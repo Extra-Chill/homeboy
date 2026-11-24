@@ -2,6 +2,7 @@ use super::acceptance_verifier::{
     validate_acceptance_requirement, validate_attestation, with_acceptance_verifier,
 };
 use super::*;
+use homeboy_core::cook_status::GateVerdict;
 
 const DETACHED_COOK_ADMISSION_LEASE_SECONDS: i64 = 30;
 use chrono::DateTime;
@@ -5378,9 +5379,10 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
         {
             return crate::agent_task_service::retry(
                 &source_run_id,
-                requested_run_id,
-                false,
-                false,
+                crate::agent_task_service::AgentTaskRetryOptions {
+                    new_run_id: requested_run_id,
+                    ..Default::default()
+                },
             )
             .map(|retry| retry.record);
         }
@@ -7208,8 +7210,8 @@ pub(crate) fn attempt_preserves_candidate_or_gate(
     };
     matches!(
         candidate.promotion,
-        Status::GateFailed
-            | Status::NoChangesGateFailed
+        Status::Gate(GateVerdict::GateFailed)
+            | Status::Gate(GateVerdict::NoChangesGateFailed)
             | Status::VerificationPending
             | Status::Applied
     ) || candidate.candidate.is_some()

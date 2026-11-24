@@ -3,6 +3,7 @@
 //! dispatch, deadlines, gate setup and projections live in `cook_*` siblings.
 
 pub(super) use homeboy_control_plane_contract::ControlPlaneState;
+use homeboy_core::cook_status::GateVerdict;
 pub(super) use serde_json::Value;
 pub(super) use std::ops::ControlFlow;
 pub(super) use std::path::{Path, PathBuf};
@@ -642,7 +643,7 @@ pub(super) fn finalize_cook_destination_worktree(
     }
     let disposition = match status {
         _ if status.is_published() => WorktreeTerminalDisposition::Succeeded,
-        CookStatus::NoChanges | CookStatus::IntentionalNoChange => {
+        CookStatus::Gate(GateVerdict::NoChanges) | CookStatus::IntentionalNoChange => {
             WorktreeTerminalDisposition::Succeeded
         }
         CookStatus::Cancelled => WorktreeTerminalDisposition::Cancelled,
@@ -901,14 +902,6 @@ pub fn authorize_cook_continue_route(options: &CookRequest) -> Result<()> {
             "run_id": options.identity.initial_run_id,
         }),
     )
-}
-
-/// Provenance supplied when Homeboy adopts a candidate prepared outside its
-/// provider lifecycle.
-#[derive(Debug, Clone, Default)]
-pub struct AgentTaskCandidateAdoptionOptions {
-    pub ai_model: Option<String>,
-    pub replace_interrupted: bool,
 }
 
 /// A Cook outcome.
@@ -1396,7 +1389,10 @@ pub(super) fn publish_latest_incomplete_draft(
                 serde_json::from_value(promotion).map_err(|error| {
                     Error::git_command_failed(format!("invalid promotion: {error}"))
                 })?;
-            if promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+            if promotion.status
+                == crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(
+                    GateVerdict::GateFailed,
+                )
                 && !promotion.changed_files.is_empty()
             {
                 return super::cook_promotion::finalize_or_load_cook_pr_with_backend_with_stores(

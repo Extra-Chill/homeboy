@@ -1277,7 +1277,8 @@ fn durable_finalization_requires_successful_provider_run_and_proof() {
 #[test]
 fn failed_gate_draft_requires_explicit_mode_and_preserves_proof_bindings() {
     let mut proof = successful_gate_proof();
-    proof.promotion.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+    proof.promotion.status =
+        crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     proof.promotion.changed_files = vec!["src/lib.rs".into()];
     proof.promotion.deterministic_gates[0].status =
         crate::agent_task_gate::AgentTaskGateStatus::Failed;

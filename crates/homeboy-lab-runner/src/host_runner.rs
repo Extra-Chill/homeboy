@@ -82,7 +82,7 @@ pub(crate) fn is_host(runner: &Runner) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{select_runner_transport, RunnerTransport};
+    use crate::transport::{connected_daemon_session, select_runner_transport, RunnerTransport};
 
     fn write_lease(home: &std::path::Path, pid: u32, address: &str) {
         let dir = home.join(crate::connection::daemon_state_dir());
@@ -187,12 +187,12 @@ mod tests {
                 recent_observation_failure: None,
                 session_path: String::new(),
             };
-            match select_runner_transport(&runner, Some(&status), false) {
-                RunnerTransport::DirectDaemon(handle) => {
-                    assert_eq!(handle.endpoint_url(), format!("http://{address}"));
-                }
-                transport => panic!("expected direct daemon, got {transport:?}"),
-            }
+            assert_eq!(
+                select_runner_transport(&runner, Some(&status), false),
+                Some(RunnerTransport::Daemon)
+            );
+            let handle = connected_daemon_session(Some(&status)).expect("daemon session");
+            assert_eq!(handle.endpoint_url(), format!("http://{address}"));
         });
     }
 }

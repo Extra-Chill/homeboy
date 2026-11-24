@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use homeboy_core::error::{Error, Result};
-use homeboy_core::server;
 
 use super::super::{load, Runner, RunnerKind};
 use super::types::{
@@ -141,36 +140,9 @@ fn pull_local(plan: &RunnerWorkspacePullPlan) -> Result<()> {
 }
 
 fn pull_ssh(runner: &Runner, plan: &RunnerWorkspacePullPlan) -> Result<()> {
-    let server_id = runner.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "runner",
-            "SSH runner is missing server_id",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-
+    let transfer = crate::RunnerFileTransfer::for_runner(runner)?;
     for source in &plan.remote_sources {
-        let output = server::transfer::transfer(&server::transfer::TransferConfig {
-            source: format!("{server_id}:{source}"),
-            destination: plan.local_destination.clone(),
-            recursive: true,
-            directory_contents: false,
-            compress: true,
-            dry_run: false,
-            exclude: Vec::new(),
-        })?;
-        if output.1 != 0 || !output.0.success {
-            return Err(Error::validation_invalid_argument(
-                "remote_path",
-                format!(
-                    "failed to pull runner workspace files: {}",
-                    output.0.error.unwrap_or_else(|| "scp failed".to_string())
-                ),
-                Some(source.clone()),
-                None,
-            ));
-        }
+        transfer.download_recursive(source, &plan.local_destination)?;
     }
     Ok(())
 }

@@ -31,11 +31,6 @@ impl CookRecoveryPerformer for ControlPlaneRecoveryPerformer {
     ) -> Result<Option<Value>> {
         service::admit_recovery_execution_step(report, overrides).map(Some)
     }
-    fn continue_cook(&self, _: &str, _: bool, _: &CookRecoveryOverrides) -> Result<(Value, i32)> {
-        Err(homeboy_core::Error::internal_unexpected(
-            "recovery continuation must be admitted as a daemon execution step",
-        ))
-    }
     fn preflight_continue_cook(&self, id: &str, rearm: bool) -> Result<(Value, i32)> {
         if let Some(preflight) = PREFLIGHT.get() {
             return preflight(id, rearm);
@@ -100,19 +95,19 @@ pub fn adopt(
     model: Option<String>,
     replace_interrupted: bool,
 ) -> Result<(Value, i32)> {
-    let result = service::adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
+    let result = service::adopt_cook_candidate(
         id,
-        attempt,
         candidate,
         service::AgentTaskCandidateAdoptionOptions {
+            attempt,
             ai_model: model,
             replace_interrupted,
+            reconstruct_dispatcher: Some(Box::new(|recipe: &Value| match DISPATCHER.get() {
+                Some(dispatcher) => dispatcher(recipe),
+                None => Ok(None),
+            })),
+            ..Default::default()
         },
-        |recipe| match DISPATCHER.get() {
-            Some(dispatcher) => dispatcher(recipe),
-            None => Ok(None),
-        },
-        Arc::new(crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover()),
     )?;
     Ok((
         serde_json::to_value(result.value)

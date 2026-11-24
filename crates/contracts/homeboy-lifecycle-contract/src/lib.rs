@@ -29,7 +29,7 @@ pub mod timeline;
 pub use artifact_contract::{
     ArtifactContract, ArtifactRecord, ArtifactViewerLink, ARTIFACT_CONTRACT_SCHEMA,
 };
-pub use cook_status::{CookDisposition, CookStatus};
+pub use cook_status::{CookDisposition, CookStatus, GateVerdict};
 pub use lifecycle::{
     LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
     LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef,

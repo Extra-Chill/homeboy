@@ -23,7 +23,7 @@
 use homeboy_lifecycle_contract::RunExecutionState;
 use std::ops::ControlFlow;
 
-use homeboy_core::cook_status::{CookDisposition, CookStatus};
+use homeboy_core::cook_status::{CookDisposition, CookStatus, GateVerdict};
 use homeboy_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -195,10 +195,6 @@ pub(crate) enum CookDeliveryState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CookDeliveryBlockerCode {
-    GateFailed,
-    // Accepts `gates_deferred` for records written before #18802.
-    #[serde(alias = "gates_deferred")]
-    GateEnvironmentUnavailable,
     BaseConflict,
     ForeignCommits,
     PublishRefused,
@@ -206,13 +202,15 @@ pub enum CookDeliveryBlockerCode {
     ReviewFormIncomplete,
     Policy,
     Cancelled,
+    /// The candidate's gate verdict stopped delivery.
+    #[serde(untagged)]
+    Gate(GateVerdict),
 }
 
 impl CookDeliveryBlockerCode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::GateFailed => "gate_failed",
-            Self::GateEnvironmentUnavailable => "gate_environment_unavailable",
+            Self::Gate(verdict) => verdict.as_str(),
             Self::BaseConflict => "base_conflict",
             Self::ForeignCommits => "foreign_commits",
             Self::PublishRefused => "publish_refused",
@@ -397,14 +395,21 @@ impl CookDelivery {
         } else if matches!(
             promotion_status,
             Some(
-                AgentTaskPromotionStatus::GateFailed
-                    | AgentTaskPromotionStatus::NoChangesGateFailed
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+                    | AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed)
             )
         ) {
-            blocked(gate_blocker(CookDeliveryBlockerCode::GateFailed, &gates))
-        } else if promotion_status == Some(AgentTaskPromotionStatus::GateEnvironmentUnavailable) {
             blocked(gate_blocker(
-                CookDeliveryBlockerCode::GateEnvironmentUnavailable,
+                CookDeliveryBlockerCode::Gate(GateVerdict::GateFailed),
+                &gates,
+            ))
+        } else if promotion_status
+            == Some(AgentTaskPromotionStatus::Gate(
+                GateVerdict::GateEnvironmentUnavailable,
+            ))
+        {
+            blocked(gate_blocker(
+                CookDeliveryBlockerCode::Gate(GateVerdict::GateEnvironmentUnavailable),
                 &gates,
             ))
         } else if let Some(blocker) = recorded
@@ -418,7 +423,7 @@ impl CookDelivery {
                 Some(AgentTaskPromotionStatus::Applied) => CookDeliveryState::Verified,
                 Some(
                     AgentTaskPromotionStatus::VerifiedNoChanges
-                    | AgentTaskPromotionStatus::NoChanges,
+                    | AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges),
                 ) => CookDeliveryState::NoChange,
                 Some(AgentTaskPromotionStatus::VerificationPending) => CookDeliveryState::Applied,
                 // Publication is only attempted after green gates.
@@ -464,18 +469,25 @@ impl CookDelivery {
                 }),
             ),
             (CookDeliveryState::NoChange, _) => (None, None),
-            (CookDeliveryState::Blocked, Some(Code::GateFailed)) => (
+            (CookDeliveryState::Blocked, Some(Code::Gate(GateVerdict::GateFailed))) => (
                 recoverable,
                 Some(
-                    match self.promotion() == Some(AgentTaskPromotionStatus::NoChangesGateFailed) {
-                        true => CookStatus::NoChangesGateFailed,
-                        false => CookStatus::GateFailed,
+                    match self.promotion()
+                        == Some(AgentTaskPromotionStatus::Gate(
+                            GateVerdict::NoChangesGateFailed,
+                        )) {
+                        true => CookStatus::Gate(GateVerdict::NoChangesGateFailed),
+                        false => CookStatus::Gate(GateVerdict::GateFailed),
                     },
                 ),
             ),
-            (CookDeliveryState::Blocked, Some(Code::GateEnvironmentUnavailable)) => {
-                (recoverable, Some(CookStatus::GateEnvironmentUnavailable))
-            }
+            (
+                CookDeliveryState::Blocked,
+                Some(Code::Gate(GateVerdict::GateEnvironmentUnavailable)),
+            ) => (
+                recoverable,
+                Some(CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable)),
+            ),
             (CookDeliveryState::Blocked, Some(Code::ReviewFormIncomplete)) => {
                 (recoverable, Some(CookStatus::CandidateRecoverable))
             }
@@ -498,7 +510,10 @@ impl CookDelivery {
 
     pub fn is_unverified(&self) -> bool {
         self.state == CookDeliveryState::Applied
-            || self.blocker_code() == Some(CookDeliveryBlockerCode::GateEnvironmentUnavailable)
+            || self.blocker_code()
+                == Some(CookDeliveryBlockerCode::Gate(
+                    GateVerdict::GateEnvironmentUnavailable,
+                ))
     }
 
     pub fn blocker_code(&self) -> Option<CookDeliveryBlockerCode> {
@@ -578,7 +593,7 @@ fn read_candidate(
         status,
         AgentTaskPromotionStatus::VerificationPending
             | AgentTaskPromotionStatus::Applied
-            | AgentTaskPromotionStatus::GateFailed
+            | AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
     ) && promotion
         .pointer("/provenance/post_apply")
         .and_then(Value::as_bool)
@@ -700,7 +715,7 @@ pub(super) fn gate_name(gate: &Value) -> Option<String> {
 
 fn gate_blocker(code: CookDeliveryBlockerCode, gates: &[CookDeliveryGate]) -> CookDeliveryBlocker {
     let (gate_state, verb) = match code {
-        CookDeliveryBlockerCode::GateEnvironmentUnavailable => {
+        CookDeliveryBlockerCode::Gate(GateVerdict::GateEnvironmentUnavailable) => {
             (AgentTaskGateStatus::Deferred, "deferred")
         }
         _ => (AgentTaskGateStatus::Failed, "failed"),
@@ -715,12 +730,12 @@ fn gate_blocker(code: CookDeliveryBlockerCode, gates: &[CookDeliveryGate]) -> Co
     let summary = gate.and_then(|gate| gate.summary.as_deref());
     let message = match (named, summary, code) {
         (Some(id), Some(summary), _) => format!("deterministic gate `{id}` {verb}: {summary}"),
-        (Some(id), None, CookDeliveryBlockerCode::GateEnvironmentUnavailable) => format!(
+        (Some(id), None, CookDeliveryBlockerCode::Gate(GateVerdict::GateEnvironmentUnavailable)) => format!(
             "deterministic gate `{id}` deferred because no runner could execute it; the candidate is unverified"
         ),
         (Some(id), None, _) => format!("deterministic gate `{id}` failed"),
         (None, Some(summary), _) => summary.to_string(),
-        (None, None, CookDeliveryBlockerCode::GateEnvironmentUnavailable) => {
+        (None, None, CookDeliveryBlockerCode::Gate(GateVerdict::GateEnvironmentUnavailable)) => {
             "deterministic gates deferred; the candidate is unverified".to_string()
         }
         (None, None, _) => "deterministic gates rejected the candidate".to_string(),
@@ -937,9 +952,8 @@ pub(super) fn publication_status(finalization: &Value) -> (CookStatus, bool) {
         },
         None,
     );
-    let status = finalization["status"]
-        .as_str()
-        .and_then(CookStatus::from_status)
+    let status = CookStatus::deserialize(&finalization["status"])
+        .ok()
         .or_else(|| delivery.and_then(|delivery| delivery.lifecycle().cook_status))
         .unwrap_or(CookStatus::FinalizationFailed);
     let published = status.is_published();
@@ -1183,7 +1197,7 @@ pub(super) fn ensure_published(
             }
         };
     let (final_status, published) = publication_status(&finalization);
-    let stop_reason = (final_status == CookStatus::NoChanges).then_some(
+    let stop_reason = (final_status == CookStatus::Gate(GateVerdict::NoChanges)).then_some(
         "cook completed provider execution and gates, but finalization found no changed files; task likely still requires review or retry",
     );
     let exit_code = if published { 0 } else { 1 };

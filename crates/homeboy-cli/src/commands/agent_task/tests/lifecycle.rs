@@ -564,7 +564,11 @@ fn historical_cook_snapshot_failure_projects_lifecycle_admission() {
         assert!(!status_value
             .to_string()
             .contains("homeboy agent-task retry <run-id> --run"));
-        assert!(homeboy::agents::agent_task_service::retry(run_id, None, false, false).is_err());
+        assert!(homeboy::agents::agent_task_service::retry(
+            run_id,
+            homeboy::agents::agent_task_service::AgentTaskRetryOptions::default()
+        )
+        .is_err());
         assert_eq!(
             agent_task_lifecycle::exact_record(run_id)
                 .expect("durable attempt")
@@ -2293,6 +2297,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             .args;
         let performer = FixtureCookRecoveryPerformer {
             executor: Arc::new(CountingCookExecutor::default()),
+            ..Default::default()
         };
         argv.push("--preflight");
         let preflight = RecoverCli::try_parse_from(argv)
@@ -2524,22 +2529,50 @@ fn cook_continue_args(id: &str) -> CookContinueArgs {
     args
 }
 
-/// `recover` performs continuation through the Cook continuation handler, with
-/// the fixture executor injected.
+/// `recover` admits continuation as a daemon execution step; the admitted
+/// step then runs through the Cook continuation handler with the fixture
+/// executor injected.
+#[derive(Default)]
 struct FixtureCookRecoveryPerformer {
     executor: Arc<CountingCookExecutor>,
+    admitted: std::cell::RefCell<
+        Option<(
+            homeboy::agents::agent_task_service::CookRecoveryStep,
+            homeboy::agents::agent_task_service::CookRecoveryOverrides,
+        )>,
+    >,
+}
+
+impl FixtureCookRecoveryPerformer {
+    /// Execute the admitted step through the production execution-step
+    /// adapter, as the daemon does.
+    fn execute_admitted_step(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
+        let (step, overrides) = self
+            .admitted
+            .borrow_mut()
+            .take()
+            .expect("a recovery step was admitted");
+        super::super::recover::execute_admitted_step_with(
+            run_id,
+            &step,
+            &overrides,
+            &Default::default(),
+            |mut args| {
+                args.full = true;
+                run_cook_continuation_with(args, self.executor.clone(), |_| Ok(None))
+            },
+        )
+    }
 }
 
 impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookRecoveryPerformer {
-    fn continue_cook(
+    fn admit_step(
         &self,
-        run_id: &str,
-        rearm: bool,
+        report: &homeboy::agents::agent_task_service::CookRecoveryReport,
         overrides: &homeboy::agents::agent_task_service::CookRecoveryOverrides,
-    ) -> homeboy::core::Result<(Value, i32)> {
-        let mut args = super::super::recover::continuation_args(run_id, rearm, overrides);
-        args.full = true;
-        continue_cook_with(args, self.executor.clone(), |_| Ok(None))
+    ) -> homeboy::core::Result<Option<Value>> {
+        *self.admitted.borrow_mut() = Some((report.step.clone(), overrides.clone()));
+        Ok(Some(json!({ "status": "admitted" })))
     }
 
     fn preflight_continue_cook(
@@ -2578,6 +2611,7 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
 fn recover_preflight_probe(id: &str) -> (Value, i32) {
     let performer = FixtureCookRecoveryPerformer {
         executor: Arc::new(CountingCookExecutor::default()),
+        ..Default::default()
     };
     let report = super::super::recover::recover_with(
         super::super::RecoverArgs {
@@ -2950,7 +2984,7 @@ fn recover_regate_carries_explicit_gate_budgets_for_a_no_progress_candidate() {
 }
 
 #[test]
-fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() {
+fn recover_preflight_is_read_only_and_the_admitted_step_reaches_the_continuation_report() {
     let cook_id = "cook-cli-recover";
     let run_id = "cook-cli-recover-attempt-1";
     let mut expected = None;
@@ -2958,7 +2992,7 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() 
         persist_recipe_only_cook(cook_id, run_id);
         let executor = Arc::new(CountingCookExecutor::default());
         expected = Some(
-            continue_cook_with(cook_continue_args(cook_id), executor.clone(), |_| Ok(None))
+            run_cook_continuation_with(cook_continue_args(cook_id), executor.clone(), |_| Ok(None))
                 .expect("Cook continuation materializes the attempt"),
         );
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
@@ -2970,6 +3004,7 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() 
         let executor = Arc::new(CountingCookExecutor::default());
         let performer = FixtureCookRecoveryPerformer {
             executor: executor.clone(),
+            ..Default::default()
         };
         let store =
             homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
@@ -3025,17 +3060,22 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() 
             },
             &performer,
         )
-        .expect("recover performs the continuation");
-        assert_eq!(recovered_exit_code, expected_exit_code, "{recovered:#}");
+        .expect("recover admits the continuation");
+        assert_eq!(recovered_exit_code, 0, "{recovered:#}");
         assert_eq!(recovered["cook_id"], cook_id);
         assert_eq!(recovered["run_id"], run_id);
         assert_eq!(recovered["step"], json!({ "kind": "continue" }));
         assert_eq!(recovered["preflight"], false);
+        assert_eq!(recovered["status"], "admitted", "{recovered:#}");
+        let (continued, continued_exit_code) = performer
+            .execute_admitted_step(run_id)
+            .expect("the admitted step performs the continuation");
+        assert_eq!(continued_exit_code, expected_exit_code, "{continued:#}");
         assert_eq!(
-            recovered["result"], expected,
-            "recover must reach the Cook continuation report"
+            continued, expected,
+            "the admitted step must reach the Cook continuation report"
         );
-        assert_eq!(recovered["result"]["status"], "accepted_unscheduled");
+        assert_eq!(continued["status"], "accepted_unscheduled");
         assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
         let index = agent_task_lifecycle::cook_index(cook_id).expect("materialized index");
         assert_eq!(index.attempts.len(), 1);
@@ -3071,7 +3111,7 @@ fn status_and_continuation_materialize_recipe_only_attempt_without_provider_work
         )
         .expect("status did not index"));
         let executor = Arc::new(CountingCookExecutor::default());
-        let continued = continue_cook_with(
+        let continued = run_cook_continuation_with(
             CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),
                 rearm: false,
@@ -3374,6 +3414,7 @@ fn recover_without_admissible_candidate_plans_no_step_and_names_the_refusal() {
         persist_legacy_candidate_cook(cook_id, run_id, None);
         let performer = FixtureCookRecoveryPerformer {
             executor: Arc::new(CountingCookExecutor::default()),
+            ..Default::default()
         };
         let (probe, exit_code) = super::super::recover::recover_with(
             super::super::RecoverArgs {
@@ -6879,9 +6920,11 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
         )
         .expect("terminalize retryable source attempt");
 
-        let replacement =
-            homeboy::agents::agent_task_service::retry(source_run_id, None, false, false)
-                .expect("reserve one queued replacement");
+        let replacement = homeboy::agents::agent_task_service::retry(
+            source_run_id,
+            homeboy::agents::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .expect("reserve one queued replacement");
         let barrier = Arc::new(Barrier::new(2));
         let consumers = (0..2)
             .map(|_| {
@@ -7004,6 +7047,7 @@ fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
     with_temp_home(|| {
         let performer = FixtureCookRecoveryPerformer {
             executor: Arc::new(CountingCookExecutor::default()),
+            ..Default::default()
         };
         assert!(
             Cli::try_parse_from([
@@ -7787,17 +7831,6 @@ fn diagnose_names_cancel_after_recovery_makes_no_progress() {
     use homeboy::agents::agent_task_service::{self as service, CookRecoveryPerformer};
     struct NoProgress;
     impl CookRecoveryPerformer for NoProgress {
-        fn continue_cook(
-            &self,
-            run: &str,
-            _: bool,
-            _: &service::CookRecoveryOverrides,
-        ) -> homeboy::core::Result<(Value, i32)> {
-            Ok((
-                json!({"latest_run_id": run, "status": "continuation_not_scheduled"}),
-                0,
-            ))
-        }
         fn preflight_continue_cook(&self, _: &str, _: bool) -> homeboy::core::Result<(Value, i32)> {
             unreachable!()
         }
@@ -7817,23 +7850,34 @@ fn diagnose_names_cancel_after_recovery_makes_no_progress() {
     with_temp_home(|| {
         let cook = "diagnose-no-progress";
         let run = "diagnose-no-progress-attempt-1";
-        persist_legacy_candidate_cook(cook, run, None);
-        let plan = agent_task_lifecycle::load_plan(run).unwrap();
-        let (_, aggregate) = test_lifecycle_store()
-            .read_record_with_aggregate_bounded(run)
-            .unwrap();
-        let mut aggregate = aggregate.unwrap();
-        aggregate.outcomes[0].candidate = Some(
-            serde_json::from_value(json!({
-                "base_sha": "a".repeat(40),
-                "candidate_sha": "b".repeat(40),
-                "tree_sha": "c".repeat(40)
+        persist_recipe_only_cook(cook, run);
+        let plan = AgentTaskPlan::new(
+            "cook-cli-recipe-only-plan",
+            vec![serde_json::from_value(json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture", "model": "fixture-model" },
+                "instructions": "recover the durable Cook lifecycle only"
             }))
-            .unwrap(),
+            .unwrap()],
         );
-        agent_task_lifecycle::record_run_aggregate(run, &plan, &aggregate).unwrap();
+        agent_task_lifecycle::submit_plan(&plan, Some(run)).unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(&test_lifecycle_store(), cook, 1, run)
+            .unwrap();
+        agent_task_lifecycle::record_pre_execution_failure(
+            run,
+            &plan,
+            "gate_environment.preserve",
+            &Error::validation_invalid_argument(
+                "CARGO_HOME",
+                "required environment capability is unavailable",
+                None,
+                None,
+            )
+            .with_retryable(true),
+        )
+        .unwrap();
         let (first, _) = service::recover_cook(cook, Default::default(), &NoProgress).unwrap();
-        assert_eq!(first.step, service::CookRecoveryStep::Continue);
+        assert_eq!(first.step, service::CookRecoveryStep::Retry, "{first:#?}");
         let blocked = service::plan_cook_recovery(cook).unwrap();
         assert!(matches!(
             blocked.step,
@@ -7852,10 +7896,7 @@ fn diagnose_names_cancel_after_recovery_makes_no_progress() {
             let actions = diagnosis["_homeboy_actionable"]["next_actions"].to_string();
             assert!(!actions.contains("agent-task recover"), "{diagnosis:#}");
             assert!(actions.contains("agent-task cancel"), "{diagnosis:#}");
-            assert!(
-                actions.contains("continuation_not_scheduled"),
-                "{diagnosis:#}"
-            );
+            assert!(actions.contains("retry_not_scheduled"), "{diagnosis:#}");
         }
     });
 }

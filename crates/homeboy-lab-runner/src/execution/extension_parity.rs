@@ -1364,6 +1364,227 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
     }
 }
 
+/// Argv for the runner's `homeboy extension list` inventory.
+pub(crate) fn runner_extension_inventory_command(homeboy_path: &str) -> Vec<String> {
+    vec![
+        homeboy_path.to_string(),
+        "extension".to_string(),
+        "list".to_string(),
+    ]
+}
+
+/// One extension reported by a runner's `homeboy extension list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunnerExtensionInventoryEntry {
+    pub(crate) id: String,
+    /// Installed source revision; `None` when unreported or empty.
+    pub(crate) source_revision: Option<String>,
+    pub(crate) manifest: RunnerExtensionInventoryManifest,
+}
+
+/// Whether the runner could read an inventoried extension's manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunnerExtensionInventoryManifest {
+    Invalid {
+        error: String,
+        diagnostic: Option<String>,
+    },
+    Readable {
+        core_compatibility: RunnerExtensionInventoryCompatibility,
+    },
+}
+
+/// The `core_compatibility.requires_homeboy` declaration of a readable entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunnerExtensionInventoryCompatibility {
+    /// The entry carried no `core_compatibility` object.
+    Omitted,
+    /// `core_compatibility` declared no Homeboy requirement.
+    Undeclared,
+    RequiresHomeboy(String),
+    /// `requires_homeboy` was present but not a string.
+    Malformed,
+}
+
+/// The single parser for `homeboy extension list` runner inventory.
+pub(crate) fn parse_runner_extension_inventory(
+    stdout: &str,
+) -> std::result::Result<Vec<RunnerExtensionInventoryEntry>, String> {
+    let value: Value = serde_json::from_str(stdout.trim())
+        .map_err(|error| format!("runner extension inventory was not valid JSON: {error}"))?;
+    if value.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err("runner extension inventory did not report success".to_string());
+    }
+    let rows = value
+        .pointer("/data/entities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "runner extension inventory did not contain data.entities".to_string())?;
+
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                "runner extension inventory contained an entry without an id".to_string()
+            })?;
+        let source_revision = row
+            .get("source_revision")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|revision| !revision.is_empty())
+            .map(str::to_string);
+        let manifest = match row.get("error") {
+            Some(error) => RunnerExtensionInventoryManifest::Invalid {
+                error: error
+                    .as_str()
+                    .ok_or_else(|| {
+                        format!("runner extension `{id}` inventory error was not a string")
+                    })?
+                    .to_string(),
+                diagnostic: row
+                    .get("diagnostic")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
+            None => RunnerExtensionInventoryManifest::Readable {
+                core_compatibility: match row
+                    .get("core_compatibility")
+                    .and_then(Value::as_object)
+                    .map(|compatibility| compatibility.get("requires_homeboy"))
+                {
+                    None => RunnerExtensionInventoryCompatibility::Omitted,
+                    Some(None | Some(Value::Null)) => {
+                        RunnerExtensionInventoryCompatibility::Undeclared
+                    }
+                    Some(Some(Value::String(requirement))) => {
+                        RunnerExtensionInventoryCompatibility::RequiresHomeboy(requirement.clone())
+                    }
+                    Some(Some(_)) => RunnerExtensionInventoryCompatibility::Malformed,
+                },
+            },
+        };
+        entries.push(RunnerExtensionInventoryEntry {
+            id: id.to_string(),
+            source_revision,
+            manifest,
+        });
+    }
+    Ok(entries)
+}
+
+/// An extension a runner must hold at an exact git source revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunnerExtensionRevisionTarget<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) source_url: &'a str,
+    pub(crate) source_revision: &'a str,
+}
+
+/// Per-target result of [`ensure_runner_extension_revisions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunnerExtensionRevisionOutcome {
+    /// The runner inventory already held the target revision; no install ran.
+    AlreadyCurrent,
+    Installed,
+    Failed {
+        detail: String,
+    },
+}
+
+/// Bring a runner's installed extensions to the target git revisions: probe
+/// the runner inventory once, plan an install for every target the inventory
+/// does not already hold at [`same_git_revision`], and let extension
+/// materialization apply the plan. Returns one outcome per target, in order.
+pub(crate) fn ensure_runner_extension_revisions(
+    runner: &Runner,
+    homeboy_path: &str,
+    targets: &[RunnerExtensionRevisionTarget<'_>],
+    exec_runner: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(RunnerExecOutput, i32)>,
+) -> Vec<RunnerExtensionRevisionOutcome> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let inventory = probe_runner_extension_inventory(runner, homeboy_path, exec_runner);
+    let inventory = match inventory {
+        Ok(inventory) => inventory,
+        Err(detail) => {
+            return targets
+                .iter()
+                .map(|_| RunnerExtensionRevisionOutcome::Failed {
+                    detail: detail.clone(),
+                })
+                .collect();
+        }
+    };
+
+    let mut outcomes: Vec<Option<RunnerExtensionRevisionOutcome>> = Vec::new();
+    let mut installs = Vec::new();
+    let mut install_slots = Vec::new();
+    for target in targets {
+        let current = inventory.iter().any(|entry| {
+            entry.id == target.id
+                && entry
+                    .source_revision
+                    .as_deref()
+                    .is_some_and(|revision| same_git_revision(revision, target.source_revision))
+        });
+        if current {
+            outcomes.push(Some(RunnerExtensionRevisionOutcome::AlreadyCurrent));
+        } else {
+            install_slots.push(outcomes.len());
+            outcomes.push(None);
+            installs.push(
+                crate::extension_materialization::RunnerExtensionGitInstall {
+                    id: target.id,
+                    source_url: target.source_url,
+                    source_revision: target.source_revision,
+                },
+            );
+        }
+    }
+
+    let results = crate::extension_materialization::apply_runner_extension_git_installs(
+        runner,
+        homeboy_path,
+        &installs,
+        exec_runner,
+    );
+    for (slot, result) in install_slots.into_iter().zip(results) {
+        outcomes[slot] = Some(match result {
+            Ok(()) => RunnerExtensionRevisionOutcome::Installed,
+            Err(err) => RunnerExtensionRevisionOutcome::Failed {
+                detail: err.message,
+            },
+        });
+    }
+    outcomes
+        .into_iter()
+        .map(|outcome| outcome.expect("every target has an outcome"))
+        .collect()
+}
+
+fn probe_runner_extension_inventory(
+    runner: &Runner,
+    homeboy_path: &str,
+    exec_runner: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(RunnerExecOutput, i32)>,
+) -> std::result::Result<Vec<RunnerExtensionInventoryEntry>, String> {
+    let (output, code) = exec_runner(
+        &runner.id,
+        RunnerExecOptions::raw_command(runner_extension_inventory_command(homeboy_path))
+            .with_env(runner.env.clone()),
+    )
+    .map_err(|err| err.message)?;
+    if code != 0 {
+        return Err(format!(
+            "runner extension inventory failed ({code}): {}",
+            output.stderr
+        ));
+    }
+    parse_runner_extension_inventory(&output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1383,8 +1604,8 @@ mod tests {
     use crate::test_support::with_isolated_home;
 
     use crate::{
-        Runner, RunnerExecMode, RunnerExecOutput, RunnerExtensionMaterializationRequest,
-        RunnerExtensionMaterializationSource, RunnerKind,
+        Runner, RunnerExecOutput, RunnerExtensionMaterializationRequest,
+        RunnerExtensionMaterializationSource, RunnerKind, RunnerTransport,
     };
     use homeboy_core::error::Error;
     use std::collections::HashMap;
@@ -1422,7 +1643,7 @@ mod tests {
             command: "runner.exec",
             runner_id: "homeboy-lab".to_string(),
             dry_run: false,
-            mode: RunnerExecMode::Local,
+            mode: RunnerTransport::Local,
             argv: Vec::new(),
             remote_cwd: String::new(),
             exit_code: 0,

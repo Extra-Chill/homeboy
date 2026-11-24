@@ -65,7 +65,7 @@ fn runner_exec_generates_a_persisted_run_for_declared_outputs() {
 }
 use homeboy::runner::runners::{
     self as runner, promote_runner_exec_artifact_dirs_in_store,
-    promote_runner_exec_artifacts_in_store, RunnerExecMode, RunnerExecOutput,
+    promote_runner_exec_artifacts_in_store, RunnerExecOutput, RunnerTransport,
 };
 
 #[test]
@@ -288,7 +288,7 @@ fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
             command: "runner.exec",
             runner_id: "lab".to_string(),
             dry_run: false,
-            mode: runner::RunnerExecMode::Daemon,
+            mode: runner::RunnerTransport::Daemon,
             argv: vec!["printf".to_string(), "hello".to_string()],
             remote_cwd: "/workspace".to_string(),
             exit_code: 7,
@@ -341,7 +341,7 @@ fn compact_exec_output_shows_metadata_and_streams_once() {
         command: "runner.exec",
         runner_id: "lab".to_string(),
         dry_run: false,
-        mode: runner::RunnerExecMode::Daemon,
+        mode: runner::RunnerTransport::Daemon,
         argv: vec![
             "homeboy".to_string(),
             "runs".to_string(),
@@ -406,7 +406,7 @@ fn compact_exec_output_marks_durable_in_flight_job_without_a_failure() {
                 },
             ]),
         ),
-        ..runner_exec_output("lab", RunnerExecMode::Daemon, "/workspace")
+        ..runner_exec_output("lab", RunnerTransport::Daemon, "/workspace")
     };
 
     let rendered = render_compact_exec_output(&output);
@@ -423,7 +423,7 @@ fn compact_exec_command_run_preserves_full_output_file_payload() {
         command: "runner.exec",
         runner_id: "lab".to_string(),
         dry_run: false,
-        mode: runner::RunnerExecMode::Daemon,
+        mode: runner::RunnerTransport::Daemon,
         argv: vec!["printf".to_string(), "hello".to_string()],
         remote_cwd: "/workspace".to_string(),
         exit_code: 0,
@@ -472,7 +472,7 @@ fn compact_exec_projects_nested_command_result_without_losing_structured_output(
         r#"{{"schema":"homeboy/command-result/v3","command":"fuzz","operation":"run","success":false,"status":"failed","data":{{"execution":{{"stderr":"Cannot find module 'tar'"}},"transcript":"{}"}}}}"#,
         "x".repeat(10_000)
     );
-    let output = runner_exec_output("lab", RunnerExecMode::Daemon, "/workspace");
+    let output = runner_exec_output("lab", RunnerTransport::Daemon, "/workspace");
     let output = RunnerExecOutput {
         stdout: nested.clone(),
         exit_code: 1,
@@ -1110,7 +1110,7 @@ fn runner_exec_promotes_offloaded_artifacts_from_runner_path() {
             .expect("run");
         let output = runner_exec_output(
             "local-ssh",
-            RunnerExecMode::Daemon,
+            RunnerTransport::Daemon,
             &workspace.path().display().to_string(),
         );
 
@@ -1176,7 +1176,7 @@ fn runner_exec_promotes_offloaded_directory_artifacts_from_runner_path() {
             .expect("run");
         let output = runner_exec_output(
             "local-ssh",
-            RunnerExecMode::Daemon,
+            RunnerTransport::Daemon,
             &workspace.path().display().to_string(),
         );
 
@@ -1230,7 +1230,7 @@ fn runner_exec_promotes_artifact_dir_children_to_run_store() {
             .expect("run");
         let output = runner_exec_output(
             "lab-local",
-            RunnerExecMode::Local,
+            RunnerTransport::Local,
             &workspace.path().display().to_string(),
         );
         homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
@@ -1325,7 +1325,7 @@ fn runner_exec_promotes_fuzz_envelope_observations_and_hotspots_as_typed_artifac
             .expect("run");
         let output = runner_exec_output(
             "lab-local",
-            RunnerExecMode::Local,
+            RunnerTransport::Local,
             &workspace.path().display().to_string(),
         );
 
@@ -1437,7 +1437,7 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
             .expect("run");
         let output = runner_exec_output(
             "lab-local",
-            RunnerExecMode::Local,
+            RunnerTransport::Local,
             &workspace.path().display().to_string(),
         );
         homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
@@ -1531,7 +1531,11 @@ fn read_only_artifact_exec_rejects_declared_outputs() {
     assert_eq!(err.details["field"], "read_only_artifact");
 }
 
-fn runner_exec_output(runner_id: &str, mode: RunnerExecMode, remote_cwd: &str) -> RunnerExecOutput {
+fn runner_exec_output(
+    runner_id: &str,
+    mode: RunnerTransport,
+    remote_cwd: &str,
+) -> RunnerExecOutput {
     RunnerExecOutput {
         variant: "exec",
         command: "runner.exec",

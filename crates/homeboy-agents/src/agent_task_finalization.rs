@@ -1,3 +1,4 @@
+use homeboy_core::cook_status::GateVerdict;
 use serde_json::json;
 
 use crate::agent_task_promotion::AgentTaskPromotionReport;
@@ -64,7 +65,7 @@ pub fn hydrate_manual_verification_dependencies(
     )
 }
 
-pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend + ?Sized>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -72,7 +73,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     finalize_pr_with_backend_mode(options, backend, true, lifecycle_store)
 }
 
-pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend + ?Sized>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -83,7 +84,7 @@ pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 /// Update an open PR for this candidate. Finalization never changes an
 /// existing PR's review state: a draft stays draft (#18884). Draft to ready is
 /// an explicit operator action.
-fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
+fn update_existing_pr<B: AgentTaskPrFinalizationBackend + ?Sized>(
     backend: &mut B,
     options: &mut AgentTaskPrFinalizationOptions,
     existing: &AgentTaskPrRef,
@@ -126,7 +127,7 @@ fn is_existing_pr_conflict(message: &str) -> bool {
 
 /// Look the PR up again after a create conflict, giving GitHub's PR list a
 /// moment to catch up with a PR created seconds ago.
-fn find_open_pr_after_create_conflict<B: AgentTaskPrFinalizationBackend>(
+fn find_open_pr_after_create_conflict<B: AgentTaskPrFinalizationBackend + ?Sized>(
     backend: &mut B,
     component_id: Option<&str>,
     path: &str,
@@ -145,7 +146,7 @@ fn find_open_pr_after_create_conflict<B: AgentTaskPrFinalizationBackend>(
     Ok(None)
 }
 
-fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
+fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend + ?Sized>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     publish: bool,
@@ -348,7 +349,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             &options,
             intent,
             &head,
-            homeboy_core::cook_status::CookStatus::NoChanges,
+            homeboy_core::cook_status::CookStatus::Gate(
+                homeboy_core::cook_status::GateVerdict::NoChanges,
+            ),
             "none",
             None,
             None,
@@ -708,7 +711,8 @@ fn validate_gate_proof_binding(
     use crate::agent_task_promotion::AgentTaskPromotionStatus;
     if options.gate_failed_draft
         && (options.manual_finalization
-            || gate_proof.promotion.status != AgentTaskPromotionStatus::GateFailed
+            || gate_proof.promotion.status
+                != AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
             || gate_proof.promotion.changed_files.is_empty()
             || !gate_proof
                 .promotion
@@ -1247,7 +1251,8 @@ fn validate_durable_publication_eligibility(
     // The same passing verdict recovery step selection uses: a proven
     // inherited failure passes and stays recorded as evidence (#17508).
     let failed_draft = gate_failed_draft
-        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+        && promotion.status
+            == crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     if failed_draft && !promotion.changed_files.is_empty() && promotion.candidate.is_some() {
         // The typed gated candidate is checked against the request and the
         // publication tree by the engine, including for failed-gate drafts.

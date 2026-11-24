@@ -1,3 +1,4 @@
+use homeboy_core::cook_status::GateVerdict;
 #[cfg(test)]
 use homeboy_engine_primitives::content_hash;
 use std::cell::RefCell;
@@ -8,6 +9,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::agent_task::{
@@ -602,17 +604,11 @@ fn resume_promoted_patch_admission(
 }
 
 pub fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {
-    let status = previous.get("status").and_then(Value::as_str);
-    matches!(
-        status,
-        Some(
-            "gate_failed"
-                | "verification_pending"
-                | "gate_environment_unavailable"
-                // Accepts `gates_deferred` for records written before #18802.
-                | "gates_deferred"
-        )
-    ) || (rerun_completed_gates && status == Some("applied"))
+    let status = previous
+        .get("status")
+        .and_then(|status| AgentTaskPromotionStatus::deserialize(status).ok());
+    status.is_some_and(AgentTaskPromotionStatus::applied_without_passing_verdict)
+        || (rerun_completed_gates && status == Some(AgentTaskPromotionStatus::Applied))
 }
 
 fn validate_resume_provenance(
@@ -869,7 +865,7 @@ fn promote_candidate(
     let Some(commit) = candidate else {
         let target =
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), path.as_deref());
-        let status = AgentTaskPromotionStatus::NoChanges;
+        let status = AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges);
         return Ok(AgentTaskPromotionReport {
             candidate_ref: None,
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
@@ -2683,7 +2679,7 @@ mod lab_gate_binding_tests {
             .expect("non-execution is retained, not a fabricated candidate mismatch");
             assert_eq!(
                 report.status,
-                AgentTaskPromotionStatus::GateEnvironmentUnavailable
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
             );
             assert_eq!(report.deterministic_gates.len(), 2);
             let unavailable = &report.deterministic_gates[0];
@@ -2771,7 +2767,7 @@ mod lab_gate_binding_tests {
 
             assert_eq!(
                 report.status,
-                AgentTaskPromotionStatus::GateEnvironmentUnavailable
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
             );
             assert!(
                 !repo.join("hydration-count").exists(),
@@ -4544,9 +4540,9 @@ fn status_for_report(
     } else if has_gate_failure {
         // A failure is decisive evidence even alongside a deferral elsewhere:
         // the candidate is rejected regardless of what else could not run.
-        AgentTaskPromotionStatus::GateFailed
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
     } else if has_gate_deferral {
-        AgentTaskPromotionStatus::GateEnvironmentUnavailable
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
     } else {
         AgentTaskPromotionStatus::Applied
     }
@@ -4573,7 +4569,7 @@ fn promotion_notification(
             resumable_blocker: None,
             next_command: None,
         },
-        AgentTaskPromotionStatus::GateFailed => AgentTaskPromotionNotification {
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed) => AgentTaskPromotionNotification {
             status: "blocked".to_string(),
             message: "patch promoted, but deterministic gates failed".to_string(),
             resumable_blocker: Some(
@@ -4581,7 +4577,7 @@ fn promotion_notification(
             ),
             next_command: None,
         },
-        AgentTaskPromotionStatus::GateEnvironmentUnavailable => AgentTaskPromotionNotification {
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable) => AgentTaskPromotionNotification {
             status: "blocked".to_string(),
             message: "patch promoted, but at least one deterministic gate did not execute (deferred, runner unavailable or Lab transport failure; see each gate result for its cause); the candidate is unverified, not rejected".to_string(),
             resumable_blocker: Some(
@@ -4595,7 +4591,7 @@ fn promotion_notification(
             resumable_blocker: None,
             next_command: None,
         },
-        AgentTaskPromotionStatus::NoChangesGateFailed => AgentTaskPromotionNotification {
+        AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed) => AgentTaskPromotionNotification {
             status: "blocked".to_string(),
             message: "provider produced no patch, but deterministic verification failed in the pinned candidate workspace".to_string(),
             resumable_blocker: Some("repair the candidate and rerun Cook so the declared verification gates pass".to_string()),
@@ -4607,7 +4603,7 @@ fn promotion_notification(
             resumable_blocker: Some("run `homeboy agent-task recover <cook-id>` to apply the patch".to_string()),
             next_command: Some("homeboy agent-task recover <cook-id>".to_string()),
         },
-        AgentTaskPromotionStatus::NoChanges => AgentTaskPromotionNotification {
+        AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges) => AgentTaskPromotionNotification {
             status: "completed".to_string(),
             message: "provider completed successfully but produced an empty patch; nothing was promoted".to_string(),
             resumable_blocker: None,
@@ -4621,7 +4617,7 @@ fn attach_setup_retry_command(
     status: AgentTaskPromotionStatus,
     run_id: Option<&str>,
 ) {
-    if status == AgentTaskPromotionStatus::GateEnvironmentUnavailable {
+    if status == AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable) {
         if let Some(run_id) = run_id {
             notification.next_command = Some(format!("homeboy agent-task recover {run_id}"));
         }
@@ -4657,7 +4653,8 @@ pub(super) fn promotion_notification_with_gate_summary(
         notification.message.push_str(&format!(
             "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}], deferred=[{deferred}], unavailable=[{unavailable}], inherited=[{inherited}]"
         ));
-        if status == AgentTaskPromotionStatus::GateEnvironmentUnavailable && !unavailable.is_empty()
+        if status == AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
+            && !unavailable.is_empty()
         {
             if let Some(gate) = gates
                 .iter()

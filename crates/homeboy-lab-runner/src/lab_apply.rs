@@ -114,7 +114,7 @@ mod tests {
             command: "runner.exec",
             runner_id: "lab".to_string(),
             dry_run: false,
-            mode: super::super::RunnerExecMode::Daemon,
+            mode: super::super::RunnerTransport::Daemon,
             argv: vec!["homeboy".to_string(), "refactor".to_string()],
             remote_cwd: "/srv/homeboy/_lab_workspaces/repo-abc".to_string(),
             exit_code: 0,
@@ -181,7 +181,7 @@ mod tests {
             command: "runner.exec",
             runner_id: "lab".to_string(),
             dry_run: false,
-            mode: super::super::RunnerExecMode::Daemon,
+            mode: super::super::RunnerTransport::Daemon,
             argv: vec![
                 "homeboy".to_string(),
                 "audit".to_string(),

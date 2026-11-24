@@ -57,7 +57,7 @@ fn make_multi_attempt(
         .as_object_mut()
         .unwrap()
         .remove("replacement_gate_proof");
-    promotion.status = AgentTaskPromotionStatus::GateFailed;
+    promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     promotion.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
     promotion.deterministic_gates[0].exit_code = 1;
     promotion.normalize_gate_outcome();
@@ -89,14 +89,6 @@ fn make_multi_attempt(
 
 struct PublishCandidate(std::sync::Mutex<CaptureBackend>);
 impl crate::agent_task_service::CookRecoveryPerformer for PublishCandidate {
-    fn continue_cook(
-        &self,
-        _: &str,
-        _: bool,
-        _: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(Value, i32)> {
-        panic!("must publish without provider redispatch")
-    }
     fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
         panic!("must publish")
     }
@@ -264,13 +256,14 @@ fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
             committed_sha: Some(sha.to_string()),
             ..Default::default()
         };
-        let result = adopt_cook_candidate_with_dispatcher_and_backend(
+        let result = adopt_cook_candidate(
             &options.identity.cook_id,
             sha,
-            AgentTaskCandidateAdoptionOptions::default(),
-            |_| Ok(None),
-            Arc::new(UnusedExecutor),
-            &mut backend,
+            AgentTaskCandidateAdoptionOptions {
+                executor: Some(Arc::new(UnusedExecutor)),
+                backend: Some(&mut backend),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(result.exit_code, 0, "{result:#?}");
@@ -289,7 +282,7 @@ fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
 #[test]
 fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof() {
     for status in [
-        AgentTaskPromotionStatus::GateEnvironmentUnavailable,
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
         AgentTaskPromotionStatus::VerificationPending,
     ] {
         with_corrected_gate_candidate(|options, _, mut promotion| {
@@ -304,13 +297,14 @@ fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof(
             unverified.normalize_gate_outcome();
             assert_eq!(unverified.status, status);
             let mut deferred = promotion.clone();
-            deferred.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
+            deferred.status =
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
             deferred.deterministic_gates[0].status =
                 crate::agent_task_gate::AgentTaskGateStatus::Deferred;
             deferred.normalize_gate_outcome();
             assert_eq!(
                 deferred.status,
-                AgentTaskPromotionStatus::GateEnvironmentUnavailable
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
             );
 
             promotion.status = status;
@@ -324,13 +318,14 @@ fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof(
                 hydrate_run_id: Some(options.identity.initial_run_id.clone()),
                 ..Default::default()
             };
-            let result = adopt_cook_candidate_with_dispatcher_and_backend(
+            let result = adopt_cook_candidate(
                 &options.identity.cook_id,
                 &sha,
-                AgentTaskCandidateAdoptionOptions::default(),
-                |_| Ok(None),
-                Arc::new(UnusedExecutor),
-                &mut backend,
+                AgentTaskCandidateAdoptionOptions {
+                    executor: Some(Arc::new(UnusedExecutor)),
+                    backend: Some(&mut backend),
+                    ..Default::default()
+                },
             )
             .unwrap();
             assert_eq!(result.exit_code, 0, "{result:#?}");
@@ -650,17 +645,14 @@ enum WedgedCook {
     WedgedTerminalDriver,
 }
 
-/// Continues by claiming the scheduled continuation, as the CLI handler
-/// does; every other step is refused.
+/// Admits the continuation step and, standing in for the daemon's
+/// execution-step adapter, continues by claiming the continuation the
+/// admitted step prepared, as the CLI handler does; every other step is
+/// refused.
 struct ClaimingContinuation;
-impl crate::agent_task_service::CookRecoveryPerformer for ClaimingContinuation {
-    fn continue_cook(
-        &self,
-        run: &str,
-        rearm: bool,
-        _: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(Value, i32)> {
-        assert!(!rearm);
+impl ClaimingContinuation {
+    fn execute_admitted_continuation(&self, run: &str) -> Result<(Value, i32)> {
+        crate::agent_task_service::prepare_admitted_recovery_continuation(run)?;
         let recipes = CookRecipeStore::from_current_data_root().unwrap();
         let cook = recipes
             .load_recipe_for_attempt(run)
@@ -675,6 +667,20 @@ impl crate::agent_task_service::CookRecoveryPerformer for ClaimingContinuation {
             serde_json::json!({ "claimed": claimed }),
             i32::from(!claimed),
         ))
+    }
+}
+impl crate::agent_task_service::CookRecoveryPerformer for ClaimingContinuation {
+    fn admit_step(
+        &self,
+        report: &crate::agent_task_service::CookRecoveryReport,
+        overrides: &crate::agent_task_service::CookRecoveryOverrides,
+    ) -> Result<Option<Value>> {
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Continue
+        );
+        assert!(overrides.is_empty());
+        Ok(Some(serde_json::json!({ "status": "admitted" })))
     }
     fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
         panic!("recovery performs, it does not preflight")
@@ -718,7 +724,8 @@ fn wedge(case: WedgedCook, options: &CookRequest) {
         }
         WedgedCook::DeferredGateBeforePublish => {
             let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
-            promotion.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
+            promotion.status =
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
             promotion.deterministic_gates[0].status =
                 crate::agent_task_gate::AgentTaskGateStatus::Deferred;
             promotion.deterministic_gates[0].exit_code = 0;
@@ -842,7 +849,12 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
                     )
                     .unwrap();
                     assert_eq!(exit, 0, "{case:?}: {report:#?}");
-                    assert_eq!(report.result.unwrap()["claimed"], true, "{case:?}");
+                    assert_eq!(report.status, "admitted", "{case:?}");
+                    let (result, exit) = ClaimingContinuation
+                        .execute_admitted_continuation(&report.run_id)
+                        .unwrap();
+                    assert_eq!(exit, 0, "{case:?}: {result:#}");
+                    assert_eq!(result["claimed"], true, "{case:?}");
                 }
                 WedgedCook::WedgedTerminalDriver => {
                     // Liveness is the kernel driver lock, observed from another
@@ -926,7 +938,7 @@ fn applied_candidate_gate_verdicts_select_a_completing_recovery_step() {
                 });
             }
             promotion.deterministic_gates.push(gate);
-            promotion.status = AgentTaskPromotionStatus::GateFailed;
+            promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
             promotion.normalize_gate_outcome();
             store
                 .record_promotion(run, serde_json::to_value(&promotion).unwrap())
@@ -989,27 +1001,19 @@ fn applied_candidate_gate_verdicts_select_a_completing_recovery_step() {
     }
 }
 
-/// Continues the way the CLI handler does when nothing can be claimed: it
-/// reports `continuation_not_scheduled` and leaves durable state unchanged.
-struct UnclaimedContinuation(std::sync::atomic::AtomicUsize);
-impl crate::agent_task_service::CookRecoveryPerformer for UnclaimedContinuation {
-    fn continue_cook(
-        &self,
-        run: &str,
-        _: bool,
-        _: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(Value, i32)> {
+/// Retries the way the retry handler does when nothing can be reserved: it
+/// reports `retry_not_scheduled` and leaves durable state unchanged.
+struct UnscheduledRetry(std::sync::atomic::AtomicUsize);
+impl crate::agent_task_service::CookRecoveryPerformer for UnscheduledRetry {
+    fn retry(&self, run: &str) -> Result<(Value, i32)> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok((
-            serde_json::json!({ "latest_run_id": run, "status": "continuation_not_scheduled" }),
+            serde_json::json!({ "latest_run_id": run, "status": "retry_not_scheduled" }),
             0,
         ))
     }
     fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
         panic!("recovery performs, it does not preflight")
-    }
-    fn retry(&self, _: &str) -> Result<(Value, i32)> {
-        panic!("must not retry")
     }
     fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
         panic!("must not reconcile")
@@ -1026,15 +1030,15 @@ impl crate::agent_task_service::CookRecoveryPerformer for UnclaimedContinuation 
 #[test]
 fn cook_recovery_blocks_a_repeated_non_progressing_step_on_every_surface() {
     use crate::agent_task_service::{CookRecoveryRequest, CookRecoveryStep};
-    with_corrected_gate_candidate(|options, _, _| {
-        wedge(WedgedCook::ContinuationNotScheduled, &options);
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-recover-no-progress", 3);
         let cook = &options.identity.cook_id;
-        let performer = UnclaimedContinuation(Default::default());
+        let performer = UnscheduledRetry(Default::default());
         let performed = || performer.0.load(std::sync::atomic::Ordering::SeqCst);
 
         let (first, _) =
             crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
-        assert_eq!(first.step, CookRecoveryStep::Continue, "{first:#?}");
+        assert_eq!(first.step, CookRecoveryStep::Retry, "{first:#?}");
         assert_eq!(performed(), 1);
 
         let (second, exit) =
@@ -1043,8 +1047,8 @@ fn cook_recovery_blocks_a_repeated_non_progressing_step_on_every_surface() {
         let CookRecoveryStep::Blocked { repeated, blocker } = &second.step else {
             panic!("a repeated non-progressing step must be blocked: {second:#?}");
         };
-        assert_eq!(repeated, "resume");
-        assert!(blocker.contains("continuation_not_scheduled"), "{blocker}");
+        assert_eq!(repeated, "retry");
+        assert!(blocker.contains("retry_not_scheduled"), "{blocker}");
         assert_eq!(
             second.failure.as_ref().unwrap()["code"],
             "agent_task.recover_blocked"
@@ -1080,7 +1084,7 @@ fn cook_recovery_blocks_a_repeated_non_progressing_step_on_every_surface() {
         .unwrap();
         let (refreshed, _) =
             crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
-        assert_eq!(refreshed.step, CookRecoveryStep::Continue, "{refreshed:#?}");
+        assert_eq!(refreshed.step, CookRecoveryStep::Retry, "{refreshed:#?}");
         assert_eq!(performed(), 2);
 
         let (unblocked, _) = crate::agent_task_service::recover_cook(
@@ -1092,7 +1096,7 @@ fn cook_recovery_blocks_a_repeated_non_progressing_step_on_every_surface() {
             &performer,
         )
         .unwrap();
-        assert_eq!(unblocked.step, CookRecoveryStep::Continue);
+        assert_eq!(unblocked.step, CookRecoveryStep::Retry);
         assert_eq!(performed(), 3);
     });
 }
@@ -1100,14 +1104,6 @@ fn cook_recovery_blocks_a_repeated_non_progressing_step_on_every_surface() {
 /// Records whether publication was preflighted or performed.
 struct RecordingPublish(std::sync::Mutex<Vec<bool>>);
 impl crate::agent_task_service::CookRecoveryPerformer for RecordingPublish {
-    fn continue_cook(
-        &self,
-        run: &str,
-        rearm: bool,
-        _: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(Value, i32)> {
-        panic!("recover must publish {run}, not continue it (rearm: {rearm})")
-    }
     fn preflight_continue_cook(&self, run: &str, rearm: bool) -> Result<(Value, i32)> {
         panic!("preflight must validate publication of {run}, not continuation (rearm: {rearm})")
     }
@@ -1168,7 +1164,7 @@ fn push_added_gate(
         failure_attribution: None,
     });
     promotion.deterministic_gates.push(gate);
-    promotion.status = AgentTaskPromotionStatus::GateFailed;
+    promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
 }
 
 /// #17423: the declared gate passed and the only other failure is an
@@ -1273,7 +1269,7 @@ fn cook_recovery_classifies_stalled_gate_setup_as_gate_environment_unavailable()
         assert!(stored.deterministic_gates[1].failure_evidence.is_none());
         assert_eq!(
             stored.status,
-            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
         let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
         assert_eq!(plan.step, CookRecoveryStep::Regate, "{plan:?}");

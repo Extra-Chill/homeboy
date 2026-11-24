@@ -526,11 +526,11 @@ fn runner_exec_dry_run(
                 .unwrap_or_else(|_| ".".to_string())
         });
     let mode = if runner.kind == RunnerKind::Local {
-        runner::RunnerExecMode::Local
+        runner::RunnerTransport::Local
     } else if allow_diagnostic_ssh {
-        runner::RunnerExecMode::DiagnosticSsh
+        runner::RunnerTransport::DiagnosticSsh
     } else {
-        runner::RunnerExecMode::Daemon
+        runner::RunnerTransport::Daemon
     };
 
     Ok((

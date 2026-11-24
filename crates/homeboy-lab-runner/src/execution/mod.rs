@@ -27,9 +27,10 @@ use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::resource_metrics::RunnerResourceMetrics;
 use super::{
-    select_runner_transport, LabRunnerHandoff, Runner, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerCapabilityPreflight, RunnerJob, RunnerKind, RunnerMutationArtifacts, RunnerResult,
-    RunnerSession, RunnerStatusReport, RunnerTransport, RunnerTunnelMode,
+    connected_daemon_session, select_runner_transport, LabRunnerHandoff, Runner,
+    RunnerActiveJobSource, RunnerActiveJobState, RunnerCapabilityPreflight, RunnerJob, RunnerKind,
+    RunnerMutationArtifacts, RunnerResult, RunnerSession, RunnerStatusReport, RunnerTransport,
+    RunnerTunnelMode,
 };
 
 const DEFAULT_RUNNER_EXEC_WAIT_TIMEOUT_SECS: u64 = 20 * 60;
@@ -78,6 +79,12 @@ use extension_parity::{
 pub use extension_parity::{
     ensure_runner_extension_parity, probe_extension_parity_from_show, ExtensionParityProbe,
     ExtensionShowOutput,
+};
+pub(crate) use extension_parity::{
+    ensure_runner_extension_revisions, parse_runner_extension_inventory,
+    runner_extension_inventory_command, RunnerExtensionInventoryCompatibility,
+    RunnerExtensionInventoryManifest, RunnerExtensionRevisionOutcome,
+    RunnerExtensionRevisionTarget,
 };
 use policy::{preflight_remote_argv, remote_execution_preflight};
 
@@ -323,14 +330,6 @@ impl RunnerExecOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerExecMode {
-    Daemon,
-    Local,
-    DiagnosticSsh,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerExecOutput {
     pub variant: &'static str,
@@ -338,7 +337,7 @@ pub struct RunnerExecOutput {
     pub runner_id: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
-    pub mode: RunnerExecMode,
+    pub mode: RunnerTransport,
     pub argv: Vec<String>,
     pub remote_cwd: String,
     pub exit_code: i32,
@@ -1132,10 +1131,8 @@ fn exec_with_status_snapshot_attempt(
     // return a deterministic, non-destructive retrieval command rather than
     // silently rotating or reconnecting the runner (Extra-Chill/homeboy#9420).
     if options.read_only_artifact_access
-        && !matches!(
-            select_runner_transport(&runner, Some(&connected), false),
-            RunnerTransport::DirectDaemon(_)
-        )
+        && select_runner_transport(&runner, Some(&connected), false)
+            != Some(RunnerTransport::Daemon)
     {
         return Err(read_only_artifact_access_unresolved_error(
             runner_id, &connected,
@@ -1146,8 +1143,11 @@ fn exec_with_status_snapshot_attempt(
             run_id, "handoff",
         )?;
     }
-    let result = match select_runner_transport(&runner, Some(&connected), false) {
-        RunnerTransport::DirectDaemon(handle) => {
+    let result = match (
+        select_runner_transport(&runner, Some(&connected), false),
+        connected_daemon_session(Some(&connected)),
+    ) {
+        (Some(RunnerTransport::Daemon), Some(handle)) => {
             run_capability_preflight(&runner)?;
             if !controller_proxy_projection.is_empty() {
                 let runner_url = crate::connection::controller_proxy_forward_for_job(runner_id)?;
@@ -1180,8 +1180,8 @@ fn exec_with_status_snapshot_attempt(
                     .and_then(|session| session.homeboy_build_identity.clone()),
             )
         }
-        RunnerTransport::Local => exec_local(plan),
-        RunnerTransport::DiagnosticSsh => exec_diagnostic_ssh(
+        (Some(RunnerTransport::Local), _) => exec_local(plan),
+        (Some(RunnerTransport::DiagnosticSsh), _) => exec_diagnostic_ssh(
             &runner,
             cwd,
             options.run_id.as_deref(),
@@ -1192,7 +1192,9 @@ fn exec_with_status_snapshot_attempt(
             options.path_materialization_plan,
             options.diagnostic_ssh_timeout,
         ),
-        RunnerTransport::Unavailable => Err(unavailable_daemon_admission_error(&runner.id)),
+        (Some(RunnerTransport::Daemon), None) | (None, _) => {
+            Err(unavailable_daemon_admission_error(&runner.id))
+        }
     };
     result.map(|(mut output, exit_code)| {
         append_runner_exec_binary_diagnostics(&mut output, &runner, connected.session.as_ref());

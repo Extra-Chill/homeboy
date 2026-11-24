@@ -75,8 +75,8 @@ fn detached_cook_lab_staging_failure_finishes_after_driver_exit() {
 }
 
 use super::super::cook_adoption::{
-    adopt_cook_candidate_with_dispatcher_and_backend, candidate_adoption_source_in_store,
-    resolve_adoption_target, resolve_adoption_target_with_attempt_in_stores,
+    adopt_cook_candidate, candidate_adoption_source_in_store, resolve_adoption_target,
+    resolve_adoption_target_with_attempt_in_stores, AgentTaskCandidateAdoptionOptions,
 };
 use super::super::cook_baseline::git_output;
 use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
@@ -1050,7 +1050,7 @@ fn verified_unchanged_attempt_ends_as_no_changes_with_the_provider_message() {
         let side_effects = CookSideEffects::for_test(
             move |lifecycle_store, _, run_id| {
                 let mut report = promotion(run_id);
-                report.status = AgentTaskPromotionStatus::NoChanges;
+                report.status = AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges);
                 report.source.task_id = task_id.clone();
                 report.changed_files.clear();
                 report.deterministic_gates.clear();
@@ -1736,7 +1736,7 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
             })
             .unwrap();
         let mut failed = applied.clone();
-        failed.status = AgentTaskPromotionStatus::GateFailed;
+        failed.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
         failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
         failed.deterministic_gates[0].exit_code = 1;
         let mut origin = None;
@@ -1825,7 +1825,7 @@ fn terminal_cook_finalizes_its_provisioned_destination_worktree() {
             );
             options.workspace.to_worktree = handle.to_string();
             if !gate_green {
-                promotion.status = AgentTaskPromotionStatus::GateFailed;
+                promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
                 promotion.deterministic_gates[0].status =
                     crate::agent_task_gate::AgentTaskGateStatus::Failed;
                 promotion.deterministic_gates[0].exit_code = 1;
@@ -4389,16 +4389,17 @@ impl CandidateAdoptionFixture {
         executor: SharedAgentTaskExecutor,
         backend: &mut CaptureBackend,
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-        adopt_cook_candidate_with_dispatcher_and_backend(
+        adopt_cook_candidate(
             run_id,
             &self.candidate,
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 replace_interrupted: false,
+                reconstruct_dispatcher: Some(Box::new(dispatcher)),
+                executor: Some(executor),
+                backend: Some(backend),
+                ..Default::default()
             },
-            dispatcher,
-            executor,
-            backend,
         )
     }
 }
@@ -4825,9 +4826,10 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
         );
         let retry = crate::agent_task_service::retry(
             &successor,
-            Some("cook-admission-timeout-retry"),
-            false,
-            false,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                new_run_id: Some("cook-admission-timeout-retry"),
+                ..Default::default()
+            },
         )
         .expect("the latest zero-execution failure reserves a complete retry")
         .record;
@@ -5370,10 +5372,12 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
         .expect("record provider timeout");
         assert_eq!(failed.exit_code, 1);
 
-        let error = crate::agent_task_service::retry_with_timeout_override(
+        let error = crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            None,
-            50,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                timeout_override_ms: Some(50),
+                ..Default::default()
+            },
         )
         .expect_err("override must increase the prior timeout");
         assert!(error.message.contains("must increase"), "{error:?}");
@@ -5382,10 +5386,12 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
             record.metadata["provider_executions"][0]["state"] = serde_json::json!("running");
         })
         .expect("restore a live provider execution");
-        let owner_error = crate::agent_task_service::retry_with_timeout_override(
+        let owner_error = crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            None,
-            100,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                timeout_override_ms: Some(100),
+                ..Default::default()
+            },
         )
         .expect_err("a live provider execution must block retry");
         assert!(
@@ -5397,10 +5403,12 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
         })
         .expect("terminalize the provider execution");
 
-        let retry = crate::agent_task_service::retry_with_timeout_override(
+        let retry = crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            None,
-            100,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                timeout_override_ms: Some(100),
+                ..Default::default()
+            },
         )
         .expect("reserve timeout override");
         let recipe = super::super::load_recipe(cook_id).expect("updated Cook recipe");
@@ -5479,30 +5487,31 @@ fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
         };
         let mut unconfirmed = override_.clone();
         unconfirmed.acknowledge_model_override = false;
-        let error = crate::agent_task_service::retry_with_provider_route_override(
+        let error = crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            Some("unconfirmed-model-retry"),
-            false,
-            false,
-            unconfirmed,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                new_run_id: Some("unconfirmed-model-retry"),
+                provider_route_override: Some(unconfirmed),
+                ..Default::default()
+            },
         )
         .expect_err("model overrides require confirmation before reserving a retry");
         assert_eq!(error.details["field"], "acknowledge-model-override");
         assert!(agent_task_lifecycle::exact_record("unconfirmed-model-retry").is_err());
-        let retry = crate::agent_task_service::retry_with_provider_route_override(
+        let retry = crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            None,
-            false,
-            false,
-            override_.clone(),
+            crate::agent_task_service::AgentTaskRetryOptions {
+                provider_route_override: Some(override_.clone()),
+                ..Default::default()
+            },
         )
         .expect("reserve route override retry");
-        let replay = crate::agent_task_service::retry_with_provider_route_override(
+        let replay = crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            None,
-            false,
-            false,
-            override_,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                provider_route_override: Some(override_),
+                ..Default::default()
+            },
         )
         .expect("replay the same route override");
         assert_eq!(replay.record.run_id, retry.record.run_id);
@@ -5610,13 +5619,11 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
         dispatch: bool,
         consumed_attempt: std::cell::RefCell<String>,
     }
-    impl crate::agent_task_service::CookRecoveryPerformer for Recovery {
-        fn continue_cook(
-            &self,
-            run_id: &str,
-            _: bool,
-            _: &crate::agent_task_service::CookRecoveryOverrides,
-        ) -> Result<(Value, i32)> {
+    impl Recovery {
+        /// The admitted continuation step, as the daemon's execution-step
+        /// adapter performs it.
+        fn execute_admitted_continuation(&self, run_id: &str) -> Result<()> {
+            crate::agent_task_service::prepare_admitted_recovery_continuation(run_id)?;
             *self.consumed_attempt.borrow_mut() = run_id.to_string();
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
                 record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Queued);
@@ -5629,13 +5636,29 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
                 None,
                 None,
             )?;
-            Ok((serde_json::json!({"run_id": run_id}), 0))
+            Ok(())
+        }
+    }
+    impl crate::agent_task_service::CookRecoveryPerformer for Recovery {
+        fn admit_step(
+            &self,
+            report: &crate::agent_task_service::CookRecoveryReport,
+            _: &crate::agent_task_service::CookRecoveryOverrides,
+        ) -> Result<Option<Value>> {
+            assert_eq!(
+                report.step,
+                crate::agent_task_service::CookRecoveryStep::Continue
+            );
+            Ok(Some(serde_json::json!({"status": "admitted"})))
         }
         fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
             unreachable!()
         }
         fn retry(&self, run_id: &str) -> Result<(Value, i32)> {
-            let retry = crate::agent_task_service::retry(run_id, None, false, false)?;
+            let retry = crate::agent_task_service::retry(
+                run_id,
+                crate::agent_task_service::AgentTaskRetryOptions::default(),
+            )?;
             *self.consumed_attempt.borrow_mut() = retry.record.run_id.clone();
             if self.dispatch {
                 execute_reserved_retry_fixture(&retry.record.run_id, Arc::new(FeedbackExecutor));
@@ -5714,6 +5737,14 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
                     crate::agent_task_service::CookRecoveryStep::Retry
                 }
             );
+            if continue_attempt {
+                // Continuation is admitted as a daemon execution step; the
+                // daemon then performs it.
+                assert_eq!(report.status, "admitted");
+                performer
+                    .execute_admitted_continuation(&report.run_id)
+                    .unwrap();
+            }
             let attempt_id = performer.consumed_attempt.borrow();
             let feedback = store.list(cook_id).unwrap();
             assert!(feedback.iter().all(|item| if dispatch {
@@ -5730,19 +5761,9 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
 
 #[test]
 fn recover_removed_runner_settles_and_dispatches_in_one_call() {
-    use crate::agent_task_service::{
-        CookRecoveryOverrides, CookRecoveryPerformer, CookRecoveryStep,
-    };
+    use crate::agent_task_service::{CookRecoveryPerformer, CookRecoveryStep};
     struct Recovery;
     impl CookRecoveryPerformer for Recovery {
-        fn continue_cook(
-            &self,
-            _: &str,
-            _: bool,
-            _: &CookRecoveryOverrides,
-        ) -> Result<(Value, i32)> {
-            unreachable!("lost work must use durable-recipe retry")
-        }
         fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
             unreachable!()
         }
@@ -5752,7 +5773,10 @@ fn recover_removed_runner_settles_and_dispatches_in_one_call() {
             assert!(serde_json::to_string(&record)
                 .unwrap()
                 .contains("runner.job_lost"));
-            let retry = crate::agent_task_service::retry(run, None, false, false)?;
+            let retry = crate::agent_task_service::retry(
+                run,
+                crate::agent_task_service::AgentTaskRetryOptions::default(),
+            )?;
             execute_reserved_retry_fixture(
                 &retry.record.run_id,
                 Arc::new(ImmediateSuccessExecutor),
@@ -5901,9 +5925,11 @@ fn snapshot_divergence_opens_a_per_cook_circuit_until_source_identity_changes() 
             &options.identity.initial_plan,
         )
         .expect_err("direct admission rejects identical identity");
-        let error =
-            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
-                .expect_err("identical snapshot replay is refused before reservation");
+        let error = crate::agent_task_service::retry(
+            &options.identity.initial_run_id,
+            crate::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .expect_err("identical snapshot replay is refused before reservation");
         assert_eq!(error.details["field"], "lab_pre_execution_circuit_breaker");
         assert_eq!(
             error.details["action"],
@@ -5926,9 +5952,11 @@ fn snapshot_divergence_opens_a_per_cook_circuit_until_source_identity_changes() 
             record.metadata["source_checkout"] = serde_json::json!({ "commit": "source-b" });
         })
         .expect("record refreshed source identity");
-        let replay =
-            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
-                .expect("changed source identity reopens only this Cook");
+        let replay = crate::agent_task_service::retry(
+            &options.identity.initial_run_id,
+            crate::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .expect("changed source identity reopens only this Cook");
         assert_eq!(replay.record.metadata["cook_id"], options.identity.cook_id);
     });
 }
@@ -5942,18 +5970,18 @@ fn ssh_cleanup_circuit_reopens_when_the_runner_generation_changes() {
         );
         assert!(crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            None,
-            false,
-            false
+            crate::agent_task_service::AgentTaskRetryOptions::default()
         )
         .is_err());
         agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
             record.metadata["runner_generation"] = serde_json::json!("generation-b");
         })
         .expect("record reconnected runner generation");
-        let replay =
-            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
-                .expect("new runner generation reopens the SSH cleanup circuit");
+        let replay = crate::agent_task_service::retry(
+            &options.identity.initial_run_id,
+            crate::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .expect("new runner generation reopens the SSH cleanup circuit");
         assert_eq!(
             replay.record.metadata["retry_of"],
             options.identity.initial_run_id
@@ -5973,9 +6001,10 @@ fn retryable_pre_provider_retry_rejects_a_lifecycle_reservation_collision_withou
 
         let error = crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            Some(collision_id),
-            false,
-            false,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                new_run_id: Some(collision_id),
+                ..Default::default()
+            },
         )
         .expect_err("colliding lifecycle reservation is rejected before Cook mutation");
 
@@ -6005,9 +6034,11 @@ fn retryable_pre_provider_retry_rejects_a_lifecycle_reservation_collision_withou
 fn repeated_zero_execution_replacements_keep_one_semantic_attempt_and_unique_lineage() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-retry-replacements", 1);
-        let first =
-            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
-                .expect("first zero-execution replacement");
+        let first = crate::agent_task_service::retry(
+            &options.identity.initial_run_id,
+            crate::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .expect("first zero-execution replacement");
         agent_task_lifecycle::record_pre_execution_failure(
             &first.record.run_id,
             &options.identity.initial_plan,
@@ -6016,8 +6047,11 @@ fn repeated_zero_execution_replacements_keep_one_semantic_attempt_and_unique_lin
                 .with_retryable(true),
         )
         .expect("record second zero-execution failure");
-        let second = crate::agent_task_service::retry(&first.record.run_id, None, false, false)
-            .expect("second zero-execution replacement");
+        let second = crate::agent_task_service::retry(
+            &first.record.run_id,
+            crate::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .expect("second zero-execution replacement");
 
         assert_ne!(first.record.run_id, second.record.run_id);
         assert_eq!(first.record.metadata["cook_attempt"], 1);
@@ -6062,14 +6096,6 @@ fn recover_preflight_step(cook_id: &str) -> crate::agent_task_service::CookRecov
 fn recover_takes_over_abandoned_continuation_claims() {
     struct Preflight;
     impl crate::agent_task_service::CookRecoveryPerformer for Preflight {
-        fn continue_cook(
-            &self,
-            _: &str,
-            _: bool,
-            _: &crate::agent_task_service::CookRecoveryOverrides,
-        ) -> Result<(Value, i32)> {
-            unreachable!()
-        }
         fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
             Ok((serde_json::json!({}), 0))
         }
@@ -6164,9 +6190,7 @@ fn zero_execution_pre_execution_failure_recovers_by_retrying_its_recipe() {
             );
             let retry = crate::agent_task_service::retry(
                 &options.identity.initial_run_id,
-                None,
-                false,
-                false,
+                crate::agent_task_service::AgentTaskRetryOptions::default(),
             )
             .expect("retry replays the durable recipe attempt");
             assert_eq!(retry.record.metadata["cook_id"], options.identity.cook_id);
@@ -6207,9 +6231,11 @@ fn lab_pre_execution_retry_preserves_admitted_placement_and_accepts_projected_st
             super::super::CookRecoveryStep::Retry
         );
         crate::agent_task_service::retry_admission(&options.identity.initial_run_id).unwrap();
-        let retry =
-            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
-                .expect("the projected retry is accepted on the controller");
+        let retry = crate::agent_task_service::retry(
+            &options.identity.initial_run_id,
+            crate::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .expect("the projected retry is accepted on the controller");
         // Read back the durable reservation, as a restarted controller would;
         // placement must not depend on the retry caller's process-local route.
         let store = test_lifecycle_store();
@@ -6367,9 +6393,11 @@ fn retryable_pre_provider_retry_materializes_orphaned_recipe_attempt() {
 
             let recovered = crate::agent_task_service::retry(
                 &options.identity.initial_run_id,
-                None,
-                true,
-                true,
+                crate::agent_task_service::AgentTaskRetryOptions {
+                    run: true,
+                    force: true,
+                    ..Default::default()
+                },
             )
             .unwrap_or_else(|error| panic!("{kind:?} orphan: {error:?}"));
 
@@ -6396,8 +6424,11 @@ fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
                 let run_id = options.identity.initial_run_id.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    let retry = crate::agent_task_service::retry(&run_id, None, false, false)
-                        .expect("concurrent retry converges");
+                    let retry = crate::agent_task_service::retry(
+                        &run_id,
+                        crate::agent_task_service::AgentTaskRetryOptions::default(),
+                    )
+                    .expect("concurrent retry converges");
                     (retry.record.run_id, retry.created)
                 })
             })
@@ -6442,9 +6473,10 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
         .unwrap();
         crate::agent_task_service::retry(
             &options.identity.initial_run_id,
-            Some(&successor_run_id),
-            false,
-            false,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                new_run_id: Some(&successor_run_id),
+                ..Default::default()
+            },
         )
         .expect("reserve and bind a complete semantic retry intent");
         assert_eq!(
@@ -6460,9 +6492,14 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
             "source.candidate"
         );
 
-        let retry =
-            crate::agent_task_service::retry(&options.identity.initial_run_id, None, true, false)
-                .expect("terminal successor is authoritative");
+        let retry = crate::agent_task_service::retry(
+            &options.identity.initial_run_id,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                run: true,
+                ..Default::default()
+            },
+        )
+        .expect("terminal successor is authoritative");
 
         assert_eq!(retry.record.run_id, successor_run_id);
         assert_eq!(
@@ -7176,9 +7213,10 @@ fn retry_after_admission_failure_restores_managed_workspace_after_baseline_clean
             }
             let reservation = crate::agent_task_service::retry(
                 &retry_source,
-                Some("cook-admission-retry-2"),
-                false,
-                false,
+                crate::agent_task_service::AgentTaskRetryOptions {
+                    new_run_id: Some("cook-admission-retry-2"),
+                    ..Default::default()
+                },
             );
             if missing {
                 let error = reservation.expect_err(case);
@@ -8984,7 +9022,7 @@ fn timed_out_attempt_follow_up_retries_the_same_provider_instead_of_rotating() {
     aggregate.outcomes[0].failure_classification =
         Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
     let mut promotion = promotion("timeout-rotation-remediation-run");
-    promotion.status = AgentTaskPromotionStatus::GateFailed;
+    promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     promotion.deterministic_gates.clear();
     promotion.gate_results.clear();
 
@@ -9230,7 +9268,7 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
     assert!(canonical_finalization_eligible(&green, true));
 
     let mut inherited = green.clone();
-    inherited.status = AgentTaskPromotionStatus::GateFailed;
+    inherited.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     inherited.deterministic_gates[0].status =
         crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
     inherited.deterministic_gates[0].exit_code = 1;
@@ -9762,15 +9800,6 @@ fn cancelled_cook_root_and_attempt_observation_rows_agree_on_skipped() {
 struct ReplacementOnlyRecoveryPerformer;
 
 impl crate::agent_task_service::CookRecoveryPerformer for ReplacementOnlyRecoveryPerformer {
-    fn continue_cook(
-        &self,
-        run_id: &str,
-        _rearm: bool,
-        _overrides: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(serde_json::Value, i32)> {
-        panic!("replacement recovery must not continue {run_id}")
-    }
-
     fn preflight_continue_cook(
         &self,
         run_id: &str,
@@ -9980,7 +10009,7 @@ fn corrected_replacement_gates(run_id: &str, verify: &str) -> Result<AgentTaskPr
 
 fn persist_deferred_fixture(run_id: &str) {
     let mut promotion = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
-    promotion.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
+    promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
     for gate in &mut promotion.deterministic_gates {
         gate.status = crate::agent_task_gate::AgentTaskGateStatus::Unavailable;
         gate.failure_evidence = None;
@@ -10116,7 +10145,6 @@ fn operator_attempt_cancel_preserves_earlier_candidate_for_recovery() {
             homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
         );
         assert!(candidate.metadata.get("candidate_retirement").is_none());
-        assert!(candidate.metadata.get("cancellation_fence").is_none());
         assert_eq!(
             crate::agent_task_service::plan_cook_recovery(cook)
                 .unwrap()
@@ -10237,7 +10265,10 @@ fn failing_regate_is_the_latest_gate_run_not_the_stale_receipt() {
         );
 
         let latest = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
-        assert_eq!(latest.status, AgentTaskPromotionStatus::GateFailed);
+        assert_eq!(
+            latest.status,
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+        );
         assert_eq!(
             latest.deterministic_gates[0]
                 .invocation()
@@ -10893,7 +10924,7 @@ fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
             .unwrap();
         assert_eq!(
             promotion.status,
-            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
         assert!(result
             .value
@@ -10955,7 +10986,7 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
             .unwrap();
         assert_eq!(
             promotion.status,
-            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
         let gate = &promotion.deterministic_gates[0];
         assert_eq!(
@@ -11332,13 +11363,14 @@ fn corrected_gate_recovery_rejects_missing_authority_history_and_candidate_drift
         std::fs::write(target.join("tracked.txt"), "drift\n").unwrap();
         assert!(promote_or_load_attempt_in_store(&store, &options, run_id).is_err());
         let candidate = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
-        assert!(adopt_cook_candidate_with_dispatcher_and_backend(
+        assert!(adopt_cook_candidate(
             &options.identity.cook_id,
             &candidate,
-            AgentTaskCandidateAdoptionOptions::default(),
-            |_| Ok(None),
-            Arc::new(UnusedExecutor),
-            &mut CaptureBackend::default(),
+            AgentTaskCandidateAdoptionOptions {
+                executor: Some(Arc::new(UnusedExecutor)),
+                backend: Some(&mut CaptureBackend::default()),
+                ..Default::default()
+            }
         )
         .is_err());
     });
@@ -11364,7 +11396,7 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
         .expect("link attempt");
 
         let mut failed = promotion_with_existing_path(run_id, target.path());
-        failed.status = AgentTaskPromotionStatus::GateFailed;
+        failed.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
         failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
         failed.deterministic_gates[0].exit_code = 1;
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(failed).unwrap())
@@ -11825,7 +11857,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         seed_review_form_aggregate(green_run_id, &green_plan);
 
         let mut first_promotion = promotion(first_run_id);
-        first_promotion.status = AgentTaskPromotionStatus::GateFailed;
+        first_promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
         first_promotion.source.task_id = task_id.clone();
         first_promotion.candidate.as_mut().unwrap().tree_sha = first_sha.to_string();
         agent_task_lifecycle::record_promotion(
@@ -11834,7 +11866,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         )
         .expect("persist gate-failed source promotion");
         let mut unchanged_promotion = promotion(unchanged_run_id);
-        unchanged_promotion.status = AgentTaskPromotionStatus::NoChanges;
+        unchanged_promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges);
         unchanged_promotion.source.task_id = task_id.clone();
         unchanged_promotion.candidate.as_mut().unwrap().tree_sha = unchanged_sha.to_string();
         unchanged_promotion.changed_files.clear();
@@ -11931,15 +11963,6 @@ impl CapturePublishRecoveryPerformer {
 }
 
 impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecoveryPerformer {
-    fn continue_cook(
-        &self,
-        run_id: &str,
-        _rearm: bool,
-        _overrides: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(serde_json::Value, i32)> {
-        panic!("a verified candidate must not replay provider work for {run_id}")
-    }
-
     fn preflight_continue_cook(
         &self,
         run_id: &str,
@@ -13505,7 +13528,7 @@ fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
 #[test]
 fn gate_environment_unavailable_stop_reason_names_the_non_execution_cause_and_next_step() {
     let mut deferred = promotion("run-lab-transport");
-    deferred.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
+    deferred.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
     let mut error = homeboy_core::Error::new(
         homeboy_core::ErrorCode::RunnerLabTransportFailure,
         "runner gate did not return terminal artifact evidence",
@@ -13732,7 +13755,7 @@ echo https://github.com/example/fixture/pull/1
                 &aggregate,
             )
             .unwrap();
-            failed.status = AgentTaskPromotionStatus::GateFailed;
+            failed.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
             failed.target.path = Some(path.display().to_string());
             failed.candidate = Some(crate::agent_task::AgentTaskCandidate {
                 base_sha: base_sha.clone(),
@@ -14647,9 +14670,11 @@ fn workspace_snapshot_fence_invalidation_is_retryable_without_provider_execution
         assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
         assert_eq!(record.provider_executions_consumed(), 0);
         assert!(record.metadata["provider_executions"].is_null());
-        let retry =
-            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
-                .unwrap();
+        let retry = crate::agent_task_service::retry(
+            &options.identity.initial_run_id,
+            crate::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .unwrap();
         assert_eq!(retry.record.metadata["cook_id"], options.identity.cook_id);
         assert_eq!(retry.record.metadata["cook_attempt"], 1);
     });
@@ -14697,8 +14722,14 @@ fn retry_revalidates_a_generic_lab_workspace_inside_the_reservation_boundary() {
             };
             // Neither public entry point may reserve a generic replay without preflight.
             assert!(
-                crate::agent_task_service::retry(source, Some("unvalidated"), false, false)
-                    .is_err(),
+                crate::agent_task_service::retry(
+                    source,
+                    crate::agent_task_service::AgentTaskRetryOptions {
+                        new_run_id: Some("unvalidated"),
+                        ..Default::default()
+                    }
+                )
+                .is_err(),
                 "{case}"
             );
             assert!(
@@ -14720,30 +14751,31 @@ fn retry_revalidates_a_generic_lab_workspace_inside_the_reservation_boundary() {
                 change_done_tx.send(()).expect("report workspace change");
             });
             let calls = std::sync::atomic::AtomicUsize::new(0);
-            let error = crate::agent_task_service::retry_with_preflight(
+            let error = crate::agent_task_service::retry(
                 source,
-                Some("cook-generic-lab-replay-race-attempt-2"),
-                false,
-                false,
-                |plan| {
-                    assert!(plan.metadata["generic_lab_command_replay"].is_object());
-                    let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let identity = std::fs::read_to_string(&marker).expect("read workspace");
-                    if call == 0 {
-                        assert_eq!(identity, "recorded", "initial preflight succeeds");
-                        change_started_tx.send(()).expect("start workspace change");
-                        change_done_rx.recv().expect("wait for workspace change");
-                        return Ok(());
-                    }
-                    if identity != "recorded" {
-                        return Err(Error::validation_invalid_argument(
-                            "workspace",
-                            "generic Lab replay workspace changed during retry admission",
-                            None,
-                            None,
-                        ));
-                    }
-                    Ok(())
+                crate::agent_task_service::AgentTaskRetryOptions {
+                    new_run_id: Some("cook-generic-lab-replay-race-attempt-2"),
+                    preflight: Some(&|plan| {
+                        assert!(plan.metadata["generic_lab_command_replay"].is_object());
+                        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let identity = std::fs::read_to_string(&marker).expect("read workspace");
+                        if call == 0 {
+                            assert_eq!(identity, "recorded", "initial preflight succeeds");
+                            change_started_tx.send(()).expect("start workspace change");
+                            change_done_rx.recv().expect("wait for workspace change");
+                            return Ok(());
+                        }
+                        if identity != "recorded" {
+                            return Err(Error::validation_invalid_argument(
+                                "workspace",
+                                "generic Lab replay workspace changed during retry admission",
+                                None,
+                                None,
+                            ));
+                        }
+                        Ok(())
+                    }),
+                    ..Default::default()
                 },
             )
             .expect_err("locked retry revalidation rejects the concurrent workspace change");

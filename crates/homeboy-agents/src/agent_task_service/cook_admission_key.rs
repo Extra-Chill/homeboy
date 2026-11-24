@@ -14,7 +14,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::cook_recipe::CookRecipeStore;
-use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, CookRunState};
+use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, CookRunState, CookRunStatus};
+use homeboy_core::cook_status::CookStatus;
 use homeboy_core::{Error, Result};
 
 /// Plan metadata field carrying the caller's admission key.
@@ -107,7 +108,7 @@ fn in_flight_cook(
     let status = if state.phase.is_in_flight() {
         state.status
     } else {
-        "in_flight".to_string()
+        CookRunStatus::Cook(CookStatus::InFlight)
     };
     Some(json!({ "cook_id": cook_id, "run_id": record.run_id, "status": status }))
 }

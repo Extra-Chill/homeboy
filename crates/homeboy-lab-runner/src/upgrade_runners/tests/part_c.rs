@@ -149,3 +149,27 @@ fn runner_extension_sync_is_admitted_as_convergence_not_bulk_workload() {
         vec![Some(homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS.to_string()); 2]
     );
 }
+
+#[test]
+fn failed_runner_inventory_fails_every_sync_target_without_installing() {
+    let runner = ssh_runner("lab", Some("homeboy"));
+    let updates = vec![
+        extension_update("a", "1111111"),
+        extension_update("b", "2222222"),
+    ];
+    let mut commands = Vec::new();
+    let (synced, skipped, failed) =
+        sync_runner_extensions(&runner, "homeboy", &updates, &mut |runner_id, options| {
+            commands.push(options.command.clone());
+            Ok((exec_output(runner_id, options.command, "", "boom", 3), 3))
+        });
+    assert!(synced.is_empty());
+    assert!(skipped.is_empty());
+    assert_eq!(commands, vec![vec!["homeboy", "extension", "list"]]);
+    assert_eq!(failed.len(), 2);
+    assert!(failed.iter().all(|entry| entry
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("runner extension inventory failed (3)"))
+        && entry.recovery_commands.len() == 1));
+}

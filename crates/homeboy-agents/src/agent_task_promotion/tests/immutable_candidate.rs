@@ -5,6 +5,7 @@ use super::super::promote::{
 };
 use super::*;
 use crate::agent_task::{AgentTaskCandidate, AgentTaskOutcome, AgentTaskOutcomeStatus};
+use homeboy_core::cook_status::GateVerdict;
 use serde_json::{json, Value};
 
 fn fixture(
@@ -523,7 +524,7 @@ fn no_candidate_and_no_change_never_runs_gates() {
         .unwrap();
         assert_eq!(
             report.status,
-            super::super::AgentTaskPromotionStatus::NoChanges
+            super::super::AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
         );
         assert!(report.changed_files.is_empty());
         assert!(provider.verify_calls.is_empty());

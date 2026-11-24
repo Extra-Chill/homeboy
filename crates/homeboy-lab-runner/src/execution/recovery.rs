@@ -873,7 +873,7 @@ fn recovered_output(
         command: "runner.exec",
         runner_id: snapshot.job.target_runner_id.clone().unwrap_or_default(),
         dry_run: false,
-        mode: RunnerExecMode::Daemon,
+        mode: RunnerTransport::Daemon,
         argv: run
             .metadata_json
             .get("remote_command")

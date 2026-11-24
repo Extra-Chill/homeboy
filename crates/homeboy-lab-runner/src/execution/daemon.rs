@@ -208,7 +208,7 @@ pub(super) fn exec_via_daemon(
     return complete_submitted_runner_job(
         SubmittedRunnerJobFlow {
             runner,
-            mode: RunnerExecMode::Daemon,
+            mode: RunnerTransport::Daemon,
             transport: "daemon",
             runner_job_transport: "daemon",
             timeout_label: "runner daemon job",
@@ -1733,7 +1733,7 @@ pub(super) fn validate_daemon_job_identity(requested_job_id: &str, job: &Job) ->
 )]
 pub(super) fn detached_handoff_output(
     runner: &Runner,
-    mode: RunnerExecMode,
+    mode: RunnerTransport,
     cwd: String,
     command: Vec<String>,
     source_snapshot: SourceSnapshot,

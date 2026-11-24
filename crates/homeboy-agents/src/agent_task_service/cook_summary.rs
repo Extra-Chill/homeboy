@@ -153,7 +153,7 @@ fn attempt_line(attempt: u32, record: &AgentTaskRunRecord, latest: bool) -> Stri
     } else if candidate_sha.is_none() && state.terminal {
         "discarded".to_string()
     } else {
-        state.status.clone()
+        state.status.to_string()
     };
     let sha = candidate_sha
         .map(|sha| sha.chars().take(12).collect::<String>())
@@ -224,7 +224,7 @@ fn project_summary(record: &AgentTaskRunRecord) -> CookSummary {
         .flatten();
     CookSummary {
         schema: COOK_SUMMARY_SCHEMA.to_string(),
-        status: state.status.clone(),
+        status: state.status.to_string(),
         phase: state.phase.as_str().to_string(),
         terminal: state.terminal,
         head_sha: head_sha.filter(|sha| !sha.trim().is_empty()),

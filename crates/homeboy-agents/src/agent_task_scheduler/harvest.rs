@@ -711,6 +711,7 @@ mod committed_harvest_tests {
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
         AGENT_TASK_REQUEST_SCHEMA,
     };
+    use homeboy_core::cook_status::GateVerdict;
 
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
@@ -1973,7 +1974,10 @@ mod committed_harvest_tests {
                     repository_integrity_evidence: None,
                 };
             let failed = promote(options(&outcome, &first.run_id, true)).unwrap();
-            assert_eq!(failed.status, AgentTaskPromotionStatus::GateFailed);
+            assert_eq!(
+                failed.status,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+            );
             assert_eq!(git(&workspace, &["rev-parse", "HEAD"]), base);
             assert!(!failed.provenance["gate_feedback_baseline"]["current_diff"]
                 .as_str()

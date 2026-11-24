@@ -15,7 +15,7 @@
 //! adds no delivery logic of its own: continuation re-enters the Cook spine
 //! through the CLI's Cook continuation handler.
 
-use homeboy_core::cook_status::CookStatus;
+use homeboy_core::cook_status::{CookStatus, GateVerdict};
 use homeboy_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -276,7 +276,7 @@ format!(
         inputs
             .run_state
             .as_ref()
-            .and_then(|state| CookStatus::from_status(&state.status))
+            .and_then(|state| state.status.cook_status())
     });
     if inputs.run_state.as_ref().is_some_and(|state| {
         !state.allows(homeboy_control_plane_contract::ControlPlaneAction::Recover)
@@ -374,7 +374,7 @@ format!(
             run = inputs.run_id
         ));
     }
-    if status == Some(CookStatus::NoChanges) {
+    if status == Some(CookStatus::Gate(GateVerdict::NoChanges)) {
         if let Some(candidate_ref) = inputs.adoptable_candidate_ref {
             return CookRecoveryStep::Adopt {
                 candidate_ref: candidate_ref.to_string(),
@@ -424,7 +424,7 @@ format!(
         | Some(CookStatus::PreExecutionFailure) => false,
         // Infrastructure deferral consumes neither a provider retry nor budget:
         // continuation re-verifies the already materialized candidate.
-        Some(CookStatus::GateEnvironmentUnavailable) => true,
+        Some(CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable)) => true,
         status if status.is_some_and(|status| status.is_gate_failure()) => inputs.retry_admitted,
         _ => true,
     };
@@ -737,14 +737,17 @@ pub struct CookRecoveryRequest {
     pub publish: CookPublishRequest,
 }
 
-/// The handlers a recovery step performs. Implemented by the CLI with the
-/// exact Cook continuation, retry and reconcile handlers, so recovery has no
+/// The handlers a recovery step performs. Implemented by the control plane
+/// with the exact retry and reconcile handlers, so recovery has no
 /// orchestration of its own. Replacement gates and publication default to the
 /// service handlers the retired `verify-replacement`,
 /// `record-replacement-gate-proof` and `finalize-pr --recover` verbs called.
 pub trait CookRecoveryPerformer {
-    /// Admit slow continuation work through the durable execution outbox.
-    /// Workers return `None` to execute the already admitted step.
+    /// Admit slow step work (continuation, rearm, regate and explicit operator
+    /// overrides) as a frozen daemon execution step through the durable
+    /// execution outbox; the daemon's execution-step adapter performs it.
+    /// Continuation, rearm and overrides have no in-process path: a performer
+    /// that admits nothing (`None`) can only perform a regate in-process.
     fn admit_step(
         &self,
         _plan: &CookRecoveryReport,
@@ -752,15 +755,6 @@ pub trait CookRecoveryPerformer {
     ) -> Result<Option<Value>> {
         Ok(None)
     }
-    /// Continue the Cook from `run_id`, optionally rearming its failed
-    /// terminal continuation, promoting one named patch artifact, or reserving
-    /// a successor attempt with explicit operator overrides.
-    fn continue_cook(
-        &self,
-        run_id: &str,
-        rearm: bool,
-        overrides: &CookRecoveryOverrides,
-    ) -> Result<(Value, i32)>;
     /// Validate continuation admission for `run_id` without dispatching a
     /// provider or mutating lifecycle state.
     fn preflight_continue_cook(&self, run_id: &str, rearm: bool) -> Result<(Value, i32)>;
@@ -996,7 +990,11 @@ pub fn ensure_recover_failure_contract(mut report: Value, exit_code: i32, id: &s
         .or_else(|| {
             agent_task_lifecycle::exact_record(&run_id)
                 .ok()
-                .map(|record| agent_task_lifecycle::CookRunState::of(&record).status)
+                .map(|record| {
+                    agent_task_lifecycle::CookRunState::of(&record)
+                        .status
+                        .to_string()
+                })
         })
         .unwrap_or_else(|| "unknown".to_string());
     if report["status"]
@@ -1141,7 +1139,9 @@ fn unmaterialized_cook_recovery_plan(
         return Some(CookRecoveryPlan {
             cook_id: record.run_id.clone(),
             run_id: record.run_id.clone(),
-            status: agent_task_lifecycle::CookRunState::of(record).status,
+            status: agent_task_lifecycle::CookRunState::of(record)
+                .status
+                .to_string(),
             step: CookRecoveryStep::none(
                 agent_task_lifecycle::unmaterialized_cook_relaunch_guidance(record),
             ),
@@ -1154,13 +1154,17 @@ fn unmaterialized_cook_recovery_plan(
         || {
             (
                 record.run_id.clone(),
-                agent_task_lifecycle::CookRunState::of(record).status,
+                agent_task_lifecycle::CookRunState::of(record)
+                    .status
+                    .to_string(),
             )
         },
         |relaunch| {
             (
                 relaunch.run_id.clone(),
-                agent_task_lifecycle::CookRunState::of(&relaunch).status,
+                agent_task_lifecycle::CookRunState::of(&relaunch)
+                    .status
+                    .to_string(),
             )
         },
     );
@@ -1214,7 +1218,9 @@ fn plan_cook_recovery_for_cook(id: &str, live_probes: bool) -> Result<CookRecove
         });
     }
     let record = agent_task_lifecycle::exact_record(&run_id)?;
-    let status = agent_task_lifecycle::CookRunState::of(&record).status;
+    let status = agent_task_lifecycle::CookRunState::of(&record)
+        .status
+        .to_string();
     let step = if let Some(pr) = published_pull_request(&record) {
         // A recorded publication is the Cook's delivery, whatever gate or
         // continuation status the attempt last recorded: re-running gates or
@@ -1297,6 +1303,9 @@ pub fn cook_recovery_delegation(id: &str) -> Option<CookRecoveryPlan> {
 /// left its durable state unchanged is recorded, so the next `recover` from
 /// that state reports [`CookRecoveryStep::Blocked`] instead of looping.
 pub fn prepare_admitted_recovery_continuation(run_id: &str) -> Result<()> {
+    // The admitted step names remaining work, so its continuation must be
+    // claimable before the handler runs; otherwise the handler finds nothing
+    // to consume and reports a no-op (#17494).
     let plan = plan_cook_recovery(run_id)?;
     super::CookRecipeStore::from_current_data_root()?
         .schedule_recovery_continuation(&plan.cook_id, run_id)
@@ -1519,7 +1528,7 @@ fn recover_cook_once(
                 None,
             ));
         }
-        plan.status = candidate_state.status;
+        plan.status = candidate_state.status.to_string();
         plan.step = CookRecoveryStep::Regate;
     }
     // Ownership wins over every operator override.
@@ -1580,7 +1589,10 @@ fn recover_cook_once(
             || replace_gates.is_some()
             || !publish.is_empty()
             || !record.state().is_terminal()
-            || agent_task_lifecycle::CookRunState::of(&record).status != "pre_execution_failure"
+            || agent_task_lifecycle::CookRunState::of(&record)
+                .status
+                .cook_status()
+                != Some(CookStatus::PreExecutionFailure)
             || plan.step != CookRecoveryStep::Retry
         {
             return Err(Error::validation_invalid_argument(
@@ -1653,23 +1665,23 @@ fn recover_cook_once(
             report.result = Some(result);
         }
     }
-    if !preflight
-        && (!overrides.is_empty()
-            || matches!(
-                report.step,
-                CookRecoveryStep::Continue | CookRecoveryStep::Regate | CookRecoveryStep::Rearm
-            ))
-    {
+    let continuation = !overrides.is_empty()
+        || matches!(
+            report.step,
+            CookRecoveryStep::Continue | CookRecoveryStep::Rearm
+        );
+    if !preflight && (continuation || report.step == CookRecoveryStep::Regate) {
         if let Some(admission) = performer.admit_step(&report, &overrides)? {
             let mut report = report;
             report.status = admission["status"].as_str().unwrap_or("admitted").into();
             report.admission = Some(admission);
             return Ok((report, 0));
         }
-    }
-    if !overrides.is_empty() {
-        let result = performer.continue_cook(run_id, overrides.has_route_override(), &overrides);
-        return Ok(finish_performed_step(report, result));
+        if continuation {
+            return Err(Error::internal_unexpected(
+                "recovery continuation must be admitted as a daemon execution step",
+            ));
+        }
     }
     if preflight {
         if report.step == CookRecoveryStep::Publish {
@@ -1706,19 +1718,9 @@ fn recover_cook_once(
         report.status.clone(),
         report.step.clone(),
     );
-    let none = CookRecoveryOverrides::default();
     let result = (|| {
         Ok(match &report.step {
-            CookRecoveryStep::Continue => {
-                // The step names remaining work, so its continuation must be
-                // claimable before the handler runs; otherwise the handler
-                // finds nothing to consume and reports a no-op (#17494).
-                super::CookRecipeStore::from_current_data_root()?
-                    .schedule_recovery_continuation(&report.cook_id, run_id)?;
-                performer.continue_cook(run_id, false, &none)?
-            }
             CookRecoveryStep::Regate => performer.regate(run_id, &regate_inputs)?,
-            CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, &none)?,
             CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
                 // A fresh provider attempt never starts from a pre-patched
                 // destination (#16292).
@@ -1762,6 +1764,9 @@ fn recover_cook_once(
             CookRecoveryStep::Publish => performer.publish(run_id, &publish, false)?,
             CookRecoveryStep::Blocked { .. } | CookRecoveryStep::None { .. } => {
                 unreachable!("no-step handled before performing")
+            }
+            CookRecoveryStep::Continue | CookRecoveryStep::Rearm => {
+                unreachable!("continuation steps are admitted before performing")
             }
         })
     })();
@@ -2072,7 +2077,10 @@ pub(crate) fn matching_no_progress(
     let path = lifecycle_store.cook_dir(cook_id).join(NO_PROGRESS_MARKER);
     let marker: CookRecoveryNoProgress = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     (marker.run_id == record.run_id
-        && marker.status == agent_task_lifecycle::CookRunState::of(record).status
+        && agent_task_lifecycle::CookRunState::of(record)
+            .status
+            .to_string()
+            == marker.status
         && marker.environment == recovery_environment())
     .then_some(marker)
 }
@@ -2940,20 +2948,15 @@ mod tests {
     fn cook_recover_refuses_an_unmaterialized_cook_without_admission_inputs() {
         struct RetryPerformer(std::cell::RefCell<Vec<String>>);
         impl CookRecoveryPerformer for RetryPerformer {
-            fn continue_cook(
-                &self,
-                _: &str,
-                _: bool,
-                _: &CookRecoveryOverrides,
-            ) -> Result<(Value, i32)> {
-                unreachable!("an unmaterialized Cook has no attempt to continue")
-            }
             fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
                 unreachable!()
             }
             fn retry(&self, run_id: &str) -> Result<(Value, i32)> {
                 self.0.borrow_mut().push(run_id.to_string());
-                let retry = crate::agent_task_service::retry(run_id, None, false, false)?;
+                let retry = crate::agent_task_service::retry(
+                    run_id,
+                    crate::agent_task_service::AgentTaskRetryOptions::default(),
+                )?;
                 Ok((serde_json::json!({ "run_id": retry.record.run_id }), 0))
             }
             fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
@@ -3046,14 +3049,6 @@ mod tests {
     fn cook_recover_relaunches_an_unmaterialized_cook_from_its_admission_inputs() {
         struct NoPerformer;
         impl CookRecoveryPerformer for NoPerformer {
-            fn continue_cook(
-                &self,
-                _: &str,
-                _: bool,
-                _: &CookRecoveryOverrides,
-            ) -> Result<(Value, i32)> {
-                unreachable!("an unmaterialized Cook has no attempt to continue")
-            }
             fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
                 unreachable!()
             }
@@ -3189,7 +3184,7 @@ mod tests {
             configure(&mut inputs);
             cook_recovery_step(&inputs)
         };
-        (decide(status_label), decide(&state.status))
+        (decide(status_label), decide(state.status.as_str()))
     }
 
     fn eligibility(
@@ -3219,7 +3214,10 @@ mod tests {
             }),
         );
         let state = agent_task_lifecycle::CookRunState::of(&record);
-        assert_eq!(state.status, "candidate_recoverable");
+        assert_eq!(
+            state.status.cook_status(),
+            Some(CookStatus::CandidateRecoverable)
+        );
         assert!(state.allows(homeboy_control_plane_contract::ControlPlaneAction::Recover));
         assert!(
             state.allows_regate(),
@@ -3309,7 +3307,10 @@ mod tests {
             }),
         );
         let state = agent_task_lifecycle::CookRunState::of(&record);
-        assert_eq!(state.status, "candidate_recoverable");
+        assert_eq!(
+            state.status.cook_status(),
+            Some(CookStatus::CandidateRecoverable)
+        );
         assert!(state.allows_regate());
         let (status_step, recover_step) = status_and_recover_steps(&record, |inputs| {
             inputs.applied_gate_failure = true;

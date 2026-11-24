@@ -74,7 +74,7 @@ fn from_run_metadata_reads_every_persisted_delivery_shape() {
         name: "gate failed",
         metadata: json!({ "promotion": promotion(status, failed_gate()) }),
         state: State::Blocked,
-        blocker: Some(Code::GateFailed),
+        blocker: Some(Code::Gate(GateVerdict::GateFailed)),
     };
     let cases = [
         Case {
@@ -107,7 +107,7 @@ fn from_run_metadata_reads_every_persisted_delivery_shape() {
                 json!([{ "id": "lab-test", "status": "deferred" }]),
             ) }),
             state: State::Blocked,
-            blocker: Some(Code::GateEnvironmentUnavailable),
+            blocker: Some(Code::Gate(GateVerdict::GateEnvironmentUnavailable)),
         },
         Case {
             name: "intentional no change",
@@ -225,7 +225,7 @@ fn a_non_executed_lab_gate_blocker_names_its_typed_cause() {
     let blocker = delivery.blocker.expect("deferred blocker");
     assert_eq!(
         blocker.code,
-        CookDeliveryBlockerCode::GateEnvironmentUnavailable
+        CookDeliveryBlockerCode::Gate(GateVerdict::GateEnvironmentUnavailable)
     );
     assert!(
         blocker.message.starts_with(
@@ -454,18 +454,21 @@ fn stored_gates_deferred_reads_as_gate_environment_unavailable() {
     let promotion: AgentTaskPromotionStatus = serde_json::from_value(stored.clone()).unwrap();
     assert_eq!(
         promotion,
-        AgentTaskPromotionStatus::GateEnvironmentUnavailable
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
     );
     assert_eq!(serde_json::to_value(promotion).unwrap(), current);
 
     let cook_loop: AgentTaskCookLoopStatus = serde_json::from_value(stored.clone()).unwrap();
     assert_eq!(
         cook_loop,
-        AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+        AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
     );
     assert_eq!(serde_json::to_value(cook_loop).unwrap(), current);
 
     let blocker: CookDeliveryBlockerCode = serde_json::from_value(stored).unwrap();
-    assert_eq!(blocker, CookDeliveryBlockerCode::GateEnvironmentUnavailable);
+    assert_eq!(
+        blocker,
+        CookDeliveryBlockerCode::Gate(GateVerdict::GateEnvironmentUnavailable)
+    );
     assert_eq!(serde_json::to_value(blocker).unwrap(), current);
 }

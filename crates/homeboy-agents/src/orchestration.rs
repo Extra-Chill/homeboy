@@ -46,6 +46,7 @@ use homeboy_control_plane_contract::{
     ControlPlanePlacementUpdateParameters, ControlPlaneRetryParameters,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
+use homeboy_core::cook_status::GateVerdict;
 use homeboy_lifecycle_contract::RunExecutionState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3273,7 +3274,7 @@ fn review_canonical_candidate(
         matches!(
             candidate.promotion,
             AgentTaskPromotionStatus::Applied
-                | AgentTaskPromotionStatus::GateFailed
+                | AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
                 | AgentTaskPromotionStatus::VerificationPending
         ) && candidate.candidate.is_some()
     });
@@ -3879,12 +3880,15 @@ where
         run_id,
         request,
         |resolved, parameters, _intent| {
-            crate::agent_task_service::retry_with_preflight(
+            crate::agent_task_service::retry(
                 resolved,
-                parameters.new_run_id.as_deref(),
-                run,
-                parameters.force,
-                &preflight,
+                crate::agent_task_service::AgentTaskRetryOptions {
+                    new_run_id: parameters.new_run_id.as_deref(),
+                    run,
+                    force: parameters.force,
+                    preflight: Some(&preflight),
+                    ..Default::default()
+                },
             )
         },
         |resolved, _intent| default_resume(resolved),
@@ -3945,10 +3949,13 @@ fn default_retry(
                 None,
             ));
         }
-        return crate::agent_task_service::retry_with_timeout_override(
+        return crate::agent_task_service::retry(
             run_id,
-            parameters.new_run_id.as_deref(),
-            timeout_ms,
+            crate::agent_task_service::AgentTaskRetryOptions {
+                new_run_id: parameters.new_run_id.as_deref(),
+                timeout_override_ms: Some(timeout_ms),
+                ..Default::default()
+            },
         );
     }
     let route = parameters.provider_route.as_ref().map(|route| {
@@ -3961,12 +3968,14 @@ fn default_retry(
     });
     // The action reserves the successor; dispatching it is the caller's own
     // step, so a CLI that runs the retry itself is not raced by this delegate.
-    crate::agent_task_service::retry_with_provider_route_override(
+    crate::agent_task_service::retry(
         run_id,
-        parameters.new_run_id.as_deref(),
-        false,
-        parameters.force,
-        route.unwrap_or_default(),
+        crate::agent_task_service::AgentTaskRetryOptions {
+            new_run_id: parameters.new_run_id.as_deref(),
+            force: parameters.force,
+            provider_route_override: route,
+            ..Default::default()
+        },
     )
 }
 

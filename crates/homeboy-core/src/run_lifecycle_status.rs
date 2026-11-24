@@ -16,7 +16,7 @@ pub type RunLifecycleStatus = ControlPlaneState;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cook_status::CookStatus;
+    use crate::cook_status::{CookStatus, GateVerdict};
 
     #[test]
     fn every_cook_status_round_trips_and_projects_to_the_reviewed_lifecycle_status() {
@@ -42,11 +42,19 @@ mod tests {
             ),
             (Validated, "validated", State::PartialFailure),
             (NoCandidate, "no_candidate", State::PartialFailure),
-            (NoChanges, "no_changes", State::PartialFailure),
-            (NoChangesGateFailed, "no_changes_gate_failed", State::Failed),
-            (GateFailed, "gate_failed", State::Failed),
             (
-                GateEnvironmentUnavailable,
+                Gate(GateVerdict::NoChanges),
+                "no_changes",
+                State::PartialFailure,
+            ),
+            (
+                Gate(GateVerdict::NoChangesGateFailed),
+                "no_changes_gate_failed",
+                State::Failed,
+            ),
+            (Gate(GateVerdict::GateFailed), "gate_failed", State::Failed),
+            (
+                Gate(GateVerdict::GateEnvironmentUnavailable),
                 "gate_environment_unavailable",
                 State::CandidateRecoverable,
             ),
@@ -115,7 +123,10 @@ mod tests {
     fn stored_gates_deferred_reads_as_gate_environment_unavailable() {
         let status: CookStatus =
             serde_json::from_value(serde_json::json!("gates_deferred")).unwrap();
-        assert_eq!(status, CookStatus::GateEnvironmentUnavailable);
+        assert_eq!(
+            status,
+            CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
+        );
         assert_eq!(
             serde_json::to_value(status).unwrap(),
             "gate_environment_unavailable"

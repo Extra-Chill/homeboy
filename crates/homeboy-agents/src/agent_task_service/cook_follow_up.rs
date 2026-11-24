@@ -1,6 +1,7 @@
 //! Cook follow-up dispatch and no-change provider rotation.
 
 use super::cook::*;
+use homeboy_core::cook_status::GateVerdict;
 
 pub(crate) enum CookFollowUpDispatch {
     Dispatched { run_id: String },
@@ -139,7 +140,7 @@ pub(super) fn no_change_remediation(
     promotion: &AgentTaskPromotionReport,
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> bool {
-    promotion.status == AgentTaskPromotionStatus::NoChanges
+    promotion.status == AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
         && promotion.changed_files.is_empty()
         && aggregate
             .outcomes

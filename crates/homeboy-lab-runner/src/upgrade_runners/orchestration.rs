@@ -64,11 +64,7 @@ fn runner_manifest_preflight_with_executor(
     // Resolved once: every query in this preflight is read-only and must use
     // the same transport the runner currently admits.
     let allow_diagnostic_ssh = diagnostic_ssh_is_permitted(&runner.id);
-    let inventory_command = vec![
-        homeboy_path.to_string(),
-        "extension".to_string(),
-        "list".to_string(),
-    ];
+    let inventory_command = crate::execution::runner_extension_inventory_command(homeboy_path);
     let inventory_options =
         runner_manifest_query_options(runner, inventory_command, allow_diagnostic_ssh);
     let (inventory_output, inventory_exit_code) = match exec(&runner.id, inventory_options) {
@@ -174,35 +170,24 @@ struct RunnerExtensionInventory {
     candidate_owned: Vec<String>,
 }
 
+/// Interpret the runner inventory for manifest admission: candidate-owned
+/// schema errors are deferred, every other entry must be readable and declare
+/// its core compatibility.
 fn runner_extension_inventory(
     stdout: &str,
 ) -> std::result::Result<RunnerExtensionInventory, String> {
-    let value: serde_json::Value = serde_json::from_str(stdout.trim())
-        .map_err(|error| format!("runner extension inventory was not valid JSON: {error}"))?;
-    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err("runner extension inventory did not report success".to_string());
-    }
-    let extensions = value
-        .pointer("/data/entities")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "runner extension inventory did not contain data.entities".to_string())?;
+    use crate::execution::{
+        RunnerExtensionInventoryCompatibility as Compatibility,
+        RunnerExtensionInventoryManifest as Manifest,
+    };
 
     let mut inventory = RunnerExtensionInventory {
         readable: Vec::new(),
         candidate_owned: Vec::new(),
     };
-    for extension in extensions {
-        let id = extension
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                "runner extension inventory contained an entry without an id".to_string()
-            })?;
-        if let Some(error) = extension.get("error") {
-            let error = error.as_str().ok_or_else(|| {
-                format!("runner extension `{id}` inventory error was not a string")
-            })?;
+    for entry in crate::execution::parse_runner_extension_inventory(stdout)? {
+        let id = entry.id;
+        match entry.manifest {
             // The selected runner refresh installs the binary and
             // synchronizes extensions only after the new binary is active. A
             // schema the legacy binary cannot deserialize therefore belongs to
@@ -210,38 +195,35 @@ fn runner_extension_inventory(
             // permanent bootstrap cycle. Other invalid-manifest categories stay
             // fail-closed because a new binary cannot make malformed or missing
             // input trustworthy.
-            if error == "manifest_deserialize_incompatible" {
-                inventory.candidate_owned.push(id.to_string());
-                continue;
+            Manifest::Invalid { error, .. } if error == "manifest_deserialize_incompatible" => {
+                inventory.candidate_owned.push(id);
             }
-            let diagnostic = extension
-                .get("diagnostic")
-                .and_then(serde_json::Value::as_str)
-                .map(|diagnostic| format!(": {diagnostic}"))
-                .unwrap_or_default();
-            return Err(format!(
-                "runner extension `{id}` manifest is invalid ({error}){diagnostic}"
-            ));
+            Manifest::Invalid { error, diagnostic } => {
+                let diagnostic = diagnostic
+                    .map(|diagnostic| format!(": {diagnostic}"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "runner extension `{id}` manifest is invalid ({error}){diagnostic}"
+                ));
+            }
+            Manifest::Readable { core_compatibility } => {
+                let requires_homeboy = match core_compatibility {
+                    Compatibility::Omitted => {
+                        return Err(format!(
+                            "runner extension `{id}` inventory omitted core_compatibility"
+                        ))
+                    }
+                    Compatibility::Malformed => {
+                        return Err(format!(
+                            "runner extension `{id}` compatibility requirement was not a string"
+                        ))
+                    }
+                    Compatibility::Undeclared => None,
+                    Compatibility::RequiresHomeboy(requirement) => Some(requirement),
+                };
+                inventory.readable.push((id, requires_homeboy));
+            }
         }
-        let requires_homeboy = match extension
-            .get("core_compatibility")
-            .and_then(serde_json::Value::as_object)
-            .map(|compatibility| compatibility.get("requires_homeboy"))
-        {
-            None => {
-                return Err(format!(
-                    "runner extension `{id}` inventory omitted core_compatibility"
-                ))
-            }
-            Some(None | Some(serde_json::Value::Null)) => None,
-            Some(Some(serde_json::Value::String(requirement))) => Some(requirement.clone()),
-            Some(Some(_)) => {
-                return Err(format!(
-                    "runner extension `{id}` compatibility requirement was not a string"
-                ))
-            }
-        };
-        inventory.readable.push((id.to_string(), requires_homeboy));
     }
     Ok(inventory)
 }
@@ -249,7 +231,7 @@ fn runner_extension_inventory(
 #[cfg(test)]
 mod manifest_preflight_tests {
     use super::*;
-    use crate::{RunnerExecMode, RunnerExecOutput};
+    use crate::{RunnerExecOutput, RunnerTransport};
     use homeboy_core::server::RunnerSettings;
     use std::collections::HashMap;
 
@@ -278,7 +260,7 @@ mod manifest_preflight_tests {
                 command: "runner.exec",
                 runner_id: runner_id.to_string(),
                 dry_run: false,
-                mode: RunnerExecMode::DiagnosticSsh,
+                mode: RunnerTransport::DiagnosticSsh,
                 argv: command,
                 remote_cwd: "/home/user/workspace".to_string(),
                 exit_code: 0,

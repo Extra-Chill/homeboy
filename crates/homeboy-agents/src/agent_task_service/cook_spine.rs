@@ -1,6 +1,7 @@
 //! Cook orchestration spine, moved whole without reordering.
 
 use super::cook::*;
+use homeboy_core::cook_status::GateVerdict;
 
 /// The Cook spine, bound to explicit recipe and lifecycle roots. Every durable
 /// write on this path resolves through the two passed stores, so a caller can
@@ -1817,8 +1818,8 @@ pub(super) fn run_cook_spine(
                             "loaded the terminal persisted promotion with inherited baseline failures",
                             1,
                         ),
-                        AgentTaskCookLoopStatus::NoChanges => (
-                            CookStatus::NoChanges,
+                        AgentTaskCookLoopStatus::Gate(GateVerdict::NoChanges) => (
+                            CookStatus::Gate(GateVerdict::NoChanges),
                             "loaded the terminal persisted no-changes promotion",
                             1,
                         ),
@@ -1827,8 +1828,8 @@ pub(super) fn run_cook_spine(
                             "loaded the terminal persisted promotion; the agent's review form declares the task incomplete, so it was not published",
                             1,
                         ),
-                        AgentTaskCookLoopStatus::NoChangesGateFailed => (
-                            CookStatus::NoChangesGateFailed,
+                        AgentTaskCookLoopStatus::Gate(GateVerdict::NoChangesGateFailed) => (
+                            CookStatus::Gate(GateVerdict::NoChangesGateFailed),
                             "loaded the terminal persisted no-changes gate failure",
                             1,
                         ),
@@ -2480,13 +2481,13 @@ pub(super) fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
-            AgentTaskCookLoopStatus::NoChanges => {
+            AgentTaskCookLoopStatus::Gate(GateVerdict::NoChanges) => {
                 if attempt >= attempt_limit {
                     publish_latest_incomplete_draft(&options, lifecycle_store)?;
                 }
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: CookStatus::NoChanges,
+                    status: CookStatus::Gate(GateVerdict::NoChanges),
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2536,13 +2537,13 @@ pub(super) fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
-            AgentTaskCookLoopStatus::NoChangesGateFailed => {
+            AgentTaskCookLoopStatus::Gate(GateVerdict::NoChangesGateFailed) => {
                 if attempt >= attempt_limit {
                     publish_latest_incomplete_draft(&options, lifecycle_store)?;
                 }
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: CookStatus::NoChangesGateFailed,
+                    status: CookStatus::Gate(GateVerdict::NoChangesGateFailed),
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2564,7 +2565,7 @@ pub(super) fn run_cook_spine(
             // than spending another provider execution.
             // A gate that ran but failed for environment reasons names that
             // gate and the recovery commands instead.
-            AgentTaskCookLoopStatus::GateEnvironmentUnavailable => {
+            AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable) => {
                 let environment_failure = feedback.failed_gates.iter().find(|gate| {
                     gate.classification
                         == crate::agent_task_gate::AgentTaskGateFailureClassification::Environment
@@ -2578,7 +2579,7 @@ pub(super) fn run_cook_spine(
                 };
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: CookStatus::GateEnvironmentUnavailable,
+                    status: CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2595,7 +2596,7 @@ pub(super) fn run_cook_spine(
                 let stop_reason = gate_budget_exceeded_stop_reason(&promotion, &cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: CookStatus::GateEnvironmentUnavailable,
+                    status: CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2705,6 +2706,20 @@ pub(super) fn run_cook_spine(
                         "deterministic gates stayed red after the configured attempt budget"
                             .to_string(),
                     ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
+            // The cook loop reports a red patched candidate as a retry
+            // decision; a bare gate-failed verdict is terminal.
+            AgentTaskCookLoopStatus::Gate(GateVerdict::GateFailed) => {
+                return Ok(stores.report(CookReportInput {
+                    cook_id,
+                    status: CookStatus::Gate(GateVerdict::GateFailed),
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some("deterministic gates rejected the candidate".to_string()),
                     exit_code: 1,
                     invocation_latest_run_id: Some(&run_id),
                 }));

@@ -3782,13 +3782,19 @@ mod tests {
                         .mutate_record(run_id, |record| {
                             record.metadata["cook_continuation"] =
                                 serde_json::json!({"state": "claimed", "owner_pid": u32::MAX});
-                            if case == "blocked" {
-                                record.metadata["cancellation_fence"] =
-                                    serde_json::json!({"reason": "test blocker"});
-                            }
                             true
                         })
                         .unwrap();
+                    if case == "blocked" {
+                        store
+                            .update_cook_index(&recipe.cook_id, |index| {
+                                index.cancellation_fence =
+                                    Some(serde_json::json!({"reason": "test blocker"}));
+                                true
+                            })
+                            .unwrap()
+                            .expect("cook index");
+                    }
                 }
                 let service = crate::orchestration::OrchestrationService::new(
                     crate::orchestration::LifecycleStoreLookup::new(store.clone()),
