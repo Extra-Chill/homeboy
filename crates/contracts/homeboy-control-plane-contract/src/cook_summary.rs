@@ -115,7 +115,8 @@ pub struct CookSummary {
     /// One line per Cook attempt, oldest first:
     /// `attempt N: <candidate sha> · gates <verdicts> · <disposition>`, where
     /// disposition is `published`, `superseded`, `discarded` or the latest
-    /// attempt's pending state (#18888).
+    /// attempt's pending state (#18888). An attempt with no candidate appends
+    /// the agent's bounded reason as `<disposition>: <reason>` (#18916).
     #[serde(default)]
     pub attempts: Vec<String>,
     pub pr_url: Option<String>,

@@ -416,6 +416,8 @@ pub(crate) fn dispatch_cook_follow_up(
                 // Derived reviewer scope (#17651); attempts persisted before
                 // it existed must still replay.
                 inputs.remove("remediation_scope");
+                // Derived gate-guided start (#18916), likewise.
+                inputs.remove("gate_guided_candidate");
             }
         }
         if incoming != frozen {
@@ -696,6 +698,25 @@ pub(super) fn dispatch_bound_cook_follow_up(
     let next_run_id = bound.run_id;
     let mut follow_up_plan = bound.plan;
     if attempt_needs_execution_with_store(lifecycle_store, &next_run_id) {
+        // A gate-guided retry repairs the previous candidate, so its baseline
+        // is that candidate checked out on the Cook base, never the bare base
+        // (#18916). Fresh retries keep the #16292 reset.
+        let gate_guided_workspace = promotion
+            .provenance
+            .get("worktree_path")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from);
+        let gate_guided_evidence = match gate_guided_workspace {
+            Some(workspace) => {
+                super::cook_attempt_workspace::prepare_gate_guided_attempt_workspace(
+                    &recipe,
+                    &follow_up_plan.tasks[0],
+                    &workspace,
+                    &next_run_id,
+                )?
+            }
+            None => None,
+        };
         let baseline = materialize_follow_up_baseline_in_root(
             promotion,
             &lifecycle_store.artifact_root(),
@@ -711,6 +732,12 @@ pub(super) fn dispatch_bound_cook_follow_up(
         bind_dispatch_workspace_attestations(&mut follow_up_plan)?;
         ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
         lifecycle_store.submit_plan_with_current_runtime(&follow_up_plan, &next_run_id)?;
+        if let Some(evidence) = gate_guided_evidence {
+            let _ = lifecycle_store.mutate_record(&next_run_id, |record| {
+                record.metadata["gate_guided_attempt_workspace"] = evidence.clone();
+                true
+            });
+        }
         lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
         if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
             lifecycle_store

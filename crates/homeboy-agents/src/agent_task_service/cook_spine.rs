@@ -2378,6 +2378,21 @@ pub(super) fn run_cook_spine(
         });
         let feedback_status = feedback.status;
         let follow_up_request = feedback.follow_up_request.clone();
+        // An attempt without a candidate keeps the agent's own reason for the
+        // Cook summary's attempt line (#18916).
+        if promotion.changed_files.is_empty() {
+            if let Some(reason) = review_form
+                .as_ref()
+                .and_then(|form| form.incomplete_reason())
+                .and_then(super::cook_summary::bounded_attempt_reason)
+            {
+                let _ = lifecycle_store.mutate_record(&run_id, |record| {
+                    record.metadata[super::cook_summary::NO_CHANGE_REASON_KEY] =
+                        Value::String(reason.clone());
+                    true
+                });
+            }
+        }
         delivery.attempts.push(AgentTaskCookAttemptReport {
             attempt,
             run_id: run_id.clone(),

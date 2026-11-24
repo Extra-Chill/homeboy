@@ -24,8 +24,9 @@ mod cook_adoption;
 pub use cook_admission_key::COOK_ADMISSION_KEY_METADATA;
 /// Per-attempt Cook timeline `agent-task status` reports (#17893).
 mod cook_attempt_timeline;
-/// Fresh provider attempts start from a clean Cook base tree.
-mod cook_attempt_workspace;
+/// Fresh provider attempts start from a clean Cook base tree; gate-guided
+/// attempts start from the previous candidate (#18916).
+pub(crate) mod cook_attempt_workspace;
 pub use cook_attempt_timeline::{
     cook_attempt_timeline, cook_attempt_timeline_in_store, CookAttemptTiming,
 };
