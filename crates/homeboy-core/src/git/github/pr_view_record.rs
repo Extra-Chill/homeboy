@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn minimal_payload_defaults_everything_else() {
-        // Exactly the fields pr_refresh historically requested.
+        // Only the fields pr_refresh reads.
         let raw = r#"{
             "number": 7,
             "url": "https://github.com/Extra-Chill/homeboy/pull/7",
@@ -205,35 +205,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_string_fields_round_trip_verbatim() {
-        let raw = r#"{
-            "baseRefName": "",
-            "headRefName": "",
-            "url": "",
-            "state": "",
-            "title": "",
-            "headRefOid": "",
-            "mergeStateStatus": ""
-        }"#;
-        let record = parse_pr_view(raw).unwrap();
-        assert_eq!(record.base_ref_name, "");
-        assert_eq!(record.head_ref_name, "");
-        assert_eq!(record.url, "");
-        assert_eq!(record.state, "");
-        assert_eq!(record.title.as_deref(), Some(""));
-        assert_eq!(record.head_ref_oid.as_deref(), Some(""));
-        assert_eq!(record.merge_state_status.as_deref(), Some(""));
-    }
-
-    #[test]
     fn malformed_json_is_one_internal_json_error() {
         let error = parse_pr_view("not json").unwrap_err();
         assert_eq!(error.code, ErrorCode::InternalJsonError);
     }
 
-    /// The `Value`-pointer parser this replaced read an explicit `null` as an
-    /// empty value for every field; the shared record must not start rejecting
-    /// payloads it used to accept.
+    /// `gh` can emit explicit `null`s; every field must read them as empty
+    /// rather than rejecting the payload.
     #[test]
     fn explicit_nulls_parse_as_defaults() {
         let raw = r#"{

@@ -199,35 +199,6 @@ pub fn classify_component_branch(
     Ok(classification)
 }
 
-/// A destination is refused for history this Cook did not create: commits
-/// ahead of the base, another branch, or a detached HEAD.
-pub(super) fn refuse_foreign_history(classification: DestinationFreshness) -> Result<()> {
-    match classification {
-        DestinationFreshness::Stale(stale)
-            if stale
-                .reasons
-                .iter()
-                .any(|reason| *reason != StaleDestinationReason::UncommittedChanges) =>
-        {
-            super::convergence::require_issue_destination_without_pr(
-                &stale.path,
-                &stale.expected_branch,
-            )?;
-            if stale.reasons.iter().all(|reason| {
-                matches!(
-                    reason,
-                    StaleDestinationReason::CommitsAheadOfBase
-                        | StaleDestinationReason::UncommittedChanges
-                )
-            }) {
-                return Err(super::convergence::pr_route(&stale.expected_branch, None));
-            }
-            Err(stale.into_error())
-        }
-        _ => Ok(()),
-    }
-}
-
 impl StaleDestination {
     /// The commands that discard the stale destination, or pick another one.
     pub fn recovery_commands(&self) -> Vec<String> {
@@ -609,7 +580,7 @@ mod tests {
         let classification =
             classify_worktree_destination(&fixture.worktree, HANDLE, BRANCH, "main")
                 .expect("classify");
-        let DestinationFreshness::Stale(stale) = classification.clone() else {
+        let DestinationFreshness::Stale(stale) = classification else {
             panic!("a dirty destination must be stale");
         };
         assert_eq!(
@@ -617,9 +588,6 @@ mod tests {
             vec![StaleDestinationReason::UncommittedChanges]
         );
         assert_eq!(stale.dirty_paths, vec!["tracked.txt".to_string()]);
-        // A Cook's own in-progress candidate looks exactly like this; Cook
-        // admission owns its reuse, so the derived-destination check admits it.
-        refuse_foreign_history(classification).expect("uncommitted changes alone are admitted");
     }
 
     #[test]
@@ -630,7 +598,6 @@ mod tests {
             classify_worktree_destination(&fixture.worktree, HANDLE, BRANCH, "main")
                 .expect("classify");
         assert_eq!(classification, DestinationFreshness::Fresh);
-        refuse_foreign_history(classification).expect("a fresh destination is admitted");
     }
 
     #[test]

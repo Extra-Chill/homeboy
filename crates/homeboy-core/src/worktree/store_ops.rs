@@ -3391,10 +3391,10 @@ pub(super) fn read_record(store_dir: &Path, id: &str) -> Result<TaskWorktreeReco
 }
 
 /// Read one manifest. A manifest without a valid workspace identity is
-/// malformed: `write_record` refuses to write one, so it can only be a legacy
-/// record. Rejecting it here turns it into a scan diagnostic and a quarantine
-/// candidate instead of an error in every consumer that later asks for its
-/// identity, which used to abort whole cleanup passes (#17234).
+/// malformed: `write_record` refuses to write one, so it can only come from an
+/// older homeboy. Rejecting it here turns it into a scan diagnostic and a
+/// quarantine candidate instead of an error in every consumer that later asks
+/// for its identity, so one bad manifest cannot abort a cleanup pass (#17234).
 pub(super) fn read_record_path(path: &Path) -> Result<TaskWorktreeRecord> {
     let raw = fs::read_to_string(path)
         .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
