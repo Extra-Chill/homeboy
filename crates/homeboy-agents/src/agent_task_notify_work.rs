@@ -133,7 +133,10 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
     }
     let summary = record
         .as_ref()
-        .map(crate::agent_task_service::cook_summary)
+        .map(|record| match &report.report_stores {
+            Some((_, store)) => crate::agent_task_service::cook_summary_in_store(store, record),
+            None => crate::agent_task_service::cook_summary(record),
+        })
         .unwrap_or_else(|| {
             homeboy_control_plane_contract::CookSummary::unobserved(
                 report.status.as_str(),

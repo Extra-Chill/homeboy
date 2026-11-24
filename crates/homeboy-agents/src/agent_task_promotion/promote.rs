@@ -900,7 +900,17 @@ fn promote_candidate(
     let feedback = outcome.metadata.get("gate_feedback_baseline");
     let destination_head_alignment =
         align_superseded_head(&path, options, outcome, commit, feedback)?;
-    if !options.dry_run || destination_head_alignment.is_none() {
+    let destination_residue = if feedback.is_none() && destination_head_alignment.is_none() {
+        release_base_residue(&path, options, outcome, commit).map_err(|mut error| {
+            error.details["promotion_pre_apply_refusal"] = json!(true);
+            error
+        })?
+    } else {
+        None
+    };
+    let skip_validation =
+        options.dry_run && (destination_head_alignment.is_some() || destination_residue.is_some());
+    if !skip_validation {
         super::candidate_bundle::validate_destination(&path, commit, feedback).map_err(
             |mut error| {
                 error.details["promotion_pre_apply_refusal"] = json!(true);
@@ -957,7 +967,7 @@ fn promote_candidate(
             target.clone(),
             worktree_path,
             &outcome.schema,
-            json!({"candidate_commit": commit, "safety_baseline": {"head": commit.base_sha, "tree": base_tree}, "destination_head_alignment": destination_head_alignment}),
+            json!({"candidate_commit": commit, "safety_baseline": {"head": commit.base_sha, "tree": base_tree}, "destination_head_alignment": destination_head_alignment, "destination_residue": destination_residue}),
             pre_apply_verified_base.clone(),
         )?;
         checkpoint(&report)?;
@@ -1032,6 +1042,7 @@ fn promote_candidate(
             "candidate_commit": commit,
             "safety_baseline": {"head": commit.base_sha, "tree": base_tree},
             "destination_head_alignment": destination_head_alignment,
+            "destination_residue": destination_residue,
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
             "candidate_checkout_setup": gates.candidate_setup,
@@ -1073,24 +1084,21 @@ fn align_superseded_head(
         return Ok(None);
     }
     validate_candidate_commit(path, candidate)?;
-    // Never discard edits or a previously applied feedback candidate.
-    if !git_output(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "to_worktree",
-            "candidate destination must be clean",
-            None,
-            None,
-        ));
-    }
     let run_id = options.source_run_id.as_deref().unwrap_or(&outcome.task_id);
+    // Never discard edits: residue is snapshotted first, and only state that
+    // is exactly a recorded Homeboy candidate is released.
+    let residue = super::residue::release_homeboy_residue(path, run_id, options.dry_run)?;
     let reference = format!(
         "refs/homeboy/superseded/{}",
         homeboy_core::paths::sanitize_path_segment(run_id)
     );
     if options.dry_run {
-        return Ok(Some(
-            json!({"from": head, "to": candidate.base_sha, "ref": reference, "dry_run": true}),
-        ));
+        let mut alignment =
+            json!({"from": head, "to": candidate.base_sha, "ref": reference, "dry_run": true});
+        if let Some(residue) = residue {
+            alignment["residue"] = residue;
+        }
+        return Ok(Some(alignment));
     }
     // Create-only: never overwrite an earlier saved head.
     git_output(path, &["update-ref", &reference, &head, ""])?;
@@ -1104,9 +1112,39 @@ fn align_superseded_head(
         "--keep"
     };
     git_output(path, &["reset", mode, &candidate.base_sha])?;
-    Ok(Some(
-        json!({"from": head, "to": candidate.base_sha, "ref": reference}),
-    ))
+    let mut alignment = json!({"from": head, "to": candidate.base_sha, "ref": reference});
+    if let Some(residue) = residue {
+        alignment["residue"] = residue;
+    }
+    Ok(Some(alignment))
+}
+
+/// A destination on the candidate base that still holds an earlier Homeboy
+/// candidate staged (a superseded attempt's promotion or alignment) is
+/// snapshotted and released before the newer candidate lands. A destination
+/// that already holds this candidate's tree is left to candidate recovery.
+fn release_base_residue(
+    path: &Path,
+    options: &AgentTaskPromotionRequest,
+    outcome: &AgentTaskOutcome,
+    candidate: &crate::agent_task::AgentTaskCandidate,
+) -> Result<Option<Value>> {
+    if git_output(path, &["rev-parse", "HEAD"])? != candidate.base_sha
+        || git_output(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty()
+    {
+        return Ok(None);
+    }
+    validate_candidate_commit(path, candidate)?;
+    if super::committed_changes::recover_candidate_destination(
+        path,
+        &candidate.candidate_sha,
+        Some(&candidate.base_sha),
+        true,
+    )? {
+        return Ok(None);
+    }
+    let run_id = options.source_run_id.as_deref().unwrap_or(&outcome.task_id);
+    super::residue::release_homeboy_residue(path, run_id, options.dry_run)
 }
 
 /// An earlier Homeboy candidate on `base`: a recorded candidate ref points at

@@ -3,6 +3,7 @@
     "name": "success",
     "payload": {
       "cook_summary": {
+        "attempts": [],
         "base_sha": null,
         "delivery": [],
         "gates": [],
@@ -56,6 +57,7 @@
         }
       ],
       "cook_summary": {
+        "attempts": [],
         "base_sha": null,
         "delivery": [],
         "gates": [],
@@ -91,6 +93,7 @@
     "name": "cancelled",
     "payload": {
       "cook_summary": {
+        "attempts": [],
         "base_sha": null,
         "delivery": [],
         "gates": [],

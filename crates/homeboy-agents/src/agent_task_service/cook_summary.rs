@@ -15,8 +15,126 @@ use crate::agent_task_lifecycle::{
     legal_actions, AgentTaskLifecycleStore, AgentTaskRunRecord, CookRunState,
 };
 
-/// Project `record` into the stable Cook summary.
+/// Project `record` into the stable Cook summary, with one accounting line
+/// per attempt of its Cook read from the ambient durable Cook index. Callers
+/// that own a lifecycle store use [`cook_summary_in_store`].
 pub fn cook_summary(record: &AgentTaskRunRecord) -> CookSummary {
+    match AgentTaskLifecycleStore::from_environment() {
+        Ok(store) => cook_summary_in_store(&store, record),
+        Err(_) => cook_summary_with_attempts(record, &[]),
+    }
+}
+
+/// Project `record` into the stable Cook summary, reading its Cook's attempt
+/// history from the Cook index in `store`.
+pub(crate) fn cook_summary_in_store(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> CookSummary {
+    cook_summary_with_attempts(record, &cook_attempt_records(store, record))
+}
+
+/// Project `record` with the Cook's attempt records, oldest first. With no
+/// attempt history, `record` stands as its Cook's only attempt.
+pub(crate) fn cook_summary_with_attempts(
+    record: &AgentTaskRunRecord,
+    attempts: &[(u32, AgentTaskRunRecord)],
+) -> CookSummary {
+    let mut summary = project_summary(record);
+    summary.attempts = if attempts.is_empty() {
+        let attempt = record
+            .metadata
+            .get("cook_attempt")
+            .and_then(Value::as_u64)
+            .and_then(|attempt| u32::try_from(attempt).ok())
+            .unwrap_or(1);
+        vec![attempt_line(attempt, record, true)]
+    } else {
+        attempts
+            .iter()
+            .enumerate()
+            .map(|(index, (attempt, attempt_record))| {
+                attempt_line(*attempt, attempt_record, index + 1 == attempts.len())
+            })
+            .collect()
+    };
+    summary.bounded()
+}
+
+/// Every attempt the Cook index of `record`'s Cook names, oldest first.
+/// `record` stands in for its own attempt; unreadable attempts are skipped.
+fn cook_attempt_records(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Vec<(u32, AgentTaskRunRecord)> {
+    let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let Ok(index) = crate::agent_task_lifecycle::cook_index_in_store(store, cook_id) else {
+        return Vec::new();
+    };
+    let mut entries = index.attempts;
+    entries.sort_by_key(|entry| entry.attempt);
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let attempt_record = if entry.run_id == record.run_id {
+                record.clone()
+            } else {
+                crate::agent_task_lifecycle::exact_record_bounded_in_store(store, &entry.run_id)
+                    .ok()?
+            };
+            Some((entry.attempt, attempt_record))
+        })
+        .collect()
+}
+
+/// `attempt N: <candidate sha> · gates <verdicts> · <disposition>`.
+fn attempt_line(attempt: u32, record: &AgentTaskRunRecord, latest: bool) -> String {
+    let delivery = CookDelivery::from_run_metadata(&record.metadata);
+    let candidate_sha = delivery
+        .as_ref()
+        .and_then(|delivery| delivery.candidate.as_ref())
+        .and_then(|candidate| candidate.candidate.as_ref())
+        .map(|candidate| candidate.candidate_sha.clone())
+        .or_else(|| {
+            record
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.candidate_sha.clone())
+        })
+        .filter(|sha| !sha.trim().is_empty());
+    let gates = summary_gates(record, delivery.as_ref())
+        .into_iter()
+        .map(|gate| format!("{}={}", gate.name, gate.state))
+        .collect::<Vec<_>>();
+    let gates = if gates.is_empty() {
+        "none".to_string()
+    } else {
+        gates.join(", ")
+    };
+    let state = CookRunState::of(record);
+    let disposition = if delivery.as_ref().and_then(CookDelivery::pr_url).is_some() {
+        "published".to_string()
+    } else if !latest {
+        if candidate_sha.is_some() {
+            "superseded"
+        } else {
+            "discarded"
+        }
+        .to_string()
+    } else if candidate_sha.is_none() && state.terminal {
+        "discarded".to_string()
+    } else {
+        state.status.clone()
+    };
+    let sha = candidate_sha
+        .map(|sha| sha.chars().take(12).collect::<String>())
+        .unwrap_or_else(|| "none".to_string());
+    format!("attempt {attempt}: {sha} · gates {gates} · {disposition}")
+}
+
+fn project_summary(record: &AgentTaskRunRecord) -> CookSummary {
     let state = CookRunState::of(record);
     let delivery = CookDelivery::from_run_metadata(&record.metadata);
     let candidate = delivery
@@ -74,13 +192,13 @@ pub fn cook_summary(record: &AgentTaskRunRecord) -> CookSummary {
         head_sha: head_sha.filter(|sha| !sha.trim().is_empty()),
         base_sha: base_sha.filter(|sha| !sha.trim().is_empty()),
         gates: summary_gates(record, delivery.as_ref()),
+        attempts: Vec::new(),
         pr_url,
         why_no_pr,
         delivery: publication
             .map(|publication| publication.delivery.clone())
             .unwrap_or_default(),
     }
-    .bounded()
 }
 
 /// The summary of the run `run_id` names, read without initializing or
@@ -89,7 +207,7 @@ pub fn cook_summary_for_run(run_id: &str) -> Option<CookSummary> {
     let store = AgentTaskLifecycleStore::from_environment().ok()?;
     crate::agent_task_lifecycle::exact_record_bounded_in_store(&store, run_id)
         .ok()
-        .map(|record| cook_summary(&record))
+        .map(|record| cook_summary_in_store(&store, &record))
 }
 
 /// Why a terminal run has no pull request: the reason [`CookRunState`] owns,

@@ -206,3 +206,49 @@ fn bench_gate_links_its_artifact_and_aggregate_summary() {
         "/data/bench-compare/bench-compare-1/bench-compare.json"
     );
 }
+
+/// #18888: the summary accounts for every attempt, not just the last one.
+#[test]
+fn summary_lists_every_attempt_with_sha_gates_and_disposition() {
+    let superseded = record(
+        RunExecutionState::CandidateRecoverable,
+        delivery(json!({
+            "promotion": promotion("gate_failed", json!([{
+                "id": "cargo-test", "status": "failed", "command": ["cargo", "test"], "exit_code": 101
+            }])),
+        })),
+    );
+    let published = record(
+        RunExecutionState::Succeeded,
+        delivery(json!({
+            "promotion": promotion("applied", json!([{
+                "id": "cargo-test", "status": "succeeded", "command": ["cargo", "test"], "exit_code": 0
+            }])),
+            "finalization": {
+                "status": "review_ready",
+                "pr_number": 42,
+                "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
+                "publication_proof": { "binding": { "candidate_sha": "commit-sha", "remote_sha": "remote-sha" } }
+            },
+        })),
+    );
+    let discarded = record(RunExecutionState::Failed, json!({}));
+    let summary = cook_summary_with_attempts(
+        &published,
+        &[(1, superseded), (2, discarded), (3, published.clone())],
+    );
+    summary.validate().expect("valid summary");
+    assert_eq!(
+        summary.attempts,
+        vec![
+            "attempt 1: patch-1 · gates cargo-test=failed · superseded",
+            "attempt 2: none · gates none · discarded",
+            "attempt 3: patch-1 · gates cargo-test=succeeded · published",
+        ]
+    );
+
+    // Without attempt history the record is its Cook's only attempt.
+    let single = cook_summary(&published);
+    assert_eq!(single.attempts.len(), 1);
+    assert!(single.attempts[0].starts_with("attempt 1: "));
+}
