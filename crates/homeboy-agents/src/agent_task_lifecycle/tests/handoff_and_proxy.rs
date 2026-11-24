@@ -3481,9 +3481,10 @@ fn list_records_skips_malformed_observation_records() {
     );
 }
 
-/// The lifecycle copy wins over the historical wire alias, including retired labels.
+/// The lifecycle copy wins over the persisted top-level `state`, including
+/// labels homeboy does not write that still appear in on-disk records.
 #[test]
-fn legacy_wire_state_round_trip_and_active_discovery() {
+fn persisted_wire_state_round_trip_and_active_discovery() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
     lifecycle_store

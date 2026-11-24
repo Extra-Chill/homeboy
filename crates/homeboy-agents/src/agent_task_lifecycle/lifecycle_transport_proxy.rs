@@ -313,11 +313,6 @@ fn resume_transport_proxy_on_runner_in_store(
     }))
 }
 
-// The ambient `reconcile_transport_proxy_snapshot()` shim that used to sit here
-// is gone. It was already `#[cfg(test)]` — its last production caller had moved
-// to the rooted sibling — and the one test still calling it now resolves its
-// own store, so the pair collapses to the rooted form alone (#7505).
-
 /// Reconcile a transport-proxy snapshot against an explicitly injected root.
 ///
 /// This is a pure alias for the transport-proxy entry into the one reconcile
