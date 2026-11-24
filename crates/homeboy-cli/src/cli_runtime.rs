@@ -1310,21 +1310,17 @@ impl CliRuntime {
                     {
                         std::process::exit(removed.emit());
                     }
-                    if let Some(output) = try_augment_clap_error(
-                        &err,
-                        &diagnostic_args,
-                        &self.extension_discovery().health,
-                    ) {
+                    if let Some(output) =
+                        try_augment_clap_error(&err, &self.extension_discovery().health)
+                    {
                         eprintln!("{}", output);
                         crate::invocation::parse_exit(false);
                         std::process::exit(2);
                     }
 
-                    if let Some(output) = try_augment_clap_error(
-                        &static_err,
-                        &diagnostic_args,
-                        &self.extension_discovery().health,
-                    ) {
+                    if let Some(output) =
+                        try_augment_clap_error(&static_err, &self.extension_discovery().health)
+                    {
                         eprintln!("{}", output);
                         crate::invocation::parse_exit(false);
                         std::process::exit(2);
@@ -3732,36 +3728,12 @@ fn is_runs_artifact_get_runner_option(args: &[String]) -> bool {
         })
 }
 
-struct ArgumentMigration {
-    command: &'static str,
-    help_flag: &'static str,
-    command_path: &'static [&'static str],
-    historical_flags: &'static [&'static str],
-    diagnostic: &'static str,
-}
-
-const ARGUMENT_MIGRATIONS: &[ArgumentMigration] = &[ArgumentMigration {
-    command: "homeboy agent-task cook",
-    help_flag: "--help-full",
-    command_path: &["agent-task", "cook"],
-    historical_flags: &["--provider", "--provider-id", "--dispatch-selector"],
-    diagnostic: "executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
-Example: `homeboy agent-task cook --backend pi --selector pi.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'homeboy review test homeboy' --no-finalize`\n\
-List available executor providers: `homeboy agent-task providers`\n\
-`--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.",
-}];
-
-/// Attempt to augment a clap error with semantic argument migrations or entity suggestions.
+/// Attempt to augment a clap error with entity suggestions.
 /// Returns Some(augmented_message) when an actionable diagnostic is available.
 fn try_augment_clap_error(
     e: &clap::Error,
-    argv: &[String],
     extension_health: &ExtensionCliHealth,
 ) -> Option<String> {
-    if let Some(output) = semantic_argument_migration_diagnostic(e, argv) {
-        return Some(output);
-    }
-
     // Extract unrecognized subcommand and parent command from error.
     let unrecognized = extract_unrecognized_from_error(e)?;
     let parent_command = extract_parent_command_from_error(e)?;
@@ -3822,13 +3794,6 @@ fn try_augment_clap_error(
 /// generic runner surface and deliberately require discovery before selecting
 /// a runner ID.
 fn command_domain_hints(unrecognized: &str, parent_command: &str) -> Option<Vec<String>> {
-    if parent_command.is_empty() && unrecognized.eq_ignore_ascii_case("init") {
-        return Some(vec![
-            "`init` is no longer a top-level command. Discover extension lifecycle commands with `homeboy extension --help`".to_string(),
-            "Converge installed extensions with `homeboy extension converge`, or refresh Homeboy and extensions with `homeboy upgrade`".to_string(),
-        ]);
-    }
-
     if !parent_command.is_empty()
         || !(unrecognized.eq_ignore_ascii_case("lab")
             || homeboy::core::engine::text::levenshtein(&unrecognized.to_lowercase(), "runner")
@@ -3841,38 +3806,6 @@ fn command_domain_hints(unrecognized: &str, parent_command: &str) -> Option<Vec<
         "'{}' refers to the runner control plane. Discover runners with `homeboy runner list`, then inspect one with `homeboy runner status <runner-id>`",
         unrecognized
     )])
-}
-
-fn semantic_argument_migration_diagnostic(e: &clap::Error, argv: &[String]) -> Option<String> {
-    if e.kind() != clap::error::ErrorKind::UnknownArgument {
-        return None;
-    }
-
-    let migration = ARGUMENT_MIGRATIONS.iter().find(|migration| {
-        argv.windows(migration.command_path.len()).any(|command| {
-            command
-                .iter()
-                .map(String::as_str)
-                .eq(migration.command_path.iter().copied())
-        })
-    })?;
-    let argument = argv.iter().find_map(|argument| {
-        migration
-            .historical_flags
-            .iter()
-            .find(|flag| {
-                argument.as_str() == **flag
-                    || argument
-                        .strip_prefix(**flag)
-                        .is_some_and(|suffix| suffix.starts_with('='))
-            })
-            .map(|flag| (*flag).to_string())
-    })?;
-
-    Some(format!(
-        "error: historical executor selection flag '{argument}' is not supported\n\nhint: {}\n\nFor more information, try '{} {}'",
-        migration.diagnostic, migration.command, migration.help_flag
-    ))
 }
 
 fn append_extension_health_hints(hints: &mut Vec<String>, extension_health: &ExtensionCliHealth) {
@@ -5956,12 +5889,7 @@ mod tests {
             broken_link_ids: vec!["sample-runtime".to_string()],
         };
 
-        let output = try_augment_clap_error(
-            &err,
-            &["homeboy".to_string(), "sample-cli".to_string()],
-            &health,
-        )
-        .expect("extension health hint");
+        let output = try_augment_clap_error(&err, &health).expect("extension health hint");
 
         assert!(output.contains("extension-provided commands may be unavailable"));
         assert!(output.contains("broken extension link `sample-runtime`"));
@@ -5986,12 +5914,8 @@ mod tests {
             let err = build_augmented_command(&[], &ExtensionCliHealth::default())
                 .try_get_matches_from(["homeboy", "lab"])
                 .expect_err("lab is not a top-level command");
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", "lab"]),
-                &ExtensionCliHealth::default(),
-            )
-            .expect("Lab should have a control-plane hint");
+            let output = try_augment_clap_error(&err, &ExtensionCliHealth::default())
+                .expect("Lab should have a control-plane hint");
 
             assert!(output.contains("homeboy runner list"));
             assert!(output.contains("homeboy runner status <runner-id>"));
@@ -6005,12 +5929,8 @@ mod tests {
             let err = build_augmented_command(&[], &ExtensionCliHealth::default())
                 .try_get_matches_from(["homeboy", command])
                 .expect_err("misspelled runner command should not parse");
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", command]),
-                &ExtensionCliHealth::default(),
-            )
-            .expect("runner typo should have a control-plane hint");
+            let output = try_augment_clap_error(&err, &ExtensionCliHealth::default())
+                .expect("runner typo should have a control-plane hint");
 
             assert!(
                 output.contains("homeboy runner list"),
@@ -6021,30 +5941,6 @@ mod tests {
                 "{command}: {output}"
             );
         }
-    }
-
-    #[test]
-    fn removed_init_command_uses_extension_lifecycle_guidance_not_extension_id_matching() {
-        crate::test_support::with_isolated_home(|home| {
-            write_cli_extension(home.path(), "rust", "rust");
-            entity_suggest::reset_entity_suggestion_cache_for_test();
-            let err = build_augmented_command(&[], &ExtensionCliHealth::default())
-                .try_get_matches_from(["homeboy", "init"])
-                .expect_err("init is not a top-level command");
-
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", "init"]),
-                &ExtensionCliHealth::default(),
-            )
-            .expect("init should have lifecycle recovery guidance");
-
-            assert!(output.contains("homeboy extension --help"));
-            assert!(output.contains("homeboy extension converge"));
-            assert!(output.contains("homeboy upgrade"));
-            assert!(!output.contains("extension 'rust'"), "{output}");
-            assert!(!output.contains("homeboy extension rust"), "{output}");
-        });
     }
 
     #[test]
@@ -6063,12 +5959,8 @@ mod tests {
             let err = build_augmented_command(&[], &ExtensionCliHealth::default())
                 .try_get_matches_from(["homeboy", "catlog"])
                 .expect_err("component typo is not a top-level command");
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", "catlog"]),
-                &ExtensionCliHealth::default(),
-            )
-            .expect("component typo should have an entity hint");
+            let output = try_augment_clap_error(&err, &ExtensionCliHealth::default())
+                .expect("component typo should have an entity hint");
 
             assert!(output.contains("component 'catalog'"));
             assert!(output.contains("homeboy component catalog"));
@@ -6100,11 +5992,7 @@ mod tests {
                 .try_get_matches_from(["homeboy", "agent-task", "auth", "list"])
                 .expect_err("`list` is not a valid `agent-task auth` subcommand");
 
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", "agent-task", "auth", "list"]),
-                &ExtensionCliHealth::default(),
-            );
+            let output = try_augment_clap_error(&err, &ExtensionCliHealth::default());
 
             // No augmentation for a nested unrecognized subcommand: the
             // caller falls straight through to clap's own immediate usage

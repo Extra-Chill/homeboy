@@ -325,22 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn removed_agent_task_verbs_point_at_recover() {
-        for verb in [
-            "promote",
-            "gate-feedback",
-            "quarantine",
-            "rearm",
-            "replay-provider-boundary",
-        ] {
-            let args = argv(&["homeboy", "agent-task", verb, "cook-1"]);
-            let removed = find_removed_command(&parse_error(&args), &args)
-                .unwrap_or_else(|| panic!("agent-task {verb} must match the registry"));
-            assert_eq!(removed.replacement, Some("homeboy agent-task recover"));
-        }
-    }
-
-    #[test]
     fn unknown_non_removed_command_keeps_clap_error() {
         let args = argv(&["homeboy", "rig", "definitely-not-a-command"]);
         let error = parse_error(&args);

@@ -202,10 +202,9 @@ pub(crate) fn finalize_set_spec(
 // Every command module is declared here with a literal `pub mod`, including the
 // modules named by `builtin_json_command_descriptors!`.
 //
-// Module declarations used to be emitted by a descriptor consumer. That saved
-// lines and cost the formatter: rustfmt resolves the module tree by *parsing*,
-// and it does not expand `macro_rules!`, so a `mod` declared inside a macro body
-// is a module rustfmt never learns exists.
+// Module declarations stay out of macro bodies because rustfmt resolves the
+// module tree by *parsing* and does not expand `macro_rules!`, so a `mod`
+// declared inside a macro body is a module rustfmt never learns exists.
 //
 // The descriptor table generates the JSON registry and dispatch; only module
 // declarations remain literal. A row whose handler module is absent still fails
@@ -300,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn command_report_matches_legacy_envelope_snapshot() {
+    fn command_report_flattens_report_beside_command() {
         let output = CommandReport {
             command: "stack.status",
             report: SnapshotReport {

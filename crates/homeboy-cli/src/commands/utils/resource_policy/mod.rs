@@ -1720,9 +1720,8 @@ mod tests {
         // --run-plan) compiles the plan on the controller. It owns worktree
         // creation and the durable batch record, so the coordinator command
         // itself must never be treated as a portable, offloadable hot command.
-        // Previously only --run-plan was guarded, so this default variant fell
-        // through and could be dispatched to Lab as a single job, timing out
-        // before creating its local batch record.
+        // Dispatched to Lab as a single job, it would time out before
+        // creating its local batch record.
         let cli = Cli::parse_from([
             "homeboy",
             "agent-task",
