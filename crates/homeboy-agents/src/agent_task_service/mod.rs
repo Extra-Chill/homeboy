@@ -39,7 +39,8 @@ mod cook_delivery;
 /// The named readers of the artifacts the `cook_delivery` record holds.
 mod cook_delivery_artifacts;
 mod cook_summary;
-pub use cook_summary::{cook_summary, cook_summary_for_run, cook_summary_in_store};
+pub(crate) use cook_summary::cook_summary_in_store;
+pub use cook_summary::{cook_summary, cook_summary_for_run};
 mod cook_lineage;
 pub(crate) mod cook_pre_execution;
 mod cook_prior_candidate;
