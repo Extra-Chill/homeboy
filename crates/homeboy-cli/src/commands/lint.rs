@@ -49,9 +49,7 @@ pub struct LintArgs {
     // Changed-file scoping. Shared changed-scope group (#11140) — one
     // declaration for `--changed-since`, `--changed-only`, the
     // caller-injected changeset, and the hidden Lab handoff payload. The
-    // `--changed-since`/`--changed-only` conflict is owned by the group, so
-    // the two hand-written `conflicts_with` attributes that used to point at
-    // each other are gone.
+    // `--changed-since`/`--changed-only` conflict is owned by the group.
     #[command(flatten)]
     pub changed: ChangedScopeArgs,
 

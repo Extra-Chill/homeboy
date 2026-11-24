@@ -187,9 +187,8 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
         SelfCommand::CleanupRuntimeTmp(args) => {
             // Resolved by the shared policy so this specialist and `homeboy
             // cleanup --include runtime-tmp` cannot honor different windows
-            // (#10316). The clap defaults used to be literal `7`/`1000`/`1
-            // GiB`/`100`, so a widened `retention.runtime_tmp_days` was honored
-            // by the aggregate and silently ignored here.
+            // (#10316), so a widened `retention.runtime_tmp_days` applies here
+            // as it does in the aggregate.
             let policy = cleanup::resolve_cleanup_policy(cleanup::CleanupPolicyOverrides {
                 limit: args.limit,
                 runtime_tmp_days: args.older_than_days,
