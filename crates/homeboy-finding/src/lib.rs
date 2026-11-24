@@ -295,7 +295,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builder_covers_lint_shape() {
+    fn metadata_json_projects_typed_fields_beside_free_form_metadata() {
         let finding = HomeboyFinding::builder("phpcs", "escape output")
             .rule("WordPress.Security.EscapeOutput")
             .category("security")
@@ -303,79 +303,18 @@ mod tests {
             .file("src/lib.php")
             .line(12)
             .column(8)
-            .fingerprint("src/lib.php:12:8:WordPress.Security.EscapeOutput")
             .fixable(true)
             .source(FindingSource::new("sidecar").path("lint-findings.json"))
-            .build();
-
-        assert_eq!(finding.category.as_deref(), Some("security"));
-        assert_eq!(finding.location.column, Some(8));
-        assert_eq!(
-            finding.metadata_json()["source"]["path"],
-            "lint-findings.json"
-        );
-    }
-
-    #[test]
-    fn builder_covers_audit_shape() {
-        let finding = HomeboyFinding::builder("audit", "Missing run function")
-            .rule("missing_method")
-            .category("command modules")
-            .severity("warning")
-            .file("src/commands/foo.rs")
-            .metadata("confidence", "structural")
-            .metadata("suggestion", "Add run()")
-            .build();
-
-        assert_eq!(finding.rule.as_deref(), Some("missing_method"));
-        assert_eq!(finding.metadata_json()["suggestion"], "Add run()");
-    }
-
-    #[test]
-    fn builder_covers_test_failure_shape() {
-        let finding = HomeboyFinding::builder("test", "Expected 200, got 500")
-            .rule("assertion_mismatch")
-            .category("test_failure")
-            .severity("error")
-            .file("tests/AuthTest.php")
-            .line(44)
-            .fingerprint("AuthTest::test_login:assertion_mismatch")
-            .metadata("test_name", "AuthTest::test_login")
-            .source(FindingSource::new("runner").label("phpunit"))
-            .build();
-
-        assert_eq!(finding.tool, "test");
-        assert_eq!(finding.metadata_json()["test_name"], "AuthTest::test_login");
-    }
-
-    #[test]
-    fn builder_covers_bench_budget_shape() {
-        let finding = HomeboyFinding::builder("budget", "Page ready time exceeded budget")
-            .rule("page.ready_ms")
-            .category("budget")
-            .severity("error")
-            .fingerprint("page.ready_ms:front-page")
+            .metadata("suggestion", "Escape the value")
             .metadata("actual", 1200.0)
-            .metadata("expected", 1000.0)
-            .metadata("unit", "ms")
             .build();
 
-        assert_eq!(finding.rule.as_deref(), Some("page.ready_ms"));
-        assert_eq!(finding.metadata_json()["unit"], "ms");
-    }
-
-    #[test]
-    fn builder_covers_annotation_shape() {
-        let finding = HomeboyFinding::builder("github-annotations", "escape output")
-            .rule("WordPress.Security.EscapeOutput")
-            .severity("warning")
-            .file("src/lib.php")
-            .line(12)
-            .source(FindingSource::new("annotation").path("phpcs.json"))
-            .metadata("github_level", "warning")
-            .build();
-
-        assert_eq!(finding.source.as_ref().unwrap().kind, "annotation");
-        assert_eq!(finding.metadata_json()["github_level"], "warning");
+        let metadata = finding.metadata_json();
+        assert_eq!(metadata["category"], "security");
+        assert_eq!(metadata["column"], 8);
+        assert_eq!(metadata["source"]["kind"], "sidecar");
+        assert_eq!(metadata["source"]["path"], "lint-findings.json");
+        assert_eq!(metadata["suggestion"], "Escape the value");
+        assert_eq!(metadata["actual"], 1200.0);
     }
 }

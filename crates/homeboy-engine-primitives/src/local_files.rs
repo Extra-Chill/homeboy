@@ -98,11 +98,8 @@ pub fn local() -> LocalFs {
 /// Ensure all app directories exist
 ///
 /// The config root is resolved exactly once and threaded into every derived
-/// location. This used to be seven independent resolutions of the same root —
-/// `paths::homeboy()` plus six derived resolvers that each re-resolved it
-/// internally — on the startup path. A repoint of the home root between the
-/// first and the last built half a config tree in one home and half in another
-/// (#7505).
+/// location, so a repoint of the home root mid-startup cannot build half a
+/// config tree in one home and half in another (#7505).
 pub fn ensure_app_dirs() -> Result<()> {
     ensure_app_dirs_in_root(&homeboy_paths::homeboy()?)
 }

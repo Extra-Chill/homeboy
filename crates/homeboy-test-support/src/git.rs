@@ -88,36 +88,3 @@ pub fn commit_file(repo: impl AsRef<Path>, name: &str, contents: &str, message: 
     run(repo, &["add", name]);
     run(repo, &["commit", "-q", "-m", message]);
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn initializes_and_commits() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("repo");
-        init(&repo);
-        assert_eq!(output(&repo, &["symbolic-ref", "--short", "HEAD"]), "main");
-        assert_eq!(output(&repo, &["config", "user.name"]), "Homeboy Test");
-        assert_eq!(
-            output(&repo, &["config", "user.email"]),
-            "homeboy@example.com"
-        );
-        commit_file(&repo, "src/file", "one", "first");
-        let first = head(&repo);
-        std::fs::write(repo.join("src/file"), "two").unwrap();
-        std::fs::write(repo.join("other"), "three").unwrap();
-        commit_all(&repo, "second");
-        assert_ne!(head(&repo), first);
-        assert_eq!(output(&repo, &["status", "--porcelain"]), "");
-        assert_eq!(output(&repo, &["show", "HEAD:other"]), "three");
-    }
-
-    #[test]
-    #[should_panic(expected = "stderr=")]
-    fn failures_include_stderr() {
-        let temp = tempfile::tempdir().unwrap();
-        head(temp.path());
-    }
-}

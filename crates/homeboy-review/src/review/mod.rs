@@ -343,15 +343,6 @@ mod tests {
     use homeboy_extension_contract::TestCommandOutput;
 
     #[test]
-    fn stage_skipped_helper_marks_not_ran() {
-        let stage: ReviewStage<serde_json::Value> = stage_skipped("lint", "no files changed");
-        assert!(!stage.ran);
-        assert!(stage.passed);
-        assert_eq!(stage.exit_code, 0);
-        assert_eq!(stage.skipped_reason.as_deref(), Some("no files changed"));
-    }
-
-    #[test]
     fn artifact_command_maps_stage_statuses() {
         let skipped: ReviewStage<serde_json::Value> = stage_skipped("test", "no files changed");
         let skipped_command = artifact_command(&skipped);

@@ -115,8 +115,7 @@ pub enum FuzzEvidenceViolationCode {
     /// is there.
     ArtifactRefMissing,
     /// A declared artifact path is local-looking but escapes the artifact
-    /// root (`..` traversal or an absolute path outside the base). Previously
-    /// these were silently discarded.
+    /// root (`..` traversal or an absolute path outside the base).
     ArtifactRefUnresolvable,
     /// A declared artifact path exists but is the wrong kind — a directory
     /// where the contract declared a file, or the reverse.

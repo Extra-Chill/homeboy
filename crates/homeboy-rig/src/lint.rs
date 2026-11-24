@@ -1000,7 +1000,7 @@ fn shared_path_failures(rel: &str, rig: &serde_json::Value) -> Vec<String> {
 /// an inline `lifecycle` payload, or a `workload` reference.
 ///
 /// Both fields are optional in the schema so either shape parses, which means
-/// serde no longer rejects a step that declares neither. The executor still
+/// serde does not reject a step that declares neither. The executor still
 /// fails closed at run time, but a rig author should not have to run `rig up`
 /// to find out — that is what this lint is for.
 fn lifecycle_step_source_failures(rel: &str, rig: &serde_json::Value) -> Vec<String> {

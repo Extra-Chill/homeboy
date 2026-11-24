@@ -96,7 +96,7 @@ pub struct MetricPolicy {
     pub boundary: Boundary,
     pub zero_baseline_is_neutral: bool,
     pub threshold_improvements: bool,
-    /// Preserve signed-baseline percentages for the legacy bench renderer.
+    /// Divide by the signed baseline (not its magnitude), as bench reports do.
     pub signed_percent: bool,
 }
 

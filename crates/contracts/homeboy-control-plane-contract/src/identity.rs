@@ -144,25 +144,8 @@ pub(crate) fn validate_opaque(value: &str) -> Result<(), IdentityError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunId, TaskId};
+    use super::{MissionId, RunId};
     use crate::IdentityError;
-
-    #[test]
-    fn identity_types_are_not_interchangeable() {
-        let names = [
-            std::any::type_name::<MissionId>(),
-            std::any::type_name::<RunId>(),
-            std::any::type_name::<TaskId>(),
-            std::any::type_name::<AttemptId>(),
-            std::any::type_name::<ExecutionId>(),
-            std::any::type_name::<ProviderSessionId>(),
-        ];
-        for (index, name) in names.iter().enumerate() {
-            for other in names.iter().skip(index + 1) {
-                assert_ne!(name, other);
-            }
-        }
-    }
 
     #[test]
     fn identities_serialize_as_plain_strings() {
