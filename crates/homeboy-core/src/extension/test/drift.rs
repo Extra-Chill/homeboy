@@ -1172,8 +1172,7 @@ mod tests {
         assert!(!is_source_relevant_change_unconfigured("Cargo.lock"));
         assert!(!is_source_relevant_change_unconfigured("LICENSE"));
 
-        // A CI workflow was previously asserted irrelevant alongside docs.
-        // It is not inert: it decides which suites run and against what, so a
+        // A CI workflow is not inert: it decides which suites run and against what, so a
         // zero-test pass on a workflow change evidences nothing about the
         // change itself. See test_harness_config_is_source_relevant.
         assert!(is_source_relevant_change_unconfigured(
@@ -1204,9 +1203,8 @@ mod tests {
 
     #[test]
     fn test_harness_config_is_source_relevant() {
-        // Config by extension, so no source pattern matches these and the
-        // docs/config fallback treated them as inert. A change here previously
-        // selected zero tests and passed without exercising the harness.
+        // Config by extension, so no source pattern matches these; they must
+        // still count as source-relevant so a change here selects tests.
         for path in [
             ".github/workflows/homeboy.yml",
             ".github/workflows/booking-attachment-mysql.yml",

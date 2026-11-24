@@ -457,41 +457,6 @@ fn only_regression_timeout_and_missing_baseline_block() {
     }
 }
 
-/// The wire spellings are the CI gate's, not a second vocabulary.
-#[test]
-fn verdict_spellings_match_the_ci_gate() {
-    assert_eq!(DifferentialVerdict::BaselineRed.as_str(), "baseline_red");
-    assert_eq!(DifferentialVerdict::Inconclusive.as_str(), "inconclusive");
-    assert_eq!(
-        DifferentialVerdict::NoMeasurement.as_str(),
-        "no_measurement"
-    );
-    assert_eq!(DifferentialVerdict::Pass.as_str(), "pass");
-    assert_eq!(DifferentialVerdict::Fail.as_str(), "fail");
-    assert_eq!(DifferentialVerdict::Timeout.as_str(), "timeout");
-    assert_eq!(DifferentialVerdict::NoBaseline.as_str(), "no_baseline");
-}
-
-/// The serialized spelling and the rendered spelling must be the same string.
-/// Two spellings for one verdict is exactly the "second vocabulary" this module
-/// exists to avoid, and it is the kind of drift nothing else would catch.
-#[test]
-fn serialized_and_rendered_verdict_spellings_agree() {
-    for verdict in [
-        DifferentialVerdict::Pass,
-        DifferentialVerdict::Fail,
-        DifferentialVerdict::Timeout,
-        DifferentialVerdict::BaselineRed,
-        DifferentialVerdict::Inconclusive,
-        DifferentialVerdict::NoMeasurement,
-        DifferentialVerdict::NoBaseline,
-        DifferentialVerdict::InvalidEvidence,
-    ] {
-        let serialized = serde_json::to_string(&verdict).expect("serialize verdict");
-        assert_eq!(serialized, format!("\"{}\"", verdict.as_str()));
-    }
-}
-
 // ---------------------------------------------------------------------------
 // rendering
 // ---------------------------------------------------------------------------

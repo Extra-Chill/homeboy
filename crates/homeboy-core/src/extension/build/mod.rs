@@ -761,7 +761,7 @@ fn execute_uncached_build_component(
             .timeout(Some(build_timeout))
             .passthrough(false)
             .stderr_passthrough(true)
-            // Legacy env var for backward compat with existing build scripts
+            // WordPress build validation reads the component path from HOMEBOY_PLUGIN_PATH.
             .env("HOMEBOY_PLUGIN_PATH", &comp.local_path);
         for (key, value) in build_env(changed_since, changed_scope.as_ref()) {
             runner = runner.env(&key, &value);

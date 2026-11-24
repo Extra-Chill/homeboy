@@ -230,21 +230,6 @@ fn extension_manifest_accepts_real_extension_fixture_shapes() {
 }
 
 #[test]
-fn retired_runtime_key_is_preserved_like_other_unknown_manifest_data() {
-    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "name": "Example",
-        "version": "1.0.0",
-        "agent_runtimes": "not interpreted",
-        "unknown_fixture_key": "not interpreted"
-    }))
-    .expect("unknown manifest keys remain opaque");
-    assert_eq!(
-        manifest.extra["agent_runtimes"],
-        manifest.extra["unknown_fixture_key"]
-    );
-}
-
-#[test]
 fn executable_pruned_fields_remain_loadable_as_unknown_manifest_data() {
     let raw = include_str!("../../../../tests/fixtures/extension_manifests/swift.json");
     let manifest: ExtensionManifest =

@@ -205,7 +205,7 @@ pub(crate) fn resolve_cloned_extension(
         return Ok(extension_id.to_string());
     }
 
-    // Preserve the legacy direct-child layout before considering declared roots.
+    // Check the direct-child layout before considering declared roots.
     let mut roots = vec![temp_dir.to_path_buf()];
     roots.extend(nested_extension_roots(temp_dir));
     for source_root in roots {
@@ -656,7 +656,7 @@ pub(crate) fn rename_dir(from: &Path, to: &Path) -> Result<()> {
 
 /// Recursively copy a directory tree.
 ///
-/// Thin wrapper over [`homeboy_core::io::copy_tree`] with the legacy
+/// Thin wrapper over [`homeboy_core::io::copy_tree`] with the
 /// extension-lifecycle entry policy (copy any non-directory entry).
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     homeboy_core::io::copy_tree(
