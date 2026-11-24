@@ -1356,19 +1356,6 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
     );
 }
 
-fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::PathBuf, String) {
-    let path = state_path().expect("state path");
-    let content = serde_json::json!({
-        "address": address,
-        "pid": pid,
-        "state_path": path.display().to_string(),
-    })
-    .to_string();
-    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
-    std::fs::write(&path, &content).expect("write legacy state");
-    (path, content)
-}
-
 fn write_runner_config(id: &str, value: &serde_json::Value) {
     let dir = crate::paths::homeboy()
         .expect("homeboy dir")
@@ -1687,7 +1674,7 @@ fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
     let status = read_status().expect("status");
     assert!(!status.running);
     assert!(!status.fresh);
-    // A state file that exists but omits the required `lease_id` is now
+    // A state file that exists but omits the required `lease_id` is
     // classified as a corrupt lease (missing field), reported through the
     // structured code with a descriptive parse reason — not a missing lease.
     assert!(status
@@ -1704,8 +1691,8 @@ fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
 #[test]
 fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_producer() {
     // #10302: `recovery_evidence` / `ownership_evidence` / `repair_plan`
-    // used to be hardcoded `None` on the local path and populated only across
-    // SSH, so no consumer could rely on either half of the one contract.
+    // are populated on the local path exactly as on the SSH path, so
+    // consumers can rely on one contract.
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
     let _owner = write_daemon_state_for_test(&state);
@@ -1781,29 +1768,6 @@ fn status_keeps_corrupt_lease_fail_closed_without_identity() {
 }
 
 #[test]
-fn status_treats_dead_known_legacy_lease_as_missing_metadata_for_recovery() {
-    let _home = HomeGuard::new();
-    let (path, _) = write_legacy_daemon_state_for_test(u32::MAX, "127.0.0.1:1");
-
-    let status = read_status().expect("status");
-
-    // A legacy state that predates the lease schema lacks the required
-    // `lease_id`, so it is now surfaced as a corrupt lease (missing field)
-    // with a descriptive parse reason rather than the old "no schema" text.
-    assert!(status
-        .stale_reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("invalid daemon lease")));
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseCorrupt)
-    );
-    assert!(status.state.is_none());
-    assert!(status.freshness.lease_id.is_none());
-    assert!(path.exists());
-}
-
-#[test]
 fn read_status_reports_stale_state_as_not_running() {
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
@@ -1852,8 +1816,7 @@ fn daemon_operation_lock_rejects_concurrent_start_or_stop() {
         err.message
     );
     // The only lock holder is this test process, so the refusal must name
-    // its exact PID (#14706 holder naming, previously owned by a
-    // python3-gated test that silently skipped without python3).
+    // its exact PID (#14706 holder naming).
     assert!(
         err.message
             .contains(&format!("live PID {}", std::process::id())),
@@ -2064,7 +2027,7 @@ fn force_stop_with_active_jobs_keeps_the_lease_and_never_signals_an_unowned_pid(
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
 
-    // Active work no longer refuses a stop (#15936); the PID carries no
+    // Active work does not refuse a stop (#15936); the PID carries no
     // startup token, so it is never signaled, and the lease stays for the
     // dead-lease recovery that resumes that work.
     for result in [

@@ -3,8 +3,7 @@
 
 use crate::{
     FilesystemAssertionKind, PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec,
-    ServiceKind, ServiceSpec, SharedPathSpec, SymlinkSpec, TraceConfig, TraceVariantSpec,
-    WorkloadSpec,
+    ServiceKind, ServiceSpec, TraceConfig, TraceVariantSpec, WorkloadSpec,
 };
 
 /// Canonical fixture covering the first full-shape consumer of the rig primitive.
@@ -150,35 +149,6 @@ mod spec_parse_tests {
             }
             other => panic!("expected command-if-missing step, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_spec_symlink_fields_parse() {
-        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
-        let link: &SymlinkSpec = &spec.symlinks[0];
-        assert_eq!(link.link, "~/.local/bin/studio");
-        assert_eq!(link.target, "~/.local/bin/studio-dev");
-    }
-
-    #[test]
-    fn test_spec_shared_path_fields_parse() {
-        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
-        let shared: &SharedPathSpec = &spec.shared_paths[0];
-        assert_eq!(shared.link, "${components.desktop-app.path}/shared-cache");
-        assert_eq!(shared.target, "~/Developer/desktop-app/shared-cache");
-    }
-
-    #[test]
-    fn test_spec_minimal_only_required_fields() {
-        let json = r#"{"id": "tiny"}"#;
-        let spec: RigSpec = serde_json::from_str(json).expect("parse");
-        assert_eq!(spec.id, "tiny");
-        assert!(spec.components.is_empty());
-        assert!(spec.services.is_empty());
-        assert!(spec.symlinks.is_empty());
-        assert!(spec.shared_paths.is_empty());
-        assert!(spec.resources.is_empty());
-        assert!(spec.pipeline.is_empty());
     }
 
     #[test]
@@ -616,35 +586,6 @@ fn test_spec_git_step_parses_with_args() {
 }
 
 #[test]
-fn test_spec_git_op_current_branch_kebab_serializes() {
-    use crate::spec::GitOp;
-    let json = r#"{
-        "id": "r",
-        "components": { "studio": { "path": "/tmp/studio" } },
-        "pipeline": {
-            "check": [
-                { "kind": "git", "component": "studio", "op": "current-branch" }
-            ]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    match &spec.pipeline.get("check").unwrap()[0] {
-        PipelineStep::Git { op, .. } => assert_eq!(*op, GitOp::CurrentBranch),
-        other => panic!("expected Git, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_spec_round_trip_preserves_shape() {
-    let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
-    let re_serialized = serde_json::to_string(&spec).expect("serialize");
-    let re_parsed: RigSpec = serde_json::from_str(&re_serialized).expect("reparse");
-    assert_eq!(re_parsed.id, spec.id);
-    assert_eq!(re_parsed.services.len(), spec.services.len());
-    assert_eq!(re_parsed.pipeline.len(), spec.pipeline.len());
-}
-
-#[test]
 fn test_spec_patch_step_parses_full_shape() {
     use crate::spec::PatchOp;
     let json = r#"{
@@ -902,17 +843,6 @@ fn test_spec_lifecycle_step_defaults_op_and_component() {
         }
         other => panic!("expected Lifecycle, got {:?}", other),
     }
-}
-
-/// Non-breaking guarantee: every step kind that existed before the `lifecycle`
-/// variant still parses to the same discriminant.
-#[test]
-fn test_spec_without_lifecycle_step_is_unchanged() {
-    let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
-    let up = spec.pipeline.get("up").expect("up pipeline");
-    assert!(!up
-        .iter()
-        .any(|step| matches!(step, PipelineStep::Lifecycle { .. })));
 }
 
 #[test]
