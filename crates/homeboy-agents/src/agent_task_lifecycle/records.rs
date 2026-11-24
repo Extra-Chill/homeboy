@@ -169,8 +169,9 @@ pub struct AgentTaskRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     pub plan_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aggregate_path: Option<String>,
+    /// Totals of the aggregate committed with this run, projected with it like
+    /// `tasks` and `artifact_refs`. Present exactly when the run has an
+    /// aggregate; the aggregate itself lives only in the run's SQLite row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub totals: Option<crate::agent_task_scheduler::AgentTaskAggregateTotals>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -630,7 +631,6 @@ impl AgentTaskRunRecord {
             submitted_at: submitted_at.into(),
             updated_at: None,
             plan_path: plan_path.into(),
-            aggregate_path: None,
             totals: None,
             tasks: Vec::new(),
             served_models: Vec::new(),
@@ -798,7 +798,6 @@ impl AgentTaskRunRecord {
             && self.local_owner_liveness() == LocalOwnerLiveness::Absent
             && !self.has_planned_runner_execution()
             && !self.has_live_execution_step_owner()
-            && self.aggregate_path.is_none()
             && self.totals.is_none()
             && self.artifact_refs.is_empty()
             && self.provider_handles.is_empty()

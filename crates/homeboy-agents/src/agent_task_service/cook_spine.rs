@@ -1564,9 +1564,6 @@ pub(super) fn run_cook_spine(
                         .as_ref()
                         .map(|record| format!("{:?}", record.state()))
                         .unwrap_or_else(|| "DispatchFailed".to_string()),
-                    aggregate_path: record
-                        .as_ref()
-                        .and_then(|record| record.aggregate_path.clone()),
                     promotion: None,
                     feedback: None,
                 });
@@ -1659,7 +1656,7 @@ pub(super) fn run_cook_spine(
         // an absent aggregate is safe to continue from.
         if record.state() == homeboy_lifecycle_contract::RunExecutionState::Running
             && record.is_stale_running()
-            && record.aggregate_path.is_none()
+            && record.totals.is_none()
         {
             super::reconcile_run_in_store(lifecycle_store, &run_id, false)?;
             record = if rooted_promotion_continuation {
@@ -1676,7 +1673,6 @@ pub(super) fn run_cook_spine(
                 attempt,
                 run_id: run_id.clone(),
                 run_state: format!("{:?}", record.state()),
-                aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
             });
@@ -1704,7 +1700,6 @@ pub(super) fn run_cook_spine(
                 attempt,
                 run_id: run_id.clone(),
                 run_state: format!("{:?}", record.state()),
-                aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
             });
@@ -1749,7 +1744,6 @@ pub(super) fn run_cook_spine(
                 attempt,
                 run_id: run_id.clone(),
                 run_state: format!("{:?}", record.state()),
-                aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
             });
@@ -1780,7 +1774,7 @@ pub(super) fn run_cook_spine(
             // An aggregate path is authoritative evidence that an aggregate was
             // committed. Its read failure must surface for repair rather than be
             // misclassified as an interruption and bypass immutable output.
-            Err(_error) if record.state().is_terminal() && record.aggregate_path.is_none() => {
+            Err(_error) if record.state().is_terminal() && record.totals.is_none() => {
                 if let Some(promotion) = persisted_terminal_promotion {
                     let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
                         source_request,
@@ -1799,7 +1793,6 @@ pub(super) fn run_cook_spine(
                         attempt,
                         run_id: run_id.clone(),
                         run_state: format!("{:?}", record.state()),
-                        aggregate_path: record.aggregate_path,
                         promotion: Some(promotion),
                         feedback: Some(feedback.clone()),
                     });
@@ -1861,7 +1854,6 @@ pub(super) fn run_cook_spine(
                         attempt,
                         run_id: run_id.clone(),
                         run_state: format!("{:?}", record.state()),
-                        aggregate_path: None,
                         promotion: None,
                         feedback: None,
                     });
@@ -1890,7 +1882,6 @@ pub(super) fn run_cook_spine(
                         attempt,
                         run_id: run_id.clone(),
                         run_state: format!("{:?}", record.state()),
-                        aggregate_path: None,
                         promotion: None,
                         feedback: None,
                     });
@@ -1915,7 +1906,6 @@ pub(super) fn run_cook_spine(
                     attempt,
                     run_id: run_id.clone(),
                     run_state: format!("{:?}", record.state()),
-                    aggregate_path: record.aggregate_path.clone(),
                     promotion: None,
                     feedback: None,
                 });
@@ -2032,7 +2022,6 @@ pub(super) fn run_cook_spine(
                     attempt,
                     run_id: run_id.clone(),
                     run_state: format!("{:?}", transitioned.state()),
-                    aggregate_path: transitioned.aggregate_path,
                     promotion: None,
                     feedback: None,
                 });
@@ -2090,7 +2079,6 @@ pub(super) fn run_cook_spine(
                 attempt,
                 run_id: run_id.clone(),
                 run_state: format!("{:?}", record.state()),
-                aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
             });
@@ -2132,7 +2120,6 @@ pub(super) fn run_cook_spine(
                 attempt,
                 run_id: run_id.clone(),
                 run_state: format!("{:?}", record.state()),
-                aggregate_path: record.aggregate_path.clone(),
                 promotion: None,
                 feedback: None,
             });
@@ -2262,7 +2249,6 @@ pub(super) fn run_cook_spine(
                 attempt,
                 run_id: run_id.clone(),
                 run_state: format!("{:?}", record.state()),
-                aggregate_path: record.aggregate_path,
                 promotion: None,
                 feedback: None,
             });
@@ -2398,7 +2384,6 @@ pub(super) fn run_cook_spine(
             attempt,
             run_id: run_id.clone(),
             run_state: format!("{:?}", record.state()),
-            aggregate_path: record.aggregate_path,
             promotion: Some(promotion.clone()),
             feedback: Some(feedback.clone()),
         });

@@ -567,9 +567,6 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     let tasks_attempted = usize_value(payload, &["durable_candidate", "provider_execution_count"])
         .or(canonical.provider_executions)
         .or_else(|| aggregate_outcome_count(payload));
-    let aggregate_path = string_value(payload, &["aggregate_path"])
-        .or_else(|| string_value(payload, &["durable_candidate", "aggregate_path"]))
-        .or_else(|| string_value(payload, &["record", "aggregate_path"]));
     let metrics = code_production_metrics(payload);
     let state = effective_run_state(
         raw_state,
@@ -655,9 +652,6 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Candidate evidence: unavailable ({reason})"));
     } else {
         lines.extend(code_production_lines(&metrics));
-    }
-    if let Some(path) = aggregate_path {
-        lines.push(format!("Aggregate: {path}"));
     }
     lines.push(format!(
         "Artifacts: {}",
@@ -2100,7 +2094,6 @@ mod tests {
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "task_count": 1,
-            "aggregate_path": "/tmp/aggregate.json",
             "aggregate": {
                 "outcomes": [{
                     "task_id": "homeboy-4345",
@@ -2274,7 +2267,6 @@ mod tests {
             "run_id": "agent-task-abe47e4d",
             "state": "succeeded",
             "task_count": 3,
-            "aggregate_path": "/tmp/aggregate.json",
             "aggregate_review": {
                 "summary": { "apply_candidates": 0 }
             },
@@ -2316,14 +2308,16 @@ mod tests {
             "promotion_replay": {
                 "available": false,
                 "reason": "aggregate key agent_task_aggregate is missing",
-                "remediation": "restore aggregate.json or executor evidence"
+                "remediation": "restore the run aggregate or executor evidence"
             }
         });
         let unavailable = render_agent_task_summary(AgentTaskSummaryKind::Cook, &unavailable)
             .expect("unavailable Cook summary");
         assert!(unavailable
             .contains("Promotion unavailable: aggregate key agent_task_aggregate is missing\n"));
-        assert!(unavailable.contains("Remediation: restore aggregate.json or executor evidence\n"));
+        assert!(
+            unavailable.contains("Remediation: restore the run aggregate or executor evidence\n")
+        );
         assert!(!unavailable.contains("Next: homeboy runs logs"));
     }
 
@@ -2675,7 +2669,6 @@ mod tests {
             "run_id": "agent-task-22bb7835",
             "state": "failed",
             "task_count": 4,
-            "aggregate_path": "/tmp/aggregate.json",
             "aggregate": {
                 "outcomes": [
                     { "task_id": "cell-1", "status": "provider_error", "summary": "no extension agent-task provider found for backend wordpress", "artifacts": [] },

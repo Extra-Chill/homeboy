@@ -180,8 +180,6 @@ pub(super) struct AgentTaskRunRecordSummary {
     pub run_id: String,
     pub plan_id: String,
     pub state: RunExecutionState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aggregate_path: Option<String>,
     #[serde(default)]
     pub task_count: usize,
 }
@@ -302,7 +300,6 @@ impl AgentTaskRunRecordSummary {
             run_id: record.run_id.clone(),
             plan_id: record.plan_id.clone(),
             state: record.state(),
-            aggregate_path: record.aggregate_path.clone(),
             task_count: record.tasks.len(),
         }
     }
@@ -1104,16 +1101,14 @@ mod tests {
                 agent_task_lifecycle::reconcile_status("run-completed-noop").expect("status");
             let artifacts =
                 agent_task_lifecycle::artifacts("run-completed-noop").expect("artifacts");
-            let (_, aggregate_path) =
-                homeboy_agents::agent_task_lifecycle::aggregate_source_in_store(
-                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
-                        .expect("lifecycle store"),
-                    "run-completed-noop",
-                )
-                .expect("aggregate source");
+            let aggregate_source = homeboy_agents::agent_task_lifecycle::aggregate_source_in_store(
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .expect("lifecycle store"),
+                "run-completed-noop",
+            )
+            .expect("aggregate source");
             let aggregate: AgentTaskAggregate =
-                serde_json::from_str(&fs::read_to_string(aggregate_path).expect("aggregate"))
-                    .expect("aggregate JSON");
+                serde_json::from_str(&aggregate_source).expect("aggregate JSON");
 
             assert_eq!(record.state(), RunExecutionState::Succeeded);
             assert_eq!(record.metadata["runner_id"], "lab-default");

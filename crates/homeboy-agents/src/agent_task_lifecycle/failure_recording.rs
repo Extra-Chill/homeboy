@@ -274,11 +274,7 @@ fn record_interrupted_local_owner_locked(
             ..AgentTaskQueueStatus::default()
         },
     };
-    let aggregate_path = lifecycle_store
-        .aggregate_path(&record.run_id)
-        .display()
-        .to_string();
-    apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
+    apply_aggregate_to_record(&mut record, &plan, &aggregate);
     let metadata = record.ensure_metadata_object();
     metadata.insert(
         "local_provider_ownership".to_string(),
@@ -649,11 +645,7 @@ fn record_pre_execution_failure_locked(
             ..AgentTaskQueueStatus::default()
         },
     };
-    let aggregate_path = lifecycle_store
-        .aggregate_path(&record.run_id)
-        .display()
-        .to_string();
-    apply_aggregate_to_record(&mut record, plan, &aggregate, aggregate_path);
+    apply_aggregate_to_record(&mut record, plan, &aggregate);
     let mut failed_record = record;
     let runner_id = failed_record.runner_id().map(str::to_string);
     let circuit = lab_pre_execution_circuit(&failed_record, plan, phase, error);
@@ -1225,83 +1217,53 @@ pub fn record_remote_dispatch_failure(
         aggregate.events = events_for_outcomes(&aggregate.outcomes);
     }
 
-    let (
-        mut record,
-        remote_run_id,
-        remote_plan_path,
-        remote_aggregate_path,
-        needs_atomic_terminal_commit,
-    ) = if let Some(record_value) = envelope.get("record") {
-        let mut record: AgentTaskRunRecord =
-            serde_json::from_value(record_value.clone()).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("parse offloaded agent-task dispatch record".to_string()),
-                )
-            })?;
-        let remote_run_id = record.run_id.clone();
-        let remote_plan_path = record.plan_path.clone();
-        let remote_aggregate_path = record.aggregate_path.clone();
-        let plan = if std::path::Path::new(&record.plan_path).is_file() {
-            read_plan_path(&record.plan_path)?
-        } else {
-            synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
-        };
-        record.run_id = run_id.clone();
-        record.plan_path = lifecycle_store
-            .write_controller_plan(&run_id, &plan)?
-            .display()
-            .to_string();
-        apply_aggregate_to_record(
-            &mut record,
-            &plan,
-            &aggregate,
-            lifecycle_store
-                .aggregate_path(&run_id)
+    let (mut record, remote_run_id, remote_plan_path, needs_atomic_terminal_commit) =
+        if let Some(record_value) = envelope.get("record") {
+            let mut record: AgentTaskRunRecord = serde_json::from_value(record_value.clone())
+                .map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("parse offloaded agent-task dispatch record".to_string()),
+                    )
+                })?;
+            let remote_run_id = record.run_id.clone();
+            let remote_plan_path = record.plan_path.clone();
+            let plan = if std::path::Path::new(&record.plan_path).is_file() {
+                read_plan_path(&record.plan_path)?
+            } else {
+                synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate)
+            };
+            record.run_id = run_id.clone();
+            record.plan_path = lifecycle_store
+                .write_controller_plan(&run_id, &plan)?
                 .display()
-                .to_string(),
-        );
-        (
-            record,
-            remote_run_id,
-            remote_plan_path,
-            remote_aggregate_path,
-            true,
-        )
-    } else {
-        let remote_run_id = envelope
-            .get("run_id")
-            .and_then(Value::as_str)
-            .unwrap_or(failure.identity.run_id)
-            .to_string();
-        let remote_plan_path = envelope
-            .get("plan_path")
-            .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .unwrap_or_else(|| {
-                envelope
-                    .get("plan_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&aggregate.plan_id)
-                    .to_string()
-            });
-        let remote_aggregate_path = envelope
-            .get("aggregate_path")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
-        let plan = synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate);
-        // One store for both: the record this submits and the aggregate written
-        // against it are one durable outcome (#7505).
-        let mut record = submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?;
-        record_aggregate_in_store(lifecycle_store, &mut record, &plan, &aggregate)?;
-        (
-            record,
-            remote_run_id,
-            remote_plan_path,
-            remote_aggregate_path,
-            false,
-        )
-    };
+                .to_string();
+            apply_aggregate_to_record(&mut record, &plan, &aggregate);
+            (record, remote_run_id, remote_plan_path, true)
+        } else {
+            let remote_run_id = envelope
+                .get("run_id")
+                .and_then(Value::as_str)
+                .unwrap_or(failure.identity.run_id)
+                .to_string();
+            let remote_plan_path = envelope
+                .get("plan_path")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    envelope
+                        .get("plan_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&aggregate.plan_id)
+                        .to_string()
+                });
+            let plan = synthetic_remote_dispatch_plan(&run_id, &failure, envelope, &aggregate);
+            // One store for both: the record this submits and the aggregate written
+            // against it are one durable outcome (#7505).
+            let mut record = submit_plan_in_store(lifecycle_store, &plan, Some(&run_id))?;
+            record_aggregate_in_store(lifecycle_store, &mut record, &plan, &aggregate)?;
+            (record, remote_run_id, remote_plan_path, false)
+        };
 
     let provider_run_ids: Vec<String> = record
         .provider_handles
@@ -1325,10 +1287,6 @@ pub fn record_remote_dispatch_failure(
     metadata.insert("stderr".to_string(), json!(failure.stderr));
     metadata.insert("remote_run_id".to_string(), json!(remote_run_id));
     metadata.insert("remote_plan_path".to_string(), json!(remote_plan_path));
-    metadata.insert(
-        "remote_aggregate_path".to_string(),
-        json!(remote_aggregate_path),
-    );
     metadata.insert("provider_run_ids".to_string(), json!(provider_run_ids));
 
     if aggregate
@@ -1850,7 +1808,7 @@ pub fn terminal_artifact_projection_readiness_in_store(
 ///
 /// All three reads follow the injected store. The `store::` shims above are
 /// exactly `default_store()?.read_record_bounded` and
-/// `default_store()?.read_aggregate_bounded`, and
+/// `default_store()?.read_aggregate`, and
 /// `default_store()` is `AgentTaskLifecycleStore::from_environment()`,
 /// so an ambient caller reaches byte-identical state through either form. The
 /// third is the projection check itself: it opens an observation store and
@@ -1863,7 +1821,7 @@ pub fn terminal_artifact_projection_readiness_bounded_in_store(
     let record = lifecycle_store.read_record_bounded(&super::sanitize_run_id(run_id))?;
     terminal_artifact_projection_readiness_for_record_with(
         &record,
-        lifecycle_store.read_aggregate_bounded(&record.run_id),
+        lifecycle_store.read_aggregate(&record.run_id),
         |record, aggregate| {
             terminal_artifact_projection_is_verified_with(record, aggregate, || {
                 lifecycle_store.open_observation_readonly()
@@ -2739,7 +2697,6 @@ pub(crate) fn apply_aggregate_to_record(
     record: &mut AgentTaskRunRecord,
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
-    aggregate_path: String,
 ) {
     record.updated_at = Some(now_timestamp());
     let terminal_state = aggregate.status();
@@ -2757,7 +2714,6 @@ pub(crate) fn apply_aggregate_to_record(
             },
         );
     }
-    record.aggregate_path = Some(aggregate_path);
     record.totals = Some(aggregate.totals.clone());
     record.tasks = tasks_for_aggregate(plan, aggregate);
     record.artifact_refs = artifact_refs_for_outcomes(&aggregate.outcomes);

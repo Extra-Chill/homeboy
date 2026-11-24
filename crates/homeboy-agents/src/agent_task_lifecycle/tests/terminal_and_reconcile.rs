@@ -773,7 +773,7 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
     .record;
     record.metadata["phase"] = json!("lab_handoff_preacceptance");
     assert_eq!(record.state(), RunExecutionState::Failed);
-    assert!(record.aggregate_path.is_some());
+    assert!(record.totals.is_some());
     assert!(!record.artifact_refs.is_empty());
     assert_eq!(record.lifecycle.provider_runtime.len(), 1);
     assert_eq!(
@@ -3457,7 +3457,7 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         let log = logs("conductor-full-loop-proof-retry2-20260611").expect("logs loaded");
         let artifacts =
             artifacts("conductor-full-loop-proof-retry2-20260611").expect("artifacts loaded");
-        let (raw_aggregate, _) = aggregate_source_in_store(
+        let raw_aggregate = aggregate_source_in_store(
             &test_lifecycle_store(),
             "conductor-full-loop-proof-retry2-20260611",
         )
@@ -3650,18 +3650,10 @@ fn cancel_marks_queued_run_and_tasks_cancelled() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The fixture deletes the *local* aggregate and points the record at
-/// a remote path, then asserts the loader still resolves a local file. The path
-/// that gets deleted has to be the path the loader would have used, so the
-/// completed run, the deletion target and the loader all name one installation.
-///
-/// `record_completed_run` reaches automatic artifact retention only
-/// when a task declares a workspace root that exists; `test_plan()` declares
-/// none, so the ambient retention pass this file's sibling test depends on is
-/// never entered here.
+/// The aggregate source is served from the run's SQLite row, the single
+/// aggregate store; there is no run-directory file to fall back to.
 #[test]
-fn aggregate_source_loads_completed_run_without_path_spelunking() {
+fn aggregate_source_loads_completed_run_from_the_run_row() {
     with_isolated_home(|_| {
         let lifecycle_store = test_lifecycle_store();
         let plan = test_plan();
@@ -3686,21 +3678,14 @@ fn aggregate_source_loads_completed_run_without_path_spelunking() {
             queue: Default::default(),
         };
         record_completed_run(&plan, &aggregate, Some("run-source")).expect("recorded");
-        let local_path = lifecycle_store.aggregate_path("run-source");
-        let mut record = lifecycle_store
-            .read_record("run-source")
-            .expect("record loaded");
-        record.aggregate_path = Some("/home/user/remote/aggregate.json".to_string());
-        lifecycle_store
-            .write_record(&record)
-            .expect("remote aggregate path stored");
-        std::fs::remove_file(&local_path).expect("local aggregate removed");
+        assert!(!lifecycle_store
+            .run_dir("run-source")
+            .join("aggregate.json")
+            .exists());
 
-        let (raw, path) =
+        let raw =
             aggregate_source_in_store(&lifecycle_store, "run-source").expect("aggregate source");
 
-        assert!(path.ends_with("aggregate.json"));
-        assert_ne!(path, PathBuf::from("/home/user/remote/aggregate.json"));
         assert!(raw.contains("task-a"));
     });
 }
@@ -4713,7 +4698,7 @@ fn terminal_provider_failure_without_owner_persists_interrupted_owner_aggregate(
         assert_eq!(terminal.state(), RunExecutionState::Failed);
         assert_eq!(replay.state(), RunExecutionState::Failed);
         assert!(replay.provider_handles.is_empty());
-        assert!(replay.aggregate_path.is_some());
+        assert!(replay.totals.is_some());
         assert_eq!(replay.tasks[0].state(), ControlPlaneState::Failed);
         assert_eq!(
             replay.metadata["local_provider_ownership"]["state"],
@@ -5119,7 +5104,7 @@ fn controller_failure_cannot_terminalize_a_successful_aggregate() {
         .expect("retain aggregate evidence");
 
         assert_eq!(terminal.state(), RunExecutionState::Failed);
-        assert!(terminal.aggregate_path.is_some());
+        assert!(terminal.totals.is_some());
         assert_eq!(
             terminal.metadata["cook_controller_failure"]["code"],
             "controller_failure"

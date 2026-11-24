@@ -613,7 +613,6 @@ pub(super) fn run_cook_reported(
                             attempt: 1,
                             run_id: failure_options.identity.initial_run_id.clone(),
                             run_state: format!("{:?}", record.state()),
-                            aggregate_path: record.aggregate_path.clone(),
                             promotion: None,
                             feedback: None,
                         }],
@@ -753,7 +752,6 @@ pub(super) fn durable_cook_error_report_with_store(
                     attempt: attempt.attempt,
                     run_id: attempt.run_id,
                     run_state: format!("{:?}", record.state()),
-                    aggregate_path: record.aggregate_path,
                     promotion: None,
                     feedback: None,
                 })

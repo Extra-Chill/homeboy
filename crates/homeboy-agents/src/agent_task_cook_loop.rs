@@ -3106,7 +3106,7 @@ mod tests {
                 kind: "aggregate".to_string(),
                 task_id: "cook-homeboy".to_string(),
                 run_id: Some("agent-task-run-1".to_string()),
-                path: Some("aggregate.json".to_string()),
+                path: None,
             },
             to_worktree: "homeboy@fix-3676".to_string(),
             target: AgentTaskPromotionTarget {

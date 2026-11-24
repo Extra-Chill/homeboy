@@ -91,8 +91,13 @@ fn terminal_workspace_authority(
         .map_err(|error| refuse(unavailable.clone(), &error.message))?;
     let terminal = match lifecycle_store.read_record(run_id) {
         Ok(controller) => controller_terminal_run(&lifecycle_store, &controller)?,
+        // A run's aggregate lives in its lifecycle row, so a missing record
+        // leaves no terminal evidence to attest.
         Err(_) if matches!(lifecycle_store.record_exists(run_id), Ok(false)) => {
-            orphaned_terminal_run(&lifecycle_store, run_id)?
+            return Err(refuse(
+                unavailable,
+                "durable controller run is missing and left no terminal evidence",
+            ))
         }
         Err(_) => {
             return Err(refuse(
@@ -199,44 +204,6 @@ fn controller_terminal_run(
             controller.state(),
             controller.workspace_lifecycle_revision
         ),
-    })
-}
-
-/// Terminal authority for a run whose lifecycle record no longer exists.
-///
-/// Task worktrees outlived their runs' lifecycle records before run retention
-/// kept the owners of active worktrees (#15844). Such a run is proven terminal
-/// only by the aggregate it persisted at completion, and only when its Lab
-/// handoff lock is absent: every runner dispatch path takes that lock, so its
-/// presence (or an unreadable lock path) means a runner may still hold a claim.
-/// A live local owner lease is still refused when the reconciliation claim is
-/// acquired.
-fn orphaned_terminal_run(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> std::result::Result<TerminalRun, WorktreeAuthorityRefusal> {
-    if !matches!(
-        lifecycle_store.lab_handoff_lock_path(run_id).try_exists(),
-        Ok(false)
-    ) {
-        return Err(refuse(
-            MissingActiveWorktreeReason::RemoteClaimReleaseUnsupported,
-            "owning run's lifecycle record is gone and its Lab handoff lock shows it may have reached a runner",
-        ));
-    }
-    let aggregate = lifecycle_store
-        .read_aggregate_bounded(run_id)
-        .map_err(|_| {
-            refuse(
-                MissingActiveWorktreeReason::TerminalAuthorityUnavailable,
-                "durable controller run is missing and left no terminal aggregate",
-            )
-        })?;
-    let state = aggregate.status();
-    Ok(TerminalRun {
-        state,
-        revision: 0,
-        evidence: format!("{state:?}@aggregate"),
     })
 }
 
@@ -1440,7 +1407,6 @@ mod tests {
     use homeboy_core::test_support::with_isolated_home;
     use homeboy_runner_contract::{WorkspaceClaimProtocol, WORKSPACE_CLAIM_SCHEMA};
     use std::collections::BTreeSet;
-    use std::fs;
     use std::sync::{Arc, Mutex};
 
     fn composite_store() -> ObservationStore {
@@ -1759,73 +1725,6 @@ mod tests {
                 CompositeWorkspaceClaimRelease::Released
             ));
             assert!(local_terminal_workspace_authority(&local).is_ok());
-        });
-    }
-
-    #[test]
-    fn orphaned_run_is_terminal_only_by_its_aggregate_and_never_after_a_lab_handoff() {
-        use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
-        use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
-        with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_environment().expect("store");
-            let aggregate = |status| AgentTaskAggregate {
-                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-                plan_id: "plan".to_string(),
-                totals: AgentTaskAggregateTotals::default(),
-                outcomes: vec![AgentTaskOutcome {
-                    status,
-                    ..Default::default()
-                }],
-                events: Vec::new(),
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            };
-            // Each run left an aggregate but has no lifecycle record.
-            store
-                .write_aggregate("orphan-run", &aggregate(AgentTaskOutcomeStatus::Failed))
-                .expect("orphan aggregate");
-            store
-                .write_aggregate(
-                    "handed-off-orphan",
-                    &aggregate(AgentTaskOutcomeStatus::Succeeded),
-                )
-                .expect("handed-off aggregate");
-            fs::write(store.lab_handoff_lock_path("handed-off-orphan"), b"").expect("lock");
-            assert!(!store.record_exists("orphan-run").expect("probe"));
-
-            let orphan = task_worktree("orphan", Some("orphan-run"));
-            let proof = local_terminal_workspace_authority(&orphan).expect("aggregate proves it");
-            assert_eq!(proof.controller_state, "Failed");
-            assert_eq!(proof.observations[0].evidence, "Failed@aggregate");
-            assert!(proof.exact_for(&orphan, Some("orphan-run")));
-
-            let reason = |id: &str, run_id: &str| {
-                local_terminal_workspace_authority(&task_worktree(id, Some(run_id)))
-                    .expect_err("record must be preserved")
-                    .reason
-            };
-            assert_eq!(
-                reason("handed-off", "handed-off-orphan"),
-                MissingActiveWorktreeReason::RemoteClaimReleaseUnsupported
-            );
-            assert_eq!(
-                reason("no-proof", "run-without-aggregate"),
-                MissingActiveWorktreeReason::TerminalAuthorityUnavailable
-            );
-
-            // A live lifecycle record stays the authority over its aggregate.
-            controller_run(
-                &store,
-                "orphan-run",
-                RunExecutionState::Running,
-                serde_json::json!({}),
-            );
-            assert_eq!(
-                reason("orphan", "orphan-run"),
-                MissingActiveWorktreeReason::LiveRun
-            );
         });
     }
 

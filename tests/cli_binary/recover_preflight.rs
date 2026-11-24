@@ -28,7 +28,7 @@ fn finalized_receipt_fixture(
         )
         .expect("persist finalization receipt");
     });
-    assert!(!lifecycle_store.aggregate_path(run_id).exists());
+    assert!(lifecycle_store.read_aggregate(run_id).is_err());
     (context, lifecycle_store)
 }
 
@@ -156,7 +156,7 @@ fn recover_preflight_reports_no_step_for_a_finalized_cook() {
                 .expect("continuation state"),
             CookContinuationState::Absent
         );
-        assert!(!lifecycle_store.aggregate_path(run_id).exists());
+        assert!(lifecycle_store.read_aggregate(run_id).is_err());
     }
 }
 
@@ -184,7 +184,7 @@ fn recover_preflight_leaves_a_queued_finalized_continuation_to_its_worker() {
         continuation_state_in_store(&recipe_store, cook_id, run_id).expect("continuation state"),
         CookContinuationState::Pending
     );
-    assert!(!lifecycle_store.aggregate_path(run_id).exists());
+    assert!(lifecycle_store.read_aggregate(run_id).is_err());
 }
 
 #[test]

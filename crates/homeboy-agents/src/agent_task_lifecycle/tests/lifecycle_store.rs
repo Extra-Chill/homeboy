@@ -241,7 +241,6 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
         left.controller_plan_path(run_id),
         right.controller_plan_path(run_id)
     );
-    assert_ne!(left.aggregate_path(run_id), right.aggregate_path(run_id));
     assert_ne!(left.cook_dir(cook_id), right.cook_dir(cook_id));
     assert_ne!(left.observation_db_path(), right.observation_db_path());
     assert_ne!(
@@ -261,10 +260,7 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
         "right-plan"
     );
     assert_eq!(left.read_aggregate(run_id).unwrap().plan_id, "left-plan");
-    assert_eq!(
-        right.read_aggregate_bounded(run_id).unwrap().plan_id,
-        "right-plan"
-    );
+    assert_eq!(right.read_aggregate(run_id).unwrap().plan_id, "right-plan");
     assert_eq!(left.read_cook_index(cook_id).unwrap().latest_run_id, run_id);
     assert_eq!(
         right.read_cook_index(cook_id).unwrap().attempts[0].attempt,

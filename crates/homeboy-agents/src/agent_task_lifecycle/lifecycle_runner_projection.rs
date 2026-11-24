@@ -170,15 +170,7 @@ pub(crate) fn project_terminal_runner_record(
             },
         )?;
     } else {
-        apply_aggregate_to_record(
-            record,
-            &plan,
-            &aggregate,
-            lifecycle_store
-                .aggregate_path(&source.id)
-                .display()
-                .to_string(),
-        );
+        apply_aggregate_to_record(record, &plan, &aggregate);
     }
     Ok(true)
 }

@@ -2160,9 +2160,8 @@ fn sparse_aggregate_only_remote_dispatch_failure_adds_remote_evidence_refs() {
 
         let loaded = reconcile_status("local-sparse-run").expect("status loaded");
         let artifacts = artifacts("local-sparse-run").expect("artifacts loaded");
-        let (raw_aggregate, _) =
-            aggregate_source_in_store(&test_lifecycle_store(), "local-sparse-run")
-                .expect("aggregate source");
+        let raw_aggregate = aggregate_source_in_store(&test_lifecycle_store(), "local-sparse-run")
+            .expect("aggregate source");
 
         assert_eq!(loaded.tasks[0].task_id, "cook-conductor");
         assert_eq!(loaded.tasks[0].backend, "fixture.agent-task-executor");
@@ -2851,46 +2850,6 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
             interactions.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "aggregate readers must return local partial evidence without probing an unavailable runner"
-        );
-    });
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The oversized fixture is written at the path the injected store
-/// itself names and read back through the sibling handed the same store, so the
-/// partial-read evidence asserted below is about this home's aggregate file.
-///
-#[test]
-fn durable_aggregate_read_does_not_pair_a_record_with_an_unmirrored_cache() {
-    with_isolated_home(|_| {
-        let lifecycle_store = test_lifecycle_store();
-        let record = lifecycle_store
-            .submit_plan_with_runtime_admission(&test_plan(), "oversized-durable-aggregate", |_| {
-                Ok(json!({}))
-            })
-            .expect("durable record");
-        let path = lifecycle_store.aggregate_path(&record.run_id);
-        std::fs::write(
-            &path,
-            vec![b'x'; (store::DURABLE_AGGREGATE_MAX_BYTES + 1) as usize],
-        )
-        .expect("oversized aggregate fixture");
-
-        let snapshot = durable_local_read(&record.run_id).expect("partial durable read");
-
-        assert_eq!(snapshot.record.run_id, record.run_id);
-        assert!(snapshot.aggregate.is_none());
-        assert!(
-            lifecycle_store
-                .read_aggregate_readonly(&record.run_id)
-                .is_err(),
-            "read-only admission must not fall back to independently cached aggregate bytes"
-        );
-        assert_eq!(snapshot.unavailable_sources.len(), 1);
-        assert_eq!(snapshot.unavailable_sources[0].source, "aggregate");
-        assert_eq!(
-            snapshot.unavailable_sources[0].reason_code,
-            "durable_read.authoritative_aggregate_absent"
         );
     });
 }

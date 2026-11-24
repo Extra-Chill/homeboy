@@ -993,7 +993,7 @@ pub(crate) fn compact_cook_report_with_summary(
         "terminal_phase": value.get("terminal_phase"),
         "terminal_failure_classification": value.get("terminal_failure_classification"),
         "primary_failure": value.get("primary_failure"),
-        "attempts": attempts.iter().take(COMPACT_TASK_LIMIT).map(|attempt| compact_fields(attempt, &["attempt", "run_id", "run_state", "aggregate_path"])).collect::<Vec<_>>(),
+        "attempts": attempts.iter().take(COMPACT_TASK_LIMIT).map(|attempt| compact_fields(attempt, &["attempt", "run_id", "run_state"])).collect::<Vec<_>>(),
         "attempts_omitted": attempts.len().saturating_sub(COMPACT_TASK_LIMIT),
         "finalization": value.get("finalization").map(|finalization| compact_fields(finalization, &["schema", "status", "pr_number", "pr_url", "updated_at", "created_at"])),
         "selected_candidate": value.get("selected_candidate").map(|candidate| compact_fields(candidate, &["latest_attempt_run_id", "run_id", "attempt", "invocation_scoped", "selected_task_id", "selected_candidate_sha", "reason", "incomplete", "skipped_newer_attempts", "applied_promotion"])),

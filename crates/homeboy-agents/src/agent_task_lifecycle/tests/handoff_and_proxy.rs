@@ -2686,9 +2686,14 @@ fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
         second_run_id
     );
 
-    let (_raw, path) = aggregate_source_in_store(&lifecycle_store, "cook-issue-6978")
+    let raw = aggregate_source_in_store(&lifecycle_store, "cook-issue-6978")
         .expect("latest aggregate resolves");
-    assert!(path.display().to_string().contains(&second_run_id));
+    assert_eq!(
+        raw,
+        lifecycle_store
+            .aggregate_source(&second_run_id)
+            .expect("second attempt aggregate")
+    );
 }
 
 /// (#14579). SQLite owns the Cook index and there is no file beside it.
@@ -2884,7 +2889,7 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
         let loaded = reconcile_status("local-run").expect("status loaded");
         let log = logs("local-run").expect("logs loaded");
         let artifacts = artifacts("local-run").expect("artifacts loaded");
-        let (raw_aggregate, _) = aggregate_source_in_store(&test_lifecycle_store(), "local-run")
+        let raw_aggregate = aggregate_source_in_store(&test_lifecycle_store(), "local-run")
             .expect("aggregate source");
 
         assert_eq!(record.run_id, "local-run");
