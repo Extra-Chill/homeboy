@@ -152,7 +152,7 @@ mod lab_source_path_tests {
     }
 }
 
-mod migrated_legacy_lab_arg_tests {
+mod lab_arg_rewrite_tests {
     use super::*;
 
     fn args(items: &[&str]) -> Vec<String> {
@@ -825,39 +825,27 @@ mod provider_config_remap_tests {
 
     #[test]
     fn remap_provider_config_stdin_spec_fails_locally_without_reading_stdin() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--provider-config".to_string(),
-            "-".to_string(),
-        ];
+        for spec_args in [vec!["--provider-config", "-"], vec!["--provider-config=-"]] {
+            let args = ["homeboy", "agent-task", "cook"]
+                .into_iter()
+                .chain(spec_args)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
 
-        let err = remap_provider_config_in_args(&args, &[]).expect_err("stdin spec should fail");
+            let err =
+                remap_provider_config_in_args(&args, &[]).expect_err("stdin spec should fail");
 
-        assert!(err
-            .to_string()
-            .contains("Invalid argument 'provider-config'"));
-        assert!(
-            err.hints.iter().any(|hint| hint
-                .message
-                .contains("write stdin to a JSON file and pass --provider-config @path")),
-            "missing actionable hint: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remap_provider_config_stdin_spec_equals_form_fails_locally_without_reading_stdin() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--provider-config=-".to_string(),
-        ];
-
-        let err = remap_provider_config_in_args(&args, &[]).expect_err("stdin spec should fail");
-
-        assert!(err.to_string().contains("--provider-config -"));
+            assert!(err
+                .to_string()
+                .contains("Invalid argument 'provider-config'"));
+            assert!(err.to_string().contains("--provider-config -"));
+            assert!(
+                err.hints.iter().any(|hint| hint
+                    .message
+                    .contains("write stdin to a JSON file and pass --provider-config @path")),
+                "missing actionable hint: {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -1772,7 +1760,7 @@ mod materialize_specs_tests {
     }
 
     #[test]
-    fn controller_attempt_plan_ignores_truncated_legacy_tasks_json() {
+    fn controller_attempt_plan_ignores_truncated_tasks_json() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plan = serde_json::json!({
             "schema": "homeboy/agent-task-plan/v1",
@@ -1780,13 +1768,13 @@ mod materialize_specs_tests {
             "tasks": [{ "task_id": "task-1", "instructions": "test" }]
         })
         .to_string();
-        let truncated_legacy_tasks = "[\n  {\n    \"prompt\": \"from an old workspace";
+        let truncated_stale_tasks = "[\n  {\n    \"prompt\": \"from an old workspace";
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
             "--tasks".to_string(),
-            truncated_legacy_tasks.to_string(),
+            truncated_stale_tasks.to_string(),
             "--attempt-plan".to_string(),
             plan,
         ];
@@ -1801,7 +1789,7 @@ mod materialize_specs_tests {
         assert_eq!(synced.len(), 1);
         assert_eq!(synced[0].0, "agent_task_attempt_plan_remapped");
         assert!(!synced[0].1.contains("old workspace"));
-        assert_eq!(out.argv[4], truncated_legacy_tasks);
+        assert_eq!(out.argv[4], truncated_stale_tasks);
         assert_eq!(out.argv[6], "@/remote/agent-task-attempt-plan.json");
         assert_eq!(out.workspace_entries.len(), 1);
         assert_eq!(
