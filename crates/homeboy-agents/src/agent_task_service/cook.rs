@@ -891,15 +891,19 @@ pub(super) const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-con
 
 /// Record that the Cook continuation lifecycle route (`agent-task recover`) selected this exact attempt.
 /// This is durable route authority, not caller-controlled plan metadata.
-pub fn authorize_cook_continue_route(options: &CookRequest) -> Result<()> {
-    agent_task_lifecycle::exact_record(&options.identity.initial_run_id)?;
-    agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?.record_metadata_value(
-        &options.identity.initial_run_id,
+pub(super) fn authorize_cook_continue_route(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<()> {
+    agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
+    lifecycle_store.record_metadata_value(
+        run_id,
         "cook_continue_route",
         serde_json::json!({
             "schema": COOK_CONTINUE_ROUTE_SCHEMA,
-            "cook_id": options.identity.cook_id,
-            "run_id": options.identity.initial_run_id,
+            "cook_id": cook_id,
+            "run_id": run_id,
         }),
     )
 }

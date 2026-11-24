@@ -3388,8 +3388,15 @@ fn recover_preflight_admits_a_candidate_recorded_by_an_older_homeboy_build() {
         );
         assert!(!probe.to_string().contains("pinned to Homeboy runtime"));
 
+        let transport = homeboy::agents::agent_task_service::cook_attempt_transport(
+            &recipe,
+            run_id,
+            false,
+            &|_| Ok(None),
+        )
+        .expect("recorded local transport");
         let options =
-            homeboy::agents::agent_task_service::reconstruct_options_with_dispatcher(&recipe, None)
+            homeboy::agents::agent_task_service::cook_attempt_request(&recipe, run_id, &transport)
                 .expect("an older build's recipe reconstructs");
         assert_eq!(options.identity.cook_id, cook_id);
         assert_eq!(options.identity.initial_run_id, run_id);

@@ -2374,15 +2374,17 @@ fn run_terminal_cook_continuation(
     // refused promotion); keep its declared failure so a nonzero pass never
     // reaches the continuation record as a bare exit status.
     let mut pass_failure: Option<serde_json::Value> = None;
-    let outcome = crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
+    let outcome = store.consume_claimed_with_dispatcher(
         claim,
-        reconstruct_cook_attempt_dispatcher,
-        |options| {
+        &reconstruct_cook_attempt_dispatcher,
+        |cook_id, run_id| {
             let executor = Arc::new(
                 crate::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
             );
-            crate::agents::agent_task_service::CookService::run(
-                options,
+            crate::agents::agent_task_service::CookService::advance(
+                cook_id,
+                run_id,
+                &reconstruct_cook_attempt_dispatcher,
                 crate::agents::agent_task_service::CookRuntime::production(
                     executor,
                     &store,

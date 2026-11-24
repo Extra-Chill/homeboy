@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::{cook_attempt_request, cook_attempt_transport, CookDispatcherResolver};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -762,8 +763,8 @@ impl CookRecipeStore {
     pub fn consume_claimed_with_dispatcher(
         &self,
         claim: ClaimedCookContinuation,
-        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-        execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
+        dispatcher: &CookDispatcherResolver<'_>,
+        execute: impl FnOnce(&str, &str) -> Result<(i32, CookDisposition)>,
     ) -> Result<i32> {
         if claim.data_root != self.data_root() {
             return Err(Error::validation_invalid_argument(
@@ -773,7 +774,7 @@ impl CookRecipeStore {
                 None,
             ));
         }
-        consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, false)
+        consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute)
     }
 }
 
@@ -2952,14 +2953,16 @@ fn rearm_state_error(cook_id: &str, run_id: &str, state: CookContinuationState) 
     )
 }
 
-pub fn reconstruct_options(recipe: &AgentTaskCookRecipe) -> Result<CookRequest> {
+pub(super) fn reconstruct_options(recipe: &AgentTaskCookRecipe) -> Result<CookRequest> {
     reconstruct_options_with_dispatcher(recipe, None)
 }
 
 /// Reconstruct immutable Cook inputs bound to the recipe's exact attempt
 /// dispatcher. A recipe recorded by any Homeboy build reconstructs: its
-/// `runtime_generation` is provenance, never an admission pin.
-pub fn reconstruct_options_with_dispatcher(
+/// `runtime_generation` is provenance, never an admission pin. Advancing an
+/// existing attempt goes through [`super::cook_attempt_request`]; this stays
+/// private to the engine.
+pub(super) fn reconstruct_options_with_dispatcher(
     recipe: &AgentTaskCookRecipe,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
 ) -> Result<CookRequest> {
@@ -2968,8 +2971,12 @@ pub fn reconstruct_options_with_dispatcher(
 
 /// Reconstruct immutable Cook inputs without binding the recorded attempt
 /// dispatcher. Adoption never dispatches provider work, and a lifecycle-validated
-/// local placement transition supersedes the recorded Lab transport.
-pub fn reconstruct_options_without_dispatcher(recipe: &AgentTaskCookRecipe) -> Result<CookRequest> {
+/// local placement transition supersedes the recorded Lab transport. Also the
+/// engine's read-only accessor for recipe policy fields (promotion recovery
+/// descriptors, adoption inputs); it never advances a Cook.
+pub(super) fn reconstruct_options_without_dispatcher(
+    recipe: &AgentTaskCookRecipe,
+) -> Result<CookRequest> {
     reconstruct_recipe_options(recipe, None, false)
 }
 
@@ -3268,44 +3275,55 @@ fn reconstruct_recipe_options(
 
 pub fn consume_claimed_with_dispatcher(
     claim: ClaimedCookContinuation,
-    dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
+    dispatcher: &CookDispatcherResolver<'_>,
+    execute: impl FnOnce(&str, &str) -> Result<(i32, CookDisposition)>,
 ) -> Result<i32> {
     default_store()?.consume_claimed_with_dispatcher(claim, dispatcher, execute)
 }
 
-pub fn consume_claimed_terminal_with_dispatcher(
-    claim: ClaimedCookContinuation,
-    dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
-) -> Result<i32> {
-    consume_claimed_with_dispatcher_policy(&default_store()?, claim, dispatcher, execute, true)
-}
-
+/// Settle a claimed continuation around one identity-only Cook pass. The
+/// claim is validated through the same loader [`CookService::advance`] uses,
+/// so a transport or recipe that cannot advance fails or retries the claim
+/// before any pass starts.
 fn consume_claimed_with_dispatcher_policy(
     store: &CookRecipeStore,
     claim: ClaimedCookContinuation,
-    dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
-    terminal: bool,
+    dispatcher: &CookDispatcherResolver<'_>,
+    execute: impl FnOnce(&str, &str) -> Result<(i32, CookDisposition)>,
 ) -> Result<i32> {
     let lifecycle_store = store.lifecycle_store();
-    let recipe = match store.load_recipe(&claim.continuation().cook_id) {
+    let cook_id = claim.continuation().cook_id.clone();
+    let run_id = claim.continuation().run_id.clone();
+    let recipe = match store.load_recipe(&cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
             claim.fail(&error.message)?;
             return Err(error);
         }
     };
-    let attempt_dispatcher = match dispatcher(&recipe.promotion_transport["attempt_dispatch"]) {
-        Ok(dispatcher) => dispatcher,
+    if !recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == run_id)
+    {
+        let error = Error::validation_invalid_argument(
+            "cook_continuation.run_id",
+            "claimed continuation is not declared by the durable cook recipe",
+            Some(run_id),
+            None,
+        );
+        claim.fail(&error.message)?;
+        return Err(error);
+    }
+    let transport = match cook_attempt_transport(&recipe, &run_id, false, dispatcher) {
+        Ok(transport) => transport,
         Err(error) => {
             claim.fail(&error.message)?;
             return Err(error);
         }
     };
-    let options = match reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher) {
-        Ok(options) => options,
+    match cook_attempt_request(&recipe, &run_id, &transport) {
+        Ok(_) => {}
         Err(error) if error.retryable == Some(true) => {
             claim.retry()?;
             return Err(error);
@@ -3314,34 +3332,13 @@ fn consume_claimed_with_dispatcher_policy(
             claim.fail(&error.message)?;
             return Err(error);
         }
-    };
-    let mut options = options;
-    if terminal {
-        // A terminal continuation is the Cook loop of a detached attempt: it
-        // gates the candidate, so it keeps the recipe's retry budget for
-        // gate-feedback remediation (#18243). Operator feedback still pending
-        // against the candidate earns one attempt beyond the recorded ones
-        // even when that budget is spent (#17611).
-        let feedback_floor = recipe
-            .attempts
-            .last()
-            .map(|attempt| attempt.attempt)
-            .unwrap_or(0)
-            + u32::from(crate::agent_task_feedback::has_pending(
-                &lifecycle_store,
-                &claim.continuation().cook_id,
-            ));
-        options.retry_policy.max_attempts = options.retry_policy.max_attempts.max(feedback_floor);
     }
-    if agent_task_lifecycle::run_record_exists_in_store(
-        &lifecycle_store,
-        &claim.continuation().run_id,
-    )? {
+    if agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, &run_id)? {
         if let Err(error) = reconcile_recipe_attempt_for_continuation_in_stores(
             store,
             &lifecycle_store,
             &recipe,
-            &claim.continuation().run_id,
+            &run_id,
         ) {
             if error.retryable == Some(true) {
                 claim.retry()?;
@@ -3351,30 +3348,13 @@ fn consume_claimed_with_dispatcher_policy(
             return Err(error);
         }
     }
-    if let Some(attempt) = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == claim.continuation().run_id)
-    {
-        options.identity.initial_run_id = attempt.run_id.clone();
-        options.identity.initial_plan = attempt.plan.clone();
-    } else {
-        let error = Error::validation_invalid_argument(
-            "cook_continuation.run_id",
-            "claimed continuation is not declared by the durable cook recipe",
-            Some(claim.continuation().run_id.clone()),
-            None,
-        );
-        claim.fail(&error.message)?;
-        return Err(error);
-    }
-    lifecycle_store.mutate_record(&claim.continuation().run_id, |record| {
+    lifecycle_store.mutate_record(&run_id, |record| {
         record
             .ensure_metadata_object()
             .remove("cook_progress")
             .is_some()
     })?;
-    let execution = execute(options);
+    let execution = execute(&cook_id, &run_id);
     match execution {
         Ok((0, disposition)) => {
             let current = lifecycle_store.read_record(&claim.continuation().run_id)?;
@@ -4209,13 +4189,13 @@ mod tests {
     /// injected normal-cook boundary.
     fn consume_next_from(
         store: &CookRecipeStore,
-        execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
+        execute: impl FnOnce(&str, &str) -> Result<(i32, CookDisposition)>,
     ) -> Result<Option<i32>> {
         let Some(claim) = store.claim_continuation_with_budget(usize::MAX)?.claim else {
             return Ok(None);
         };
         store
-            .consume_claimed_with_dispatcher(claim, |_| Ok(None), execute)
+            .consume_claimed_with_dispatcher(claim, &|_| Ok(None), execute)
             .map(Some)
     }
 
@@ -4800,45 +4780,50 @@ mod tests {
             .expect("claim continuation")
             .expect("persisted continuation claim");
 
+        let resolve = move |durable_recipe: &Value| {
+            assert_eq!(durable_recipe["kind"], "lab");
+            assert_eq!(durable_recipe["queue"], "cook-lab");
+            Ok(Some(dispatcher.clone()))
+        };
         let exit_code = store
-            .consume_claimed_with_dispatcher(
-                claim,
-                |durable_recipe| {
-                    assert_eq!(durable_recipe["kind"], "lab");
-                    assert_eq!(durable_recipe["queue"], "cook-lab");
-                    Ok(Some(dispatcher))
-                },
-                |request| {
-                    assert_eq!(
-                        request
-                            .provider_transport
-                            .attempt_dispatcher
-                            .expect("injected Lab dispatcher")
-                            .durable_recipe()?,
-                        serde_json::json!({ "kind": "lab", "queue": "cook-lab" })
-                    );
-                    assert_eq!(request.identity.cook_id, "lab-cook");
-                    assert_eq!(request.identity.initial_run_id, "lab-run");
-                    assert_eq!(request.workspace.to_worktree, "fixture@lab");
-                    assert_eq!(request.workspace.task_base_sha.as_deref(), Some("lab-base"));
-                    assert_eq!(request.workspace.source_refs, ["issue:lab"]);
-                    assert_eq!(
-                        request
-                            .provider_transport
-                            .provider_invocation
-                            .as_ref()
-                            .map(|invocation| invocation.argv.clone()),
-                        Some(vec!["lab-agent".to_string()])
-                    );
-                    assert_eq!(request.retry_policy.max_attempts, 2);
-                    assert!(request.finalization.draft_pr);
-                    assert_eq!(request.finalization.head.as_deref(), Some("lab-head"));
-                    Ok((0, CookDisposition::InFlight))
-                },
-            )
+            .consume_claimed_with_dispatcher(claim, &resolve, |cook_id, run_id| {
+                assert_eq!(cook_id, "lab-cook");
+                assert_eq!(run_id, "lab-run");
+                Ok((0, CookDisposition::InFlight))
+            })
             .expect("consume Lab continuation");
-
         assert_eq!(exit_code, 0);
+
+        // The pass advances through the one loader, which rebinds the
+        // recorded dispatcher and every grouped request field.
+        let recipe = store.load_recipe("lab-cook").unwrap();
+        let transport = cook_attempt_transport(&recipe, "lab-run", false, &resolve).unwrap();
+        let request = cook_attempt_request(&recipe, "lab-run", &transport).unwrap();
+        assert_eq!(
+            request
+                .provider_transport
+                .attempt_dispatcher
+                .expect("injected Lab dispatcher")
+                .durable_recipe()
+                .unwrap(),
+            serde_json::json!({ "kind": "lab", "queue": "cook-lab" })
+        );
+        assert_eq!(request.identity.cook_id, "lab-cook");
+        assert_eq!(request.identity.initial_run_id, "lab-run");
+        assert_eq!(request.workspace.to_worktree, "fixture@lab");
+        assert_eq!(request.workspace.task_base_sha.as_deref(), Some("lab-base"));
+        assert_eq!(request.workspace.source_refs, ["issue:lab"]);
+        assert_eq!(
+            request
+                .provider_transport
+                .provider_invocation
+                .as_ref()
+                .map(|invocation| invocation.argv.clone()),
+            Some(vec!["lab-agent".to_string()])
+        );
+        assert_eq!(request.retry_policy.max_attempts, 2);
+        assert!(request.finalization.draft_pr);
+        assert_eq!(request.finalization.head.as_deref(), Some("lab-head"));
     }
 
     #[test]
@@ -4993,22 +4978,20 @@ mod tests {
             .unwrap();
 
         let mut observed = None;
-        // `consume_claimed_terminal_with_dispatcher` is exactly this call with
-        // `default_store()` in the store position.
-        let exit_code = consume_claimed_with_dispatcher_policy(
-            &store,
-            claim,
-            |_| Ok(None),
-            |options| {
-                observed = Some(options);
+        let exit_code = store
+            .consume_claimed_with_dispatcher(claim, &|_| Ok(None), |cook_id, run_id| {
+                observed = Some((cook_id.to_string(), run_id.to_string()));
                 Ok((0, CookDisposition::Terminal))
-            },
-            true,
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         assert_eq!(exit_code, 0);
-        let options = observed.expect("terminal continuation reached normal cook boundary");
+        let (cook_id, run_id) =
+            observed.expect("terminal continuation reached normal cook boundary");
+        let recipe_on_disk = store.load_recipe(&cook_id).unwrap();
+        let transport = cook_attempt_transport(&recipe_on_disk, &run_id, false, &|_| Ok(None))
+            .expect("recorded local transport");
+        let options = cook_attempt_request(&recipe_on_disk, &run_id, &transport).unwrap();
         assert_eq!(options.retry_policy.max_attempts, 3);
         assert_eq!(options.identity.initial_run_id, "run");
         assert_eq!(
@@ -5299,14 +5282,11 @@ mod tests {
             .claim_continuation_for("cook", "run")
             .unwrap()
             .unwrap();
-        consume_claimed_with_dispatcher_policy(
-            &store,
-            claim,
-            |_| Ok(None),
-            |_| Ok((0, CookDisposition::InFlight)),
-            false,
-        )
-        .unwrap();
+        store
+            .consume_claimed_with_dispatcher(claim, &|_| Ok(None), |_, _| {
+                Ok((0, CookDisposition::InFlight))
+            })
+            .unwrap();
         assert_eq!(
             feedback_store.list("cook").unwrap()[0].state,
             crate::agent_task_feedback::FeedbackState::Pending
@@ -5421,26 +5401,26 @@ mod tests {
     }
 
     #[test]
-    fn consumer_reconstructs_options_once_and_completed_work_never_replays() {
+    fn consumer_advances_the_claimed_attempt_and_completed_work_never_replays() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
         store.persist_recipe(&recipe()).unwrap();
         store.enqueue_terminal_continuation("cook", "run").unwrap();
         let mut observed = None;
         assert_eq!(
-            consume_next_from(&store, |options| {
-                observed = Some(options);
+            consume_next_from(&store, |cook_id, run_id| {
+                observed = Some((cook_id.to_string(), run_id.to_string()));
                 Ok((0, CookDisposition::Terminal))
             })
             .unwrap(),
             Some(0)
         );
-        let options = observed.expect("normal cook hook received options");
-        assert_eq!(options.identity.cook_id, "cook");
-        assert_eq!(options.identity.initial_run_id, "run");
+        let (cook_id, run_id) = observed.expect("normal cook hook received the attempt identity");
+        assert_eq!(cook_id, "cook");
+        assert_eq!(run_id, "run");
         assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
         assert!(
-            consume_next_from(&store, |_| panic!("completed continuation replayed"))
+            consume_next_from(&store, |_, _| panic!("completed continuation replayed"))
                 .unwrap()
                 .is_none()
         );
@@ -5765,11 +5745,10 @@ mod tests {
             .expect("targeted continuation");
         assert_eq!(
             store
-                .consume_claimed_with_dispatcher(
-                    claim,
-                    |_| Ok(None),
-                    |_| Ok((7, CookDisposition::Terminal))
-                )
+                .consume_claimed_with_dispatcher(claim, &|_| Ok(None), |_, _| Ok((
+                    7,
+                    CookDisposition::Terminal
+                )))
                 .unwrap(),
             7
         );
@@ -5835,14 +5814,10 @@ mod tests {
 
             assert_eq!(
                 store
-                    .consume_claimed_with_dispatcher(
-                        claim,
-                        |_| Ok(None),
-                        |_| {
-                            assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
-                            Ok((1, CookDisposition::Terminal))
-                        },
-                    )
+                    .consume_claimed_with_dispatcher(claim, &|_| Ok(None), |_, _| {
+                        assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
+                        Ok((1, CookDisposition::Terminal))
+                    },)
                     .unwrap(),
                 1,
                 "own_claim={own_claim}"
@@ -5881,11 +5856,9 @@ mod tests {
             .unwrap()
             .unwrap();
         let exit_code = store
-            .consume_claimed_with_dispatcher(
-                claim,
-                |_| Ok(None),
-                |_| Ok((0, CookDisposition::InFlight)),
-            )
+            .consume_claimed_with_dispatcher(claim, &|_| Ok(None), |_, _| {
+                Ok((0, CookDisposition::InFlight))
+            })
             .expect("the recorded runtime generation no longer pins continuation");
 
         assert_eq!(exit_code, 0);
@@ -5910,25 +5883,21 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let exit_code = store
-                .consume_claimed_with_dispatcher(
-                    claim,
-                    |_| Ok(None),
-                    |options| {
-                        assert_eq!(options.identity.initial_run_id, "run");
-                        lifecycle_store.submit_plan_with_runtime_admission(
-                            &plan,
-                            "detached-child",
-                            |_| Ok(serde_json::json!({})),
-                        )?;
-                        lifecycle_store.mutate_record("detached-child", |record| {
-                            record.metadata["cook_progress"] =
-                                serde_json::json!({"phase": disposition.phase()});
-                            true
-                        })?;
-                        // Exit zero alone cannot distinguish settlement from handoff.
-                        Ok((0, disposition))
-                    },
-                )
+                .consume_claimed_with_dispatcher(claim, &|_| Ok(None), |_, run_id| {
+                    assert_eq!(run_id, "run");
+                    lifecycle_store.submit_plan_with_runtime_admission(
+                        &plan,
+                        "detached-child",
+                        |_| Ok(serde_json::json!({})),
+                    )?;
+                    lifecycle_store.mutate_record("detached-child", |record| {
+                        record.metadata["cook_progress"] =
+                            serde_json::json!({"phase": disposition.phase()});
+                        true
+                    })?;
+                    // Exit zero alone cannot distinguish settlement from handoff.
+                    Ok((0, disposition))
+                })
                 .unwrap();
             assert_eq!(exit_code, 0);
             assert!(lifecycle_store
@@ -6026,7 +5995,7 @@ mod tests {
 
             assert_eq!(executions.load(Ordering::SeqCst), 0);
             assert_eq!(
-                consume_next_from(&store, |_| {
+                consume_next_from(&store, |_, _| {
                     executions.fetch_add(1, Ordering::SeqCst);
                     Ok((0, CookDisposition::Terminal))
                 })
@@ -6106,14 +6075,14 @@ mod tests {
 
         let results = std::thread::scope(|scope| {
             let first = scope.spawn(|| {
-                consume_next_from(&store, |_| {
+                consume_next_from(&store, |_, _| {
                     executions.fetch_add(1, Ordering::SeqCst);
                     Ok((0, CookDisposition::Terminal))
                 })
                 .unwrap()
             });
             let second = scope.spawn(|| {
-                consume_next_from(&store, |_| {
+                consume_next_from(&store, |_, _| {
                     executions.fetch_add(1, Ordering::SeqCst);
                     Ok((0, CookDisposition::Terminal))
                 })
