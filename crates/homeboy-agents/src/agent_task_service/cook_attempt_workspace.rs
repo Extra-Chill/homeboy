@@ -9,6 +9,12 @@
 //! destination is snapshotted to a durable ref and reset to the recorded Cook
 //! base, and [`assert_attempt_workspace_at_base`] refuses to start the attempt
 //! with a typed [`AttemptWorkspaceNotAtBase`] failure otherwise.
+//!
+//! Gate-guided retries are the exception (#18916). A gate-fix attempt is told
+//! to repair the previous candidate's deterministic gate failure, so its
+//! workspace starts from that candidate: [`checkout_candidate_on_base`] checks
+//! the candidate's tree out on top of the Cook base, keeping the attempt's
+//! candidate measured against the Cook base.
 
 use std::path::{Path, PathBuf};
 
@@ -142,14 +148,44 @@ pub(crate) fn reset_attempt_workspace_to_base(
     if head == base_sha && dirty_paths.is_empty() {
         return Ok(None);
     }
-    let reference = format!("refs/homeboy/attempt-reset/{label}");
-    git(workspace, &["check-ref-format", &reference], None)?;
+    let (reference, snapshot) = snapshot_workspace(workspace, &head, label, "fresh")?;
+    git(workspace, &["reset", "--hard", &base_sha], None)?;
+    git(workspace, &["clean", "-fd"], None)?;
+    assert_attempt_workspace_at_base(workspace, &base_sha)?;
+    Ok(Some(serde_json::json!({
+        "schema": "homeboy/cook-attempt-workspace-reset/v1",
+        "workspace": workspace,
+        "base": base_sha,
+        "previous_head": head,
+        "dirty_paths": dirty_paths,
+        "snapshot_ref": reference,
+        "snapshot": snapshot,
+    })))
+}
+
+/// The full workspace tree (tracked and untracked changes), written through a
+/// private index so the destination index is never touched.
+fn workspace_tree(workspace: &Path) -> Result<String> {
     let index_file = homeboy_core::git::private_index(workspace)?;
     let index = index_file.path().to_path_buf();
     git(workspace, &["read-tree", "HEAD"], Some(&index))?;
     git(workspace, &["add", "--all"], Some(&index))?;
-    let tree = git(workspace, &["write-tree"], Some(&index))?;
-    let message = format!("homeboy: snapshot before fresh Cook attempt ({label})");
+    git(workspace, &["write-tree"], Some(&index))
+}
+
+/// Preserve whatever `workspace` holds (commits ahead of base plus
+/// uncommitted, including untracked, changes) at
+/// `refs/homeboy/attempt-reset/<label>`. Returns `(ref, snapshot commit)`.
+fn snapshot_workspace(
+    workspace: &Path,
+    head: &str,
+    label: &str,
+    purpose: &str,
+) -> Result<(String, String)> {
+    let reference = format!("refs/homeboy/attempt-reset/{label}");
+    git(workspace, &["check-ref-format", &reference], None)?;
+    let tree = workspace_tree(workspace)?;
+    let message = format!("homeboy: snapshot before {purpose} Cook attempt ({label})");
     let snapshot = git(
         workspace,
         &[
@@ -160,20 +196,96 @@ pub(crate) fn reset_attempt_workspace_to_base(
             "commit-tree",
             &tree,
             "-p",
-            &head,
+            head,
             "-m",
             &message,
         ],
         None,
     )?;
     git(workspace, &["update-ref", &reference, &snapshot], None)?;
+    Ok((reference, snapshot))
+}
+
+/// The tree of `candidate_sha` when that commit is present in `workspace`.
+pub(crate) fn resolve_candidate_tree(workspace: &Path, candidate_sha: &str) -> Option<String> {
+    let candidate_sha = candidate_sha.trim();
+    if candidate_sha.is_empty() {
+        return None;
+    }
+    git(
+        workspace,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{candidate_sha}^{{tree}}"),
+        ],
+        None,
+    )
+    .ok()
+    .filter(|tree| !tree.is_empty())
+}
+
+/// Start a gate-guided attempt from the previous candidate (#18916): the
+/// workspace HEAD is the Cook `base` and its tree is `candidate_sha`'s tree,
+/// left as uncommitted changes so the attempt's candidate is still measured
+/// against the Cook base. A workspace whose tree already is the candidate's
+/// (the candidate committed on the base, or applied uncommitted) is left alone
+/// and `None` is returned. Anything else in the workspace is snapshotted to
+/// `refs/homeboy/attempt-reset/<label>` first.
+pub(crate) fn checkout_candidate_on_base(
+    workspace: &Path,
+    base: &str,
+    candidate_sha: &str,
+    label: &str,
+) -> Result<Option<Value>> {
+    let base_sha = git(
+        workspace,
+        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+        None,
+    )?;
+    let candidate_tree = resolve_candidate_tree(workspace, candidate_sha).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "attempt_workspace",
+            format!(
+                "gate-guided attempt candidate {candidate_sha} is not present in the workspace"
+            ),
+            Some(workspace.display().to_string()),
+            None,
+        )
+    })?;
+    if workspace_tree(workspace)? == candidate_tree {
+        return Ok(None);
+    }
+    let (head, dirty_paths) = head_and_dirty_paths(workspace)?;
+    let (reference, snapshot) = snapshot_workspace(workspace, &head, label, "gate-guided")?;
     git(workspace, &["reset", "--hard", &base_sha], None)?;
     git(workspace, &["clean", "-fd"], None)?;
-    assert_attempt_workspace_at_base(workspace, &base_sha)?;
+    git(
+        workspace,
+        &["read-tree", "--reset", "-u", &candidate_tree],
+        None,
+    )?;
+    // Unstage: HEAD and the index stay at the base, the candidate is the
+    // working tree's uncommitted change.
+    git(workspace, &["reset", "-q"], None)?;
+    let (head_after, _) = head_and_dirty_paths(workspace)?;
+    if head_after != base_sha || workspace_tree(workspace)? != candidate_tree {
+        return Err(Error::validation_invalid_argument(
+            "attempt_workspace",
+            format!(
+                "gate-guided attempt workspace did not converge on candidate {candidate_sha} over base {base_sha}"
+            ),
+            Some(workspace.display().to_string()),
+            None,
+        ));
+    }
     Ok(Some(serde_json::json!({
-        "schema": "homeboy/cook-attempt-workspace-reset/v1",
+        "schema": "homeboy/cook-attempt-workspace-candidate/v1",
         "workspace": workspace,
         "base": base_sha,
+        "candidate": candidate_sha,
+        "candidate_tree": candidate_tree,
         "previous_head": head,
         "dirty_paths": dirty_paths,
         "snapshot_ref": reference,
@@ -341,6 +453,50 @@ pub(crate) fn prepare_fresh_attempt_workspace_for_cook(cook_id: &str, run_id: &s
         }
     }
     Ok(())
+}
+
+/// The previous candidate a gate-guided follow-up request starts from
+/// (`inputs.cook_loop.gate_guided_candidate`, #18916), if any.
+pub(crate) fn gate_guided_candidate(
+    request: &crate::agent_task::AgentTaskRequest,
+) -> Option<crate::agent_task::AgentTaskCandidate> {
+    request
+        .inputs
+        .pointer("/cook_loop/gate_guided_candidate")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .filter(|candidate: &crate::agent_task::AgentTaskCandidate| {
+            !candidate.candidate_sha.trim().is_empty()
+        })
+}
+
+/// Before a gate-guided attempt's baseline is materialized from `workspace`,
+/// make that workspace contain the previous candidate checked out on the Cook
+/// base (#18916). Requests that are not gate-guided, and workspaces that do
+/// not hold the candidate commit, are left untouched.
+pub(crate) fn prepare_gate_guided_attempt_workspace(
+    recipe: &super::AgentTaskCookRecipe,
+    request: &crate::agent_task::AgentTaskRequest,
+    workspace: &Path,
+    run_id: &str,
+) -> Result<Option<Value>> {
+    let Some(candidate) = gate_guided_candidate(request) else {
+        return Ok(None);
+    };
+    if !workspace.is_dir() || resolve_candidate_tree(workspace, &candidate.candidate_sha).is_none()
+    {
+        return Ok(None);
+    }
+    let base = recorded_cook_base(recipe)
+        .or_else(|| Some(candidate.base_sha.trim().to_string()).filter(|b| !b.is_empty()));
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    let label = format!(
+        "{}-gate-guided",
+        run_id.replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")
+    );
+    checkout_candidate_on_base(workspace, &base, &candidate.candidate_sha, &label)
 }
 
 #[cfg(test)]
