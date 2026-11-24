@@ -358,7 +358,7 @@ pub struct VerifyGateArgs {
     #[arg(long = "verify-bench", value_name = "SPEC", value_hint = clap::ValueHint::FilePath)]
     pub verify_bench: Vec<String>,
     /// Durable source metadata emitted by Homeboy-generated promotion commands.
-    /// This preserves the immutable provenance of a previously snapshotted gate;
+    /// It carries the immutable provenance of an already snapshotted gate;
     /// private entries retain no source path.
     #[arg(long = "gate-input-source", value_name = "JSON", value_parser = parse_gate_input_source)]
     pub input_sources: Vec<AgentTaskGateInputSource>,
@@ -1474,11 +1474,11 @@ mod tests {
         let options: VerifyGateOptions = TestCli::try_parse_from([
             "homeboy",
             "--gate-toolchain",
-            "legacy-tool",
+            "plain-tool",
             "--gate-toolchain-spec",
             r#"{"command":"custom-tool","probe_arguments":["probe","--json"]}"#,
         ])
-        .expect("parse legacy and structured toolchain declarations")
+        .expect("parse plain and structured toolchain declarations")
         .gates
         .into();
 
@@ -1487,7 +1487,7 @@ mod tests {
             vec![
                 AgentTaskGateToolchainRequirement {
                     resolve_only: false,
-                    command: "legacy-tool".to_string(),
+                    command: "plain-tool".to_string(),
                     probe_arguments: vec!["--version".to_string()],
                 },
                 AgentTaskGateToolchainRequirement {
