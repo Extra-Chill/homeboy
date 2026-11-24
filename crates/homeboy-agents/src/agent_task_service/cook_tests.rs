@@ -439,7 +439,6 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         pr_title: "fix(agent-task): guard the reload render path".to_string(),
         summary: "Close the issue by guarding the reload path.".to_string(),
         what_changed: vec!["Add a null guard in the render path.".to_string()],
-        verification: Vec::new(),
         completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
         incomplete_reason: String::new(),
         delivery: Vec::new(),

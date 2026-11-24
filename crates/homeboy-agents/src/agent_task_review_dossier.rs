@@ -72,18 +72,6 @@ impl AgentTaskReviewEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AiReviewVerificationClaim {
-    pub command: String,
-    /// Provider-measured wall time. Controller gate timing is retained separately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u128>,
-    pub total: u64,
-    pub passed: u64,
-    pub failed: u64,
-    pub ignored: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskReviewVerifiedCommand {
     #[serde(default)]
     pub label: String,
@@ -451,16 +439,6 @@ pub struct AiFilledReviewForm {
     /// Bullet points of the concrete changes.
     #[serde(default, deserialize_with = "prose_lines")]
     pub what_changed: Vec<String>,
-    /// Optional numeric test claims. No longer requested by the dispatched
-    /// prompt or declared output schema (#14733): the deterministic gate
-    /// commands are controller-owned, so asking the agent to also run and
-    /// report them was redundant, non-deterministic, and unreliable evidence.
-    /// The field remains only so an older or noncompliant provider response
-    /// that still includes it parses instead of hard-failing; it is never
-    /// consulted — `verify_against_promotion` derives every reviewer-visible
-    /// verification entry solely from durable candidate gate evidence.
-    #[serde(default)]
-    pub verification: Vec<AiReviewVerificationClaim>,
     /// The agent's own verdict on whether the requested task is done. Gates
     /// prove the repository still passes, not that the task was completed;
     /// only the agent can declare that, and it must do so structurally rather
@@ -1352,7 +1330,7 @@ pub(crate) fn render_source_relationships(
         .join("\n")
 }
 
-/// Remove legacy routing-tier suffixes from model disclosures, including lineage entries.
+/// Remove routing-tier suffixes that persisted model disclosures may carry, including lineage entries.
 fn strip_model_tiers(model: &str) -> String {
     let mut display = model.to_string();
     while let Some(start) = display.find(" (tier ") {
@@ -2794,7 +2772,6 @@ mod tests {
             pr_title: "fix(agent-task): guard the reload render path".into(),
             summary: "Fix the widget so it renders on reload.".into(),
             what_changed: vec!["Guard the null path in render().".into()],
-            verification: Vec::new(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
             delivery: Vec::new(),
@@ -3095,46 +3072,8 @@ mod tests {
     }
 
     #[test]
-    fn optional_claims_do_not_change_machine_derived_verified_commands() {
-        let mut form = valid_form();
-        form.verification.push(AiReviewVerificationClaim {
-            command: "cargo test connection::tests".into(),
-            elapsed_ms: None,
-            total: 127,
-            passed: 124,
-            failed: 3,
-            ignored: 0,
-        });
-        form.verification.push(AiReviewVerificationClaim {
-            command: "cargo test connection".into(),
-            elapsed_ms: None,
-            total: 127,
-            passed: 124,
-            failed: 2,
-            ignored: 0,
-        });
-        let verified = form
-            .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
-            .expect("optional agent claims cannot reject durable gate evidence");
-        assert_eq!(verified.len(), 1);
-        assert_eq!(verified[0].command, "cargo test connection");
-        assert_eq!(verified[0].total, Some(177));
-        assert_eq!(verified[0].passed, Some(175));
-        assert_eq!(verified[0].failed, Some(2));
-        assert_eq!(verified[0].ignored, Some(0));
-    }
-
-    #[test]
     fn different_candidate_fingerprint_is_excluded_from_review_verification() {
-        let mut form = valid_form();
-        form.verification.push(AiReviewVerificationClaim {
-            command: "cargo test connection".into(),
-            elapsed_ms: None,
-            total: 177,
-            passed: 175,
-            failed: 2,
-            ignored: 0,
-        });
+        let form = valid_form();
         let mut promotion = promotion("cargo test connection", "candidate-tree");
         promotion.provenance["candidate_checkout"]["tree"] = serde_json::json!("other-tree");
         let verified = form
@@ -3145,15 +3084,7 @@ mod tests {
 
     #[test]
     fn php_style_gate_without_supported_counts_still_derives_verified_command() {
-        let mut form = valid_form();
-        form.verification.push(AiReviewVerificationClaim {
-            command: "php artisan test".into(),
-            elapsed_ms: None,
-            total: 7,
-            passed: 7,
-            failed: 0,
-            ignored: 0,
-        });
+        let form = valid_form();
         let mut promotion = promotion("php artisan test", "candidate-tree");
         promotion.deterministic_gates[0].stdout =
             "PASS  Tests\\Feature\\ExampleTest\nTests: 7 passed".into();
@@ -3619,32 +3550,20 @@ mod tests {
     }
 
     #[test]
-    fn review_form_accepts_used_for_and_legacy_compatibility_keys() {
+    fn review_form_parses_minimal_and_undeclared_keys() {
+        // `compatibility` is not declared; providers still send it.
         let outputs = serde_json::json!({ "review_form": {
             "pr_title": "fix(agent-task): guard reload path",
             "summary": "Guard reloads.",
             "what_changed": ["Added the guard."],
             "compatibility": "Additive.",
-            "used_for": "Guard reloads.",
             "completion": "complete"
         }});
         let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("retired keys still parse")
+            .expect("undeclared keys parse")
             .expect("form present");
         form.validate(PrTitlePolicy::ConventionalCommit)
-            .expect("retired keys are not validated");
-    }
-
-    #[test]
-    fn minimal_review_form_does_not_require_legacy_fields() {
-        let form: AiFilledReviewForm = serde_json::from_value(serde_json::json!({
-            "pr_title": "refactor(review): simplify signatures",
-            "summary": "Remove redundant reviewer fields.",
-            "what_changed": ["Simplified the form."],
-            "completion": "complete"
-        }))
-        .unwrap();
-        form.validate(PrTitlePolicy::ConventionalCommit).unwrap();
+            .expect("minimal form validates");
         let declaration = review_form_output_declaration(PrTitlePolicy::ConventionalCommit);
         assert!(declaration.structural_schema["properties"]
             .get("used_for")
