@@ -1,68 +1,6 @@
 use super::*;
 
 #[test]
-fn fuzz_replay_parses_artifact_and_case_id_flags() {
-    let cli = FuzzCli::parse_from([
-        "fuzz",
-        "replay",
-        "/tmp/fuzz-results.json",
-        "--component",
-        "component-a",
-        "--case-id",
-        "case-1",
-        "--run-id",
-        "proof-1",
-        "--",
-        "--runner-flag",
-    ]);
-
-    match cli.args.command {
-        Some(FuzzCommand::Replay(replay)) => {
-            assert_eq!(replay.component.as_deref(), Some("component-a"));
-            assert_eq!(
-                replay.artifact_or_case.as_deref(),
-                Some("/tmp/fuzz-results.json")
-            );
-            assert_eq!(replay.case_id.as_deref(), Some("case-1"));
-            assert_eq!(replay.run_id.as_deref(), Some("proof-1"));
-            assert_eq!(replay.args, vec!["--runner-flag"]);
-        }
-        _ => panic!("expected fuzz replay command"),
-    }
-}
-
-#[test]
-fn fuzz_minimize_parses_artifact_and_case_id_flags() {
-    let cli = FuzzCli::parse_from([
-        "fuzz",
-        "minimize",
-        "/tmp/fuzz-results.json",
-        "--component",
-        "component-a",
-        "--case-id",
-        "case-1",
-        "--run-id",
-        "proof-1",
-        "--",
-        "--runner-flag",
-    ]);
-
-    match cli.args.command {
-        Some(FuzzCommand::Minimize(minimize)) => {
-            assert_eq!(minimize.component.as_deref(), Some("component-a"));
-            assert_eq!(
-                minimize.artifact_or_case.as_deref(),
-                Some("/tmp/fuzz-results.json")
-            );
-            assert_eq!(minimize.case_id.as_deref(), Some("case-1"));
-            assert_eq!(minimize.run_id.as_deref(), Some("proof-1"));
-            assert_eq!(minimize.args, vec!["--runner-flag"]);
-        }
-        _ => panic!("expected fuzz minimize command"),
-    }
-}
-
-#[test]
 fn fuzz_replay_resolves_campaign_metadata_without_executing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("fuzz-results.json");

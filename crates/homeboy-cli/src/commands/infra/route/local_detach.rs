@@ -991,10 +991,8 @@ pub(super) fn detached_child_diagnostic(log_path: &Path) -> Result<Value, &'stat
                 })
                 // The real v3 envelope carries its typed failure under
                 // `diagnostics`, not `error` (`CommandResultEnvelope::diagnostics`,
-                // `homeboy-cli/src/commands/utils/response.rs`). This previously
-                // read a key production output never emits, so no detached-Cook
-                // launcher failure was ever actually classified — every call
-                // fell through to the narrow fallback below.
+                // `homeboy-cli/src/commands/utils/response.rs`); only envelopes
+                // without one fall through to the narrow fallback below.
                 .and_then(|result| result.get("diagnostics"))
                 .filter(|error| {
                     error.get("code").and_then(Value::as_str).is_some()

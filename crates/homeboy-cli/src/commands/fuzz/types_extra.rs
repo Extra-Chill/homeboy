@@ -77,11 +77,11 @@ pub struct FuzzFailureDiagnostic {
     pub case_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
-    /// Narrow legacy classification label. Retains
+    /// Narrow classification label:
     /// `pre_execution_assembly_failure` / `php_bootstrap_fatal` /
-    /// `failed_campaign` / `workload_execution_failure`, and adds
-    /// `evidence_contract_failure` so a producer defect stops being reported
-    /// as a workload failure. Prefer `failure_domain` for new consumers.
+    /// `failed_campaign` / `workload_execution_failure` /
+    /// `evidence_contract_failure`, so a producer defect is not reported as a
+    /// workload failure. Prefer `failure_domain` for new consumers.
     pub classification: String,
     /// Which of the four failure families owns this run: `product_finding`,
     /// `workload_failure`, `gate_failure`, or `evidence_contract_failure`.

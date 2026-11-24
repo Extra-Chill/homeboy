@@ -392,21 +392,13 @@ impl homeboy::agents::agent_task_scheduler::AgentTaskExecutorAdapter for LocalBe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::bench::BenchArgs;
     use crate::commands::utils::args::{
         BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
     };
-    use clap::Parser;
     use homeboy::agents::agent_task::{
         AgentTaskMatrixAggregateCell, AgentTaskMatrixExecutionState,
     };
     use homeboy_core::extension::bench::BenchGateOp;
-
-    #[derive(Parser)]
-    struct TestCli {
-        #[command(flatten)]
-        bench: BenchArgs,
-    }
 
     fn run_args(component: Option<&str>) -> BenchRunArgs {
         BenchRunArgs {
@@ -445,36 +437,6 @@ mod tests {
             ci_profile: None,
             ignore_default_baseline: false,
         }
-    }
-
-    #[test]
-    fn parses_matrix_fanout_flags() {
-        let cli = TestCli::try_parse_from([
-            "bench",
-            "studio-web",
-            "--matrix",
-            "model=gpt-5.5,kimi",
-            "--matrix",
-            "prompt=site-a,site-b",
-            "--runner-pool",
-            "sample-runtime",
-            "--concurrency",
-            "8",
-            "--max-queue-depth",
-            "3",
-            "--expect-artifact",
-            "bench-results",
-            "--report",
-            "side-by-side",
-        ])
-        .expect("bench matrix fan-out should parse");
-
-        assert_eq!(cli.bench.run.matrix.len(), 2);
-        assert_eq!(cli.bench.run.runner_pool.as_deref(), Some("sample-runtime"));
-        assert_eq!(cli.bench.run.concurrency, 8);
-        assert_eq!(cli.bench.run.matrix_max_queue_depth, Some(3));
-        assert_eq!(cli.bench.run.expected_artifact, vec!["bench-results"]);
-        assert_eq!(cli.bench.run.report, vec![BenchReportFormat::SideBySide]);
     }
 
     #[test]

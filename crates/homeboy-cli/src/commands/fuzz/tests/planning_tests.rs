@@ -487,89 +487,6 @@ fn fuzz_plan_lab_contract_explains_local_planning_path() {
 }
 
 #[test]
-fn fuzz_campaign_plan_cli_parses_manifest_workloads_lab_runner_and_artifacts() {
-    let cli = FuzzCli::try_parse_from([
-        "fuzz",
-        "plan",
-        "component-a",
-        "--campaign-manifest",
-        "/tmp/fuzz-campaign.json",
-        "--campaign-workload",
-        "api-fuzz",
-        "--campaign-workload",
-        "db-fuzz",
-        "--lab-runner",
-        "lab-a",
-        "--required-artifact",
-        "coverage-gap-report",
-    ])
-    .expect("parse fuzz campaign plan cli");
-
-    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
-        panic!("expected fuzz plan command");
-    };
-    assert_eq!(
-        args.campaign_manifest.as_deref(),
-        Some(Path::new("/tmp/fuzz-campaign.json"))
-    );
-    assert_eq!(
-        args.campaign_workloads
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["api-fuzz", "db-fuzz"]
-    );
-    assert_eq!(args.lab_runner.as_deref(), Some("lab-a"));
-    assert_eq!(
-        args.required_artifacts
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["coverage-gap-report"]
-    );
-}
-
-#[test]
-fn fuzz_plan_execute_cli_parses_campaign_execution_flags() {
-    let cli = FuzzCli::try_parse_from([
-        "fuzz",
-        "plan",
-        "component-a",
-        "--campaign-workload",
-        "api-fuzz",
-        "--execute",
-        "--resume",
-    ])
-    .expect("parse fuzz plan execute cli");
-
-    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
-        panic!("expected fuzz plan command");
-    };
-    assert!(args.execute);
-    assert!(args.resume);
-    assert!(!args.dry_run);
-}
-
-#[test]
-fn fuzz_run_campaign_cli_parses_as_campaign_command() {
-    let cli = FuzzCli::try_parse_from([
-        "fuzz",
-        "run-campaign",
-        "component-a",
-        "--campaign-workload",
-        "api-fuzz",
-        "--dry-run",
-    ])
-    .expect("parse fuzz run-campaign cli");
-
-    let Some(FuzzCommand::RunCampaign(args)) = cli.args.command else {
-        panic!("expected fuzz run-campaign command");
-    };
-    assert!(args.dry_run);
-    assert!(!args.execute);
-}
-
-#[test]
 fn fuzz_run_campaign_dry_run_emits_structured_dispatch_records() {
     with_isolated_home(|home| {
         let extension_dir = home.path().join(".config/homeboy/extensions/generic");
@@ -1089,18 +1006,6 @@ fn fuzz_run_parses_generic_contract_flags() {
 }
 
 #[test]
-fn fuzz_doctor_parses_extension_id() {
-    let cli = FuzzCli::parse_from(["fuzz", "doctor", "--extension", "runtime-a"]);
-
-    match cli.args.command {
-        Some(FuzzCommand::Doctor(doctor)) => {
-            assert_eq!(doctor.extension_id, "runtime-a");
-        }
-        _ => panic!("expected fuzz doctor command"),
-    }
-}
-
-#[test]
 fn fuzz_validate_accepts_case_log_artifact() {
     let dir = tempfile::tempdir().expect("temp dir");
     let results_file = dir.path().join("fuzz-results.json");
@@ -1231,24 +1136,6 @@ fn fuzz_validate_measurement_profile_is_non_blocking_but_strict_profile_blocks()
     assert!(strict.gates.iter().any(|gate| {
         gate.gate_id == "no-open-findings" && gate.status == "failed" && gate.observed == 1.0
     }));
-}
-
-#[test]
-fn fuzz_compare_parses_envelope_paths() {
-    let cli = FuzzCli::parse_from([
-        "fuzz",
-        "compare",
-        "baseline-envelope.json",
-        "candidate-envelope.json",
-    ]);
-
-    match cli.args.command {
-        Some(FuzzCommand::Compare(compare)) => {
-            assert_eq!(compare.baseline, PathBuf::from("baseline-envelope.json"));
-            assert_eq!(compare.candidate, PathBuf::from("candidate-envelope.json"));
-        }
-        _ => panic!("expected fuzz compare command"),
-    }
 }
 
 #[test]

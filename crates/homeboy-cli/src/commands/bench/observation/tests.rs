@@ -991,7 +991,7 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
 }
 
 #[test]
-fn bench_observation_records_local_placement_override_with_legacy_evidence() {
+fn bench_observation_records_local_placement_override_evidence() {
     with_isolated_home(|home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         resource_policy::reset_captured_context_for_test();
