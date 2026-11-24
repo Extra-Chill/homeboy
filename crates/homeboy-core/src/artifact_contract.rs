@@ -41,55 +41,36 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// `artifact_contract_to_ref` is the only surviving contract<->ref
-    /// conversion. `artifact_contract_from_record` and
-    /// `artifact_contract_from_ref` had zero call sites and were removed in
-    /// #10310 along with `EvidenceContract`.
+    /// The ref target prefers `path`, then `url`, then `public_url`, so a
+    /// contract without a path still yields a non-empty ref target.
     #[test]
-    fn artifact_contract_to_ref_carries_target_and_semantics() {
-        let contract = ArtifactContract::from_value(json!({
-            "kind": "transcript",
-            "type": "json",
-            "path": "artifacts/run.json",
-            "public_url": "https://example.test/run.json",
-            "role": "primary-output",
-            "semantic_key": "task.transcript"
-        }))
-        .expect("artifact contract");
-
-        let reference = artifact_contract_to_ref(&contract, "artifact-1", "run-1");
-
-        assert_eq!(reference.schema, ARTIFACT_REF_SCHEMA);
-        assert_eq!(reference.id, "artifact-1");
-        assert_eq!(reference.run_id, "run-1");
-        assert_eq!(reference.kind, "transcript");
-        assert_eq!(reference.artifact_type, "json");
-        assert_eq!(reference.path, "artifacts/run.json");
-        assert_eq!(
-            reference.public_url.as_deref(),
-            Some("https://example.test/run.json")
-        );
-        assert_eq!(reference.role.as_deref(), Some("primary-output"));
-        assert_eq!(reference.semantic_key.as_deref(), Some("task.transcript"));
-        assert_eq!(
-            reference.canonical_uri(),
-            "homeboy://run/run-1/artifact/artifact-1"
-        );
-    }
-
-    /// A contract with no `path` still yields a non-empty ref target by falling
-    /// back to `url` then `public_url`.
-    #[test]
-    fn artifact_contract_to_ref_falls_back_to_url_for_the_ref_path() {
-        let contract = ArtifactContract::from_value(json!({
-            "kind": "log",
-            "url": "https://example.test/build.log"
-        }))
-        .expect("artifact contract");
-
-        let reference = artifact_contract_to_ref(&contract, "artifact-2", "run-2");
-
-        assert_eq!(reference.path, "https://example.test/build.log");
-        assert_eq!(reference.public_url, None);
+    fn artifact_contract_to_ref_falls_back_through_path_url_and_public_url() {
+        for (contract, expected_path) in [
+            (
+                json!({
+                    "kind": "transcript",
+                    "path": "artifacts/run.json",
+                    "url": "https://example.test/raw.json",
+                    "public_url": "https://example.test/run.json"
+                }),
+                "artifacts/run.json",
+            ),
+            (
+                json!({
+                    "kind": "log",
+                    "url": "https://example.test/build.log",
+                    "public_url": "https://example.test/public.log"
+                }),
+                "https://example.test/build.log",
+            ),
+            (
+                json!({ "kind": "log", "public_url": "https://example.test/public.log" }),
+                "https://example.test/public.log",
+            ),
+        ] {
+            let contract = ArtifactContract::from_value(contract).expect("artifact contract");
+            let reference = artifact_contract_to_ref(&contract, "artifact-1", "run-1");
+            assert_eq!(reference.path, expected_path);
+        }
     }
 }

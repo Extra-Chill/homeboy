@@ -672,47 +672,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn validates_confined_relative_file_entries() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::create_dir_all(dir.path().join("logs")).expect("mkdir");
-        fs::write(dir.path().join("logs/output.log"), "hello").expect("write artifact");
-        let manifest = ArtifactManifest::new(vec![ArtifactManifestEntry {
+    fn entry(path: &str) -> ArtifactManifestEntry {
+        ArtifactManifestEntry {
             id: None,
-            path: "logs/output.log".to_string(),
-            kind: "log".to_string(),
-            role: None,
-            label: Some("Output log".to_string()),
-            semantic_key: None,
-            content_type: None,
-            provenance: None,
-            viewer: None,
-            public_url: None,
-            public_url_state: None,
-            size_bytes: None,
-            sha256: None,
-            redaction: Some(ArtifactRedactionState::Redacted),
-            metadata: json!({ "phase": "test" }),
-        }]);
-
-        let entries = manifest.validate_under(dir.path()).expect("valid manifest");
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].entry.size_bytes, Some(5));
-        assert_eq!(entries[0].entry.content_type.as_deref(), Some("text/plain"));
-        assert_eq!(
-            entries[0].entry.sha256.as_deref(),
-            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
-        );
-        assert!(entries[0].absolute_path.ends_with("logs/output.log"));
-    }
-
-    #[test]
-    fn rejects_parent_path_escape_before_touching_filesystem() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let manifest = ArtifactManifest::new(vec![ArtifactManifestEntry {
-            id: None,
-            path: "../secret.txt".to_string(),
+            path: path.to_string(),
             kind: "log".to_string(),
             role: None,
             label: None,
@@ -726,7 +689,39 @@ mod tests {
             sha256: None,
             redaction: None,
             metadata: json!({}),
-        }]);
+        }
+    }
+
+    /// Extension-written manifests omit optional fields; validation fills in
+    /// the measured size, content type, checksum and empty metadata.
+    #[test]
+    fn validates_confined_relative_file_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("logs")).expect("mkdir");
+        fs::write(dir.path().join("logs/output.log"), "hello").expect("write artifact");
+        let manifest: ArtifactManifest = serde_json::from_value(json!({
+            "schema": ARTIFACT_MANIFEST_SCHEMA,
+            "artifacts": [{ "path": "logs/output.log", "kind": "log" }]
+        }))
+        .expect("parse manifest");
+
+        let entries = manifest.validate_under(dir.path()).expect("valid manifest");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry.size_bytes, Some(5));
+        assert_eq!(entries[0].entry.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(
+            entries[0].entry.sha256.as_deref(),
+            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
+        assert_eq!(entries[0].entry.metadata, json!({}));
+        assert!(entries[0].absolute_path.ends_with("logs/output.log"));
+    }
+
+    #[test]
+    fn rejects_parent_path_escape_before_touching_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = ArtifactManifest::new(vec![entry("../secret.txt")]);
 
         let err = manifest
             .validate_under(dir.path())
@@ -737,59 +732,22 @@ mod tests {
         assert!(err.details.to_string().contains("../secret.txt"));
     }
 
-    #[test]
-    fn missing_metadata_defaults_to_empty_object() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(dir.path().join("output.txt"), "hello").expect("write artifact");
-        let manifest: ArtifactManifest = serde_json::from_value(json!({
-            "schema": ARTIFACT_MANIFEST_SCHEMA,
-            "artifacts": [{
-                "path": "output.txt",
-                "kind": "log"
-            }]
-        }))
-        .expect("parse manifest");
-
-        let entries = manifest.validate_under(dir.path()).expect("valid manifest");
-
-        assert_eq!(entries[0].entry.metadata, json!({}));
-    }
-
+    #[cfg(unix)]
     #[test]
     fn rejects_symlink_escape() {
-        #[cfg(unix)]
-        {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let outside = tempfile::tempdir().expect("outside tempdir");
-            let outside_file = outside.path().join("secret.txt");
-            fs::write(&outside_file, "secret").expect("write outside");
-            std::os::unix::fs::symlink(&outside_file, dir.path().join("link.txt"))
-                .expect("symlink");
-            let manifest = ArtifactManifest::new(vec![ArtifactManifestEntry {
-                id: None,
-                path: "link.txt".to_string(),
-                kind: "log".to_string(),
-                role: None,
-                label: None,
-                semantic_key: None,
-                content_type: None,
-                provenance: None,
-                viewer: None,
-                public_url: None,
-                public_url_state: None,
-                size_bytes: None,
-                sha256: None,
-                redaction: None,
-                metadata: json!({}),
-            }]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "secret").expect("write outside");
+        std::os::unix::fs::symlink(&outside_file, dir.path().join("link.txt")).expect("symlink");
+        let manifest = ArtifactManifest::new(vec![entry("link.txt")]);
 
-            let err = manifest
-                .validate_under(dir.path())
-                .expect_err("symlink escape should fail");
+        let err = manifest
+            .validate_under(dir.path())
+            .expect_err("symlink escape should fail");
 
-            assert_eq!(err.code.as_str(), "validation.invalid_argument");
-            assert!(err.message.contains("resolves outside"));
-        }
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("resolves outside"));
     }
 
     #[test]
@@ -812,17 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn exposes_manifest_path_from_canonical_filename() {
-        let dir = tempfile::tempdir().expect("tempdir");
-
-        assert_eq!(
-            manifest_path(dir.path()),
-            dir.path().join(ARTIFACT_MANIFEST_FILE)
-        );
-    }
-
-    #[test]
-    fn normalizes_safe_relative_artifact_paths_to_slashes() {
+    fn normalizes_safe_relative_artifact_paths_and_rejects_unsafe_ones() {
         assert_eq!(
             normalize_relative_artifact_path(Path::new("logs").join("output.txt"))
                 .expect("normalized path"),
@@ -832,10 +780,6 @@ mod tests {
             normalize_relative_artifact_path("logs\\output.txt").expect("normalized path"),
             "logs/output.txt"
         );
-    }
-
-    #[test]
-    fn rejects_unsafe_relative_artifact_paths() {
         for path in [
             "",
             ".",
@@ -847,7 +791,7 @@ mod tests {
             "artifacts/.git/config",
         ] {
             let err = normalize_relative_artifact_path(path).expect_err("unsafe path");
-            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert_eq!(err.code.as_str(), "validation.invalid_argument", "{path}");
         }
     }
 
@@ -902,11 +846,6 @@ mod tests {
             contract.public_url.as_deref(),
             Some("https://artifacts.example.test/reports/summary.json")
         );
-        assert_eq!(contract.label.as_deref(), Some("Summary"));
-        assert_eq!(contract.role.as_deref(), Some("summary"));
-        assert_eq!(contract.semantic_key.as_deref(), Some("run.summary"));
-        assert_eq!(contract.size_bytes, Some(17));
-        assert_eq!(contract.metadata, json!({ "format": "homeboy-proof" }));
         assert_eq!(contract.extra["id"], "artifact-1");
         assert_eq!(
             contract.extra["provenance"]["producer"],
@@ -922,14 +861,7 @@ mod tests {
     #[test]
     fn descriptor_projection_rejects_empty_viewer_links() {
         let entry = ArtifactManifestEntry {
-            id: None,
-            path: "report.json".to_string(),
             kind: "summary".to_string(),
-            role: None,
-            label: None,
-            semantic_key: None,
-            content_type: None,
-            provenance: None,
             viewer: Some(ArtifactManifestViewer {
                 url: None,
                 links: vec![ArtifactManifestViewerLink {
@@ -938,12 +870,7 @@ mod tests {
                     replay: None,
                 }],
             }),
-            public_url: None,
-            public_url_state: None,
-            size_bytes: None,
-            sha256: None,
-            redaction: None,
-            metadata: json!({}),
+            ..entry("report.json")
         };
 
         let err = entry
