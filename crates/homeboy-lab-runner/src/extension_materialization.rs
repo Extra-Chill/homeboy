@@ -73,6 +73,11 @@ pub(crate) struct LabJobExtensionOverlay {
     pub(crate) source_revision: Option<String>,
     pub(crate) content_hash: String,
     pub(crate) shared_assets: Vec<LabJobExtensionSharedAsset>,
+    /// HOME-relative runtime paths the extension declares for isolated HOMEs
+    /// (`isolated_home_paths`). The job's private HOME links each one to the
+    /// runner account's HOME, matching the local Cook gate (#17754).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) isolated_home_paths: Vec<String>,
 }
 
 /// A root-manifest asset staged alongside one extension's isolated Lab overlay.
@@ -172,6 +177,17 @@ fn materialize_lab_job_extension_overlay_snapshots(
                 remote_path,
             });
         }
+        let isolated_home_paths = manifest
+            .isolated_home_paths
+            .iter()
+            .filter(|path| {
+                homeboy_extension_contract::manifest::validate_isolated_home_paths(
+                    std::slice::from_ref(*path),
+                )
+                .is_ok()
+            })
+            .cloned()
+            .collect();
         overlays.push(LabJobExtensionOverlay {
             id: id.clone(),
             source_path,
@@ -179,6 +195,7 @@ fn materialize_lab_job_extension_overlay_snapshots(
             source_revision: git_revision(&source),
             content_hash,
             shared_assets,
+            isolated_home_paths,
         });
     }
     Ok(overlays)
@@ -221,7 +238,8 @@ fn lab_job_extension_overlay_command(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let links = [extension_links, shared_asset_links]
+    let home_path_links = lab_job_isolated_home_path_links(runtime_root, overlays);
+    let links = [extension_links, shared_asset_links, home_path_links]
         .into_iter()
         .filter(|links| !links.is_empty())
         .collect::<Vec<_>>()
@@ -230,6 +248,36 @@ fn lab_job_extension_overlay_command(
         "set -eu\nruntime={runtime}\n# A job gets only its declared extensions; runner-global config may contain mutable links.\nmkdir -p \"$runtime/home/.config/homeboy/extensions\"\n{links}\n",
         runtime = shell::quote_path(runtime_root),
     )
+}
+
+/// Link each declared `isolated_home_paths` entry from the runner account's
+/// HOME into the job HOME. The overlay script runs before the job swaps HOME,
+/// so `$HOME` here is the runner's own. Like the local gate, a path is linked
+/// only when the runner has it as a directory and the job HOME has nothing there.
+fn lab_job_isolated_home_path_links(
+    runtime_root: &str,
+    overlays: &[LabJobExtensionOverlay],
+) -> String {
+    let mut seen = std::collections::BTreeSet::new();
+    overlays
+        .iter()
+        .flat_map(|overlay| overlay.isolated_home_paths.iter())
+        .filter(|path| seen.insert((*path).clone()))
+        .map(|path| {
+            let target = format!("{}/home/{path}", runtime_root.trim_end_matches('/'));
+            let parent = Path::new(&target)
+                .parent()
+                .and_then(Path::to_str)
+                .expect("isolated home path target has a UTF-8 parent");
+            format!(
+                "if [ -n \"${{HOME:-}}\" ] && [ -d \"$HOME\"/{rel} ] && [ ! -e {target} ] && [ ! -L {target} ]; then mkdir -p {parent}; ln -s \"$(cd \"$HOME\"/{rel} && pwd -P)\" {target}; fi",
+                rel = shell::quote_path(path),
+                parent = shell::quote_path(parent),
+                target = shell::quote_path(&target),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn lab_job_shared_asset_target(runtime_root: &str, asset_path: &str) -> String {
@@ -251,7 +299,73 @@ mod lab_job_overlay_tests {
             source_revision: Some(hash.to_string()),
             content_hash: hash.to_string(),
             shared_assets: Vec::new(),
+            isolated_home_paths: Vec::new(),
         }
+    }
+
+    #[test]
+    fn declared_isolated_home_paths_link_runner_home_into_job_home() {
+        let mut wordpress = overlay("wordpress", "/runner/jobs/a", "aaaaaaaaaaaaaaaa");
+        wordpress.isolated_home_paths = vec![
+            ".cache/homeboy/wp-codebox".to_string(),
+            ".wordpress-playground".to_string(),
+        ];
+        let mut other = overlay("other", "/runner/jobs/a", "bbbbbbbbbbbbbbbb");
+        other.isolated_home_paths = vec![".wordpress-playground".to_string()];
+        let command = lab_job_extension_overlay_command("/runner/jobs/a", &[wordpress, other]);
+
+        assert!(command.contains("/runner/jobs/a/home/.cache/homeboy/wp-codebox"));
+        assert!(command.contains("\"$HOME\"/'.cache/homeboy/wp-codebox' && pwd -P"));
+        assert!(!command.contains("$HOME/.config/homeboy"));
+        assert_eq!(
+            command
+                .matches("\"$HOME\"/'.wordpress-playground' && pwd -P")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_home_path_links_resolve_against_runner_home_and_keep_existing_entries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runner_home = root.path().join("runner-home");
+        let cache = runner_home.join(".cache/homeboy/wp-codebox/source");
+        std::fs::create_dir_all(&cache).expect("runner cache");
+        std::fs::create_dir_all(runner_home.join(".wordpress-playground")).expect("archive cache");
+        let runtime = root.path().join("job/extension-runtime");
+        let existing = runtime.join("home/.wordpress-playground");
+        std::fs::create_dir_all(&existing).expect("existing job entry");
+        let mut wordpress = overlay("wordpress", runtime.to_str().unwrap(), "aaaaaaaaaaaaaaaa");
+        wordpress.isolated_home_paths = vec![
+            ".cache/homeboy/wp-codebox".to_string(),
+            ".wordpress-playground".to_string(),
+            ".missing/dir".to_string(),
+        ];
+        let script = lab_job_isolated_home_path_links(runtime.to_str().unwrap(), &[wordpress]);
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("set -eu\n{script}\n"))
+            .env("HOME", &runner_home)
+            .status()
+            .expect("run link script");
+        assert!(status.success());
+
+        let linked = runtime.join("home/.cache/homeboy/wp-codebox");
+        assert!(std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::canonicalize(&linked).unwrap(),
+            std::fs::canonicalize(runner_home.join(".cache/homeboy/wp-codebox")).unwrap()
+        );
+        assert!(linked.join("source").is_dir());
+        assert!(!std::fs::symlink_metadata(&existing)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!runtime.join("home/.missing").exists());
     }
 
     #[test]
