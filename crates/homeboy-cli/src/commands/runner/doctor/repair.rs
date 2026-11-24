@@ -752,9 +752,13 @@ fn apply_daemon_repair_plan(
 /// status and used by Lab admission. Repair success is only valid when it is
 /// true after the final mutation.
 pub(super) fn daemon_admission_ready(runner_id: &str) -> homeboy::core::Result<bool> {
-    Ok(runner::runner_admission_snapshot(runner_id)?
-        .summary
-        .accepting_jobs)
+    Ok(runner::runner_admission_snapshot(
+        runner_id,
+        None,
+        runner::RunnerAdmissionReadiness::Observation,
+    )?
+    .summary
+    .accepting_jobs)
 }
 
 fn connect_outcome(

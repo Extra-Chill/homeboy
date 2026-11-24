@@ -613,24 +613,6 @@ pub(crate) fn lab_runner_homeboy_has_blocking_status_drift(
         .is_some_and(|refusal| !matches!(refusal, LabRunnerAdmissionRefusal::LeaseNotFresh { .. }))
 }
 
-pub(crate) fn lab_runner_daemon_fresh_for_admission(
-    status: &RunnerStatusReport,
-    require_exact: bool,
-) -> bool {
-    lab_runner_admission_refusal(status, require_exact).is_none()
-}
-
-/// Direct SSH runners execute jobs with their configured executable rather
-/// than the controller binary. When that executable's immutable identity is
-/// available, it is the authoritative admission comparison for the active
-/// daemon. An unavailable identity fails closed.
-pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
-    status: &RunnerStatusReport,
-    require_exact: bool,
-) -> bool {
-    lab_runner_homeboy_has_blocking_status_drift(status, require_exact)
-}
-
 /// Recover the controller runtime when an independent handoff-stage check
 /// proves that the controller, rather than a runner, must be upgraded.
 pub(crate) fn controller_homeboy_recovery_command() -> String {

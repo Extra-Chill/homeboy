@@ -785,33 +785,6 @@ impl RunnerStatusReport {
         self.daemon_compatible_for_admission() && self.daemon_fresh()
     }
 
-    /// Capacity remains owned by `RunnerAvailability`; this method only adds
-    /// the daemon freshness fact so placement does not duplicate capacity logic
-    /// introduced by the aggregate runner accounting path (#9474).
-    pub fn admission_availability(&self, capacity: Option<usize>) -> RunnerAvailability {
-        let mut availability = RunnerAvailability::from_status_parts(
-            self.runner_id.clone(),
-            self.is_connected(),
-            self.admission_blocking_stale_daemon().is_some(),
-            // `active_job_count` is the selected daemon's authoritative live
-            // count; the typed view can transiently expose more identities.
-            self.active_job_count.max(self.active_jobs.len()),
-            &self.active_job_state,
-            capacity,
-        );
-        if self.under_pressure() {
-            availability.reasons.push("pressure".to_string());
-            availability.accepts_jobs = false;
-        }
-        if !self.daemon_fresh_for_admission() && self.admission_blocking_stale_daemon().is_none() {
-            availability
-                .reasons
-                .push("daemon_freshness_unavailable".to_string());
-            availability.accepts_jobs = false;
-        }
-        availability
-    }
-
     /// Project the authoritative current-state admission summary from the
     /// supplied live report without reading or mutating any external state.
     pub fn admission_summary(&self) -> RunnerAdmissionSummary {

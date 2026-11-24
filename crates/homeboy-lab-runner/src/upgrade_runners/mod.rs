@@ -35,10 +35,14 @@ struct RunnerDirectActiveJobs;
 
 impl homeboy_upgrade::upgrade::RunnerDirectActiveJobsProvider for RunnerDirectActiveJobs {
     fn direct_active_job_count(&self, runner_id: &str) -> Option<usize> {
-        crate::runner_admission_snapshot(runner_id)
-            .ok()?
-            .summary
-            .live_daemon_job_count
+        crate::runner_admission_snapshot(
+            runner_id,
+            None,
+            crate::RunnerAdmissionReadiness::Observation,
+        )
+        .ok()?
+        .summary
+        .live_daemon_job_count
     }
 }
 

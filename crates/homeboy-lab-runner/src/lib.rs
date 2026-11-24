@@ -91,30 +91,83 @@ pub fn runner_secret_identity_inventory(runner_id: &str) -> Result<RunnerSecretI
     })
 }
 
-impl RunnerAdmissionSnapshot {
-    fn from_status(status: RunnerStatusReport) -> Self {
-        let summary = status.admission_summary();
-        Self { status, summary }
+/// Runner-owned inputs to the readiness verdict: configured capacity, whether
+/// the Homeboy runtime is ready, and the exact-version policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunnerAdmissionPolicy {
+    pub capacity: Option<usize>,
+    pub capabilities_ready: bool,
+    pub exact_version: bool,
+}
+
+/// Which readiness verdict a [`RunnerAdmissionSnapshot`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerAdmissionReadiness {
+    /// Only the observation summary; no configured readiness verdict.
+    Observation,
+    /// The runner's configured capacity and version policy, with the Homeboy
+    /// runtime readiness probed when the status did not already prove it.
+    Configured,
+    /// A caller-supplied policy.
+    Policy(RunnerAdmissionPolicy),
+}
+
+impl RunnerAdmissionReadiness {
+    fn resolve(
+        self,
+        status: &RunnerStatusReport,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<RunnerAdmissionPolicy> {
+        match self {
+            Self::Observation => None,
+            Self::Policy(policy) => Some(policy),
+            Self::Configured => Some(RunnerAdmissionPolicy::configured(
+                load(&status.runner_id).ok().as_ref(),
+                status,
+                deadline,
+            )),
+        }
     }
 }
 
-/// Observe a runner once, then derive every admission fact from that status:
-/// its one current session and the daemon's live job view.
-pub fn runner_admission_snapshot(runner_id: &str) -> Result<RunnerAdmissionSnapshot> {
-    runner_admission_snapshot_until(
-        runner_id,
-        std::time::Instant::now() + readonly_probe::readonly_probe_timeout(),
-    )
+impl RunnerAdmissionPolicy {
+    /// The runner's configured capacity and version policy. A status that
+    /// observed the configured Homeboy binary's build identity has already
+    /// executed it on the runner; only otherwise probe its capabilities.
+    fn configured(
+        runner: Option<&Runner>,
+        status: &RunnerStatusReport,
+        deadline: Option<std::time::Instant>,
+    ) -> Self {
+        let capabilities_ready = status.configured_job_binary_build_identity.is_some()
+            || match deadline {
+                Some(deadline) => runner_capability_inventory_until(&status.runner_id, deadline),
+                None => runner_capability_inventory(&status.runner_id),
+            }
+            .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
+        Self {
+            capacity: runner.and_then(|runner| runner.settings.concurrency_limit),
+            capabilities_ready,
+            exact_version: runner.is_some_and(|runner| {
+                lab::offload::metadata::require_exact_runner_version(&runner.settings)
+            }),
+        }
+    }
 }
 
-/// Observe admission under one caller-owned deadline. Every remote observation
-/// in the status projection receives only the budget that remains.
-pub fn runner_admission_snapshot_until(
+/// Observe a runner once under an optional caller-owned deadline (default: the
+/// read-only probe timeout), then derive every admission fact from that
+/// status. Every remote observation receives only the budget that remains.
+pub fn runner_admission_snapshot(
     runner_id: &str,
-    deadline: std::time::Instant,
+    deadline: Option<std::time::Instant>,
+    readiness: RunnerAdmissionReadiness,
 ) -> Result<RunnerAdmissionSnapshot> {
-    let mut snapshot =
-        RunnerAdmissionSnapshot::from_status(connection::status_until(runner_id, deadline)?);
+    let deadline = deadline
+        .unwrap_or_else(|| std::time::Instant::now() + readonly_probe::readonly_probe_timeout());
+    let status = connection::status_until(runner_id, deadline)?;
+    let policy = readiness.resolve(&status, Some(deadline));
+    let mut snapshot = project_runner_admission(status, policy);
     if snapshot.summary.accepting_jobs {
         let runner = load(runner_id)?;
         if let Some(root) = runner.workspace_root.as_deref() {
@@ -127,115 +180,94 @@ pub fn runner_admission_snapshot_until(
     Ok(snapshot)
 }
 
-/// Build the admission projection from an already-observed status report.
-/// This avoids repeating remote inspection when a caller also needs status
-/// details.
-pub fn runner_admission_snapshot_for_status(status: RunnerStatusReport) -> RunnerAdmissionSnapshot {
-    RunnerAdmissionSnapshot::from_status(status)
-}
-
-/// The `runner status` admission projection. `accepts_jobs`, `reasons` and
-/// `readiness_state` come from [`runner_readiness_for_status`], the same
-/// projection Lab admission uses, so status cannot report a runner as
-/// accepting while admission refuses it.
-pub fn runner_status_admission_snapshot(runner_id: &str) -> Result<RunnerAdmissionSnapshot> {
-    Ok(runner_readiness_admission_snapshot(
-        runner_admission_snapshot(runner_id)?,
-    ))
-}
-
-/// Attach the shared readiness verdict to an observed snapshot, reading the
-/// runner's configured capacity and version policy. `runner status` and
-/// `runner list` both project through here.
-pub fn runner_readiness_admission_snapshot(
-    snapshot: RunnerAdmissionSnapshot,
+/// The one runner admission projection from an already-observed status
+/// report. `accepts_jobs`, `reasons` and `readiness_state` come from
+/// [`runner_readiness_for_status`], the same projection Lab admission,
+/// placement and offload use, so status cannot report a runner as accepting
+/// while admission refuses it.
+pub fn runner_admission_snapshot_for_status(
+    status: RunnerStatusReport,
+    readiness: RunnerAdmissionReadiness,
 ) -> RunnerAdmissionSnapshot {
-    let runner = load(&snapshot.status.runner_id).ok();
-    let capabilities_ready = homeboy_runtime_ready(&snapshot.status.runner_id, &snapshot.status);
-    let capacity = runner
-        .as_ref()
-        .and_then(|runner| runner.settings.concurrency_limit);
-    let exact_version = runner.as_ref().is_some_and(|runner| {
-        lab::offload::metadata::require_exact_runner_version(&runner.settings)
-    });
-    runner_status_admission_snapshot_for_status(
-        snapshot,
-        capacity,
-        capabilities_ready,
-        exact_version,
-    )
+    let policy = readiness.resolve(&status, None);
+    project_runner_admission(status, policy)
 }
 
-/// Attach the Lab admission readiness verdict to an observed snapshot.
-pub fn runner_status_admission_snapshot_for_status(
-    mut snapshot: RunnerAdmissionSnapshot,
-    capacity: Option<usize>,
-    capabilities_ready: bool,
-    exact_version: bool,
+fn project_runner_admission(
+    status: RunnerStatusReport,
+    policy: Option<RunnerAdmissionPolicy>,
 ) -> RunnerAdmissionSnapshot {
-    let readiness = runner_readiness_for_status(
-        &snapshot.status,
-        capacity,
-        capabilities_ready,
-        exact_version,
-    );
-    let accepts_jobs = !readiness.available_runner_ids.is_empty();
-    snapshot.summary.accepting_jobs &= accepts_jobs;
-    snapshot.summary.accepts_jobs = Some(accepts_jobs);
-    snapshot.summary.reasons = readiness.reasons;
-    snapshot.summary.readiness_state = Some(readiness.state.as_str().to_string());
-    snapshot
+    let mut summary = status.admission_summary();
+    if let Some(policy) = policy {
+        let readiness = runner_readiness_for_status(&status, &policy);
+        let accepts_jobs = !readiness.available_runner_ids.is_empty();
+        summary.accepting_jobs &= accepts_jobs;
+        summary.accepts_jobs = Some(accepts_jobs);
+        summary.reasons = readiness.reasons;
+        summary.readiness_state = Some(readiness.state.as_str().to_string());
+    }
+    RunnerAdmissionSnapshot { status, summary }
 }
 
-/// The one runner readiness function. Lab admission, `runner status` and
-/// `runner list`'s `admission=` column all derive from it.
+/// The one runner readiness function. Lab admission, placement, offload,
+/// `runner status` and `runner list`'s `admission=` column all derive from it.
 pub fn runner_readiness_for_status(
     status: &RunnerStatusReport,
-    capacity: Option<usize>,
-    capabilities_ready: bool,
-    exact_version: bool,
+    policy: &RunnerAdmissionPolicy,
 ) -> LabRunnerReadiness {
     lab_runner_readiness_from_candidates(
         Some(&status.runner_id),
         vec![lab_runner_admission_candidate(
             &status.runner_id,
-            capacity,
             status,
-            capabilities_ready,
-            exact_version,
+            policy,
         )],
     )
 }
 
-/// The `runner list` `admission=` label for a snapshot that carries the shared
-/// readiness verdict.
-pub fn runner_admission_label(snapshot: &RunnerAdmissionSnapshot) -> String {
-    let summary = &snapshot.summary;
-    // A recent failed job observation keeps an accepting runner degraded; a
-    // current one explains why it is not accepting.
-    let observing_now = snapshot
-        .status
-        .daemon_freshness
-        .as_ref()
-        .is_some_and(|freshness| freshness.is_observation_unavailable());
-    if summary
-        .pressure
-        .as_ref()
-        .is_some_and(|pressure| pressure.admission_reason.is_some())
-    {
-        return "pressure".to_string();
-    }
-    match summary.degraded.as_deref() {
-        Some(reason) if summary.accepting_jobs || observing_now => format!("degraded: {reason}"),
-        _ if summary.accepting_jobs => "accepting".to_string(),
-        _ if summary.readiness_state.as_deref()
-            == Some(LabRunnerReadinessState::ReadinessUnobserved.as_str()) =>
+/// The single-runner availability verdict (accepts, reasons) of the same
+/// projection [`runner_readiness_for_status`] aggregates. Placement and the
+/// Lab offload dispatch gate refuse with these reasons.
+pub fn runner_admission_availability(
+    status: &RunnerStatusReport,
+    policy: &RunnerAdmissionPolicy,
+) -> RunnerAvailability {
+    lab_runner_admission_candidate(&status.runner_id, status, policy).availability()
+}
+
+impl RunnerAdmissionSnapshot {
+    /// The `runner list` `admission=` label for a snapshot that carries the
+    /// shared readiness verdict.
+    pub fn admission_label(&self) -> String {
+        let summary = &self.summary;
+        // A recent failed job observation keeps an accepting runner degraded; a
+        // current one explains why it is not accepting.
+        let observing_now = self
+            .status
+            .daemon_freshness
+            .as_ref()
+            .is_some_and(|freshness| freshness.is_observation_unavailable());
+        if summary
+            .pressure
+            .as_ref()
+            .is_some_and(|pressure| pressure.admission_reason.is_some())
         {
-            LabRunnerReadinessState::ReadinessUnobserved
-                .as_str()
-                .to_string()
+            return "pressure".to_string();
         }
-        _ => "blocked".to_string(),
+        match summary.degraded.as_deref() {
+            Some(reason) if summary.accepting_jobs || observing_now => {
+                format!("degraded: {reason}")
+            }
+            _ if summary.accepting_jobs => "accepting".to_string(),
+            _ if summary.readiness_state.as_deref()
+                == Some(LabRunnerReadinessState::ReadinessUnobserved.as_str()) =>
+            {
+                LabRunnerReadinessState::ReadinessUnobserved
+                    .as_str()
+                    .to_string()
+            }
+            _ => "blocked".to_string(),
+        }
     }
 }
 
@@ -1057,14 +1089,8 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
         .into_iter()
         .filter_map(|runner| {
             let status = status(&runner.id).ok()?;
-            let capabilities_ready = homeboy_runtime_ready(&runner.id, &status);
-            Some(lab_runner_admission_candidate(
-                &runner.id,
-                runner.settings.concurrency_limit,
-                &status,
-                capabilities_ready,
-                lab::offload::metadata::require_exact_runner_version(&runner.settings),
-            ))
+            let policy = RunnerAdmissionPolicy::configured(Some(&runner), &status, None);
+            Some(lab_runner_admission_candidate(&runner.id, &status, &policy))
         })
         .collect();
     Ok(lab_runner_readiness_from_candidates(
@@ -1081,10 +1107,12 @@ pub fn runner_readiness_repair_admitted(runner_id: &str) -> Result<bool> {
     let status = status(runner_id)?;
     let candidate = lab_runner_admission_candidate(
         runner_id,
-        runner.settings.concurrency_limit,
         &status,
-        false,
-        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+        &RunnerAdmissionPolicy {
+            capacity: runner.settings.concurrency_limit,
+            capabilities_ready: false,
+            exact_version: lab::offload::metadata::require_exact_runner_version(&runner.settings),
+        },
     );
     Ok(candidate.connected
         && !candidate.stale_daemon
@@ -1190,35 +1218,39 @@ fn observe_lab_runner_admission_candidate(
 ) -> Result<DefaultLabRunnerCandidate> {
     let runner = load(runner_id)?;
     runner_probe_gate::invalidate_runner_probes(runner_id);
-    let status = runner_admission_snapshot_until(runner_id, deadline)?.status;
+    let status = runner_admission_snapshot(
+        runner_id,
+        Some(deadline),
+        RunnerAdmissionReadiness::Observation,
+    )?
+    .status;
+    // A capability probe failure is an observation failure here, not a
+    // readiness verdict: readiness refresh reports it as unobserved.
     let capabilities_ready = status.configured_job_binary_build_identity.is_some()
         || !runner_capability_inventory_until(runner_id, deadline)?
             .runtime_ids
             .is_empty();
     Ok(lab_runner_admission_candidate(
         runner_id,
-        runner.settings.concurrency_limit,
         &status,
-        capabilities_ready,
-        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+        &RunnerAdmissionPolicy {
+            capacity: runner.settings.concurrency_limit,
+            capabilities_ready,
+            exact_version: lab::offload::metadata::require_exact_runner_version(&runner.settings),
+        },
     ))
-}
-
-/// A status that observed the configured Homeboy binary's build identity has
-/// already executed it on the runner; only otherwise probe its capabilities.
-fn homeboy_runtime_ready(runner_id: &str, status: &RunnerStatusReport) -> bool {
-    status.configured_job_binary_build_identity.is_some()
-        || runner_capability_inventory(runner_id)
-            .is_ok_and(|inventory| !inventory.runtime_ids.is_empty())
 }
 
 fn lab_runner_admission_candidate(
     runner_id: &str,
-    capacity: Option<usize>,
     status: &RunnerStatusReport,
-    capabilities_ready: bool,
-    exact_version: bool,
+    policy: &RunnerAdmissionPolicy,
 ) -> DefaultLabRunnerCandidate {
+    let RunnerAdmissionPolicy {
+        capacity,
+        capabilities_ready,
+        exact_version,
+    } = *policy;
     let lease_verdict = status.daemon_lease_verdict(None);
     // A freshness observation without a published lease identity cannot
     // prove that the observed daemon is the session's current daemon. Keep
@@ -1249,10 +1281,11 @@ fn lab_runner_admission_candidate(
         capacity,
         stale_daemon: admission_warning.is_some(),
         unverified_daemon,
-        admission_fresh: lab::offload::metadata::lab_runner_daemon_fresh_for_admission(
+        admission_fresh: lab::offload::metadata::lab_runner_admission_refusal(
             status,
             exact_version,
-        ),
+        )
+        .is_none(),
         admission_failure_reason: if status.under_pressure() {
             Some("pressure".to_string())
         } else {
@@ -1579,15 +1612,8 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
         .into_iter()
         .filter_map(|runner| {
             let status = status(&runner.id).ok()?;
-            let capabilities_ready = homeboy_runtime_ready(&runner.id, &status);
-            let candidate = lab_runner_admission_candidate(
-                &runner.id,
-                runner.settings.concurrency_limit,
-                &status,
-                capabilities_ready,
-                lab::offload::metadata::require_exact_runner_version(&runner.settings),
-            );
-            Some(candidate.availability())
+            let policy = RunnerAdmissionPolicy::configured(Some(&runner), &status, None);
+            Some(lab_runner_admission_candidate(&runner.id, &status, &policy).availability())
         })
         .collect();
     availability.sort_by(|a, b| a.runner_id.cmp(&b.runner_id));
@@ -2053,15 +2079,26 @@ mod tests {
     use super::*;
     use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 
+    fn test_policy(capacity: Option<usize>, exact_version: bool) -> RunnerAdmissionPolicy {
+        RunnerAdmissionPolicy {
+            capacity,
+            capabilities_ready: true,
+            exact_version,
+        }
+    }
+
     #[test]
     fn observed_build_identity_proves_the_homeboy_runtime_without_a_probe() {
         homeboy_core::test_support::with_isolated_home(|_| {
             // The runner is not configured, so any capability probe would fail.
             let mut status = skewed_runner_status("1.0.0".to_string());
-            assert!(!homeboy_runtime_ready("unconfigured-runner", &status));
+            let ready = |status: &RunnerStatusReport| {
+                RunnerAdmissionPolicy::configured(None, status, None).capabilities_ready
+            };
+            assert!(!ready(&status));
             status.configured_job_binary_build_identity =
                 Some("homeboy 1.0.0+0123456789ab".to_string());
-            assert!(homeboy_runtime_ready("unconfigured-runner", &status));
+            assert!(ready(&status));
         });
     }
 
@@ -2162,7 +2199,8 @@ mod tests {
             recent_observation_failure: None,
             session_path: "test".to_string(),
         };
-        let snapshot = RunnerAdmissionSnapshot::from_status(status);
+        let snapshot =
+            runner_admission_snapshot_for_status(status, RunnerAdmissionReadiness::Observation);
 
         assert!(snapshot.summary.daemon_compatible);
         assert!(snapshot.summary.safe_to_rotate);
@@ -2206,7 +2244,8 @@ mod tests {
             session_path: "test".to_string(),
         };
 
-        let snapshot = RunnerAdmissionSnapshot::from_status(status);
+        let snapshot =
+            runner_admission_snapshot_for_status(status, RunnerAdmissionReadiness::Observation);
 
         assert!(snapshot.summary.accepting_jobs);
     }
@@ -2260,7 +2299,8 @@ mod tests {
             session_path: "test".to_string(),
         };
 
-        let snapshot = RunnerAdmissionSnapshot::from_status(status);
+        let snapshot =
+            runner_admission_snapshot_for_status(status, RunnerAdmissionReadiness::Observation);
 
         assert!(!snapshot.summary.accepting_jobs);
         assert!(snapshot.summary.safe_to_rotate);
@@ -2414,21 +2454,17 @@ mod tests {
                 paths: Vec::new(),
             });
 
-        let status_view = runner_status_admission_snapshot_for_status(
-            runner_admission_snapshot_for_status(status.clone()),
-            Some(2),
-            true,
-            false,
+        let status_view = runner_admission_snapshot_for_status(
+            status.clone(),
+            RunnerAdmissionReadiness::Policy(test_policy(Some(2), false)),
         )
         .summary;
         let admission = lab_runner_readiness_from_candidates(
             Some("homeboy-lab"),
             vec![lab_runner_admission_candidate(
                 "homeboy-lab",
-                Some(2),
                 &status,
-                true,
-                false,
+                &test_policy(Some(2), false),
             )],
         );
 
@@ -2457,12 +2493,10 @@ mod tests {
                 "readiness_unobserved",
             ),
         ] {
-            let admission = runner_readiness_for_status(&status, Some(2), true, false);
-            let snapshot = runner_status_admission_snapshot_for_status(
-                runner_admission_snapshot_for_status(status),
-                Some(2),
-                true,
-                false,
+            let admission = runner_readiness_for_status(&status, &test_policy(Some(2), false));
+            let snapshot = runner_admission_snapshot_for_status(
+                status,
+                RunnerAdmissionReadiness::Policy(test_policy(Some(2), false)),
             );
 
             assert_eq!(admission.state, state);
@@ -2475,7 +2509,7 @@ mod tests {
                 Some(!admission.available_runner_ids.is_empty())
             );
             assert_eq!(snapshot.summary.reasons, admission.reasons);
-            assert_eq!(runner_admission_label(&snapshot), label);
+            assert_eq!(snapshot.admission_label(), label);
         }
     }
 
@@ -2503,7 +2537,7 @@ mod tests {
         status.session.as_mut().unwrap().homeboy_build_identity =
             Some("homeboy 0.435.6+de88dcd".to_string());
         let candidate =
-            lab_runner_admission_candidate("homeboy-lab", Some(1), &status, true, false);
+            lab_runner_admission_candidate("homeboy-lab", &status, &test_policy(Some(1), false));
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
         assert_eq!(readiness.state, LabRunnerReadinessState::ConnectedReady);
@@ -2514,7 +2548,8 @@ mod tests {
     #[test]
     fn current_release_refresh_respects_exact_version_admission() {
         let status = skewed_runner_status(patch_drift_version());
-        let candidate = lab_runner_admission_candidate("homeboy-lab", Some(1), &status, true, true);
+        let candidate =
+            lab_runner_admission_candidate("homeboy-lab", &status, &test_policy(Some(1), true));
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
         assert_eq!(readiness.state, LabRunnerReadinessState::Stale);

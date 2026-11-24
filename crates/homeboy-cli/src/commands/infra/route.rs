@@ -918,7 +918,12 @@ pub(crate) fn cook_admission_decision(
     };
     let runner_id = &runner.runner_id;
     let snapshot = homeboy::runner::runners::persisted_status(runner_id)
-        .map(homeboy::runner::runners::runner_admission_snapshot_for_status)
+        .map(|status| {
+            homeboy::runner::runners::runner_admission_snapshot_for_status(
+                status,
+                homeboy::runner::runners::RunnerAdmissionReadiness::Observation,
+            )
+        })
         .ok();
     let ready = preflight.lab_readiness.as_ref().is_some_and(|r| {
         r.state == "connected_ready"

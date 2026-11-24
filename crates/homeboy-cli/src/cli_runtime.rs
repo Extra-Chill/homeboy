@@ -705,13 +705,21 @@ pub(crate) fn select_unmaterialized_cook_runner(
         )
     };
     if let Some(runner_id) = runner_ref {
-        if crate::runner::runners::runner_admission_snapshot(runner_id)?
-            .summary
-            .accepting_jobs
+        if crate::runner::runners::runner_admission_snapshot(
+            runner_id,
+            None,
+            crate::runner::runners::RunnerAdmissionReadiness::Observation,
+        )?
+        .summary
+        .accepting_jobs
         {
             return eligible(runner_id.to_string());
         }
-        let snapshot = crate::runner::runners::runner_admission_snapshot(runner_id)?;
+        let snapshot = crate::runner::runners::runner_admission_snapshot(
+            runner_id,
+            None,
+            crate::runner::runners::RunnerAdmissionReadiness::Observation,
+        )?;
         return Ok(Err(snapshot.summary.next_action.unwrap_or_else(|| {
             format!("runner `{runner_id}` is not accepting jobs")
         })));
@@ -1919,9 +1927,13 @@ pub(crate) fn execution_step_cook_preflight(
             .and_then(|value| value.selected_runner_id.clone())
     });
     if let Some(runner_id) = cli.runner.as_deref() {
-        if !crate::runner::runners::runner_admission_snapshot(runner_id)?
-            .summary
-            .accepting_jobs
+        if !crate::runner::runners::runner_admission_snapshot(
+            runner_id,
+            None,
+            crate::runner::runners::RunnerAdmissionReadiness::Observation,
+        )?
+        .summary
+        .accepting_jobs
         {
             let mut error = crate::core::Error::validation_invalid_argument(
                 "runner",

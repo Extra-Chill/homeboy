@@ -1829,7 +1829,12 @@ fn reconciled_refresh_admission_in_roots(
     let admission = reconciled_refresh_admission_with(
         runner_id,
         super::connection::reconcile_status,
-        super::runner_admission_snapshot_for_status,
+        |status| {
+            super::runner_admission_snapshot_for_status(
+                status,
+                super::RunnerAdmissionReadiness::Observation,
+            )
+        },
     )?;
     if admission
         .status
@@ -1840,7 +1845,10 @@ fn reconciled_refresh_admission_in_roots(
         let runner = load(runner_id)?;
         if runner.settings.service_managed {
             let upgrade_status = super::connection::pre_describe_upgrade_status(&admission.status)?;
-            let upgrade = super::runner_admission_snapshot_for_status(upgrade_status);
+            let upgrade = super::runner_admission_snapshot_for_status(
+                upgrade_status,
+                super::RunnerAdmissionReadiness::Observation,
+            );
             if !upgrade.summary.safe_to_rotate {
                 return Err(Error::validation_invalid_argument(
                     "upgrade_ownership",
