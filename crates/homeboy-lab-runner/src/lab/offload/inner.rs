@@ -1687,7 +1687,7 @@ pub(crate) fn run_lab_offload_inner(
             capability_admission_has_blocking_drift(admission, require_exact_runner_version)
         })
         .unwrap_or_else(|| {
-            lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+            lab_runner_homeboy_has_blocking_status_drift(
                 &runner_status,
                 require_exact_runner_version,
             )
@@ -2535,16 +2535,25 @@ fn direct_daemon_admission_coordinates<'a>(
 /// - A disconnected runner was rejected with a generic "requires a connected
 ///   daemon" message that omitted the structured reason and recovery evidence.
 ///
-/// Routing through `RunnerAvailability` + `lab_runner_availability_error` keeps
+/// Routing through `runner_admission_availability` + `lab_runner_availability_error` keeps
 /// this deeper gate consistent with the preflight gate and preserves the
 /// stale-daemon reason and its exact recovery command in the returned error.
-fn require_available_lab_runner(
+pub(crate) fn require_available_lab_runner(
     _runner_id: &str,
     runner_status: &RunnerStatusReport,
     concurrency_limit: Option<usize>,
     command_label: &str,
 ) -> Result<()> {
-    let availability = runner_status.admission_availability(concurrency_limit);
+    // Capability and runner-Homeboy version admission are separate plan steps
+    // with their own refusals; this gate is the shared admission projection.
+    let availability = crate::runner_admission_availability(
+        runner_status,
+        &crate::RunnerAdmissionPolicy {
+            capacity: concurrency_limit,
+            capabilities_ready: true,
+            exact_version: false,
+        },
+    );
     if availability.accepts_jobs {
         return Ok(());
     }

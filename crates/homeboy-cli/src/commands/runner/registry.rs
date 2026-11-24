@@ -187,8 +187,9 @@ fn runner_inventory_summary(
         && !runner::is_host_daemon_runner(&configured.runner_id);
     let operator = status.map(super::status::operator_summary);
     let admission = status.map(|status| {
-        homeboy::runner::runners::runner_readiness_admission_snapshot(
-            homeboy::runner::runner_admission_snapshot_for_status(status.clone()),
+        homeboy::runner::runners::runner_admission_snapshot_for_status(
+            status.clone(),
+            homeboy::runner::runners::RunnerAdmissionReadiness::Configured,
         )
     });
     RunnerInventorySummary {
@@ -210,7 +211,7 @@ fn runner_inventory_summary(
         } else {
             admission
                 .as_ref()
-                .map(homeboy::runner::runners::runner_admission_label)
+                .map(homeboy::runner::RunnerAdmissionSnapshot::admission_label)
                 .unwrap_or_else(|| "blocked".to_string())
         },
         concurrency: RunnerInventoryConcurrency {

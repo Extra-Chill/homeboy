@@ -30,10 +30,20 @@ pub fn report(
     // The snapshot captures the live status and its admission summary together,
     // while the Lab status probes retain their read-only bounds within doctor.
     let admission_snapshot = if scoped {
-        runner::runner_admission_snapshot_until(runner_id, observation_deadline).ok()
+        runner::runner_admission_snapshot(
+            runner_id,
+            Some(observation_deadline),
+            runner::RunnerAdmissionReadiness::Observation,
+        )
+        .ok()
     } else {
         runner::persisted_status_until(runner_id, observation_deadline)
-            .map(runner::runner_admission_snapshot_for_status)
+            .map(|status| {
+                runner::runner_admission_snapshot_for_status(
+                    status,
+                    runner::RunnerAdmissionReadiness::Observation,
+                )
+            })
             .ok()
     };
     let persisted_status = admission_snapshot.as_ref().map(|snapshot| &snapshot.status);

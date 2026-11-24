@@ -66,9 +66,21 @@ impl RunnerDiscoveryService {
                 reasons: Vec::new(),
             });
         }
+        // Capabilities are served by their own Runner API endpoint.
+        let policy = crate::RunnerAdmissionPolicy {
+            capacity: runner.settings.concurrency_limit,
+            capabilities_ready: true,
+            exact_version: crate::lab::offload::metadata::require_exact_runner_version(
+                &runner.settings,
+            ),
+        };
         Ok(readiness(
             &runner,
-            crate::runner_admission_snapshot(runner_id)?,
+            crate::runner_admission_snapshot(
+                runner_id,
+                None,
+                crate::RunnerAdmissionReadiness::Policy(policy),
+            )?,
         ))
     }
 
@@ -324,10 +336,7 @@ fn descriptor(runner: &Runner) -> RunnerDescriptor {
 }
 
 fn readiness(runner: &Runner, snapshot: RunnerAdmissionSnapshot) -> RunnerReadiness {
-    let availability = snapshot
-        .status
-        .admission_availability(runner.settings.concurrency_limit);
-    let mut reasons = availability.reasons;
+    let mut reasons = snapshot.summary.reasons;
     if !snapshot.summary.daemon_compatible {
         reasons.push("daemon_incompatible".to_string());
     }
@@ -349,7 +358,7 @@ fn readiness(runner: &Runner, snapshot: RunnerAdmissionSnapshot) -> RunnerReadin
         connected: snapshot.summary.connected,
         accepting_jobs: snapshot.summary.accepting_jobs,
         active_job_count: snapshot.summary.active_job_count,
-        capacity: availability.capacity,
+        capacity: runner.settings.concurrency_limit,
         reasons,
     }
 }

@@ -1987,7 +1987,17 @@ fn status_admission_uses_one_runner_observation_of_the_current_session() {
             "unverified configured job binary remains fenced"
         );
         assert_eq!(summary.active_job_count, Some(1));
-        assert!(!report.admission_availability(Some(32)).accepts_jobs);
+        assert!(
+            !crate::runner_admission_availability(
+                &report,
+                &crate::RunnerAdmissionPolicy {
+                    capacity: Some(32),
+                    capabilities_ready: true,
+                    exact_version: false,
+                },
+            )
+            .accepts_jobs
+        );
 
         stop.store(true, std::sync::atomic::Ordering::Release);
         server.join().expect("daemon server");

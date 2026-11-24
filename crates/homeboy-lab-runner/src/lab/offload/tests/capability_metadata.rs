@@ -900,7 +900,9 @@ fn direct_runner_admission_compares_daemon_with_configured_runner_identity() {
 
     // Direct SSH admission compares the daemon with the runner-side executable
     // that will execute jobs, never with the controller's target-specific binary.
-    assert!(!lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, false,));
+    assert!(!lab_runner_homeboy_has_blocking_status_drift(
+        &status, false,
+    ));
 }
 
 #[test]
@@ -910,8 +912,12 @@ fn direct_runner_admission_does_not_gate_on_configured_build_identity() {
     session.mode = RunnerTunnelMode::DirectSsh;
     session.homeboy_build_identity = Some("homeboy 0.295.0+b03d659866d1".to_string());
 
-    assert!(!lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, false,));
-    assert!(!lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, false,));
+    assert!(!lab_runner_homeboy_has_blocking_status_drift(
+        &status, false,
+    ));
+    assert!(!lab_runner_homeboy_has_blocking_status_drift(
+        &status, false,
+    ));
 }
 
 #[test]
@@ -926,7 +932,9 @@ fn daemon_build_identity_drift_does_not_block_admission() {
         Some("homeboy 0.229.11+new".to_string()),
     ));
 
-    assert!(!lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, false));
+    assert!(!lab_runner_homeboy_has_blocking_status_drift(
+        &status, false
+    ));
 }
 
 #[test]

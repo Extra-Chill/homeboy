@@ -565,15 +565,21 @@ fn observe_gate_admission(
 ) -> Result<(LabGateAdmission, crate::RunnerAdmissionSnapshot)> {
     let runner = crate::load(runner_id)?;
     let exact = crate::lab::offload::metadata::require_exact_runner_version(&runner.settings);
-    let snapshot = crate::runner_admission_snapshot(runner_id)?;
+    let snapshot = crate::runner_admission_snapshot(
+        runner_id,
+        None,
+        crate::RunnerAdmissionReadiness::Observation,
+    )?;
     let status = &snapshot.status;
     // Capabilities are not part of gate admission, so they are not projected
     // as a refusal reason here.
-    let projected = crate::runner_status_admission_snapshot_for_status(
-        crate::runner_admission_snapshot_for_status(status.clone()),
-        runner.settings.concurrency_limit,
-        true,
-        exact,
+    let projected = crate::runner_admission_snapshot_for_status(
+        status.clone(),
+        crate::RunnerAdmissionReadiness::Policy(crate::RunnerAdmissionPolicy {
+            capacity: runner.settings.concurrency_limit,
+            capabilities_ready: true,
+            exact_version: exact,
+        }),
     );
     use crate::lab::offload::metadata::{lab_runner_admission_refusal, LabRunnerAdmissionRefusal};
     let freshness = match lab_runner_admission_refusal(status, exact) {
@@ -734,7 +740,11 @@ fn execute_owned(
     // Observe identity/freshness, not a prediction of host capacity. The
     // executing daemon owns the durable capacity queue.
     let runner = crate::load(&request.runner_id)?;
-    let snapshot = crate::runner_admission_snapshot(&request.runner_id)?;
+    let snapshot = crate::runner_admission_snapshot(
+        &request.runner_id,
+        None,
+        crate::RunnerAdmissionReadiness::Observation,
+    )?;
     let refusal = crate::lab::offload::metadata::lab_runner_admission_refusal(
         &snapshot.status,
         crate::lab::offload::metadata::require_exact_runner_version(&runner.settings),

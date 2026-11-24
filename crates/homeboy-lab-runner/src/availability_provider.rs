@@ -127,7 +127,12 @@ fn eligibility_from_readiness(readiness: RunnerReadiness) -> std::result::Result
 pub fn register() {
     homeboy_core::daemon::step_job::register_step_runner_wait_context(std::sync::Arc::new(
         |runner| {
-            let snapshot = crate::runner_status_admission_snapshot(runner).ok();
+            let snapshot = crate::runner_admission_snapshot(
+                runner,
+                None,
+                crate::RunnerAdmissionReadiness::Configured,
+            )
+            .ok();
             serde_json::json!({
                 "controller_build": homeboy_core::build_identity::current(),
                 "runner_build": snapshot.as_ref().and_then(|snapshot| snapshot.summary.daemon_build_identity.as_ref()),
