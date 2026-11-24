@@ -561,9 +561,8 @@ impl ObservationStore {
         if !owned {
             return Ok(());
         }
-        // Every run-owned table, not just artifacts. This path used to clear
-        // artifacts alone, which silently orphaned any other child row; with
-        // foreign keys enforced (#11129) it would instead fail the parent
+        // Every run-owned table, not just artifacts: with foreign keys
+        // enforced (#11129) any remaining child row would fail the parent
         // delete outright.
         for table in RUN_OWNED_CHILD_TABLES {
             tx.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [run_id])

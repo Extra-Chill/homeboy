@@ -125,9 +125,7 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
             "daemon lease pid is not running",
         ));
     }
-    // v1 has the same routing/ownership fields as v2, but no executable
-    // identity. Keep accepting it across binary upgrades; reject unknown schemas.
-    if state.schema != DAEMON_LEASE_SCHEMA && state.schema != "homeboy.daemon.session_lease.v1" {
+    if state.schema != DAEMON_LEASE_SCHEMA {
         return Ok(stale_lease(
             state,
             true,
