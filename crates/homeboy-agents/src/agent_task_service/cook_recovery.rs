@@ -2985,8 +2985,8 @@ mod tests {
             .unwrap();
             store
                 .mutate_record(cook_id, |record| {
-                    record.metadata["detached_cook_handoff"]["state"] =
-                        serde_json::json!("exited_before_handoff");
+                    record.metadata["detached_cook_handoff"]["admission_state"] =
+                        serde_json::json!("failed");
                     record
                         .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                     true

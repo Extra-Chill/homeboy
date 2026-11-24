@@ -203,7 +203,6 @@ pub fn record_detached_cook_handoff_parent_in_store(
 
     let mut record = submit_detached_handoff_placeholder_in_store(lifecycle_store, &cook_id)?;
     record.metadata["detached_cook_handoff"] = json!({
-        "state": "pending",
         "admission_state": "pre_supervisor",
         "admission_deadline_at": (chrono::Utc::now()
             + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
@@ -254,7 +253,6 @@ pub fn claim_detached_cook_handoff_parent_in_store(
     let claimed = lifecycle_store.mutate_record(&cook_id, |record| {
         let handoff = &record.metadata["detached_cook_handoff"];
         let reclaimable_pre_projection_failure = record.state() == RunExecutionState::Failed
-            && handoff["state"] == "exited_before_handoff"
             && handoff["admission_state"] == "failed"
             && lifecycle_store.read_cook_index(&cook_id).is_err()
             && !record.metadata["unmaterialized_cook_admission"].is_object()
@@ -262,8 +260,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         if handoff["cook_id"] != cook_id
             || (record.state().is_terminal() && !reclaimable_pre_projection_failure)
             || (!reclaimable_pre_projection_failure
-                && (handoff["state"] != "pending"
-                    || handoff["admission_state"] != "pre_supervisor"
+                && (handoff["admission_state"] != "pre_supervisor"
                     || (handoff.get("launcher_id").is_some()
                         && detached_cook_launcher_is_live(record, chrono::Utc::now()))))
         {
@@ -272,7 +269,6 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         if reclaimable_pre_projection_failure {
             set_run_state(record, RunExecutionState::Queued);
             record.lifecycle.execution.finished_at = None;
-            record.metadata["detached_cook_handoff"]["state"] = json!("pending");
             record.metadata["detached_cook_handoff"]["admission_state"] = json!("pre_supervisor");
             record.metadata["detached_cook_handoff"]
                 .as_object_mut()
@@ -311,7 +307,8 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         None,
     );
     if let Some(record) = existing {
-        error.details["handoff_state"] = record.metadata["detached_cook_handoff"]["state"].clone();
+        error.details["handoff_state"] =
+            json!(CookAdmissionPhase::of(&record).map(CookAdmissionPhase::handoff_label));
         error.details["admission_state"] =
             record.metadata["detached_cook_handoff"]["admission_state"].clone();
         error.details["launcher_id"] =
@@ -402,7 +399,6 @@ pub fn prepare_unmaterialized_cook_admission(
         submission_metadata.insert(
             "detached_cook_handoff".to_string(),
             json!({
-                "state": "pending",
                 "admission_state": "unmaterialized",
                 "cook_id": cook_id,
             }),
@@ -529,25 +525,7 @@ fn record_unmaterialized_cook_admission_locked(
     metadata: serde_json::Map<String, Value>,
 ) -> Result<AgentTaskRunRecord> {
     const SCHEMA: &str = "homeboy/unmaterialized-cook-admission/v1";
-    if !matches!(
-        state,
-        "queued" | "blocked_runner_unavailable" | "blocked_runner_stale"
-    ) {
-        return Err(Error::validation_invalid_argument(
-            "cook_admission.state",
-            "unmaterialized Cook admission requires a typed queued or runner-blocked state",
-            Some(state.to_string()),
-            None,
-        ));
-    }
-    if !binding.is_object() {
-        return Err(Error::validation_invalid_argument(
-            "cook_admission.binding",
-            "unmaterialized Cook admission requires an immutable object binding",
-            None,
-            None,
-        ));
-    }
+    validate_unmaterialized_admission_input(&binding, state)?;
 
     let cook_id = sanitize_run_id(cook_id);
     if lifecycle_store.read_record(&cook_id).is_err() {
@@ -560,7 +538,6 @@ fn record_unmaterialized_cook_admission_locked(
         submission_metadata.insert(
             "detached_cook_handoff".to_string(),
             json!({
-                "state": "pending",
                 "admission_state": "unmaterialized",
                 "cook_id": cook_id,
             }),
@@ -896,7 +873,6 @@ pub fn update_unmaterialized_cook_placement_in_store(
             let execution_started = record.metadata["provider_executions"]
                 .as_array()
                 .is_some_and(|executions| !executions.is_empty())
-                || store.read_cook_index(&cook_id).is_ok()
                 || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"]
                     .as_str()
                     .is_some_and(|run_id| store.read_record(run_id).is_ok());
@@ -1021,45 +997,6 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
     Ok(())
 }
 
-/// Attach the spawned child's identity inside an explicitly rooted store.
-///
-/// The cancellation state this write reads — the record's own run state and the
-/// fence it carries forward — is read inside the mutation, from the same store
-/// the mutation lands in. Ambient, another home's parent could decide whether
-/// this child is recorded as pending or already cancelled, and the durable
-/// identity cancellation later signals on could be attached to a record no
-/// cancellation in this store would ever reach.
-pub fn record_detached_cook_handoff_child_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    pid: u32,
-    start_identity: homeboy_core::process::ProcessStartIdentity,
-) -> Result<AgentTaskRunRecord> {
-    let cook_id = sanitize_run_id(cook_id);
-    let record = lifecycle_store.mutate_record(&cook_id, |record| {
-        // A concurrent observer may have already terminalized the handoff
-        // before this attachment write acquired the record lock. Keep that
-        // classification intact for the launcher to report.
-        if record.state().is_terminal() {
-            return false;
-        }
-        let metadata = record.ensure_metadata_object();
-        metadata["detached_cook_handoff"] = json!({
-            "state": "pending",
-        "admission_state": "child_attached",
-        "child_supervisor_deadline_at": (chrono::Utc::now()
-            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
-            .to_rfc3339(),
-            "cook_id": cook_id,
-            "child_pid": pid,
-            "child_start_identity": start_identity,
-        });
-        record.updated_at = Some(now_timestamp());
-        true
-    })?;
-    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
-}
-
 /// Atomically transfer a claimed handoff parent to its submitted supervisor.
 ///
 /// A launcher has a live child after spawn but before the child can materialize
@@ -1082,7 +1019,6 @@ pub fn record_claimed_detached_cook_handoff_supervision_in_store(
         let handoff = &record.metadata["detached_cook_handoff"];
         if record.state().is_terminal()
             || handoff["cook_id"] != cook_id
-            || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
             || handoff["launcher_id"] != launcher_id
         {
@@ -1108,7 +1044,7 @@ pub fn record_claimed_detached_cook_handoff_supervision_in_store(
         if let Some(record) = existing {
             error.details["run_state"] = json!(format!("{:?}", record.state()));
             error.details["handoff_state"] =
-                record.metadata["detached_cook_handoff"]["state"].clone();
+                json!(CookAdmissionPhase::of(&record).map(CookAdmissionPhase::handoff_label));
             error.details["admission_state"] =
                 record.metadata["detached_cook_handoff"]["admission_state"].clone();
             error.details["expected_launcher_id"] = json!(launcher_id);
@@ -1120,34 +1056,6 @@ pub fn record_claimed_detached_cook_handoff_supervision_in_store(
         }
         error
     })
-}
-
-/// Persist the supervising daemon job inside an explicitly rooted store.
-///
-/// The ownership guard — that this record really is the named Cook's handoff
-/// parent — sits inside the mutation closure, so it is read from the store the
-/// write lands in. This is also the transition to `supervising`, the admission
-/// state that makes a lease live indefinitely, so a supervisor recorded against
-/// another home's parent would leave this store's admission to expire while a
-/// daemon was in fact supervising it.
-pub fn record_detached_cook_supervisor_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    job_id: &str,
-) -> Result<()> {
-    let cook_id = sanitize_run_id(cook_id);
-    let job_id = job_id.to_string();
-    let _ = lifecycle_store.mutate_record(&cook_id, |record| {
-        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
-            return false;
-        }
-        record.metadata["detached_cook_handoff"]["supervisor_job_id"] = json!(job_id);
-        record.metadata["detached_cook_handoff"]["admission_state"] = json!("supervising");
-        record.metadata["detached_cook_handoff"]["reattach_command"] =
-            json!(format!("homeboy agent-task status {cook_id}"));
-        true
-    })?;
-    Ok(())
 }
 
 /// Reserve a detached Cook's first attempt within its explicitly selected
@@ -1173,22 +1081,20 @@ pub fn reserve_detached_cook_handoff_materialization_in_store(
         }
         // A redirected parent has completed its one-time handoff. Later Cook
         // retries are ordinary attempt materializations and need no reservation.
-        if record.metadata["detached_cook_handoff"]["state"] == "redirected" {
-            return true;
-        }
-        if record.state().is_terminal()
-            || record.metadata["detached_cook_handoff"]["state"] != "pending"
-        {
-            return false;
+        match CookAdmissionPhase::of(record) {
+            Some(CookAdmissionPhase::Materialized) => return true,
+            Some(CookAdmissionPhase::Pending { .. }) => {}
+            _ => return false,
         }
         let metadata = record.ensure_metadata_object();
         metadata["detached_cook_handoff"]["materializing_attempt_run_id"] = json!(attempt_run_id);
-        if let Some(admission) = metadata.get_mut("unmaterialized_cook_admission") {
-            advance_unmaterialized_admission(
-                admission,
-                "materializing",
-                format!("materializing attempt {attempt_run_id}"),
-            );
+        // Status never reports the pre-materialization blocker once an attempt
+        // takes custody; materialization itself is the derived phase.
+        let admission = metadata.get_mut("unmaterialized_cook_admission");
+        if let Some(admission) = admission.and_then(Value::as_object_mut) {
+            admission.insert("state".to_string(), json!("materializing"));
+            let reason = format!("materializing attempt {attempt_run_id}");
+            admission.insert("reason".to_string(), json!(reason));
         }
         record.updated_at = Some(now_timestamp());
         true
@@ -1276,14 +1182,14 @@ fn terminalize_detached_cook_handoff_parent_in_store(
 ) -> Result<Option<AgentTaskRunRecord>> {
     let cook_id = sanitize_run_id(cook_id);
     lifecycle_store.transition_when(&cook_id, |record| {
-        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
-            || record.state().is_terminal()
-            || record.metadata["detached_cook_handoff"]["state"] != "pending"
-            || lifecycle_store.read_cook_index(&cook_id).is_ok()
-            || record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"]
-                .as_str()
-                .is_some_and(|run_id| lifecycle_store.read_record(run_id).is_ok())
-        {
+        let live = match CookAdmissionPhase::of(record) {
+            Some(CookAdmissionPhase::Pending { .. }) => true,
+            Some(CookAdmissionPhase::Materializing { attempt_run_id }) => {
+                lifecycle_store.read_record(attempt_run_id).is_err()
+            }
+            _ => false,
+        };
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id || !live {
             return None;
         }
         // The guard above admits only a live parent, so this is always the
@@ -1306,7 +1212,6 @@ pub fn fail_claimed_detached_cook_handoff_parent_in_store(
         if handoff["cook_id"] != cook_id
             || handoff["launcher_id"] != launcher_id
             || record.state().is_terminal()
-            || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
         {
             return None;
@@ -1335,7 +1240,6 @@ fn detached_cook_handoff_failure_metadata(
     reason: &str,
 ) -> serde_json::Map<String, Value> {
     let mut handoff = record.metadata["detached_cook_handoff"].clone();
-    handoff["state"] = json!("exited_before_handoff");
     handoff["admission_state"] = json!("failed");
     handoff["reason"] = json!(reason);
     let mut metadata = serde_json::Map::new();
@@ -1355,14 +1259,14 @@ fn complete_detached_cook_handoff_parent_in_store(
     }
     let _ =
         lifecycle_store.transition_when_locked_without_terminal_projection(&cook_id, |record| {
+            // A live handoff is always pending; materialization is derived from
+            // `admission_state`/`attempt_run_id`, not a stored label (#18908).
             if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
                 || record.state().is_terminal()
-                || record.metadata["detached_cook_handoff"]["state"] != "pending"
             {
                 return None;
             }
             let mut handoff = record.metadata["detached_cook_handoff"].clone();
-            handoff["state"] = json!("redirected");
             handoff["admission_state"] = json!("materialized");
             handoff["attempt_run_id"] = json!(attempt_run_id);
             handoff
@@ -1371,19 +1275,6 @@ fn complete_detached_cook_handoff_parent_in_store(
                 .remove("materializing_attempt_run_id");
             let mut metadata = serde_json::Map::new();
             metadata.insert("detached_cook_handoff".to_string(), handoff);
-            if let Some(mut admission) = record
-                .metadata
-                .get("unmaterialized_cook_admission")
-                .filter(|admission| admission.is_object())
-                .cloned()
-            {
-                advance_unmaterialized_admission(
-                    &mut admission,
-                    "materialized",
-                    format!("materialized as attempt {attempt_run_id}"),
-                );
-                metadata.insert("unmaterialized_cook_admission".to_string(), admission);
-            }
             Some(AgentTaskTransition::Terminate {
                 outcome: RunExecutionState::Succeeded,
                 metadata,
@@ -1392,24 +1283,11 @@ fn complete_detached_cook_handoff_parent_in_store(
     Ok(())
 }
 
-/// Advance an unmaterialized Cook admission once its first attempt takes
-/// custody, so status never reports the pre-materialization blocker on a Cook
-/// that is materializing or running. Records without an admission are untouched.
-fn advance_unmaterialized_admission(admission: &mut Value, state: &str, reason: String) {
-    if let Some(admission) = admission.as_object_mut() {
-        admission.insert("state".to_string(), json!(state));
-        admission.insert("reason".to_string(), json!(reason));
-    }
-}
-
 /// A detached Cook parent is admission state, never an executable queued plan.
-///
-/// The original persisted shape only carries `state: pending`; treating that as
-/// the default preserves mixed-version records while newer writers add a more
-/// specific `admission_state` for operator visibility.
+/// A terminal root that never handed off still reports its pending admission.
 pub fn has_pending_detached_cook_handoff(record: &AgentTaskRunRecord) -> bool {
     record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id
-        && record.metadata["detached_cook_handoff"]["state"] == "pending"
+        && CookAdmissionPhase::of(record).is_some_and(|phase| phase.handoff_label() == "pending")
 }
 
 pub fn detached_cook_admission_is_live(
@@ -1467,13 +1345,12 @@ pub fn has_expired_detached_cook_admission(
 /// behalf, so the admission goes back to the daemon's queue instead of
 /// expiring as an ownerless detached handoff.
 pub fn has_orphaned_unmaterialized_cook_admission(record: &AgentTaskRunRecord) -> bool {
+    let step = Some("unmaterialized");
     has_pending_detached_cook_handoff(record)
-        && record.metadata["detached_cook_handoff"]["admission_state"] == "unmaterialized"
+        && CookAdmissionPhase::of(record) == Some(CookAdmissionPhase::Pending { step })
         && is_unmaterialized_cook_admission(record)
         && record.state() == RunExecutionState::Running
         && record.metadata["execution_scheduling"]["current_intent_id"].is_string()
-        && record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"].is_null()
-        && record.metadata["detached_cook_handoff"]["attempt_run_id"].is_null()
         && !record.has_live_execution_step_owner()
         && !record.owner_process_is_running()
 }
@@ -1499,9 +1376,7 @@ pub fn requeue_orphaned_unmaterialized_cook_admission_in_store(
     };
     let mut intent_error = None;
     let requeued = lifecycle_store.transition_when(&cook_id, |stored| {
-        if !has_orphaned_unmaterialized_cook_admission(stored)
-            || lifecycle_store.read_cook_index(&cook_id).is_ok()
-        {
+        if !has_orphaned_unmaterialized_cook_admission(stored) {
             return None;
         }
         let mut prepared = stored.clone();
@@ -3957,6 +3832,78 @@ pub fn record_provider_execution_cleanup_elapsed_in_store(
         ));
     }
     record.ok_or_else(|| Error::internal_unexpected("provider cleanup timing was unchanged"))
+}
+
+/// Attach the spawned child's identity inside an explicitly rooted store.
+/// Test fixture for the legacy `child_attached` step: production launches
+/// publish child and supervisor together through
+/// [`record_claimed_detached_cook_handoff_supervision_in_store`].
+///
+/// The cancellation state this write reads — the record's own run state and the
+/// fence it carries forward — is read inside the mutation, from the same store
+/// the mutation lands in. Ambient, another home's parent could decide whether
+/// this child is recorded as pending or already cancelled, and the durable
+/// identity cancellation later signals on could be attached to a record no
+/// cancellation in this store would ever reach.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_detached_cook_handoff_child_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    pid: u32,
+    start_identity: homeboy_core::process::ProcessStartIdentity,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+        // A concurrent observer may have already terminalized the handoff
+        // before this attachment write acquired the record lock. Keep that
+        // classification intact for the launcher to report.
+        if record.state().is_terminal() {
+            return false;
+        }
+        let metadata = record.ensure_metadata_object();
+        metadata["detached_cook_handoff"] = json!({
+        "admission_state": "child_attached",
+        "child_supervisor_deadline_at": (chrono::Utc::now()
+            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
+            .to_rfc3339(),
+            "cook_id": cook_id,
+            "child_pid": pid,
+            "child_start_identity": start_identity,
+        });
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+/// Persist the supervising daemon job inside an explicitly rooted store
+/// (test fixture; see [`record_detached_cook_handoff_child_in_store`]).
+///
+/// The ownership guard — that this record really is the named Cook's handoff
+/// parent — sits inside the mutation closure, so it is read from the store the
+/// write lands in. This is also the transition to `supervising`, the admission
+/// state that makes a lease live indefinitely, so a supervisor recorded against
+/// another home's parent would leave this store's admission to expire while a
+/// daemon was in fact supervising it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_detached_cook_supervisor_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    job_id: &str,
+) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let job_id = job_id.to_string();
+    let _ = lifecycle_store.mutate_record(&cook_id, |record| {
+        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+            return false;
+        }
+        record.metadata["detached_cook_handoff"]["supervisor_job_id"] = json!(job_id);
+        record.metadata["detached_cook_handoff"]["admission_state"] = json!("supervising");
+        record.metadata["detached_cook_handoff"]["reattach_command"] =
+            json!(format!("homeboy agent-task status {cook_id}"));
+        true
+    })?;
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -6488,14 +6435,15 @@ pub(crate) fn record_cook_attempt_locked_in_store(
     if let Ok(parent) = lifecycle_store.read_record(&cook_id) {
         let handoff = &parent.metadata["detached_cook_handoff"];
         let reserved_child = handoff["materializing_attempt_run_id"] == run_id;
+        let phase = CookAdmissionPhase::of(&parent);
         // An existing index proves this is later-attempt materialization; a
         // terminal first-handoff placeholder no longer owns that boundary.
         if !lifecycle_store.cook_index_exists(&cook_id)
             && handoff["cook_id"] == cook_id
-            && (((parent.state().is_terminal() && handoff["state"] != "redirected")
+            && (((parent.state().is_terminal() && phase != Some(CookAdmissionPhase::Materialized))
                 || parent.state() == RunExecutionState::Cancelled)
                 && !reserved_child
-                || (handoff["state"] != "pending" && handoff["state"] != "redirected"))
+                || phase == Some(CookAdmissionPhase::ExitedBeforeHandoff))
         {
             return Err(Error::validation_invalid_argument(
                 "cook_id",
@@ -6724,11 +6672,12 @@ pub fn resolve_detached_cook_materializing_attempt_in_store(
     let Ok(parent) = lifecycle_store.read_record(&cook_id) else {
         return Ok(None);
     };
-    let handoff = &parent.metadata["detached_cook_handoff"];
-    if handoff["cook_id"] != cook_id || handoff["state"] != "pending" {
+    if !has_pending_detached_cook_handoff(&parent) {
         return Ok(None);
     }
-    let Some(run_id) = handoff["materializing_attempt_run_id"].as_str() else {
+    let Some(run_id) =
+        parent.metadata["detached_cook_handoff"]["materializing_attempt_run_id"].as_str()
+    else {
         return Ok(None);
     };
     let run_id = sanitize_run_id(run_id);
