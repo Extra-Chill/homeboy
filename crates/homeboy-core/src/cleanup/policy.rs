@@ -342,9 +342,9 @@ mod tests {
         let policy = cleanup_policy_from_retention(&configured, CleanupPolicyOverrides::default())
             .expect("resolve policy");
 
-        // The regression this guards: specialists used to carry their own
-        // `default_value_t` literals, so a widened configuration window was
-        // honored by the aggregate and silently ignored by the specialist.
+        // Specialists must resolve configured windows through the shared
+        // policy rather than their own `default_value_t` literals, or a widened
+        // window is honored by the aggregate and ignored by the specialist.
         assert_eq!(policy.terminal_run_days, 90);
         assert_eq!(policy.runtime_tmp_days, 30);
         assert_eq!(policy.runtime_tmp_managed_days, 30);

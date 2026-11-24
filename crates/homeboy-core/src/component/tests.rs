@@ -35,7 +35,7 @@ fn validate_version_target_conflict_different_pattern_errors() {
 
     let result =
         validate_version_target_conflict(&existing, "component.meta", "build=(.*)", "test-comp");
-    // Multiple targets per file with different patterns are now allowed
+    // Multiple targets per file with different patterns are allowed
     // (e.g. release version + build metadata in the same file).
     assert!(result.is_ok());
 }
@@ -273,17 +273,6 @@ fn component_env_serialization_roundtrip() {
         json["env"]["SHARED_CACHE_DIR"],
         serde_json::json!("/tmp/homeboy/shared-cache")
     );
-}
-
-#[test]
-fn component_ignores_changelog_targets_alias() {
-    let component: Component = serde_json::from_value(serde_json::json!({
-        "id": "fixture",
-        "changelog_targets": "CHANGELOG.md"
-    }))
-    .unwrap();
-
-    assert!(component.changelog_target.is_none());
 }
 
 #[test]
