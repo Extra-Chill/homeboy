@@ -159,8 +159,8 @@ pub fn promote_with_checkpoint(
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
+    // resolves once here and is passed down; the interior never re-resolves
+    // the environment (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let mut report = promote_with_checkpoint_in_observation_store(
         options.clone(),
@@ -214,8 +214,8 @@ pub fn resume_promoted_patch(
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
     // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
+    // resolves once here and is passed down; the interior never re-resolves
+    // the environment (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let mut report = resume_promoted_patch_in_observation_store(
         options.clone(),
@@ -1680,10 +1680,8 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
         });
     }
 
-    /// An SSH credential failure is transport evidence in its own right. It
-    /// used to be classified only because the remote host string contained
-    /// `proxy`, so the same failure to any other host was misreported as an
-    /// invalid base ref.
+    /// An SSH credential failure is transport evidence in its own right,
+    /// whatever the remote host is called, never an invalid base ref.
     #[test]
     fn ssh_credential_failure_is_transport_without_a_proxy_hostname() {
         assert!(is_git_transport_failure(

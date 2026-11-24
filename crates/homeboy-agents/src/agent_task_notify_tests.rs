@@ -8,6 +8,10 @@
 use super::*;
 use crate::agent_task_service::{AgentTaskCookFailureContext, AgentTaskCookRecoveryAction};
 
+fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str>, exit_code: i32) {
+    cook_terminal_in_store(&test_lifecycle_store(), report, component, exit_code);
+}
+
 fn cook_terminal_with(
     report: &AgentTaskCookReport,
     component: Option<&str>,

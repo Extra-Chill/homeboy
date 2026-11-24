@@ -68,10 +68,9 @@ pub fn secret_env_status_with_fallbacks(
 /// One provider-shaped secret-env scope: that provider's sources, plus the
 /// names it unconditionally requires even when it declares no source for them.
 ///
-/// Catalog `secret_env` used to merge every shown provider's sources into one
-/// map and resolve once. A backend that required a name without declaring a
-/// source then reported it missing while the flattened catalog reported the
-/// same name configured from a different provider's json-file (#13629).
+/// Each provider resolves within its own scope, so a name one backend requires
+/// without declaring a source is never reported configured from another
+/// provider's json-file (#13629).
 #[derive(Debug, Clone, Default)]
 pub struct AgentTaskSecretEnvScope {
     pub fallback_sources: HashMap<String, AgentTaskSecretSource>,
