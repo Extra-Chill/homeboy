@@ -4,7 +4,7 @@
 //! to collect uptime, load, disk, memory, and service health from remote servers.
 
 use super::SshClient;
-use crate::engine::shell::quote_arg;
+use crate::error::posix_quote_arg;
 use crate::project::Project;
 use serde::{Serialize, Serializer};
 use std::time::Duration;
@@ -167,7 +167,7 @@ fn collect_server_health(client: &SshClient, server_id: &str, services: &[String
             cmd_parts.push(format!(
                 "echo '{}:'$(systemctl is-active {} 2>/dev/null || echo 'unknown')",
                 svc,
-                quote_arg(svc)
+                posix_quote_arg(svc)
             ));
         }
     }
@@ -801,19 +801,19 @@ Mem:          3.8Gi       1.5Gi       1.0Gi       0.0Ki       1.3Gi       2.0Gi
         assert!(warnings.is_empty());
     }
 
-    /// Systemd unit names must survive `quote_arg` unquoted -- `@` is the
+    /// Systemd unit names must survive `posix_quote_arg` unquoted -- `@` is the
     /// instance separator and `.`/`-` are ordinary in unit names, so none of
     /// them may be treated as shell metacharacters.
     #[test]
     fn test_quote_arg_leaves_service_names_unquoted() {
-        assert_eq!(quote_arg("nginx"), "nginx");
-        assert_eq!(quote_arg("php8.4-fpm"), "php8.4-fpm");
-        assert_eq!(quote_arg("user@.service"), "user@.service");
+        assert_eq!(posix_quote_arg("nginx"), "nginx");
+        assert_eq!(posix_quote_arg("php8.4-fpm"), "php8.4-fpm");
+        assert_eq!(posix_quote_arg("user@.service"), "user@.service");
     }
 
     #[test]
     fn test_quote_arg_quotes_unsafe_service_names() {
-        let quoted = quote_arg("foo; rm -rf /");
+        let quoted = posix_quote_arg("foo; rm -rf /");
         assert!(quoted.starts_with('\''));
     }
 }

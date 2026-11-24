@@ -8,7 +8,7 @@ use homeboy_core::component;
 use homeboy_core::defaults;
 use homeboy_core::engine::shell;
 use homeboy_core::engine::template::{render_map, TemplateVars};
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{posix_quote_arg, Error, Result};
 use homeboy_core::server::SshClient;
 use homeboy_engine_primitives::phase_timing::PhaseTimer;
 use homeboy_extension_contract::DeployVerification;
@@ -61,7 +61,7 @@ pub(super) fn deploy_via_git(
     let fetch_cmd = format!(
         "cd {} && git fetch {} --tags",
         shell::quote_path(remote_path),
-        shell::quote_arg(&git_config.remote),
+        posix_quote_arg(&git_config.remote),
     );
     let fetch_output = ssh_client.execute(&fetch_cmd);
     if !fetch_output.success {
@@ -79,15 +79,15 @@ pub(super) fn deploy_via_git(
         format!(
             "cd {} && git checkout {}",
             shell::quote_path(remote_path),
-            shell::quote_arg(&checkout_target),
+            posix_quote_arg(&checkout_target),
         )
     } else {
         format!(
             "cd {} && git checkout {} && git pull {} {}",
             shell::quote_path(remote_path),
-            shell::quote_arg(&checkout_target),
-            shell::quote_arg(&git_config.remote),
-            shell::quote_arg(&checkout_target),
+            posix_quote_arg(&checkout_target),
+            posix_quote_arg(&git_config.remote),
+            posix_quote_arg(&checkout_target),
         )
     };
     homeboy_core::log_status!("deploy:git", "Checking out {}", checkout_target);
@@ -404,7 +404,7 @@ fn extract_steps(remote_path: &str, artifact_filename: String, cmd_template: &st
     let clean_cmd = format!(
         "cd {} && find . -mindepth 1 -maxdepth 1 ! -name {} -exec rm -rf {{}} +",
         shell::quote_path(remote_path),
-        shell::quote_arg(&artifact_filename),
+        posix_quote_arg(&artifact_filename),
     );
     homeboy_core::log_status!("deploy", "Cleaning target directory before extraction");
     let vars = HashMap::from([
@@ -491,7 +491,7 @@ fn flatten_double_nested_step(remote_path: &str) -> Option<Step> {
          find {staging} -mindepth 1 -maxdepth 1 -exec mv {{}} . \\; && \
          rmdir {staging}; fi",
         nested = shell::quote_path(&nested_dir),
-        basename_arg = shell::quote_arg(basename),
+        basename_arg = posix_quote_arg(basename),
         inner = shell::quote_path(basename),
         staging = shell::quote_path(staging),
         log = install_script::LOG_MARKER,

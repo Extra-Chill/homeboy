@@ -126,7 +126,7 @@ fn prefetch_second_pass_hits_slot_and_prunes_old_slots() {
                 latest_version: "99.0.0".into(),
                 current_version: crate::current_version().into(),
                 update_available: true,
-                checked_at: homeboy_core::update_check_cache::now_unix(),
+                checked_at: homeboy_engine_primitives::now_secs(),
                 runtime_compatibility: None,
             })
             .unwrap(),

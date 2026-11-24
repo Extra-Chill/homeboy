@@ -2200,7 +2200,7 @@ fn spawn_terminal_cook_worker(
         "generation": request.generation,
     })
     .to_string();
-    let exe = homeboy::core::daemon::daemon_launchable_executable().map_err(|error| {
+    let exe = homeboy::core::daemon::launchable_executable().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve current executable".to_string()),

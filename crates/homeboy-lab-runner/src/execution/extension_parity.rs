@@ -1,4 +1,5 @@
 use homeboy_core::engine::shell;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::extension;
 use homeboy_core::output::MergeOutput;
@@ -629,7 +630,7 @@ fn show_runner_extension(
         "cd {} && {} extension show {} --live-readiness",
         shell::quote_path(cwd),
         shell::quote_path(homeboy_path),
-        shell::quote_arg(extension_id)
+        posix_quote_arg(extension_id)
     );
     execute_runner_command(runner, &command)
 }
@@ -924,9 +925,9 @@ fn runner_extension_sync_command(
         "cd {} && {} extension refresh {} --id {} --ref {}",
         shell::quote_path(cwd),
         shell::quote_path(homeboy_path),
-        shell::quote_arg(source_url),
-        shell::quote_arg(extension_id),
-        shell::quote_arg(local_revision)
+        posix_quote_arg(source_url),
+        posix_quote_arg(extension_id),
+        posix_quote_arg(local_revision)
     )
 }
 
@@ -1143,8 +1144,8 @@ fn uncommitted_controller_extension_source_error(
     let remote_revision = remote_revision.unwrap_or("<missing>");
     let dev_sync_command = format!(
         "homeboy runner dev-sync {} --extensions {}=<source-path>",
-        shell::quote_arg(runner_id),
-        shell::quote_arg(extension_id)
+        posix_quote_arg(runner_id),
+        posix_quote_arg(extension_id)
     );
     Error::new(
         ErrorCode::ValidationInvalidArgument,
@@ -1217,9 +1218,9 @@ fn dev_overlay_mismatch_error(
 ) -> Error {
     let command = format!(
         "homeboy runner dev-sync {} --extensions {}={}",
-        shell::quote_arg(runner_id),
-        shell::quote_arg(extension_id),
-        shell::quote_arg(&overlay.source_path)
+        posix_quote_arg(runner_id),
+        posix_quote_arg(extension_id),
+        posix_quote_arg(&overlay.source_path)
     );
     Error::new(
         ErrorCode::ValidationInvalidArgument,

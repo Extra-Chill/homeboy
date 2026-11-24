@@ -1,7 +1,7 @@
+use homeboy_core::error::posix_quote_arg;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy_core::engine::shell;
 use homeboy_core::observation::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV};
 use homeboy_core::source_snapshot::SourceSnapshot;
 
@@ -691,18 +691,18 @@ fn verify_snapshot_workspace_content(
         let diagnostic = match provenance.materialization_mode.as_str() {
             "snapshot-git" => format!(
                 "homeboy runner exec --cwd {} {} -- git status --short",
-                shell::quote_arg(&provenance.remote_workspace_path),
-                shell::quote_arg(&provenance.runner_id),
+                posix_quote_arg(&provenance.remote_workspace_path),
+                posix_quote_arg(&provenance.runner_id),
             ),
             "snapshot" | "filesystem_snapshot" => format!(
                 "homeboy runner workspace sync --mode snapshot --path {} {}",
-                shell::quote_arg(
+                posix_quote_arg(
                     provenance
                         .local_source_path
                         .as_deref()
                         .unwrap_or("<unknown-source-path>")
                 ),
-                shell::quote_arg(&provenance.runner_id),
+                posix_quote_arg(&provenance.runner_id),
             ),
             _ => unreachable!("workspace verification mode was validated above"),
         };

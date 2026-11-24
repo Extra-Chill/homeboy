@@ -12,7 +12,7 @@
 //! directory is repointed, and a user-owned regular file that reports an older
 //! Homeboy version is replaced. Anything else is reported and left alone.
 
-use homeboy_core::engine::shell::quote_arg;
+use homeboy_core::error::posix_quote_arg;
 pub use homeboy_upgrade::upgrade::HomeboyPathBinarySync;
 
 /// Report-line marker emitted by [`path_binary_sync_script`].
@@ -76,8 +76,8 @@ for target in "$HOME/.local/bin/homeboy" "$HOME/.cargo/bin/homeboy"; do
   fi
 done
 "#,
-        slot = quote_arg(slot),
-        managed = quote_arg(binaries_dir.trim_end_matches('/')),
+        slot = posix_quote_arg(slot),
+        managed = posix_quote_arg(binaries_dir.trim_end_matches('/')),
     )
 }
 

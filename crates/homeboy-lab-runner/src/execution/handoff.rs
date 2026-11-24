@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -6,7 +7,6 @@ use serde_json::Value;
 use homeboy_core::api_jobs::{
     Job, JobEvent, RunnerJobCancelRequest, RunnerJobProjectionCancelRequest,
 };
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 
 use crate::daemon_http_get::parse_daemon_response_json;
@@ -29,7 +29,7 @@ pub(crate) fn lab_offload_handoff_hints(
     let runner_exec_prefix = match remote_cwd.filter(|cwd| !cwd.trim().is_empty()) {
         Some(cwd) => format!(
             "homeboy runner exec --cwd {} {runner_id} --",
-            shell::quote_arg(cwd)
+            posix_quote_arg(cwd)
         ),
         None => format!("homeboy runner exec {runner_id} --"),
     };

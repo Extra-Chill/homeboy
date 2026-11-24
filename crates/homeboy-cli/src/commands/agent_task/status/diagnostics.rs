@@ -1,6 +1,7 @@
 //! Collection, ranking, and bounded rendering of durable failure evidence.
 
 use super::*;
+use homeboy::core::error::posix_quote_arg;
 
 pub(super) fn collect_hydrated_evidence_diagnostics(
     task_id: &str,
@@ -586,7 +587,7 @@ pub(super) fn provenance_build_skew_next_commands(
         .map(str::to_string)
         .chain(std::iter::once(format!(
             "homeboy agent-task retry {}",
-            quote_arg(
+            posix_quote_arg(
                 record.metadata["cook_id"]
                     .as_str()
                     .unwrap_or(record.run_id.as_str())
@@ -860,7 +861,10 @@ pub(super) fn attach_lab_admission_wait(
         value["summary"] = json!(message);
         value["diagnosis_outcome"] = json!("waiting_for_admission");
         if let Some(run_id) = value["run_id"].as_str() {
-            let command = format!("homeboy agent-task status {} --watch", quote_arg(run_id));
+            let command = format!(
+                "homeboy agent-task status {} --watch",
+                posix_quote_arg(run_id)
+            );
             value["next_commands"] = json!([command]);
         }
     }

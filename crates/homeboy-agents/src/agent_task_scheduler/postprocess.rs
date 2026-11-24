@@ -215,7 +215,7 @@ fn start_or_reconcile_worker_with_retry(
         schema: WORKER_SPAWN_SCHEMA.to_string(),
         worker_id: uuid::Uuid::new_v4().to_string(),
         pid: child.id(),
-        spawned_unix_secs: now_unix_secs(),
+        spawned_unix_secs: now_secs(),
         start_identity: homeboy_core::process::process_start_identity(child.id())
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
@@ -272,7 +272,7 @@ fn postprocess_worker_executable() -> PathBuf {
         return worker;
     }
     configured.unwrap_or_else(|| {
-        homeboy_core::daemon::daemon_launchable_executable().expect("current Homeboy executable")
+        homeboy_core::daemon::launchable_executable().expect("current Homeboy executable")
     })
 }
 
@@ -1007,7 +1007,7 @@ fn acquire_claim(path: &Path) -> std::result::Result<PostprocessClaimGuard, Stri
         schema: CLAIM_SCHEMA.to_string(),
         owner_id: uuid::Uuid::new_v4().to_string(),
         owner_pid: std::process::id(),
-        heartbeat_unix_secs: now_unix_secs(),
+        heartbeat_unix_secs: now_secs(),
     };
     let bytes = serde_json::to_vec(&claim).map_err(|error| error.to_string())?;
     match std::fs::OpenOptions::new()
@@ -1108,7 +1108,7 @@ fn heartbeat_claim(
             else {
                 return;
             };
-            claim.heartbeat_unix_secs = now_unix_secs();
+            claim.heartbeat_unix_secs = now_secs();
             if !claim_owned_by(&path, &owner_id) {
                 return;
             }
@@ -1142,7 +1142,7 @@ fn claim_owner_is_alive(pid: u32) -> bool {
     pid == std::process::id()
 }
 
-use homeboy_engine_primitives::now_secs as now_unix_secs;
+use homeboy_engine_primitives::now_secs;
 
 fn checkpoint_identity(
     plan: &AgentTaskPlan,

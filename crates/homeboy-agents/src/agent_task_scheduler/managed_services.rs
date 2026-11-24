@@ -511,8 +511,7 @@ impl ManagedServices {
         let worker = std::env::var_os("HOMEBOY_SERVICE_SUPERVISOR_WORKER")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                homeboy_core::daemon::daemon_launchable_executable()
-                    .expect("current Homeboy executable")
+                homeboy_core::daemon::launchable_executable().expect("current Homeboy executable")
             });
         let child = Command::new(worker)
             .args(["self", "service-supervisor-worker", "--request"])

@@ -1329,7 +1329,7 @@ mod tests {
         drop(writer);
 
         let result = execute_local_command_in_dir_impl(
-            &format!("cat > {}", crate::engine::shell::quote_arg(&output_path)),
+            &format!("cat > {}", crate::error::posix_quote_arg(&output_path)),
             None,
             None,
             None,

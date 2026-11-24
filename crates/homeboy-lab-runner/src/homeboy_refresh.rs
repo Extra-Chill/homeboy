@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use homeboy_core::engine::shell::{quote_arg, quote_path};
+use homeboy_core::engine::shell::quote_path;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::output::MergeOutput;
@@ -2695,8 +2696,8 @@ where
         Some(runner_id.to_string()),
         Some(vec![format!(
             "Run `homeboy runner refresh-homeboy {} --select {}` to write and reconnect the selected executable.",
-            quote_arg(runner_id),
-            quote_arg(homeboy_path)
+            posix_quote_arg(runner_id),
+            posix_quote_arg(homeboy_path)
         )]),
     ))
 }
@@ -2749,8 +2750,8 @@ fn durable_refresh_partial_error(
     let previous = previous_homeboy_path.unwrap_or("homeboy");
     let continuation_command = format!(
         "homeboy runner refresh-homeboy {} --select {}",
-        quote_arg(runner_id),
-        quote_arg(previous),
+        posix_quote_arg(runner_id),
+        posix_quote_arg(previous),
     );
     let state = serde_json::json!({
         "schema": "homeboy/runner-refresh-partial/v1",
@@ -3252,7 +3253,7 @@ fn non_empty<'a>(name: &str, value: &'a str) -> Result<&'a str> {
 }
 
 fn shell_arg(value: &str) -> String {
-    quote_arg(value)
+    posix_quote_arg(value)
 }
 
 #[cfg(test)]

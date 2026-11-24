@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -890,7 +891,7 @@ fn sanitize_ref(value: &str) -> String {
 fn shell_command(command: &[String]) -> String {
     command
         .iter()
-        .map(|arg| shell::quote_arg(arg))
+        .map(|arg| posix_quote_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
 }

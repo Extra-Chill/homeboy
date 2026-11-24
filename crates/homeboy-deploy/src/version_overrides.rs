@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -448,7 +449,7 @@ pub(super) fn find_deploy_override(
 /// Embedded in the generated archive-install command as the second
 /// atomic-exchange mechanism (after `mv --exchange`, which only exists in GNU
 /// coreutils >= 9.5). Kept to a single line with no single quotes and no
-/// braces so it survives `shell::quote_arg` single-quote embedding and the
+/// braces so it survives `posix_quote_arg` single-quote embedding and the
 /// Rust `format!` template. It exits 0 only when the kernel swapped the two
 /// paths in one syscall; every other outcome (python3 missing, pre-2.28 glibc
 /// without the `renameat2` symbol, filesystem without RENAME_EXCHANGE support)
@@ -461,7 +462,7 @@ pub(crate) fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> D
     } else {
         ""
     };
-    let exchange_py = shell::quote_arg(RENAMEAT2_EXCHANGE_PY);
+    let exchange_py = posix_quote_arg(RENAMEAT2_EXCHANGE_PY);
     // Newline-delimited subshell supports heredocs and scopes `exit`.
     // Cache refresh remains best-effort, like post:deploy.
     let after_switch = policy.after_switch_command.as_deref().unwrap_or(":");
@@ -597,13 +598,13 @@ pub(crate) fn archive_install_verification(
     let selector = if let Some(file) = header.file.as_deref() {
         format!(
             "candidate=$(printf '%s\\n' \"$entries\" | awk -v required={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; if (rel == required) {{ print $0; exit }} }}')",
-            shell::quote_arg(file)
+            posix_quote_arg(file)
         )
     } else if let Some(file_glob) = header.file_glob.as_deref() {
         let file_regex = glob_to_awk_regex(file_glob);
         format!(
             "candidate=$(printf '%s\\n' \"$entries\" | awk -v pattern={} '{{ slash = index($0, \"/\"); rel = slash ? substr($0, slash + 1) : $0; count = split(rel, parts, \"/\"); base = parts[count]; if (base ~ pattern) {{ print $0; exit }} }}')",
-            shell::quote_arg(&file_regex)
+            posix_quote_arg(&file_regex)
         )
     } else {
         return None;
@@ -614,7 +615,7 @@ pub(crate) fn archive_install_verification(
     } else {
         ""
     };
-    let contains = shell::quote_arg(&header.contains);
+    let contains = posix_quote_arg(&header.contains);
 
     Some(DeployVerification {
         path_pattern: policy.path_pattern.clone(),
@@ -1631,7 +1632,7 @@ mod tests {
             "mv --exchange {a} {b} 2>/dev/null || python3 -c {py} {a} {b} 2>/dev/null",
             a = shell::quote_path(a.to_str().expect("probe path a")),
             b = shell::quote_path(b.to_str().expect("probe path b")),
-            py = shell::quote_arg(RENAMEAT2_EXCHANGE_PY),
+            py = posix_quote_arg(RENAMEAT2_EXCHANGE_PY),
         );
         let swapped = std::process::Command::new("sh")
             .arg("-c")

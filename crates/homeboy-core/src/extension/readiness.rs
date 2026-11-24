@@ -310,7 +310,7 @@ fn read_cached_status(
     }
     let mut status = cache.status;
     status.cache_age_seconds =
-        Some(crate::update_check_cache::now_unix().saturating_sub(cache.checked_at));
+        Some(homeboy_engine_primitives::now_secs().saturating_sub(cache.checked_at));
     Some(status)
 }
 
@@ -324,7 +324,7 @@ fn write_cached_status(
         &ExtensionReadinessCache {
             schema: READINESS_CACHE_SCHEMA.to_string(),
             identity,
-            checked_at: crate::update_check_cache::now_unix(),
+            checked_at: homeboy_engine_primitives::now_secs(),
             status: status.clone(),
         },
     );

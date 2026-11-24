@@ -5,7 +5,7 @@
 //! in a known-safe set (ASCII alphanumerics and `-_./:=@`), otherwise it is
 //! single-quoted. An empty value renders as `''` so it is never silently dropped
 //! from a rendered command. It is intentionally distinct from
-//! [`homeboy_core::engine::shell::quote_arg`], which uses a shell-metacharacter
+//! [`homeboy_core::error::posix_quote_arg`], which uses a shell-metacharacter
 //! *denylist* and therefore quotes a different set of inputs.
 #[cfg(test)]
 mod tests {

@@ -4,11 +4,11 @@ fn escape_single_quote_content(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
-pub use homeboy_error::posix_quote_arg as quote_arg;
+use homeboy_error::posix_quote_arg;
 
 pub fn quote_args(args: &[String]) -> String {
     args.iter()
-        .map(|a| quote_arg(a))
+        .map(|a| posix_quote_arg(a))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -61,7 +61,7 @@ fn split_respecting_quotes(input: &str) -> Vec<String> {
 
 /// Quote a shell argument, leaving conservatively safe words bare.
 ///
-/// Unlike [`quote_arg`], which quotes anything containing a shell metacharacter,
+/// Unlike [`posix_quote_arg`], which quotes anything containing a shell metacharacter,
 /// this keeps unquoted only an explicit allowlist: ASCII alphanumerics and
 /// `-` `_` `.` `/` `:` `=` `@`. (`=` and `@` are inert in argument position, so
 /// `user@host` and `key=value` stay bare.) Everything else is single-quoted, with
@@ -115,7 +115,7 @@ pub fn quote_runner_env_value(key: &str, value: &str) -> String {
         return format!("\"{}\"", escape_double_quoted_env_value(value));
     }
 
-    quote_arg(value)
+    posix_quote_arg(value)
 }
 
 fn escape_double_quoted_env_value(value: &str) -> String {

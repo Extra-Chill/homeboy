@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
@@ -8,7 +9,6 @@ use std::time::Duration;
 
 use homeboy_core::build_identity::ProvenanceBuildSkew;
 use homeboy_core::engine::command::StdoutLineObserver;
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::redaction::{redact_argv, RedactionPolicy};
 use homeboy_core::runner_execution_envelope::{
@@ -86,10 +86,10 @@ pub(super) fn exec_diagnostic_ssh(
     validate_remote_required_paths(&mut client, &require_paths)?;
     let command_line = format!(
         "cd {} && {}",
-        shell::quote_arg(&cwd),
+        posix_quote_arg(&cwd),
         command
             .iter()
-            .map(|arg| shell::quote_arg(arg))
+            .map(|arg| posix_quote_arg(arg))
             .collect::<Vec<_>>()
             .join(" ")
     );
@@ -1519,11 +1519,11 @@ fn configure_bash_runtime_path(
     let mut init = String::new();
     if let Some(existing) = env.get("BASH_ENV") {
         init.push_str(". ");
-        init.push_str(&shell::quote_arg(existing));
+        init.push_str(&posix_quote_arg(existing));
         init.push('\n');
     }
     init.push_str("export PATH=");
-    init.push_str(&shell::quote_arg(&parent.display().to_string()));
+    init.push_str(&posix_quote_arg(&parent.display().to_string()));
     init.push_str(":\"$PATH\"\n");
     fs::write(&init_path, init).map_err(|error| {
         Error::from_io_error(

@@ -137,7 +137,7 @@ pub(crate) fn host_service_pending_restart(
 }
 
 fn shell_arg(value: &str) -> String {
-    homeboy_core::engine::shell::quote_arg(value)
+    homeboy_core::error::posix_quote_arg(value)
 }
 
 fn host_unit<'a>(

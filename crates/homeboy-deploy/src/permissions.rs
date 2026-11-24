@@ -1,5 +1,6 @@
 use homeboy_core::defaults;
 use homeboy_core::engine::shell;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_core::error::Error;
 
 use super::install_script::{shown, Step, StepOutput, LOG_MARKER};
@@ -70,7 +71,7 @@ fn chmod_step(command: String, operation: &'static str, remote_path: &str) -> St
 fn ownership_command(remote_path: &str, remote_owner: Option<&str>) -> String {
     let log = |message: &str| format!("echo \"{LOG_MARKER}{message}\"");
     let resolve_owner = match remote_owner {
-        Some(owner) => format!("owner={}", shell::quote_arg(owner)),
+        Some(owner) => format!("owner={}", posix_quote_arg(owner)),
         None => {
             let parent_path = remote_path
                 .trim_end_matches('/')

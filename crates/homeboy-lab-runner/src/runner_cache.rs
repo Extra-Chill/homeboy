@@ -1,10 +1,10 @@
 //! Controller-operated retention for producer-owned runner Homeboy binaries.
 
+use homeboy_core::error::posix_quote_arg;
 use serde::Serialize;
 use std::process::Command;
 use std::time::Duration;
 
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 
 use crate::{load, workspace::ssh_client_for_runner, Runner, RunnerKind};
@@ -260,8 +260,8 @@ slot_process_owned() {
 "#;
     format!(
         "root={root}\nconfigured={configured}\n{functions}",
-        root = shell::quote_arg(root),
-        configured = shell::quote_arg(configured),
+        root = posix_quote_arg(root),
+        configured = posix_quote_arg(configured),
         functions = SLOT_FUNCTIONS
             .replace("__HEX16__", &"[0-9a-f]".repeat(16))
             .replace("__HEX64__", &"[0-9a-f]".repeat(64)),
@@ -316,8 +316,8 @@ if slot_process_owned "$p"; then printf active_process; exit 0; fi
 rm -rf -- "$p" && printf removed || printf delete_failed
 "#,
         functions = slot_shell_functions(root, configured),
-        path = shell::quote_arg(path),
-        identity = shell::quote_arg(identity),
+        path = posix_quote_arg(path),
+        identity = posix_quote_arg(identity),
     )
 }
 

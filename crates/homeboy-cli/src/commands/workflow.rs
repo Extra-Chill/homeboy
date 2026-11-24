@@ -560,7 +560,7 @@ fn admission_request(
     };
     // The installed path, even when the running binary was replaced: a
     // cadence keeps running this program after upgrades.
-    let current_exe = homeboy::core::daemon::daemon_launchable_executable().map_err(|error| {
+    let current_exe = homeboy::core::daemon::launchable_executable().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve the Homeboy executable".into()),
@@ -666,7 +666,7 @@ fn run_on_runner(
     if args.wait {
         remote.push("--wait".to_string());
     }
-    let program = homeboy::core::daemon::daemon_launchable_executable().map_err(|error| {
+    let program = homeboy::core::daemon::launchable_executable().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve the Homeboy executable".into()),

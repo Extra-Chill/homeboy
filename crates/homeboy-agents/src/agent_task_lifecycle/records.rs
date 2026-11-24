@@ -475,8 +475,8 @@ impl AgentTaskLabRuntimeRecovery {
     pub fn command(&self) -> String {
         format!(
             "homeboy runner refresh-homeboy {} --ref {}",
-            homeboy_core::engine::shell::quote_arg(&self.runner_id),
-            homeboy_core::engine::shell::quote_arg(&self.build_ref),
+            homeboy_core::error::posix_quote_arg(&self.runner_id),
+            homeboy_core::error::posix_quote_arg(&self.build_ref),
         )
     }
 }

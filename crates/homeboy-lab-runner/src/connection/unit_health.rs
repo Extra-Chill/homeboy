@@ -9,6 +9,7 @@
 //! and `runner doctor` read the same account without probing again, and a
 //! daemon restart neither re-announces nor forgets an open incident.
 
+use homeboy_core::error::posix_quote_arg;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -60,7 +61,7 @@ impl RunnerUnitState {
 
 /// Read-only shell: the unit's state properties, then its recent journal.
 pub(crate) fn unit_state_script() -> String {
-    let unit = shell::quote_arg(&service_unit_name());
+    let unit = posix_quote_arg(&service_unit_name());
     format!(
         "systemctl --user show -p ActiveState -p SubState -p Result -p NRestarts {unit} </dev/null; echo {JOURNAL_MARKER}; journalctl --user -u {unit} -n 30 --no-pager -o cat </dev/null 2>/dev/null"
     )

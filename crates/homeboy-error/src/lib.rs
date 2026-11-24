@@ -68,8 +68,8 @@ impl ExecutableAction {
 
 /// POSIX-quote a single argument for rendering a command back to the user.
 ///
-/// This is the shared implementation used by error action rendering and
-/// re-exported as `homeboy_engine_primitives::shell::quote_arg`.
+/// This is the single owner used by error action rendering and every shell
+/// command builder in the workspace.
 pub fn posix_quote_arg(arg: &str) -> String {
     if arg.is_empty() {
         return "''".to_string();

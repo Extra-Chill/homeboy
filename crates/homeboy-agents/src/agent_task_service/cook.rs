@@ -37,8 +37,8 @@ pub(super) use crate::agent_task_timeout::{
 };
 pub(super) use homeboy_core::command_invocation::CommandInvocation;
 pub(super) use homeboy_core::cook_status::{CookDisposition, CookStatus};
+pub(super) use homeboy_core::error::posix_quote_arg;
 pub(super) use homeboy_core::{Error, Result};
-pub(super) use homeboy_engine_primitives::shell::quote_arg;
 
 pub(super) use super::cook_activity::{CookActivityProbe, CookProviderActivity};
 pub(super) use super::cook_baseline::{
@@ -102,7 +102,7 @@ pub(super) struct WorkspaceBaseCaptureHook {
 /// the public command shape.
 pub fn cook_recover_command(executable: Option<&str>, cook_or_attempt_id: &str) -> String {
     let executable = executable
-        .map(quote_arg)
+        .map(posix_quote_arg)
         .unwrap_or_else(|| cook_recovery_command_prefix(cook_or_attempt_id));
     cook_recover_command_with_prefix(&executable, cook_or_attempt_id)
 }
@@ -191,7 +191,7 @@ pub fn cook_recovery_command_with_prefix(prefix: &str, args: &[&str]) -> String 
     let mut command = format!("{prefix} agent-task");
     for arg in args {
         command.push(' ');
-        command.push_str(&quote_arg(arg));
+        command.push_str(&posix_quote_arg(arg));
     }
     command
 }

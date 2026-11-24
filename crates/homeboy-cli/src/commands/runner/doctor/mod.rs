@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use homeboy::agents::agent_task_provider::AgentTaskExecutorProvider;
-use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server, SshClient};
 use homeboy::runner::runners::{
     self as runner, daemon_repair_codes, Runner, RunnerSession, RunnerToolRegistry, RunnerToolSpec,

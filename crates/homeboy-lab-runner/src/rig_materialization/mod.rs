@@ -55,7 +55,7 @@ fn materialize_lab_stack_from_repository(
             .expect("Lab stack spec serializes")
             .as_slice(),
     );
-    let q = homeboy_core::engine::shell::quote_arg;
+    let q = homeboy_core::error::posix_quote_arg;
     let verify = |reference: &homeboy_rig::LabStackRef| {
         format!(
             "git -C {destination} fetch --no-tags origin {reference}:refs/homeboy/lab-stack; actual=$(git -C {destination} rev-parse refs/homeboy/lab-stack^{{commit}}); test \"$actual\" = {sha}",
@@ -120,7 +120,7 @@ fn remove_partial_lab_stack(runner: &super::Runner, destination: &str) {
     // partial clone or failed cherry-pick so a retry owns a clean destination.
     let cleanup = format!(
         "rm -rf -- {}",
-        homeboy_core::engine::shell::quote_arg(destination)
+        homeboy_core::error::posix_quote_arg(destination)
     );
     if let Ok(command) = super::workspace::shell_command_for_runner(runner, &cleanup) {
         let _ = super::workspace::run_shell_capture(&command);
@@ -869,8 +869,8 @@ fn write_runner_json(
 
     let encoded = base64::engine::general_purpose::STANDARD
         .encode(serde_json::to_vec(value).expect("broker target projection serializes"));
-    let quoted_path = homeboy_core::engine::shell::quote_arg(path);
-    let quoted_parent = homeboy_core::engine::shell::quote_arg(
+    let quoted_path = homeboy_core::error::posix_quote_arg(path);
+    let quoted_parent = homeboy_core::error::posix_quote_arg(
         Path::new(path)
             .parent()
             .expect("broker target projection path has parent")

@@ -2,6 +2,7 @@
 //! rig component path overrides, and the stale-runner-homeboy error.
 
 use super::*;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 #[cfg(test)]
 use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
@@ -416,7 +417,7 @@ pub(crate) fn lab_runner_homeboy_metadata(
         "controller_binary": controller_binary,
         "refresh_commands": refresh_commands,
         "local_upgrade_command": "homeboy upgrade",
-        "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", shell::quote_arg(runner_id)),
+        "upgrade_command": format!("homeboy upgrade --force --upgrade-runner {}", posix_quote_arg(runner_id)),
     })
 }
 
@@ -643,7 +644,7 @@ pub(super) fn controller_homeboy_recovery_command_for_binary(exe: &Path) -> Stri
     if let Some(source_checkout) = source_checkout_for_binary(exe) {
         return format!(
             "homeboy upgrade --method source --source-path {} --force",
-            shell::quote_arg(&source_checkout.display().to_string())
+            posix_quote_arg(&source_checkout.display().to_string())
         );
     }
     let exe_display = exe.display().to_string();

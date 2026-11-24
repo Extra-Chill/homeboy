@@ -94,6 +94,7 @@ use super::super::execution_step::execution_step_fixtures::{
     current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
 };
 use homeboy_control_plane_contract::ControlPlaneState;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_lifecycle_contract::RunExecutionState;
 
 #[test]
@@ -3605,9 +3606,9 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
                 context.next_actions[0].command,
                 format!(
                     "git -C {} add -A && git -C {} commit -m {}",
-                    quote_arg(target.to_str().expect("UTF-8 target path")),
-                    quote_arg(target.to_str().expect("UTF-8 target path")),
-                    quote_arg("test")
+                    posix_quote_arg(target.to_str().expect("UTF-8 target path")),
+                    posix_quote_arg(target.to_str().expect("UTF-8 target path")),
+                    posix_quote_arg("test")
                 )
             );
             assert_eq!(

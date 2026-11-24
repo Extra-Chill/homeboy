@@ -1,4 +1,5 @@
 use super::*;
+use homeboy_core::error::posix_quote_arg;
 
 #[test]
 fn cancelling_either_runner_call_reaps_its_child_scope() {
@@ -10,7 +11,7 @@ fn cancelling_either_runner_call_reaps_its_child_scope() {
         let descendant = fixture.path().join("pid");
         homeboy_test_support::write_executable(&bin.join("ssh"), &format!(
             "#!/bin/sh\nsleep 60 & child=$!\nprintf '%s' \"$child\" > {}\nprintf accepted > {}\nwait\n",
-            shell::quote_arg(&descendant.display().to_string()), shell::quote_arg(&accepted.display().to_string()),
+            posix_quote_arg(&descendant.display().to_string()), posix_quote_arg(&accepted.display().to_string()),
         ), 0o755).unwrap();
         homeboy_core::server::create(
             r#"{"id":"protocol-transport","host":"materialization.invalid","user":"test"}"#,
@@ -146,7 +147,7 @@ fn commit_archive_carries_no_platform_metadata_members() {
             bin.join("ssh"),
             format!(
                 "#!/bin/sh\ncat > {}\nprintf '{{}}'\n",
-                shell::quote_arg(&archive.display().to_string())
+                posix_quote_arg(&archive.display().to_string())
             ),
             0o755,
         )

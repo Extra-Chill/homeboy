@@ -1,10 +1,10 @@
+use homeboy_core::error::posix_quote_arg;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 use sha2::Digest;
 
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::server::{self, Server, SshClient, TRANSIENT_SSH_STDERR_PATTERNS};
 
@@ -491,7 +491,7 @@ mod tests {
         let pid_path = pid_file.path().to_string_lossy().to_string();
         let command = format!(
             "sleep 30 & child=$!; printf '%s' \"$child\" > {}; wait",
-            shell::quote_arg(&pid_path)
+            posix_quote_arg(&pid_path)
         );
         let error = run_shell_command_before(
             &command,
@@ -545,8 +545,8 @@ pub(crate) fn shell_command_for_runner(runner: &Runner, command: &str) -> Result
             Ok(format!(
                 "ssh {ssh_args} {remote} {command}",
                 ssh_args = ssh_args(&client),
-                remote = shell::quote_arg(&remote),
-                command = shell::quote_arg(command),
+                remote = posix_quote_arg(&remote),
+                command = posix_quote_arg(command),
             ))
         }
     }

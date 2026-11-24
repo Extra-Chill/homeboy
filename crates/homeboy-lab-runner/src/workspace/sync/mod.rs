@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -47,7 +48,6 @@ use super::util::{
     run_shell_command_before, sanitize_path_segment, ssh_args, ssh_client_for_runner,
     validate_absolute_path,
 };
-use homeboy_core::engine::shell;
 use homeboy_core::server::{
     execute_local_command_in_dir_with_timeout, is_transient_ssh_error, CommandOutput,
 };
@@ -562,9 +562,9 @@ pub(super) fn prepared_source_cache_command(cache: &str, cache_root: &str, sourc
     );
     format!(
         "cache={cache}; cache_root={cache_root}; source={source}; marker={marker}; marker_dir={marker_dir}; lock=\"$cache.lock\"; tmp=\"$cache.tmp.$$\"; nested=\"$cache/${{tmp##*/}}\"; {capture_owner}; mkdir -p \"$cache_root\"; mv_no_target=''; if mv --help 2>&1 | grep -q -e '--no-target-directory'; then mv_no_target='-T'; fi; discard_tmp() {{ chmod -R u+w \"$tmp\" >/dev/null 2>&1; rm -rf \"$tmp\" >/dev/null 2>&1; }}; publish_conflict() {{ discard_tmp; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s reason=concurrent_publisher\\n' \"$cache\"; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=publish_conflict\\n' \"$cache\"; fi; }}; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\\n' \"$cache\"; elif mkdir \"$lock\" 2>/dev/null; then trap 'rmdir \"$lock\" 2>/dev/null || :' EXIT; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\\n' \"$cache\"; else {publish}; fi; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=busy\\n' \"$cache\"; fi; {restore_owner}; kept=0; failures=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f {candidate_marker} || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; candidate_lock=\"$candidate.lock\"; mkdir \"$candidate_lock\" 2>/dev/null || continue; if test -f {candidate_marker}; then if ! chmod -R u+w \"$candidate\" >/dev/null 2>&1 || ! rm -rf \"$candidate\" >/dev/null 2>&1; then failures=$((failures + 1)); if [ \"$failures\" -le {max_failures} ]; then printf 'homeboy_prepared_source_cache event=prune_failed cache=%s reason=undeletable\\n' \"$candidate\" >&2; elif [ \"$failures\" -eq $(({max_failures} + 1)) ]; then printf 'homeboy_prepared_source_cache event=prune_failed_summary reason=additional_failures_suppressed\\n' >&2; fi; else rm -rf {candidate_state} >/dev/null 2>&1; printf 'homeboy_prepared_source_cache event=pruned cache=%s\\n' \"$candidate\"; fi; fi; rmdir \"$candidate_lock\" 2>/dev/null || :; done; exit 0",
-        cache = shell::quote_arg(cache), cache_root = shell::quote_arg(cache_root), source = shell::quote_arg(source),
-        marker = shell::quote_arg(&runner_workspace_prepared_source_marker_path(cache)),
-        marker_dir = shell::quote_arg(&runner_workspace_state_dir(cache)),
+        cache = posix_quote_arg(cache), cache_root = posix_quote_arg(cache_root), source = posix_quote_arg(source),
+        marker = posix_quote_arg(&runner_workspace_prepared_source_marker_path(cache)),
+        marker_dir = posix_quote_arg(&runner_workspace_state_dir(cache)),
         candidate_state = prepared_source_state_dir_shell("$candidate"),
         capture_owner = super::util::owner_capture_shell("$cache_root"), restore_owner = super::util::owner_restore_path_shell("$cache_root"), max_entries = PREPARED_SOURCE_CACHE_MAX_ENTRIES, max_failures = 8,
     )
@@ -636,10 +636,10 @@ fn materialize_prepared_source_view_controlled(
 pub(super) fn prepared_source_view_command(cache: &str, destination: &str) -> String {
     format!(
         "cache={cache}; destination={destination}; cache_marker={cache_marker}; destination_state={destination_state}; destination_marker={destination_marker}; lock=\"$cache.lock\"; test -f \"$cache_marker\" && test ! -e \"$destination\" && mkdir \"$lock\" 2>/dev/null || exit 1; trap 'rmdir \"$lock\" 2>/dev/null || :' EXIT; trap 'exit 1' HUP INT TERM; test -f \"$cache_marker\" && mkdir -p \"$(dirname \"$destination\")\" && cp -a \"$cache\" \"$destination\" && chmod -R u+w \"$destination\" && mkdir -p \"$destination_state\" && : > \"$destination_marker\" || {{ rm -rf \"$destination\" \"$destination_marker\"; exit 1; }}",
-        cache = shell::quote_arg(cache), destination = shell::quote_arg(destination),
-        cache_marker = shell::quote_arg(&runner_workspace_prepared_source_marker_path(cache)),
-        destination_state = shell::quote_arg(&runner_workspace_state_dir(destination)),
-        destination_marker = shell::quote_arg(&runner_workspace_prepared_source_marker_path(destination)),
+        cache = posix_quote_arg(cache), destination = posix_quote_arg(destination),
+        cache_marker = posix_quote_arg(&runner_workspace_prepared_source_marker_path(cache)),
+        destination_state = posix_quote_arg(&runner_workspace_state_dir(destination)),
+        destination_marker = posix_quote_arg(&runner_workspace_prepared_source_marker_path(destination)),
     )
 }
 
@@ -1455,8 +1455,8 @@ fn prune_workspaces_for_runner(
             let binary = crate::remote_runner_homeboy_path(runner, "prune workspace blobs")?;
             let command = format!(
                 "{} runner workspace prune-blobs --workspace-root {}",
-                shell::quote_arg(&binary),
-                shell::quote_arg(workspace_root)
+                posix_quote_arg(&binary),
+                posix_quote_arg(workspace_root)
             );
             super::util::run_shell_command(
                 &super::util::shell_command_for_runner(runner, &command)?,
@@ -2096,7 +2096,7 @@ fn workspace_metadata_run_id(
         RunnerKind::Ssh => {
             let (_, client) = ssh_client_for_runner(runner)?;
             let output = client.execute_with_timeout(
-                &format!("cat {}", shell::quote_arg(&metadata_path)),
+                &format!("cat {}", posix_quote_arg(&metadata_path)),
                 WORKSPACE_METADATA_TIMEOUT,
             );
             if !output.success {
@@ -2189,7 +2189,7 @@ fn reject_existing_job_workspace(
             let (_, client) = ssh_client_for_runner(runner)?;
             client
                 .execute_with_timeout(
-                    &format!("test -e {}", shell::quote_arg(remote_path)),
+                    &format!("test -e {}", posix_quote_arg(remote_path)),
                     WORKSPACE_METADATA_TIMEOUT,
                 )
                 .success
@@ -2253,7 +2253,7 @@ pub(crate) fn update_workspace_resource_lifecycle(
         RunnerKind::Ssh => {
             let (_, client) = ssh_client_for_runner(&runner)?;
             let output = client.execute_with_timeout(
-                &format!("cat {}", shell::quote_arg(&metadata_path)),
+                &format!("cat {}", posix_quote_arg(&metadata_path)),
                 WORKSPACE_METADATA_TIMEOUT,
             );
             if !output.success {
@@ -2291,7 +2291,7 @@ pub(crate) fn record_workspace_terminal_evidence(
         RunnerKind::Ssh => {
             let (_, client) = ssh_client_for_runner(&runner)?;
             let output = client.execute_with_timeout(
-                &format!("cat {}", shell::quote_arg(&metadata_path)),
+                &format!("cat {}", posix_quote_arg(&metadata_path)),
                 WORKSPACE_METADATA_TIMEOUT,
             );
             if !output.success {
@@ -2410,7 +2410,7 @@ fn rollback_materialized_workspace_before(
     {
         return;
     }
-    let remove = format!("rm -rf -- {}", shell::quote_arg(remote_path));
+    let remove = format!("rm -rf -- {}", posix_quote_arg(remote_path));
     let command = match runner.kind {
         RunnerKind::Local => remove,
         RunnerKind::Ssh => {
@@ -2423,8 +2423,8 @@ fn rollback_materialized_workspace_before(
                 format!(
                     "ssh {} {} {}",
                     ssh_args(&client),
-                    shell::quote_arg(&format!("{}@{}", client.user, client.host)),
-                    shell::quote_arg(&remove),
+                    posix_quote_arg(&format!("{}@{}", client.user, client.host)),
+                    posix_quote_arg(&remove),
                 )
             }
         }
@@ -2503,11 +2503,11 @@ pub(crate) fn write_runner_state_file(
                     Some("write workspace metadata staging file".to_string()),
                 )
             })?;
-            let prepare_command = format!("mkdir -p {parent}", parent = shell::quote_arg(&parent),);
+            let prepare_command = format!("mkdir -p {parent}", parent = posix_quote_arg(&parent),);
             let publish_command = format!(
                 "mv -f {staged_path} {path}",
-                staged_path = shell::quote_arg(&staged_metadata_path),
-                path = shell::quote_arg(&metadata_path),
+                staged_path = posix_quote_arg(&staged_metadata_path),
+                path = posix_quote_arg(&metadata_path),
             );
 
             // Metadata is staged outside the live path, so the complete
@@ -3013,7 +3013,7 @@ fn ssh_runner_workspace_disk_probe(
     client.env.extend(runner.env.clone());
     let command = format!(
         "p={path}; while [ ! -e \"$p\" ] && [ \"$p\" != / ]; do p=$(dirname \"$p\"); done; df -Pk \"$p\" 2>/dev/null | awk 'NR==2 {{print $2 \" \" $4}}'",
-        path = shell::quote_arg(workspace_root),
+        path = posix_quote_arg(workspace_root),
     );
     let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
     if !output.success {
@@ -3651,7 +3651,7 @@ fn ssh_process_liveness(
 pub(crate) fn ssh_process_liveness_command(path: &str) -> String {
     format!(
         "p={}; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown; exit 0; }}; if ps -eo pid=,ppid=,args= | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}' || lsof -w -Fn -a -d cwd +D \"$p\" 2>/dev/null | grep -q . || lsof -w -Fn +D \"$p\" 2>/dev/null | grep -q .; then printf live; else printf inactive; fi",
-        shell::quote_arg(path)
+        posix_quote_arg(path)
     )
 }
 
@@ -4016,12 +4016,12 @@ pub(crate) fn prune_scan_command(
             "done; [ \"$complete\" = partial ] || last=; printf \"__homeboy_prune_scan__\\t%s\\t%s\\t%s\\n\" \"$scanned\" \"$complete\" \"$last\"; }}; ",
             "else printf \"__homeboy_prune_scan__\\t0\\tcomplete\\t\\n\"; fi"
         ),
-        root = shell::quote_arg(root),
-        after = shell::quote_arg(after.and_then(Path::to_str).unwrap_or("")),
-        meta = shell::quote_arg(RUNNER_WORKSPACE_METADATA_FILE_NAME),
-        state_suffix = shell::quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
-        suffix = shell::quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
-        min_age = shell::quote_arg(&min_age.to_string()),
+        root = posix_quote_arg(root),
+        after = posix_quote_arg(after.and_then(Path::to_str).unwrap_or("")),
+        meta = posix_quote_arg(RUNNER_WORKSPACE_METADATA_FILE_NAME),
+        state_suffix = posix_quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
+        suffix = posix_quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
+        min_age = posix_quote_arg(&min_age.to_string()),
         unowned_min_age = min_age.max(UNOWNED_ENTRY_MIN_AGE_SECONDS),
         row_budget = row_budget,
         scan_budget = scan_budget_seconds,
@@ -4035,7 +4035,7 @@ pub(crate) fn prune_scan_command(
 pub(crate) fn prune_size_command(paths: &[&str]) -> String {
     let paths = paths
         .iter()
-        .map(|path| shell::quote_arg(path))
+        .map(|path| posix_quote_arg(path))
         .collect::<Vec<_>>()
         .join(" ");
     format!(
@@ -4148,7 +4148,7 @@ fn remove_ssh_prune_candidate(
         let metadata_path = PathBuf::from(workspace_metadata_path(&candidate.remote_path));
         let metadata_command = format!(
             "meta={}; [ -f \"$meta\" ] && base64 < \"$meta\" | tr -d '\\n'",
-            shell::quote_arg(&metadata_path.display().to_string())
+            posix_quote_arg(&metadata_path.display().to_string())
         );
         let metadata_output =
             client.execute_with_timeout(&metadata_command, WORKSPACE_PRUNE_TIMEOUT);
@@ -4222,13 +4222,13 @@ pub(crate) fn ssh_prune_delete_command_with_terminal_authority(
     terminal_owner_run_id: Option<&str>,
     terminal_job_id: Option<&str>,
 ) -> String {
-    let owner = shell::quote_arg(terminal_owner_run_id.unwrap_or(""));
-    let job = shell::quote_arg(terminal_job_id.unwrap_or(""));
+    let owner = posix_quote_arg(terminal_owner_run_id.unwrap_or(""));
+    let job = posix_quote_arg(terminal_job_id.unwrap_or(""));
     format!(
         "root={root}; p={path}; meta_rel={meta}; owner={owner}; job={job}; case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; meta=\"$p$meta_rel\"; [ -f \"$meta\" ] && grep -Eq '\"schema\"[[:space:]]*:[[:space:]]*\"homeboy/runner-workspace/v1\"' \"$meta\" || {{ printf unknown:metadata; exit 0; }}; if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"active\"' \"$meta\"; then compact=$(tr -d '[:space:]' < \"$meta\") || {{ printf unknown:metadata; exit 0; }}; {{ [ -n \"$owner\" ] && [ \"$(printf '%s' \"$compact\" | grep -Fo -- \"\\\"run_id\\\":\\\"$owner\\\"\" | wc -l | tr -d ' ')\" -ge 2 ]; }} || {{ [ -n \"$job\" ] && printf '%s' \"$compact\" | grep -Fq -- \"\\\"job_id\\\":\\\"$job\\\"\"; }} || {{ printf live:active_resource_lifecycle_lease; exit 0; }}; fi; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; printf '%s\\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; [ \"$state\" -eq 0 ] && {{ printf live:remote_process_ownership; exit 0; }}; [ \"$state\" -eq 1 ] || {{ printf unknown:process_probe_failed; exit 0; }}; cwd=$(lsof -w -Fn -a -d cwd +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; open=$(lsof -w -Fn +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$open\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; rm -rf -- \"$p\" \"$p\"-homeboy-state && printf removed || printf unknown:delete_failed",
-        root = shell::quote_arg(root),
-        path = shell::quote_arg(remote_path),
-        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
+        root = posix_quote_arg(root),
+        path = posix_quote_arg(remote_path),
+        meta = posix_quote_arg(&workspace_metadata_relative_to_checkout()),
     )
 }
 
@@ -4246,9 +4246,9 @@ pub(crate) fn ssh_prune_delete_materialized_workspace_command(
             "cmp -s \"$meta\" \"$expected\" || {{ printf unknown:materialized_workspace_lifecycle_changed; exit 0; }}; ",
             "{probe_and_delete}"
         ),
-        root = shell::quote_arg(root),
-        path = shell::quote_arg(remote_path),
-        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
+        root = posix_quote_arg(root),
+        path = posix_quote_arg(remote_path),
+        meta = posix_quote_arg(&workspace_metadata_relative_to_checkout()),
         probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
     )
 }
@@ -4266,10 +4266,10 @@ pub(crate) fn ssh_prune_delete_orphan_artifact_dir_command(
             "{{ [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; }} && {{ printf unknown:artifact_dir_checkout_present; exit 0; }}; ",
             "{probe_and_delete}"
         ),
-        root = shell::quote_arg(root),
-        path = shell::quote_arg(remote_path),
-        suffix = shell::quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
-        state_suffix = shell::quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
+        root = posix_quote_arg(root),
+        path = posix_quote_arg(remote_path),
+        suffix = posix_quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
+        state_suffix = posix_quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
         probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
     )
 }
@@ -4284,9 +4284,9 @@ pub(crate) fn ssh_prune_delete_unowned_entry_command(root: &str, remote_path: &s
             "[ -e \"$p$meta_rel\" ] && {{ printf unknown:workspace_metadata_present; exit 0; }}; ",
             "{probe_and_delete}"
         ),
-        root = shell::quote_arg(root),
-        path = shell::quote_arg(remote_path),
-        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
+        root = posix_quote_arg(root),
+        path = posix_quote_arg(remote_path),
+        meta = posix_quote_arg(&workspace_metadata_relative_to_checkout()),
         probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
     )
 }
@@ -4316,9 +4316,9 @@ fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str
             client.env.extend(runner.env.clone());
             let command = format!(
                 "root={root}; path={path}; case \"$path\" in \"$root\"/*) [ \"$path\" != \"$root\" ] && rm -rf -- \"$path\" \"$path\"{state_suffix} ;; *) echo refused >&2; exit 2 ;; esac",
-                root = shell::quote_arg(root),
-                path = shell::quote_arg(remote_path),
-                state_suffix = shell::quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
+                root = posix_quote_arg(root),
+                path = posix_quote_arg(remote_path),
+                state_suffix = posix_quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
             );
             let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
             if output.success {
