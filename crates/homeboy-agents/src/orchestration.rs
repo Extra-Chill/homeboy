@@ -1618,6 +1618,10 @@ impl OrchestrationService<LifecycleStoreLookup> {
             "retry_context": review_retry_context(run_id),
             "read": { "phase": "controller_local", "mutated": false, "unavailable_sources": durable_read.unavailable_sources },
         });
+        evidence["review_form"] = aggregate
+            .as_ref()
+            .and_then(crate::agent_task_service::persisted_review_form)
+            .unwrap_or(Value::Null);
         if let Some(selection) = target.selection {
             if selection.latest_attempt_run_id != run_id {
                 let latest = crate::agent_task_lifecycle::exact_durable_local_read_in_store(
@@ -1625,16 +1629,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     &selection.latest_attempt_run_id,
                 )
                 .map_err(map_lifecycle_error)?;
-                let review_form = latest.aggregate.as_ref().and_then(|aggregate| {
-                    aggregate
-                        .selected_outcome()
-                        .or_else(|| {
-                            (aggregate.outcomes.len() == 1)
-                                .then(|| aggregate.outcomes.first())
-                                .flatten()
-                        })
-                        .and_then(|outcome| outcome.outputs.get("review_form"))
-                });
+                let review_form = latest
+                    .aggregate
+                    .as_ref()
+                    .and_then(crate::agent_task_service::persisted_review_form);
+                // The review form is the latest attempt's own account.
+                evidence["review_form"] = review_form.clone().unwrap_or(Value::Null);
                 evidence["contributing_attempt"] = serde_json::json!({
                     "run_id": latest.record.run_id,
                     "review_form": review_form,
@@ -4080,12 +4080,15 @@ fn project_snapshot(
             };
             resource.blocker = Some(ControlPlaneBlocker {
                 code: Some("review_form.incomplete".into()),
-                message: redacted_bounded(
-                    &format!("The agent's review form declares the task incomplete: {reason}"),
-                    MESSAGE_BOUND,
-                ),
+                // Agent-authored text is never truncated in JSON (#18930).
+                message: homeboy_core::redaction::redact_string(&format!(
+                    "The agent's review form declares the task incomplete: {reason}"
+                )),
                 reason: Some(next),
-                details: None,
+                // Bounded readers point here for the complete form.
+                details: Some(serde_json::json!({
+                    "review_form": format!("homeboy agent-task review {id}"),
+                })),
                 state: None,
                 retry: None,
                 daemon: None,

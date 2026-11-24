@@ -579,3 +579,59 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
         assert_eq!(attempt_status["run"], retry_run_id);
     });
 }
+
+#[test]
+fn review_json_returns_the_complete_persisted_review_form() {
+    with_temp_home(|| {
+        let run_id = "run-review-complete-form";
+        run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))
+            .expect("run completed");
+        let reason = format!("blocked: {}", "the agent's account of the run ".repeat(40));
+        assert!(reason.chars().count() > 1000);
+        let form = json!({
+            "pr_title": "fix: incomplete",
+            "summary": "Could not finish.",
+            "what_changed": ["nothing shipped"],
+            "completion": "incomplete",
+            "incomplete_reason": reason,
+        });
+        // The form lives only in the outcome's json typed artifact, as the
+        // runtime result persists it for candidate_recoverable runs.
+        let store = test_lifecycle_store();
+        let plan = agent_task_lifecycle::load_plan_in_store(&store, run_id).unwrap();
+        let mut aggregate = store.read_aggregate(run_id).unwrap();
+        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        aggregate.outcomes[0].typed_artifacts.push(
+            serde_json::from_value(json!({
+                "name": "agent_result",
+                "type": "json",
+                "payload": { "status": "candidate_recoverable", "outputs": { "review_form": form } },
+            }))
+            .expect("typed artifact"),
+        );
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate).unwrap();
+
+        let (value, exit_code) = review::review(ReviewArgs {
+            run_id: run_id.to_string(),
+            full: false,
+            to_worktree: None,
+            provider_argv: Vec::new(),
+        })
+        .expect("review loaded");
+
+        assert_eq!(exit_code, 0);
+        let json = serde_json::to_string(&value).expect("review JSON");
+        let round_trip: Value = serde_json::from_str(&json).expect("parse review JSON");
+        assert_eq!(round_trip["review_form"], form);
+        assert_eq!(round_trip["review_form"]["incomplete_reason"], reason);
+        let human = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Review,
+            &round_trip,
+        )
+        .expect("human review");
+        assert!(
+            human.contains(&format!("Incomplete reason: {reason}\n")),
+            "{human}"
+        );
+    });
+}

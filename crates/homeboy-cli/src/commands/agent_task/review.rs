@@ -225,6 +225,8 @@ fn compact_review(value: Value, full: bool) -> Value {
         "action_eligibility": value.pointer("/evidence/action_eligibility"),
         "candidate_selection": value.pointer("/evidence/candidate_selection"),
         "contributing_attempt": value.pointer("/evidence/contributing_attempt"),
+        // The latest attempt's complete, untruncated review form (#18930).
+        "review_form": value.pointer("/evidence/review_form"),
         "transport": value.pointer("/evidence/transport"),
         "read": value.pointer("/evidence/read"),
         "full_command": format!("homeboy agent-task review {run_id} --full"),
