@@ -13855,7 +13855,7 @@ echo https://github.com/example/fixture/pull/1
                 &gate_id,
                 "last gate output: two cells failed",
                 "Incomplete candidate; deterministic verification failed:",
-                "Closes #42",
+                "Refs #42",
             ] {
                 assert!(
                     requested.contains(expected),

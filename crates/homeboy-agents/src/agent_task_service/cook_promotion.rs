@@ -2975,13 +2975,13 @@ pub(crate) fn cook_finalization_options_with_stores(
         review_form.is_some(),
         title_policy,
     )?;
-    // Passing regression gates is not proof that the task was completed.
-    // Only a repro that failed on base and passed on this candidate can
-    // authorize a new ready PR. Existing PR state is preserved by finalization.
+    // Passing regression gates is not proof that the task was completed. Only
+    // a Cook that proved its task authorizes a new ready PR, from the same
+    // predicate that picks `Closes` over `Refs` (#18931). Existing PR state is
+    // preserved by finalization.
     let draft_pr = options.finalization.draft_pr
         || gap.is_some()
-        || review_dossier.repro
-            != Some(crate::agent_task_review_dossier::AgentTaskReviewRepro::Verified);
+        || !crate::agent_task_finalization::cook_proved_task(&review_dossier);
     review_dossier.validate_for_publication(&review_profile, draft_pr)?;
     let form_title = if !options.finalization.title.is_empty() {
         None
@@ -3908,6 +3908,13 @@ fn cook_review_dossier_with_stores_and_review_form(
             },
         ]);
     }
+    // A form with a publication gap (missing, invalid, or failed gates) has no
+    // verdict that can prove the task (#18931).
+    let completion = if gap.is_none() {
+        terminal_form.completion
+    } else {
+        None
+    };
     let mut summary = if gap.is_some() {
         terminal_form.summary.clone()
     } else {
@@ -4017,6 +4024,7 @@ fn cook_review_dossier_with_stores_and_review_form(
                 .unwrap_or_default(),
             &terminal_form.delivery,
         ),
+        completion,
     })
 }
 
