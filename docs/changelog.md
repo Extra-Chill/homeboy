@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.496.1] - 2026-11-24
+
+### Changed
+- delete tests that can never fail
+- one transport selector and one file-transfer layer
+- one extension-parity owner for execution and upgrade
+- one Cook retry entry and one candidate-adoption entry
+- delete dead metadata.cancellation_fence fallback
+- delete the in-process continue_cook recovery path
+- type CookRunState.status and own gate verdicts in one GateVerdict enum
+
 ## [0.496.0] - 2026-11-24
 
 ### Added
