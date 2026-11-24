@@ -3168,7 +3168,7 @@ fn abandoned_recipe_only_cook_is_reconciled_rather_than_recovered() {
             record.set_state_for_test(RunExecutionState::Succeeded);
             record.metadata["detached_cook_handoff"] = json!({
                 "cook_id": cook_id,
-                "state": "redirected",
+                "admission_state": "materialized",
                 "attempt_run_id": attempt_id,
             });
             record.submitted_at = "2020-01-01T00:00:00Z".into();

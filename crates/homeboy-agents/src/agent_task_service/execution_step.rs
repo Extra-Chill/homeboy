@@ -10,7 +10,9 @@ use homeboy_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunRecord};
+use crate::agent_task_lifecycle::{
+    AgentTaskLifecycleStore, AgentTaskRunRecord, CookAdmissionPhase,
+};
 use crate::agent_task_scheduler::AgentTaskPlan;
 
 pub const EXECUTION_STEP_KIND: &str = "agent-task-execution-step";
@@ -789,7 +791,7 @@ pub(super) fn consume_execution_terminal_in_store(
         if stored.metadata["execution_scheduling"]["current_intent_id"].as_str()
             != Some(&delivery.key)
             || (stored.state().is_terminal()
-                && stored.metadata["detached_cook_handoff"]["state"] != "redirected")
+                && CookAdmissionPhase::of(stored) != Some(CookAdmissionPhase::Materialized))
         {
             return None;
         }
@@ -838,7 +840,8 @@ pub(super) fn consume_execution_terminal_in_store(
             reconcile = Some(execution_record.run_id.clone());
             return None;
         }
-        if !delivery.cancelled && stored.metadata["detached_cook_handoff"]["state"] == "redirected"
+        if !delivery.cancelled
+            && CookAdmissionPhase::of(stored) == Some(CookAdmissionPhase::Materialized)
         {
             // A published attempt already owns a deferral or its durable
             // terminal result. Never manufacture another initial admission.

@@ -514,8 +514,8 @@ fn assert_detached_cook_materializes_attempt(force_pressure: bool) {
         .read_record(cook_id)
         .expect("the requested Cook identity remains discoverable after handoff");
     assert_eq!(
-        handoff_parent.metadata["detached_cook_handoff"]["state"],
-        "redirected"
+        handoff_parent.metadata["detached_cook_handoff"]["admission_state"],
+        "materialized"
     );
     assert_eq!(
         handoff_parent.metadata["detached_cook_handoff"]["attempt_run_id"],
@@ -827,7 +827,7 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
             .read_record(cook_id)
             .expect("read handoff parent after launcher crash");
         let handoff = &parent.metadata["detached_cook_handoff"];
-        if handoff["state"] == "redirected" {
+        if handoff["admission_state"] == "materialized" {
             break handoff["attempt_run_id"]
                 .as_str()
                 .expect("redirected handoff names its attempt")

@@ -142,7 +142,6 @@ impl CookStartupAdmission {
         let handoff = &record.metadata["detached_cook_handoff"];
         let progress_is_current = record.metadata["cook_progress"]["phase"] == "pre_supervisor";
         if !record.state().is_terminal()
-            && handoff["state"] == "pending"
             && handoff["admission_state"] == "pre_supervisor"
             && handoff["launcher_id"] == launcher_id
             && !progress_is_current
@@ -194,7 +193,6 @@ impl CookStartupAdmission {
         // or a transferred local launcher has a different token and must retain
         // its own handoff custody.
         if record.state().is_terminal()
-            || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
             || handoff["launcher_id"] != self.launcher_id
             || handoff["launcher_pid"].as_u64() != Some(u64::from(std::process::id()))

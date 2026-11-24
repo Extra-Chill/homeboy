@@ -932,8 +932,10 @@ fn queued_cook_admission_survives_its_owner_exiting_and_dispatches_when_unblocke
             "queued"
         );
         assert_eq!(
-            requeued.metadata["detached_cook_handoff"]["state"],
-            "pending"
+            agent_task_lifecycle::CookAdmissionPhase::of(&requeued),
+            Some(agent_task_lifecycle::CookAdmissionPhase::Pending {
+                step: Some("unmaterialized")
+            })
         );
         assert!(!requeued.is_stale_running());
         let next = current_intent(&store, subject);
@@ -1298,11 +1300,13 @@ fn unmaterialized_admission_advances_as_its_first_attempt_materializes() {
         agent_task_lifecycle::submit_plan_in_store(&store, &test_plan(), Some(child)).unwrap();
         agent_task_lifecycle::record_cook_attempt_in_store(&store, parent, 1, child).unwrap();
         let parent_record = store.read_record(parent).unwrap();
+        // Materialization is the derived phase; the admission keeps its last
+        // pre-materialization step rather than a duplicate `materialized` label.
         let admission = &parent_record.metadata["unmaterialized_cook_admission"];
-        assert_eq!(admission["state"], "materialized");
+        assert_eq!(admission["state"], "materializing");
         assert_eq!(
-            admission["reason"],
-            format!("materialized as attempt {child}")
+            agent_task_lifecycle::CookAdmissionPhase::of(&parent_record),
+            Some(agent_task_lifecycle::CookAdmissionPhase::Materialized)
         );
         assert_eq!(
             parent_record.metadata["detached_cook_handoff"]["admission_state"],
@@ -3139,7 +3143,7 @@ fn cancelled_workflow_cook_step_cancels_the_attempt_its_cook_redirected_to() {
             // A workflow step owns its Cook by ID; it records no launcher.
             let handoff = &mut record.metadata["detached_cook_handoff"];
             handoff["attempt_run_id"] = serde_json::json!(&attempt_id);
-            handoff["state"] = serde_json::json!("redirected");
+            handoff["admission_state"] = serde_json::json!("materialized");
         })
         .expect("redirect parent");
         agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
@@ -3259,7 +3263,8 @@ fn cook_step_missing_redirected_index_settles_and_acks_after_daemon_restart() {
         .unwrap();
         agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Succeeded);
-            record.metadata["detached_cook_handoff"]["state"] = serde_json::json!("redirected");
+            record.metadata["detached_cook_handoff"]["admission_state"] =
+                serde_json::json!("materialized");
             record.metadata["detached_cook_handoff"]["attempt_run_id"] =
                 serde_json::json!("missing-attempt");
         })
@@ -3349,7 +3354,8 @@ fn scoped_reconcile_keeps_exact_attempts_separate_and_expands_cook_aliases_to_th
             // stale after normal handoff completion has redirected the parent.
             record.metadata["detached_cook_handoff"]["attempt_run_id"] =
                 serde_json::json!(&attempt_id);
-            record.metadata["detached_cook_handoff"]["state"] = serde_json::json!("redirected");
+            record.metadata["detached_cook_handoff"]["admission_state"] =
+                serde_json::json!("materialized");
         })
         .expect("link stale parent projection");
         for run_id in [cook_id, attempt_id.as_str()] {
