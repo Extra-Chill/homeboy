@@ -17,11 +17,16 @@ use crate::agent_task_source_snapshot::{TaskSourceSnapshot, TASK_SOURCE_INPUT_KE
 /// Reason recorded for a checklist item the review form did not account for.
 pub const UNREPORTED_DELIVERY_REASON: &str = "not reported by the agent";
 
-/// Headings whose list items are delivery items.
-const CHECKLIST_HEADINGS: [&str; 3] = [
-    "required behaviour",
-    "required behavior",
+/// Words that mark a heading whose list items are delivery items, e.g.
+/// `Required behaviour`, `Acceptance criteria`, `Asks` or
+/// `Rework 2 (required): …`.
+const CHECKLIST_HEADING_WORDS: [&str; 6] = [
+    "required",
     "acceptance criteria",
+    "asks",
+    "tasks",
+    "rework",
+    "to do",
 ];
 
 /// The task source snapshot recorded on `request` at admission.
@@ -76,9 +81,9 @@ pub fn checklist_items(body: &str) -> Vec<String> {
         }
         if let Some(heading) = heading_text(trimmed) {
             let heading = heading.to_lowercase();
-            in_section = CHECKLIST_HEADINGS
+            in_section = CHECKLIST_HEADING_WORDS
                 .iter()
-                .any(|known| heading.starts_with(known));
+                .any(|word| heading.contains(word));
             continue;
         }
         let indent = line.len() - line.trim_start().len();
@@ -90,7 +95,10 @@ pub fn checklist_items(body: &str) -> Vec<String> {
             },
             None => None,
         };
-        let Some(item) = item.map(single_line).filter(|item| !item.is_empty()) else {
+        let Some(item) = item
+            .map(|item| single_line(bold_title(item)))
+            .filter(|item| !item.is_empty())
+        else {
             continue;
         };
         if !items
@@ -220,6 +228,16 @@ fn task_item(text: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+/// The bold lead-in of an item such as `**Bind evidence at intake.** Detail…`,
+/// which names the item; otherwise the whole text.
+fn bold_title(text: &str) -> &str {
+    text.strip_prefix("**")
+        .and_then(|rest| rest.split_once("**"))
+        .map(|(title, _)| title.trim().trim_end_matches(['.', ':']))
+        .filter(|title| !title.is_empty())
+        .unwrap_or(text)
+}
+
 fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -246,7 +264,7 @@ mod tests {
 
     #[test]
     fn delivery_items_extract_from_checklist_headings_and_task_lists() {
-        let cases: [(&str, &str, &[&str]); 6] = [
+        let cases: [(&str, &str, &[&str]); 7] = [
             ("no checklist", "Fix the crash.\n\n- an aside", &[]),
             (
                 "required behaviour heading",
@@ -267,6 +285,11 @@ mod tests {
                 "heading and task list combined, deduplicated",
                 "### Required behavior\n- [ ] Reconcile delivery\n- List in prompt\n\n# Other\n- [ ] reconcile delivery",
                 &["Reconcile delivery", "List in prompt"],
+            ),
+            (
+                "rework heading with numbered bold-titled asks",
+                "## Rework 2 (required): slice 1 is inert\nContext paragraph.\n\n1. **Bind evidence at intake, not after rewrites.** Detail.\n2. **Accept `box-tree/v3`.** Detail.\n\nAcceptance is unchanged.\n\n## Summary\n- Not an ask",
+                &["Bind evidence at intake, not after rewrites", "Accept `box-tree/v3`"],
             ),
             (
                 "fenced code is skipped",
