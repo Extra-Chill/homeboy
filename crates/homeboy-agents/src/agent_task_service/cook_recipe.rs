@@ -3369,10 +3369,11 @@ fn consume_claimed_with_dispatcher_policy(
         return Err(error);
     }
     lifecycle_store.mutate_record(&claim.continuation().run_id, |record| {
-        record
+        let progress = record
             .ensure_metadata_object()
             .remove("cook_progress")
-            .is_some()
+            .is_some();
+        super::CookOutcome::write(&mut record.metadata, None) || progress
     })?;
     let execution = execute(options);
     match execution {

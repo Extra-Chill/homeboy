@@ -381,7 +381,7 @@ pub(crate) fn settle_undriven_cook(
     }
     let status = super::cook_projections::terminal_fallback_status(state.execution_state);
     let failed = state.execution_state != homeboy_lifecycle_contract::RunExecutionState::Succeeded;
-    if !record.metadata["cook_progress"]["exit_code"].is_i64() {
+    if super::CookOutcome::from_run_metadata(&record.metadata).is_none() {
         agent_task_lifecycle::record_cook_outcome_in_store(
             lifecycle,
             &record.run_id,
@@ -681,7 +681,7 @@ pub(super) fn run_cook_reported(
             if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
                 lifecycle_store,
                 run_id,
-                result.value.status.as_str(),
+                result.value.status,
                 result.exit_code,
             )
             .and_then(|_| store.settle_continuations_driven_inline(&result.value.cook_id))

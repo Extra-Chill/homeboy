@@ -76,6 +76,66 @@ struct CookDeliveryRecord {
     delivery: Option<CookDelivery>,
     #[serde(default)]
     artifacts: CookDeliveryArtifacts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outcome: Option<CookOutcome>,
+}
+
+/// The terminal outcome a Cook recorded on its latest attempt's
+/// `cook_delivery` record when it ended (#18920).
+///
+/// It is the one durable outcome detail beside the run's
+/// `RunExecutionState` (the phase) and the delivery facts. `cook_progress`
+/// carries only live progress; nothing reads a verdict from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CookOutcome {
+    /// The Cook status the terminal report settled on, when one was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<CookStatus>,
+    /// The Cook's process exit code.
+    pub exit_code: i32,
+}
+
+impl CookOutcome {
+    /// The outcome a run's `cook_delivery` record holds, if any.
+    pub fn from_run_metadata(metadata: &Value) -> Option<Self> {
+        CookDeliveryRecord::read(metadata).and_then(|record| record.outcome)
+    }
+
+    /// Record `outcome` (or clear it with `None`) on the run's `cook_delivery`
+    /// record, leaving its delivery facts and artifacts untouched. Returns
+    /// whether the metadata changed. A record written by a newer binary is
+    /// left alone.
+    pub(crate) fn write(metadata: &mut Value, outcome: Option<Self>) -> bool {
+        if metadata.get(COOK_DELIVERY_KEY).is_some() && CookDeliveryRecord::read(metadata).is_none()
+        {
+            return false;
+        }
+        let mut record = CookDeliveryRecord::read(metadata).unwrap_or(CookDeliveryRecord {
+            schema: COOK_DELIVERY_SCHEMA.to_string(),
+            delivery: None,
+            artifacts: CookDeliveryArtifacts::default(),
+            outcome: None,
+        });
+        if record.outcome == outcome {
+            return false;
+        }
+        record.outcome = outcome;
+        let Some(metadata) = metadata.as_object_mut() else {
+            return false;
+        };
+        if record.delivery.is_none()
+            && record.outcome.is_none()
+            && record.artifacts == CookDeliveryArtifacts::default()
+        {
+            metadata.remove(COOK_DELIVERY_KEY);
+        } else {
+            metadata.insert(
+                COOK_DELIVERY_KEY.to_string(),
+                serde_json::to_value(record).expect("a Cook delivery always serializes"),
+            );
+        }
+        true
+    }
 }
 
 /// The full artifacts delivery steps recorded, kept verbatim in the
@@ -342,6 +402,7 @@ impl CookDelivery {
             schema: COOK_DELIVERY_SCHEMA.to_string(),
             delivery: delivery.cloned(),
             artifacts: artifacts.clone(),
+            outcome: None,
         })
         .expect("a Cook delivery always serializes")
     }

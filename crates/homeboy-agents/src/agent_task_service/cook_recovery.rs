@@ -3210,7 +3210,7 @@ mod tests {
                 "cook_id": "cook-17976",
                 "runner_id": "homeboy-lab",
                 "runner_job_id": "job-17976",
-                "cook_progress": { "phase": "terminal", "terminal_status": "in_flight" },
+                "cook_progress": { "phase": "terminal" },
             }),
         );
         let state = agent_task_lifecycle::CookRunState::of(&record);
@@ -3269,7 +3269,7 @@ mod tests {
                 "phase": "retry",
                 "runner_id": "homeboy-lab",
                 "runner_job_id": "job-17384-transport-retry",
-                "cook_progress": { "phase": "terminal", "terminal_status": "queued" },
+                "cook_progress": { "phase": "terminal" },
             }),
         );
         use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
@@ -3303,7 +3303,7 @@ mod tests {
             homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable,
             serde_json::json!({
                 "cook_id": "cook-17489",
-                "cook_progress": { "phase": "terminal", "terminal_status": "awaiting_ci" },
+                "cook_progress": { "phase": "terminal" },
             }),
         );
         let state = agent_task_lifecycle::CookRunState::of(&record);
@@ -3332,7 +3332,7 @@ mod tests {
             serde_json::json!({
                 "cook_id": "cook-17295",
                 "provider_executions_consumed": 1,
-                "cook_progress": { "phase": "terminal", "terminal_status": "queued" },
+                "cook_progress": { "phase": "terminal" },
             }),
         );
         let (status_step, recover_step) = status_and_recover_steps(&record, |_| {});

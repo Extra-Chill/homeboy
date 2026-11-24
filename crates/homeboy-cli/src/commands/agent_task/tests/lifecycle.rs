@@ -2427,8 +2427,11 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             "Cook promotion and gates must run instead of the generic plan runner: {completed:#?}"
         );
         assert_eq!(
-            completed.metadata["cook_progress"]["terminal_status"],
-            "green_no_finalize",
+            homeboy::agents::agent_task_service::CookOutcome::from_run_metadata(
+                &completed.metadata
+            )
+            .and_then(|outcome| outcome.status),
+            Some(homeboy::core::cook_status::CookStatus::GreenNoFinalize),
             "the Cook-owned no-finalize finalization decision must close the lifecycle: {completed:#?}"
         );
     });

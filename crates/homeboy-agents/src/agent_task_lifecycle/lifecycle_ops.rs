@@ -2,7 +2,7 @@ use super::acceptance_verifier::{
     validate_acceptance_requirement, validate_attestation, with_acceptance_verifier,
 };
 use super::*;
-use homeboy_core::cook_status::GateVerdict;
+use homeboy_core::cook_status::{CookStatus, GateVerdict};
 
 const DETACHED_COOK_ADMISSION_LEASE_SECONDS: i64 = 30;
 use chrono::DateTime;
@@ -3424,17 +3424,19 @@ pub fn record_cook_progress_with_activity_in_store(
     let run_id = sanitize_run_id(run_id);
     let record = lifecycle_store.mutate_record(&run_id, |record| {
         let now = now_timestamp();
+        // A Cook's settled terminal outcome freezes its progress until a
+        // resumed Cook clears it; an outcome without a status is only an exit
+        // code, which the next progress write retires.
+        match crate::agent_task_service::CookOutcome::from_run_metadata(&record.metadata) {
+            Some(outcome) if outcome.status.is_some() => return true,
+            Some(_) => {
+                crate::agent_task_service::CookOutcome::write(&mut record.metadata, None);
+            }
+            None => {}
+        }
         {
             let metadata = record.ensure_metadata_object();
             let previous = metadata.get("cook_progress").cloned();
-            if previous
-                .as_ref()
-                .and_then(|progress| progress.get("terminal_status"))
-                .and_then(Value::as_str)
-                .is_some()
-            {
-                return true;
-            }
             let phase_started_at = previous
                 .as_ref()
                 .filter(|previous| previous["phase"].as_str() == Some(phase))
@@ -3627,30 +3629,44 @@ pub fn record_cook_supervision_stop_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook supervision stop was unchanged"))
 }
 
+/// Record a Cook's terminal outcome on its latest attempt and write the phase
+/// that outcome settles in the same commit: a Cook that ended without a
+/// candidate (`no_candidate`, `no_changes`) has nothing to recover (#15294).
 pub fn record_cook_terminal_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    terminal_status: &str,
+    status: CookStatus,
     exit_code: i32,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let record = lifecycle_store.mutate_record(&run_id, |record| {
-        let Some(progress) = record
-            .ensure_metadata_object()
-            .get_mut("cook_progress")
-            .and_then(Value::as_object_mut)
-        else {
-            return false;
-        };
-        if progress.get("phase").and_then(Value::as_str) != Some("terminal") {
+        if record
+            .metadata
+            .pointer("/cook_progress/phase")
+            .and_then(Value::as_str)
+            != Some("terminal")
+        {
             return false;
         }
-        progress.insert("terminal_status".to_string(), json!(terminal_status));
-        progress.insert("exit_code".to_string(), json!(exit_code));
+        record.ensure_metadata_object();
+        crate::agent_task_service::CookOutcome::write(
+            &mut record.metadata,
+            Some(crate::agent_task_service::CookOutcome {
+                status: Some(status),
+                exit_code,
+            }),
+        );
         // A cancelled Cook keeps its cancellation: the provenance that minted
         // its `run.cancelled` receipt is valid only on a `Cancelled` record
         // (#15718), and the cancellation is the cause of the missing candidate.
-        if terminal_status == "no_candidate" && record.state() != RunExecutionState::Cancelled {
+        let settles_partial_failure = match status {
+            CookStatus::NoCandidate => record.state() != RunExecutionState::Cancelled,
+            CookStatus::Gate(GateVerdict::NoChanges) => {
+                record.state() == RunExecutionState::Succeeded
+            }
+            _ => false,
+        };
+        if settles_partial_failure {
             set_run_state(record, RunExecutionState::PartialFailure);
         }
         true
@@ -3664,27 +3680,22 @@ pub fn record_cook_terminal_result_in_store(
     Ok(record)
 }
 
-/// Record a Cook's end-to-end outcome on its latest attempt, the durable fact
-/// its rows project from. A later exit replaces it, and the next progress
-/// write of a resumed Cook clears it.
+/// Record a Cook's exit code on its latest attempt, the durable fact its rows
+/// project from, keeping any terminal status already recorded. A later exit
+/// replaces it.
 pub fn record_cook_outcome_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     exit_code: i32,
 ) -> Result<()> {
     lifecycle_store.mutate_record(&sanitize_run_id(run_id), |record| {
-        let progress = record
-            .ensure_metadata_object()
-            .entry("cook_progress".to_string())
-            .or_insert_with(|| json!({}));
-        if !progress.is_object() {
-            *progress = json!({});
-        }
-        if progress["exit_code"] == exit_code {
-            return false;
-        }
-        progress["exit_code"] = json!(exit_code);
-        true
+        let status = crate::agent_task_service::CookOutcome::from_run_metadata(&record.metadata)
+            .and_then(|outcome| outcome.status);
+        record.ensure_metadata_object();
+        crate::agent_task_service::CookOutcome::write(
+            &mut record.metadata,
+            Some(crate::agent_task_service::CookOutcome { status, exit_code }),
+        )
     })?;
     Ok(())
 }

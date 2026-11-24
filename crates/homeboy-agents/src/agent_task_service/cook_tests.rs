@@ -9436,6 +9436,12 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                 "id": mission.as_str(), "plane": "isolated_tasks",
             });
             let run_id = &options.identity.initial_run_id;
+            let outcome = match name {
+                "intentional-no-change" => Some((CookStatus::IntentionalNoChange, 0)),
+                "no-changes" => Some((CookStatus::Gate(GateVerdict::NoChanges), 2)),
+                _ if no_finalize => Some((CookStatus::GreenNoFinalize, 0)),
+                _ => None,
+            };
             recipes.persist_initial_recipe(&options).unwrap();
             agent_task_lifecycle::record_completed_run(
                 &options.identity.initial_plan,
@@ -9455,18 +9461,9 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                         "/promotion",
                         proof.clone(),
                     );
-                    if name == "intentional-no-change" {
-                        record.metadata["cook_progress"] = serde_json::json!({
-                            "phase": "terminal", "terminal_status": "intentional_no_change",
-                            "terminal_success": true, "exit_code": 0,
-                        });
-                    }
-                    if no_finalize || name == "no-changes" {
-                        record.metadata["cook_progress"] = serde_json::json!({
-                            "phase": "terminal",
-                            "terminal_status": if no_finalize { "green_no_finalize" } else { "no_changes" },
-                            "terminal_success": no_finalize, "exit_code": if no_finalize { 0 } else { 2 },
-                        });
+                    if outcome.is_some() {
+                        record.metadata["cook_progress"] =
+                            serde_json::json!({ "phase": "terminal" });
                     }
                     if live_owner {
                         let pid = std::process::id();
@@ -9487,6 +9484,12 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                     true
                 })
                 .unwrap();
+            if let Some((status, exit_code)) = outcome {
+                agent_task_lifecycle::record_cook_terminal_result_in_store(
+                    &store, run_id, status, exit_code,
+                )
+                .unwrap();
+            }
             store
                 .record_cook_attempt(&options.identity.cook_id, 1, run_id)
                 .unwrap();

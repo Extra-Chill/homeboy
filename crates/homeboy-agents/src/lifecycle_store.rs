@@ -2558,8 +2558,7 @@ fn row_authority(
         // The Cook's outcome is recorded on its latest attempt when its
         // terminal report lands; until then every Cook row is held.
         let latest = latest_attempt()?.unwrap_or_else(|| record.clone());
-        let terminal = &latest.metadata["cook_progress"];
-        if !terminal["exit_code"].is_i64() {
+        if crate::agent_task_service::CookOutcome::from_run_metadata(&latest.metadata).is_none() {
             return Ok(RowAuthority::Cook(None));
         }
         return Ok(RowAuthority::Cook(Some(if record.run_id == cook_id {
@@ -2589,9 +2588,8 @@ fn cook_row_status(record: &AgentTaskRunRecord) -> Option<&'static str> {
     }
     let state = super::CookRunState::of(record).execution_state;
     has_outcome(state).then(|| run_status(state)).or_else(|| {
-        let terminal = &record.metadata["cook_progress"];
-        terminal["exit_code"].is_i64().then(|| {
-            if terminal["exit_code"] == 0 {
+        crate::agent_task_service::CookOutcome::from_run_metadata(&record.metadata).map(|outcome| {
+            if outcome.exit_code == 0 {
                 RunStatus::Pass.as_str()
             } else {
                 RunStatus::Fail.as_str()
