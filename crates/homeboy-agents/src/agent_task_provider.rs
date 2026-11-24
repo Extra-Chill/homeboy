@@ -122,7 +122,7 @@ pub(crate) use outcome_normalization::{
 
 #[cfg(test)]
 use command_runner::{
-    is_transient_provider_error, provider_command_env, run_provider_command,
+    is_transient_provider_error, provider_command_env_with_credentials, run_provider_command,
     run_provider_command_once, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
 };
 #[cfg(test)]
