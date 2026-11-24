@@ -1335,7 +1335,7 @@ mod tests {
         git(&["reset", "-q", "--hard", &base]);
 
         let mut promotion = promotion_report_with_changed_files(
-            AgentTaskPromotionStatus::GateFailed,
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
             vec![failed_gate()],
             vec!["BoxTree.php".to_string(), "Capture.php".to_string()],
         );
@@ -1443,7 +1443,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: request,
             promotion_report: promotion_report_with_changed_files(
-                AgentTaskPromotionStatus::NoChanges,
+                AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges),
                 Vec::new(),
                 Vec::new(),
             ),
