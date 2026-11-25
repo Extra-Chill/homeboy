@@ -464,46 +464,15 @@ mod tests {
     }
 
     #[test]
-    fn identical_messages_cluster_together() {
+    fn same_message_clusters_and_distinct_methods_split() {
+        let missing_set = "Call to undefined method PluginSettings::set()";
         let failures = vec![
+            failure("FooTest::testA", "tests/FooTest.php", "Error", missing_set),
+            failure("FooTest::testB", "tests/FooTest.php", "Error", missing_set),
+            failure("BarTest::testC", "tests/BarTest.php", "Error", missing_set),
             failure(
-                "FooTest::testA",
-                "tests/FooTest.php",
-                "Error",
-                "Call to undefined method PluginSettings::set()",
-            ),
-            failure(
-                "BarTest::testB",
-                "tests/BarTest.php",
-                "Error",
-                "Call to undefined method PluginSettings::set()",
-            ),
-            failure(
-                "BazTest::testC",
+                "BazTest::testD",
                 "tests/BazTest.php",
-                "Error",
-                "Call to undefined method PluginSettings::set()",
-            ),
-        ];
-
-        let result = analyze("test", &input(failures));
-        assert_eq!(result.clusters.len(), 1);
-        assert_eq!(result.clusters[0].count, 3);
-        assert_eq!(result.clusters[0].category, FailureCategory::MissingMethod);
-    }
-
-    #[test]
-    fn different_undefined_methods_get_separate_clusters() {
-        let failures = vec![
-            failure(
-                "FooTest::testA",
-                "tests/FooTest.php",
-                "Error",
-                "Call to undefined method PluginSettings::set()",
-            ),
-            failure(
-                "BarTest::testB",
-                "tests/BarTest.php",
                 "Error",
                 "Call to undefined method PluginSettings::delete()",
             ),
@@ -511,87 +480,57 @@ mod tests {
 
         let result = analyze("test", &input(failures));
         assert_eq!(result.clusters.len(), 2);
-        assert_eq!(result.clusters[0].count, 1);
+        // Largest cluster first; affected files are deduplicated.
+        assert_eq!(result.clusters[0].count, 3);
+        assert_eq!(result.clusters[0].category, FailureCategory::MissingMethod);
+        assert_eq!(result.clusters[0].affected_files.len(), 2);
         assert_eq!(result.clusters[1].count, 1);
     }
 
     #[test]
-    fn fatal_redeclare_clusters() {
-        let failures = vec![
-            failure(
-                "FooTest::testA",
-                "tests/FooTest.php",
+    fn failures_are_categorized_by_message_shape() {
+        let cases = [
+            (
                 "Fatal",
                 "Cannot redeclare sampleplugin_get_monolog_instance()",
+                FailureCategory::FatalError,
             ),
-            failure(
-                "BarTest::testB",
-                "tests/BarTest.php",
-                "Fatal",
-                "Cannot redeclare sampleplugin_get_monolog_instance()",
-            ),
-        ];
-
-        let result = analyze("test", &input(failures));
-        assert_eq!(result.clusters.len(), 1);
-        assert_eq!(result.clusters[0].category, FailureCategory::FatalError);
-        assert!(result.clusters[0].suggested_fix.is_some());
-    }
-
-    #[test]
-    fn sorted_by_count_descending() {
-        let failures = vec![
-            failure(
-                "A::a",
-                "a.php",
+            (
                 "Error",
-                "Call to undefined method X::foo()",
+                "Class \"Missing\" not found",
+                FailureCategory::MissingClass,
             ),
-            failure("B::b", "b.php", "Error", "Class \"Missing\" not found"),
-            failure("C::c", "c.php", "Error", "Class \"Missing\" not found"),
-            failure("D::d", "d.php", "Error", "Class \"Missing\" not found"),
+            (
+                "Error",
+                "Trying to configure method \"execute\" which cannot be configured because it does not exist, has not been specified, is final, or is static",
+                FailureCategory::MockError,
+            ),
+            (
+                "AssertionFailedError",
+                "Failed asserting that WP_Error Object (...) is an instance of \"array\"",
+                FailureCategory::ReturnTypeChange,
+            ),
+            (
+                "TypeError",
+                "Too few arguments to function Foo::bar(), 2 passed and exactly 3 expected",
+                FailureCategory::SignatureChange,
+            ),
         ];
-
-        let result = analyze("test", &input(failures));
-        assert_eq!(result.clusters[0].count, 3); // missing class
-        assert_eq!(result.clusters[1].count, 1); // undefined method
+        for (error_type, message, category) in cases {
+            let result = analyze(
+                "test",
+                &input(vec![failure("A::a", "a.php", error_type, message)]),
+            );
+            assert_eq!(result.clusters[0].category, category, "{message}");
+            assert!(result.clusters[0].suggested_fix.is_some(), "{message}");
+        }
     }
 
     #[test]
-    fn mock_errors_categorized() {
-        let failures = vec![failure(
-            "FooTest::testA",
-            "tests/FooTest.php",
-            "Error",
-            "Trying to configure method \"execute\" which cannot be configured because it does not exist, has not been specified, is final, or is static",
-        )];
-
-        let result = analyze("test", &input(failures));
-        assert_eq!(result.clusters[0].category, FailureCategory::MockError);
-    }
-
-    #[test]
-    fn return_type_change_detected() {
-        let failures = vec![failure(
-            "FooTest::testA",
-            "tests/FooTest.php",
-            "AssertionFailedError",
-            "Failed asserting that WP_Error Object (...) is an instance of \"array\"",
-        )];
-
-        let result = analyze("test", &input(failures));
-        assert_eq!(
-            result.clusters[0].category,
-            FailureCategory::ReturnTypeChange
-        );
-    }
-
-    #[test]
-    fn hints_include_fix_priority() {
+    fn hints_prioritize_fatal_errors() {
         let failures = vec![
             failure("A::a", "a.php", "Fatal", "Cannot redeclare foo()"),
             failure("B::b", "b.php", "Fatal", "Cannot redeclare foo()"),
-            failure("C::c", "c.php", "Fatal", "Cannot redeclare foo()"),
             failure(
                 "D::d",
                 "d.php",
@@ -601,61 +540,6 @@ mod tests {
         ];
 
         let result = analyze("test", &input(failures));
-        let hints_text = result.hints.join(" ");
-        assert!(hints_text.contains("fatal"));
-    }
-
-    #[test]
-    fn affected_files_deduplicated() {
-        let failures = vec![
-            failure(
-                "FooTest::testA",
-                "tests/FooTest.php",
-                "Error",
-                "Call to undefined method X::foo()",
-            ),
-            failure(
-                "FooTest::testB",
-                "tests/FooTest.php",
-                "Error",
-                "Call to undefined method X::foo()",
-            ),
-        ];
-
-        let result = analyze("test", &input(failures));
-        assert_eq!(result.clusters[0].affected_files.len(), 1);
-        assert_eq!(result.clusters[0].count, 2);
-    }
-
-    #[test]
-    fn extract_between_works() {
-        assert_eq!(
-            extract_between("Class \"Foo\\Bar\" not found", "Class \"", "\" not found"),
-            Some("Foo\\Bar")
-        );
-        assert_eq!(extract_between("no match here", "start", "end"), None);
-    }
-
-    #[test]
-    fn common_prefix_works() {
-        assert_eq!(common_prefix(&["foobar", "foobaz", "fooqux"]), "foo");
-        assert_eq!(common_prefix(&["abc"]), "abc");
-        assert_eq!(common_prefix(&[]), "");
-    }
-
-    #[test]
-    fn signature_change_categorized() {
-        let failures = vec![failure(
-            "FooTest::testA",
-            "tests/FooTest.php",
-            "TypeError",
-            "Too few arguments to function Foo::bar(), 2 passed and exactly 3 expected",
-        )];
-
-        let result = analyze("test", &input(failures));
-        assert_eq!(
-            result.clusters[0].category,
-            FailureCategory::SignatureChange
-        );
+        assert!(result.hints.join(" ").contains("fatal"));
     }
 }

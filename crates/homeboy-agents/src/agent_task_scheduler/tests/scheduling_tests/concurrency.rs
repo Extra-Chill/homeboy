@@ -222,30 +222,6 @@ pub(super) mod concurrency_tests {
     }
 
     #[test]
-    fn wait_all_remains_the_default_candidate_completion_policy() {
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(20));
-        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = plan_with_tasks(2);
-        plan.group_key = Some("candidate-group".to_string());
-        for task in &mut plan.tasks {
-            task.group_key = Some("candidate-group".to_string());
-        }
-        plan.options.max_concurrency = 2;
-        assert_eq!(
-            plan.options.candidate_completion,
-            AgentTaskCandidateCompletionPolicy::WaitAll
-        );
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(aggregate.totals.succeeded, 2);
-        assert_eq!(
-            aggregate.selected_outcome().map(|outcome| outcome.status),
-            Some(AgentTaskOutcomeStatus::Succeeded)
-        );
-    }
-
-    #[test]
     fn candidate_resource_budget_can_intentionally_serialize_execution() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
         let max_seen = Arc::clone(&executor.max_seen);

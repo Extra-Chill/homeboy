@@ -630,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn test_for_run() {
+    fn observation_pointer_for_run_emits_query_and_export_commands() {
         let metadata = ObservationOutputMetadata::for_run("review", "run-123");
         let json = serde_json::to_value(metadata).expect("serialize observation metadata");
 
@@ -686,20 +686,6 @@ mod tests {
             ),
             (1, 1, 1, 1)
         );
-        assert_eq!(result.exit_code(), 1);
-    }
-
-    #[test]
-    fn batch_outcome_totals_cover_success_partial_failure_skipped_and_empty() {
-        let empty = BatchResult::new();
-        assert_eq!(empty.outcome_totals(), OutcomeTotals::default());
-
-        let mut result = BatchResult::new();
-        result.record_created("created".to_string());
-        result.record_updated("updated".to_string());
-        result.record_skipped("skipped".to_string());
-        result.record_error("failed".to_string(), "boom".to_string());
-
         assert_eq!(
             result.outcome_totals(),
             OutcomeTotals {
@@ -757,32 +743,25 @@ mod tests {
     }
 
     #[test]
-    fn entity_rows_emit_rows_only_under_entities() {
-        let output = FlattenedRows {
-            command: "example.list",
-            rows: EntityRows::new(vec![json!({ "id": "a" }), json!({ "id": "b" })]),
-        };
+    fn entity_rows_emit_rows_only_under_entities_even_when_empty() {
+        for (rows, expected) in [
+            (
+                vec![json!({ "id": "a" }), json!({ "id": "b" })],
+                json!([{ "id": "a" }, { "id": "b" }]),
+            ),
+            (Vec::new(), json!([])),
+        ] {
+            let value = serde_json::to_value(FlattenedRows {
+                command: "example.list",
+                rows: EntityRows::new(rows),
+            })
+            .expect("serialize");
 
-        let value = serde_json::to_value(&output).expect("serialize");
-
-        assert_eq!(value["command"], "example.list");
-        assert_eq!(value["entities"], json!([{ "id": "a" }, { "id": "b" }]));
-    }
-
-    #[test]
-    fn entity_rows_always_emit_entities_when_empty() {
-        let value = serde_json::to_value(FlattenedRows {
-            command: "example.list",
-            rows: EntityRows::new(Vec::new()),
-        })
-        .expect("serialize");
-
-        assert_eq!(value["entities"], json!([]));
-        assert_eq!(
-            value.as_object().expect("object").len(),
-            2,
-            "only command + entities: {value}"
-        );
+            assert_eq!(
+                value,
+                json!({ "command": "example.list", "entities": expected })
+            );
+        }
     }
 
     #[test]

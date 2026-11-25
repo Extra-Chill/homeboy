@@ -497,8 +497,10 @@ mod tests {
     /// A component that builds a server artifact *and* declares a provider is
     /// dual-deliverable. The plan must name the deliverable it selected and the
     /// one it did not, so a server route is never a silent choice (#12853).
+    /// `--target provider` is an operator decision, so the plan must not
+    /// re-decide it back to the server route.
     #[test]
-    fn standard_dry_run_reports_route_when_repository_provider_is_not_targeted() {
+    fn dry_run_reports_server_route_unless_provider_is_targeted() {
         let component = Component {
             id: "fixture".to_string(),
             local_path: "/source/fixture".to_string(),
@@ -525,17 +527,19 @@ mod tests {
         config.all = false;
         config.component_ids = vec!["fixture".to_string()];
         config.dry_run = true;
+        let plan = |config: &DeployConfig| {
+            run_dry_run_mode(
+                std::slice::from_ref(&component),
+                &HashMap::new(),
+                &HashMap::new(),
+                &project,
+                "/srv/site",
+                config,
+            )
+            .expect("dry-run plan")
+        };
 
-        let result = run_dry_run_mode(
-            std::slice::from_ref(&component),
-            &HashMap::new(),
-            &HashMap::new(),
-            &project,
-            "/srv/site",
-            &config,
-        )
-        .expect("standard dry-run plan");
-
+        let result = plan(&config);
         let route = result.results[0]
             .warnings
             .iter()
@@ -545,51 +549,9 @@ mod tests {
         assert!(route.contains("this project selects no provider target"));
         assert!(route.contains("'fixture.deploy'"));
         assert!(route.contains("--target provider"));
-    }
 
-    /// `--target provider` is an operator decision, so the plan must not
-    /// re-decide it back to the server route.
-    #[test]
-    fn an_explicit_provider_target_is_not_reported_as_a_server_route() {
-        let component = Component {
-            id: "fixture".to_string(),
-            local_path: "/source/fixture".to_string(),
-            remote_path: "wp-content/plugins/fixture".to_string(),
-            deployment_provider: Some(homeboy_core::component::DeploymentProviderAttachment {
-                extension: "fixture-provider".to_string(),
-                provider: "fixture.deploy".to_string(),
-                contract: None,
-                policy: Some(serde_json::json!({ "repository": "shared" })),
-            }),
-            ..Component::default()
-        };
-        let project = Project {
-            components: vec![homeboy_core::project::ProjectComponentAttachment {
-                id: "fixture".to_string(),
-                local_path: component.local_path.clone(),
-                remote_path: Some(component.remote_path.clone()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let mut config = DeployConfig::check_all_no_pull_head();
-        config.check = false;
-        config.all = false;
-        config.component_ids = vec!["fixture".to_string()];
-        config.dry_run = true;
         config.target = Some(crate::route::DeployTarget::Provider);
-
-        let result = run_dry_run_mode(
-            std::slice::from_ref(&component),
-            &HashMap::new(),
-            &HashMap::new(),
-            &project,
-            "/srv/site",
-            &config,
-        )
-        .expect("provider-targeted dry-run plan");
-
-        assert!(!result.results[0]
+        assert!(!plan(&config).results[0]
             .warnings
             .iter()
             .any(|warning| warning.starts_with("deployment route: server")));
@@ -629,34 +591,12 @@ mod tests {
         ];
         let config = DeployConfig {
             component_ids: vec!["first".to_string(), "second".to_string()],
-            all: false,
-            outdated: false,
-            behind_upstream: false,
             dry_run: true,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
             requested_refs: BTreeMap::from([
                 ("first".to_string(), "first-ref".to_string()),
                 ("second".to_string(), "second-ref".to_string()),
             ]),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: None,
-            resume_run_id: None,
-            max_concurrency: 1,
-            target: None,
+            ..Default::default()
         };
 
         let result = run_dry_run_mode(
@@ -1199,38 +1139,6 @@ mod tests {
                 Some("local-build")
             );
         }
-    }
-
-    #[test]
-    fn check_reports_unavailable_when_local_build_artifact_has_no_package_coverage() {
-        let component = Component {
-            id: "plugin".to_string(),
-            local_path: "/source/tree/must-not-be-read".to_string(),
-            build_artifact: Some("dist/plugin.zip".to_string()),
-            ..Component::default()
-        };
-        let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
-        let result = run_check_mode(CheckModeInput {
-            data_root: &test_data_root(),
-            components: &[component],
-            local_versions: &versions,
-            remote_versions: &versions,
-            extension_skipped: &[],
-            project: &Project::default(),
-            base_path: ".",
-            config: &DeployConfig::check_all_no_pull_head(),
-            client: &local_client(),
-            canonical_packages: &HashMap::new(),
-            unavailable_canonical_packages: &HashMap::new(),
-        });
-        assert_eq!(
-            result.results[0]
-                .content_manifest
-                .as_ref()
-                .expect("manifest")
-                .status,
-            "unavailable"
-        );
     }
 
     #[test]

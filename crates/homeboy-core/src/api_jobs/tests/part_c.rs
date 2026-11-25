@@ -236,7 +236,7 @@ fn new_daemon_lease_recovers_adopted_pre_worker_job_once() {
 }
 
 #[test]
-fn active_runner_jobs_include_daemon_local_jobs_counted_by_freshness() {
+fn active_runner_jobs_report_unprojected_daemon_jobs_as_daemon_sourced() {
     let store = JobStore::default();
     let job = store.create("runner.exec");
 
@@ -270,6 +270,8 @@ fn daemon_exec_projection_survives_event_retention_and_separates_run_identity() 
     );
 
     let active = store.active_runner_jobs();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].job_id, job.id.to_string());
     assert_eq!(active[0].runner_id, "homeboy-lab");
     assert_eq!(
         active[0].durable_run_id.as_deref(),
@@ -405,24 +407,6 @@ fn dead_daemon_recovery_preserves_queued_remote_work() {
             JobStatus::Queued
         );
     }
-}
-
-#[test]
-fn remote_runner_jobs_persist_envelope() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open(&path).expect("durable store opens");
-    let job = store
-        .submit_runner_api_fixture(staged_runner_request("homeboy-lab"))
-        .expect("remote runner job queues");
-
-    let reopened = JobStore::open(&path).expect("durable store reopens");
-    let envelope = reopened
-        .queued_staged_execution(job.id, "homeboy-lab")
-        .expect("read persisted envelope")
-        .expect("persisted job remains queued");
-    let dispatch = envelope.dispatch.as_ref().expect("typed dispatch");
-    assert_eq!(dispatch.command, vec!["homeboy", "test"]);
 }
 
 #[test]

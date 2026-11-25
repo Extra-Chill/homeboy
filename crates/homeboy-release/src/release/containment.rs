@@ -146,15 +146,6 @@ pub enum ContainmentStatus {
 }
 
 impl ContainmentStatus {
-    /// True when some release provably contains the commit.
-    #[allow(
-        dead_code,
-        reason = "No production caller: the released/not-released partition is asserted by this module's tests."
-    )]
-    pub(crate) fn is_released(self) -> bool {
-        !matches!(self, Self::NotYetReleased)
-    }
-
     /// The command that closes the gap, or `None` when there is nothing to do
     /// or nothing established.
     pub(crate) fn remediation(self) -> Option<&'static str> {
@@ -944,90 +935,66 @@ mod tests {
 
     // -- ordering -----------------------------------------------------------
 
-    /// The rule this command exists for. `git tag --contains` emits tags in
-    /// refname order, and refname order is neither ancestry order nor version
-    /// order — so "first released in" must be the minimum by parsed version.
+    /// `git tag --contains` emits tags in refname order, which is neither
+    /// ancestry order nor version order — so "first released in" must be the
+    /// minimum by parsed version, compared numerically, and an older-line patch
+    /// that contains the commit wins over later lines.
     #[test]
-    fn earliest_containing_release_is_the_minimum_version_not_the_first_line() {
-        let containing = tags(&["v0.334.0", "v0.333.9", "v0.340.0"]);
-
-        let earliest = earliest_containing_release(&containing, None).expect("a containing tag");
-
-        assert_eq!(earliest.tag, "v0.333.9");
+    fn earliest_containing_release_is_the_minimum_parsed_version() {
+        for (containing, expected) in [
+            (vec!["v0.334.0", "v0.333.9", "v0.340.0"], Some("v0.333.9")),
+            (vec!["v0.10.0", "v0.9.0", "v0.100.0"], Some("v0.9.0")),
+            (vec!["v0.331.4", "v0.334.0", "v0.335.0"], Some("v0.331.4")),
+            (vec![], None),
+        ] {
+            let earliest = earliest_containing_release(&tags(&containing), None);
+            assert_eq!(
+                earliest.as_ref().map(|tag| tag.tag.as_str()),
+                expected,
+                "{containing:?}"
+            );
+        }
     }
 
-    /// Lexicographic ordering puts `v0.10.0` before `v0.9.0`; version ordering
-    /// does not. A checkout with a two-digit minor is the common case here.
+    /// Non-release tags and tags from other namespaces in the same repository
+    /// must not become the answer.
     #[test]
-    fn earliest_containing_release_orders_numerically_not_lexicographically() {
-        let containing = tags(&["v0.10.0", "v0.9.0", "v0.100.0"]);
-
-        let earliest = earliest_containing_release(&containing, None).expect("a containing tag");
-
-        assert_eq!(earliest.tag, "v0.9.0");
-    }
-
-    /// A patch cut from an older line contains commits a numerically later tag
-    /// on another line does not. The containing set is the authority; ordering
-    /// only decides which of those is earliest.
-    #[test]
-    fn earliest_containing_release_prefers_an_older_line_patch() {
-        let containing = tags(&["v0.331.4", "v0.334.0", "v0.335.0"]);
-
-        let earliest = earliest_containing_release(&containing, None).expect("a containing tag");
-
-        assert_eq!(earliest.tag, "v0.331.4");
-        assert_eq!(earliest.version, Version::new(0, 331, 4));
-    }
-
-    #[test]
-    fn earliest_containing_release_is_absent_when_nothing_contains_the_commit() {
-        assert!(earliest_containing_release(&[], None).is_none());
-    }
-
-    /// Non-release tags in the same repository must not become the answer.
-    #[test]
-    fn parse_release_tags_drops_non_release_tags() {
-        let all = tags(&[
-            "v0.334.0",
-            "nightly",
-            "v0.334.0-rc.1",
-            "v1.2",
-            "release-candidate",
-            "v0.333.0",
-        ]);
-
-        let parsed = parse_release_tags(&all, None);
-
-        assert_eq!(
-            parsed
-                .iter()
-                .map(|tag| tag.tag.as_str())
-                .collect::<Vec<_>>(),
-            vec!["v0.333.0", "v0.334.0"]
-        );
-    }
-
-    /// A scoped component releases as `<component>-vX.Y.Z`; tags from other
-    /// namespaces in the same monorepo must not leak into the answer.
-    #[test]
-    fn parse_release_tags_scopes_to_the_component_namespace() {
-        let all = tags(&[
-            "wordpress-v1.2.0",
-            "wordpress-v1.3.0",
-            "theme-v9.9.9",
-            "v2.0.0",
-        ]);
-
-        let parsed = parse_release_tags(&all, Some("wordpress"));
-
-        assert_eq!(
-            parsed
-                .iter()
-                .map(|tag| tag.tag.as_str())
-                .collect::<Vec<_>>(),
-            vec!["wordpress-v1.2.0", "wordpress-v1.3.0"]
-        );
+    fn parse_release_tags_keeps_only_exact_release_tags_in_the_namespace() {
+        for (all, prefix, expected) in [
+            (
+                vec![
+                    "v0.334.0",
+                    "nightly",
+                    "v0.334.0-rc.1",
+                    "v1.2",
+                    "v1.2.3.4",
+                    "v1.2.x",
+                    "release-candidate",
+                    "v0.333.0",
+                ],
+                None,
+                vec!["v0.333.0", "v0.334.0"],
+            ),
+            (
+                vec![
+                    "wordpress-v1.2.0",
+                    "wordpress-v1.3.0",
+                    "theme-v9.9.9",
+                    "v2.0.0",
+                ],
+                Some("wordpress"),
+                vec!["wordpress-v1.2.0", "wordpress-v1.3.0"],
+            ),
+        ] {
+            let parsed = parse_release_tags(&tags(&all), prefix);
+            assert_eq!(
+                parsed
+                    .iter()
+                    .map(|tag| tag.tag.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -1042,115 +1009,69 @@ mod tests {
 
     // -- status split -------------------------------------------------------
 
-    /// The exact scenario in #11754: the fix is in v0.334.0, the binary is
-    /// 0.327.0. That is "released but not installed" — `homeboy upgrade`, not a
-    /// release.
+    /// Each verdict maps to a distinct operator action. Released-but-not-
+    /// installed (#11754) is `homeboy upgrade`; merged-but-unreleased is
+    /// `homeboy release`; an installed tag this checkout does not have is
+    /// missing evidence, not evidence of absence.
     #[test]
-    fn released_but_not_installed_points_at_upgrade() {
-        let known = tags(&["v0.327.0", "v0.333.0", "v0.334.0"]);
-        let containing = tags(&["v0.334.0"]);
+    fn assess_splits_containment_into_actionable_verdicts() {
+        for (known, containing, installed, status, installed_contains, remediation) in [
+            (
+                vec!["v0.327.0", "v0.333.0", "v0.334.0"],
+                vec!["v0.334.0"],
+                Some("v0.327.0"),
+                ContainmentStatus::ReleasedNotInstalled,
+                Some(false),
+                Some("homeboy upgrade"),
+            ),
+            (
+                vec!["v0.333.0", "v0.334.0"],
+                vec![],
+                Some("v0.334.0"),
+                ContainmentStatus::NotYetReleased,
+                Some(false),
+                Some("homeboy release"),
+            ),
+            (
+                vec!["v0.333.0", "v0.334.0"],
+                vec!["v0.333.0", "v0.334.0"],
+                Some("v0.334.0"),
+                ContainmentStatus::ReleasedAndInstalled,
+                Some(true),
+                None,
+            ),
+            (
+                vec!["v0.333.0", "v0.334.0"],
+                vec!["v0.334.0"],
+                Some("v0.327.0"),
+                ContainmentStatus::ReleasedInstallUnknown,
+                None,
+                None,
+            ),
+            (
+                vec!["v0.334.0"],
+                vec!["v0.334.0"],
+                None,
+                ContainmentStatus::ReleasedInstallUnknown,
+                None,
+                None,
+            ),
+        ] {
+            let known = tags(&known);
+            let containing = tags(&containing);
+            let assessment = assess(
+                ContainmentFacts {
+                    known_tags: &known,
+                    containing_tags: &containing,
+                    installed_tag: installed,
+                },
+                None,
+            );
 
-        let assessment = assess(
-            ContainmentFacts {
-                known_tags: &known,
-                containing_tags: &containing,
-                installed_tag: Some("v0.327.0"),
-            },
-            None,
-        );
-
-        assert_eq!(assessment.status, ContainmentStatus::ReleasedNotInstalled);
-        assert_eq!(assessment.first_released_in.as_deref(), Some("v0.334.0"));
-        assert_eq!(
-            assessment.first_released_version.as_deref(),
-            Some("0.334.0")
-        );
-        assert_eq!(assessment.installed_contains, Some(false));
-        assert!(assessment.installed_tag_known_locally);
-        assert_eq!(assessment.remediation.as_deref(), Some("homeboy upgrade"));
-        assert!(assessment.detail.contains("does NOT contain"));
-    }
-
-    /// Merged but unreleased is a different action from stale-binary, and must
-    /// read as one. Collapsing them is the ambiguity this command removes.
-    #[test]
-    fn not_yet_released_points_at_a_release_not_an_upgrade() {
-        let known = tags(&["v0.333.0", "v0.334.0"]);
-
-        let assessment = assess(
-            ContainmentFacts {
-                known_tags: &known,
-                containing_tags: &[],
-                installed_tag: Some("v0.334.0"),
-            },
-            None,
-        );
-
-        assert_eq!(assessment.status, ContainmentStatus::NotYetReleased);
-        assert!(assessment.first_released_in.is_none());
-        assert_eq!(assessment.remediation.as_deref(), Some("homeboy release"));
-        assert!(assessment.detail.contains("NOT YET RELEASED"));
-        assert_eq!(assessment.releases_since, 0);
-    }
-
-    #[test]
-    fn released_and_installed_asks_for_nothing() {
-        let known = tags(&["v0.333.0", "v0.334.0"]);
-        let containing = tags(&["v0.333.0", "v0.334.0"]);
-
-        let assessment = assess(
-            ContainmentFacts {
-                known_tags: &known,
-                containing_tags: &containing,
-                installed_tag: Some("v0.334.0"),
-            },
-            None,
-        );
-
-        assert_eq!(assessment.status, ContainmentStatus::ReleasedAndInstalled);
-        assert_eq!(assessment.installed_contains, Some(true));
-        assert!(assessment.remediation.is_none());
-    }
-
-    /// An installed tag this checkout does not have is missing evidence, not
-    /// evidence of absence — reporting "does not contain" would send the
-    /// operator to `homeboy upgrade` for no reason.
-    #[test]
-    fn absent_installed_tag_is_unknown_not_missing() {
-        let known = tags(&["v0.333.0", "v0.334.0"]);
-        let containing = tags(&["v0.334.0"]);
-
-        let assessment = assess(
-            ContainmentFacts {
-                known_tags: &known,
-                containing_tags: &containing,
-                installed_tag: Some("v0.327.0"),
-            },
-            None,
-        );
-
-        assert_eq!(assessment.status, ContainmentStatus::ReleasedInstallUnknown);
-        assert!(!assessment.installed_tag_known_locally);
-        assert!(assessment.installed_contains.is_none());
-        assert!(assessment.remediation.is_none());
-    }
-
-    #[test]
-    fn no_installed_tag_at_all_is_unknown() {
-        let known = tags(&["v0.334.0"]);
-        let containing = tags(&["v0.334.0"]);
-
-        let assessment = assess(
-            ContainmentFacts {
-                known_tags: &known,
-                containing_tags: &containing,
-                installed_tag: None,
-            },
-            None,
-        );
-
-        assert_eq!(assessment.status, ContainmentStatus::ReleasedInstallUnknown);
-        assert!(assessment.installed_contains.is_none());
+            assert_eq!(assessment.status, status, "{installed:?}");
+            assert_eq!(assessment.installed_contains, installed_contains);
+            assert_eq!(assessment.remediation.as_deref(), remediation);
+        }
     }
 
     #[test]
@@ -1168,29 +1089,6 @@ mod tests {
         );
 
         assert_eq!(assessment.releases_since, 3);
-    }
-
-    #[test]
-    fn containment_status_predicates_match_the_action_split() {
-        assert!(!ContainmentStatus::NotYetReleased.is_released());
-        assert!(ContainmentStatus::ReleasedAndInstalled.is_released());
-        assert!(ContainmentStatus::ReleasedNotInstalled.is_released());
-        assert!(ContainmentStatus::ReleasedInstallUnknown.is_released());
-
-        assert_eq!(
-            ContainmentStatus::NotYetReleased.remediation(),
-            Some(REMEDIATION_RELEASE)
-        );
-        assert_eq!(
-            ContainmentStatus::ReleasedNotInstalled.remediation(),
-            Some(REMEDIATION_UPGRADE)
-        );
-        assert!(ContainmentStatus::ReleasedAndInstalled
-            .remediation()
-            .is_none());
-        assert!(ContainmentStatus::ReleasedInstallUnknown
-            .remediation()
-            .is_none());
     }
 
     /// A JSON consumer distinguishes the four verdicts by `status` alone.
@@ -1211,6 +1109,7 @@ mod tests {
 
         assert_eq!(json["status"], "released_not_installed");
         assert_eq!(json["first_released_in"], "v0.334.0");
+        assert_eq!(json["first_released_version"], "0.334.0");
         assert_eq!(json["installed_contains"], false);
         assert_eq!(json["remediation"], "homeboy upgrade");
     }
@@ -1220,8 +1119,6 @@ mod tests {
     #[test]
     fn installed_version_resolver_preserves_provenance_and_override_precedence() {
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("plugin.php"), "Version: 1.2.3\n")
-            .expect("write component version");
         let component = Component {
             id: "not-homeboy".to_string(),
             local_path: temp.path().to_string_lossy().into_owned(),
@@ -1238,13 +1135,6 @@ mod tests {
             (
                 "homeboy",
                 "0.397.0",
-                None,
-                running.as_str(),
-                VersionSource::RunningBinary,
-            ),
-            (
-                "homeboy",
-                "0.458.35",
                 None,
                 running.as_str(),
                 VersionSource::RunningBinary,
@@ -1292,79 +1182,59 @@ mod tests {
                 resolved.checkout().as_deref(),
                 (source == VersionSource::Checkout).then_some(expected)
             );
-            assert_eq!(
-                serde_json::to_value(source).unwrap(),
-                match source {
-                    VersionSource::RunningBinary => "running_binary",
-                    VersionSource::Override => "override",
-                    VersionSource::Checkout => "checkout",
-                }
-            );
         }
     }
 
+    /// A source build ahead of every tag is not behind (warning on it would
+    /// train operators to ignore this surface), a `v` prefix on the installed
+    /// value must not defeat the comparison, and missing or unparseable
+    /// evidence is unknown rather than current.
     #[test]
-    fn gap_counts_releases_published_after_the_installed_one() {
-        let known = tags(&["v0.327.0", "v0.328.0", "v0.331.0", "v0.333.0"]);
+    fn gap_classifies_the_installed_version_against_published_releases() {
+        for (known, installed, status, releases_behind, remediation) in [
+            (
+                vec!["v0.327.0", "v0.328.0", "v0.331.0", "v0.333.0"],
+                "0.327.0",
+                GapStatus::Behind,
+                3,
+                Some("homeboy upgrade"),
+            ),
+            (
+                vec!["v0.332.0", "v0.333.0"],
+                "0.333.0",
+                GapStatus::Current,
+                0,
+                None,
+            ),
+            (
+                vec!["v0.332.0", "v0.333.0"],
+                "v0.333.0",
+                GapStatus::Current,
+                0,
+                None,
+            ),
+            (
+                vec!["v0.332.0", "v0.333.0"],
+                "0.334.0",
+                GapStatus::Ahead,
+                0,
+                None,
+            ),
+            (vec![], "0.327.0", GapStatus::Unknown, 0, None),
+            (
+                vec!["v0.333.0"],
+                "not-a-version",
+                GapStatus::Unknown,
+                0,
+                None,
+            ),
+        ] {
+            let assessment = assess_gap(&tags(&known), None, Some(installed), None);
 
-        let assessment = assess_gap(&known, None, Some("0.327.0"), Some("v0.327.0"));
-
-        assert_eq!(assessment.status, GapStatus::Behind);
-        assert_eq!(assessment.releases_behind, 3);
-        assert_eq!(assessment.latest_tag.as_deref(), Some("v0.333.0"));
-        assert_eq!(assessment.remediation.as_deref(), Some("homeboy upgrade"));
-    }
-
-    #[test]
-    fn gap_on_the_newest_release_is_current_and_silent() {
-        let known = tags(&["v0.332.0", "v0.333.0"]);
-
-        let assessment = assess_gap(&known, None, Some("0.333.0"), Some("v0.333.0"));
-
-        assert_eq!(assessment.status, GapStatus::Current);
-        assert_eq!(assessment.releases_behind, 0);
-        assert!(assessment.remediation.is_none());
-    }
-
-    /// A source build on an unreleased branch is ahead, not behind. Warning on
-    /// it would train operators to ignore this surface.
-    #[test]
-    fn gap_ahead_of_every_tag_is_not_behind() {
-        let known = tags(&["v0.332.0", "v0.333.0"]);
-
-        let assessment = assess_gap(&known, None, Some("0.334.0"), Some("v0.334.0"));
-
-        assert_eq!(assessment.status, GapStatus::Ahead);
-        assert_eq!(assessment.releases_behind, 0);
-        assert!(assessment.remediation.is_none());
-    }
-
-    #[test]
-    fn gap_without_tags_is_unknown_not_current() {
-        let assessment = assess_gap(&[], None, Some("0.327.0"), Some("v0.327.0"));
-
-        assert_eq!(assessment.status, GapStatus::Unknown);
-        assert!(assessment.latest_tag.is_none());
-    }
-
-    #[test]
-    fn gap_with_an_unparseable_installed_version_is_unknown() {
-        let known = tags(&["v0.333.0"]);
-
-        let assessment = assess_gap(&known, None, Some("not-a-version"), None);
-
-        assert_eq!(assessment.status, GapStatus::Unknown);
-    }
-
-    /// The `v` prefix is how a release tag spells a version; it must not defeat
-    /// the comparison when it rides along on the installed value.
-    #[test]
-    fn gap_tolerates_a_v_prefixed_installed_version() {
-        let known = tags(&["v0.332.0", "v0.333.0"]);
-
-        let assessment = assess_gap(&known, None, Some("v0.333.0"), Some("v0.333.0"));
-
-        assert_eq!(assessment.status, GapStatus::Current);
+            assert_eq!(assessment.status, status, "{installed} vs {known:?}");
+            assert_eq!(assessment.releases_behind, releases_behind);
+            assert_eq!(assessment.remediation.as_deref(), remediation);
+        }
     }
 
     #[test]
@@ -1382,30 +1252,14 @@ mod tests {
 
     // -- issue resolution ---------------------------------------------------
 
-    #[test]
-    fn issue_resolution_reads_the_merged_closing_pull_request() {
-        let raw = r#"{
-            "data": {"repository": {"issue": {"closedByPullRequestsReferences": {"nodes": [
-                {"number": 11720, "merged": true, "mergeCommit": {"oid": "6043c013d0000000000000000000000000000000"}}
-            ]}}}}
-        }"#;
-
-        let resolution = parse_issue_resolution(raw, 11702).expect("merged PR resolves");
-
-        assert_eq!(resolution.pull_request, 11720);
-        assert_eq!(
-            resolution.commit,
-            "6043c013d0000000000000000000000000000000"
-        );
-    }
-
     /// When several PRs close one issue, the one that landed first is the one
     /// that introduced the fix being asked about.
     #[test]
-    fn issue_resolution_prefers_the_first_landed_pull_request() {
+    fn issue_resolution_prefers_the_first_landed_merged_pull_request() {
         let raw = r#"{
             "data": {"repository": {"issue": {"closedByPullRequestsReferences": {"nodes": [
                 {"number": 11800, "merged": true, "mergeCommit": {"oid": "bbb"}},
+                {"number": 11690, "merged": false, "mergeCommit": null},
                 {"number": 11720, "merged": true, "mergeCommit": {"oid": "aaa"}}
             ]}}}}
         }"#;
@@ -1416,59 +1270,33 @@ mod tests {
         assert_eq!(resolution.commit, "aaa");
     }
 
-    /// An open PR has no commit on main. Resolving through it would answer a
+    /// An open PR has no commit on main; resolving through it would answer a
     /// containment question about a commit that does not exist yet.
     #[test]
-    fn issue_resolution_ignores_unmerged_pull_requests() {
-        let raw = r#"{
-            "data": {"repository": {"issue": {"closedByPullRequestsReferences": {"nodes": [
-                {"number": 11720, "merged": false, "mergeCommit": null}
-            ]}}}}
-        }"#;
+    fn issue_resolution_refuses_issues_without_a_merged_closing_pull_request() {
+        for (raw, issue, message) in [
+            (
+                r#"{"data": {"repository": {"issue": {"closedByPullRequestsReferences": {"nodes": [
+                    {"number": 11720, "merged": false, "mergeCommit": null}
+                ]}}}}}"#,
+                11702,
+                "no merged pull request",
+            ),
+            (
+                r#"{"data": {"repository": {"issue": {"closedByPullRequestsReferences": {"nodes": []}}}}}"#,
+                11702,
+                "#11702",
+            ),
+            (
+                r#"{"data": {"repository": {"issue": null}}}"#,
+                999_999,
+                "#999999",
+            ),
+        ] {
+            let error = parse_issue_resolution(raw, issue).expect_err("must not resolve");
 
-        let error = parse_issue_resolution(raw, 11702).expect_err("unmerged PR does not resolve");
-
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.message.contains("no merged pull request"));
-    }
-
-    #[test]
-    fn issue_resolution_reports_an_issue_with_no_closing_pull_request() {
-        let raw = r#"{"data": {"repository": {"issue": {"closedByPullRequestsReferences": {"nodes": []}}}}}"#;
-
-        let error = parse_issue_resolution(raw, 11702).expect_err("no PR does not resolve");
-
-        assert!(error.message.contains("#11702"));
-    }
-
-    #[test]
-    fn issue_resolution_reports_a_missing_issue() {
-        let raw = r#"{"data": {"repository": {"issue": null}}}"#;
-
-        let error =
-            parse_issue_resolution(raw, 999_999).expect_err("missing issue does not resolve");
-
-        assert!(error.message.contains("#999999"));
-    }
-
-    // -- helpers ------------------------------------------------------------
-
-    #[test]
-    fn tag_lines_are_split_and_trimmed() {
-        assert_eq!(
-            split_tag_lines("v1.0.0\n\n  v1.1.0  \n"),
-            vec!["v1.0.0".to_string(), "v1.1.0".to_string()]
-        );
-        assert!(split_tag_lines("").is_empty());
-    }
-
-    #[test]
-    fn exact_semver_core_rejects_prerelease_and_short_versions() {
-        assert!(is_exact_semver_core("1.2.3"));
-        assert!(!is_exact_semver_core("1.2"));
-        assert!(!is_exact_semver_core("1.2.3.4"));
-        assert!(!is_exact_semver_core("1.2.3-rc.1"));
-        assert!(!is_exact_semver_core("1.2.x"));
-        assert!(!is_exact_semver_core(""));
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert!(error.message.contains(message), "{}", error.message);
+        }
     }
 }

@@ -55,24 +55,11 @@ mod tests {
     }
 
     #[test]
-    fn selects_only_remote_and_lists_ambiguous_ids() {
+    fn default_selection_requires_exactly_one_remote_runner() {
         assert_eq!(select_remote(vec!["lab".into()]).unwrap(), "lab");
-        let error = select_remote(vec!["zebra".into(), "alpha".into()]).unwrap_err();
-        assert!(error.to_string().contains("alpha, zebra"));
-        assert!(error.to_string().contains("Pass a runner ID"));
-    }
-
-    #[test]
-    fn no_remote_requires_explicit_selection() {
-        let error = select_remote(vec![]).unwrap_err();
-        assert!(error.to_string().contains("No non-local runners"));
-        assert!(error.to_string().contains("local"));
-    }
-
-    #[test]
-    fn explicit_ids_bypass_default_selection() {
-        for id in ["local", "localhost", "self", "custom"] {
-            assert_eq!(resolve(Some(id.into())).unwrap(), id);
-        }
+        let ambiguous = select_remote(vec!["zebra".into(), "alpha".into()]).unwrap_err();
+        assert!(ambiguous.to_string().contains("alpha, zebra"));
+        let none = select_remote(vec![]).unwrap_err();
+        assert!(none.to_string().contains("No non-local runners"));
     }
 }

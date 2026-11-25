@@ -787,54 +787,25 @@ mod tests {
     }
 
     #[test]
-    fn breaking_policy_config_is_optional_and_validated() {
-        let mut value =
-            serde_json::json!({"upstream": "up", "downstream": "down", "package": "pkg"});
-        let edge: DependencyStackEdge = serde_json::from_value(value.clone()).unwrap();
-        assert!(edge.policy.is_none());
-        for breaking in ["semver", "commit-markers"] {
-            value["policy"] = serde_json::json!({"breaking": breaking});
-            let edge: DependencyStackEdge = serde_json::from_value(value.clone()).unwrap();
-            let policy = edge.policy.unwrap();
-            assert!(policy.max.is_none());
-            assert_eq!(serde_json::to_value(policy).unwrap(), value["policy"]);
+    fn breaking_markers_follow_the_conventional_forms() {
+        for (subject, expected) in [
+            ("feat!: drop legacy API", true),
+            ("fix(parser)!: reject nested", true),
+            ("feat: add API", false),
+            ("fix(parser): accept nested", false),
+            ("just a sentence with ! in it", false),
+            ("!: missing type", false),
+        ] {
+            assert_eq!(subject_has_breaking_marker(subject), expected, "{subject}");
         }
-        value["policy"] = serde_json::json!({"max": "same-major"});
-        let edge: DependencyStackEdge = serde_json::from_value(value.clone()).unwrap();
-        let policy = edge.policy.unwrap();
-        assert!(policy.max.is_some());
-        assert_eq!(
-            policy.breaking.unwrap_or_default(),
-            DependencyStackBreakingPolicy::Semver
-        );
-        assert_eq!(serde_json::to_value(policy).unwrap(), value["policy"]);
-        value["policy"] = serde_json::json!({"breaking": "typo"});
-        let error = serde_json::from_value::<DependencyStackEdge>(value)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("unknown variant `typo`"), "{error}");
-        assert!(
-            error.contains("semver") && error.contains("commit-markers"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn subject_markers_follow_the_conventional_breaking_forms() {
-        assert!(subject_has_breaking_marker("feat!: drop legacy API"));
-        assert!(subject_has_breaking_marker("fix(parser)!: reject nested"));
-        assert!(!subject_has_breaking_marker("feat: add API"));
-        assert!(!subject_has_breaking_marker("fix(parser): accept nested"));
-        assert!(!subject_has_breaking_marker("just a sentence with ! in it"));
-        assert!(!subject_has_breaking_marker("!: missing type"));
-    }
-
-    #[test]
-    fn breaking_footers_match_both_spellings_and_nothing_else() {
-        assert!(is_breaking_footer("BREAKING CHANGE: drops the v1 API"));
-        assert!(is_breaking_footer("BREAKING-CHANGE: drops the v1 API"));
-        assert!(!is_breaking_footer("BREAKING NEWS: nothing"));
-        assert!(!is_breaking_footer("this mentions BREAKING CHANGE: inline"));
+        for (footer, expected) in [
+            ("BREAKING CHANGE: drops the v1 API", true),
+            ("BREAKING-CHANGE: drops the v1 API", true),
+            ("BREAKING NEWS: nothing", false),
+            ("this mentions BREAKING CHANGE: inline", false),
+        ] {
+            assert_eq!(is_breaking_footer(footer), expected, "{footer}");
+        }
     }
 
     #[test]

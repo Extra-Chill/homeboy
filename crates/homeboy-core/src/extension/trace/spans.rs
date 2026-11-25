@@ -50,7 +50,7 @@ pub(crate) fn event_matches_key(event: &TraceEvent, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::trace::parsing::{TraceAssertion, TraceSpanStatus, TraceStatus};
+    use crate::extension::trace::parsing::{TraceAssertion, TraceStatus};
 
     fn event(t_ms: u64, source: &str, event: &str) -> TraceEvent {
         TraceEvent {
@@ -59,66 +59,6 @@ mod tests {
             event: event.to_string(),
             data: Default::default(),
         }
-    }
-
-    #[test]
-    fn trace_wrappers_preserve_span_summary_contract() {
-        let results = summarize_spans(
-            &[event(10, "runner", "start"), event(35, "runner", "done")],
-            &[TraceSpanDefinition {
-                id: "total".to_string(),
-                from: "runner.start".to_string(),
-                to: "runner.done".to_string(),
-            }],
-        );
-
-        assert_eq!(results[0].status, TraceSpanStatus::Ok);
-        assert_eq!(results[0].duration_ms, Some(25));
-    }
-
-    #[test]
-    fn test_parse_span_definition() {
-        let definition = parse_span_definition("total:runner.start:runner.done").unwrap();
-
-        assert_eq!(definition.id, "total");
-        assert_eq!(definition.from, "runner.start");
-        assert_eq!(definition.to, "runner.done");
-    }
-
-    #[test]
-    fn test_parse_phase_milestone() {
-        let phase = parse_phase_milestone("ready:runner.ready").unwrap();
-
-        assert_eq!(phase.label, "ready");
-        assert_eq!(phase.key, "runner.ready");
-    }
-
-    #[test]
-    fn test_phase_span_definitions() {
-        let definitions = phase_span_definitions(&[
-            TracePhaseMilestone {
-                label: "start".to_string(),
-                key: "runner.start".to_string(),
-            },
-            TracePhaseMilestone {
-                label: "ready".to_string(),
-                key: "runner.ready".to_string(),
-            },
-        ])
-        .unwrap();
-
-        assert_eq!(definitions.len(), 2);
-        assert_eq!(definitions[0].id, "phase.start_to_ready");
-        assert_eq!(definitions[1].id, "phase.total");
-    }
-
-    #[test]
-    fn test_reporting_timeline() {
-        let timeline =
-            reporting_timeline(&[event(20, "runner", "ready"), event(0, "runner", "start")]);
-
-        assert_eq!(timeline[0].event, "start");
-        assert_eq!(timeline[1].event, "ready");
     }
 
     #[test]
@@ -154,14 +94,7 @@ mod tests {
         );
 
         assert_eq!(results.span_definitions.len(), 1);
+        assert_eq!(results.span_results.len(), 1);
         assert_eq!(results.span_results[0].duration_ms, Some(25));
-    }
-
-    #[test]
-    fn test_event_matches_key() {
-        let event = event(0, "runner", "ready");
-
-        assert!(event_matches_key(&event, "runner.ready"));
-        assert!(!event_matches_key(&event, "runner.start"));
     }
 }

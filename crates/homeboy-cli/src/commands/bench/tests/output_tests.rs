@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn bench_output_single_serializes_with_tagged_payload() {
+fn bench_output_serializes_as_tagged_variant_and_payload() {
     let single = BenchCommandOutput {
         passed: true,
         status: "passed".to_string(),
@@ -23,32 +23,12 @@ fn bench_output_single_serializes_with_tagged_payload() {
         actionable: None,
     };
     let value = serde_json::to_value(BenchOutput::Single(Box::new(single))).unwrap();
-    assert_eq!(
-        value.get("variant"),
-        Some(&serde_json::Value::String("single".to_string()))
-    );
-    let payload = value
-        .get("payload")
-        .expect("single bench output has payload");
-    assert_eq!(payload.get("passed"), Some(&serde_json::Value::Bool(true)));
-    assert_eq!(
-        payload.get("component"),
-        Some(&serde_json::Value::String("studio".to_string()))
-    );
-}
+    assert_eq!(value["variant"], "single");
+    assert_eq!(value["payload"]["passed"], true);
+    assert_eq!(value["payload"]["component"], "studio");
 
-#[test]
-fn bench_output_comparison_serializes_with_tagged_payload() {
     let (cmp, _) = aggregate_comparison("studio".to_string(), 10, Vec::new());
     let value = serde_json::to_value(BenchOutput::Comparison(cmp)).unwrap();
-    assert_eq!(
-        value.get("variant"),
-        Some(&serde_json::Value::String("comparison".to_string()))
-    );
-    assert_eq!(
-        value
-            .get("payload")
-            .and_then(|payload| payload.get("comparison")),
-        Some(&serde_json::Value::String("cross_rig".to_string()))
-    );
+    assert_eq!(value["variant"], "comparison");
+    assert_eq!(value["payload"]["comparison"], "cross_rig");
 }

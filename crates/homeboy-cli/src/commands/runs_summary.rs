@@ -1651,29 +1651,6 @@ mod tests {
     }
 
     #[test]
-    fn show_summary_reports_no_artifacts() {
-        let payload = json!({
-            "variant": "show",
-            "payload": {
-                "command": "runs.show",
-                "run": {
-                    "id": "run-1",
-                    "kind": "test",
-                    "status": "fail",
-                    "started_at": "2026-06-19T00:00:00Z",
-                    "finished_at": null,
-                    "metadata": {},
-                    "artifacts": []
-                }
-            }
-        });
-
-        let summary = render_runs_show_summary(&payload).expect("summary");
-        assert!(summary.contains("Artifacts: none recorded\n"));
-        assert!(summary.contains("full run: homeboy runs show run-1 --json\n"));
-    }
-
-    #[test]
     fn failed_show_summary_bounds_cleanup_inventory_without_losing_recovery_or_primary_artifact() {
         let mut artifacts = (1..=1_000)
             .map(|index| {

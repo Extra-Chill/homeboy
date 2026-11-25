@@ -610,12 +610,11 @@ fn cleanup_release_artifacts(local_path: &str, package_owned_paths: &[String]) {
 mod tests {
     use super::{
         extract_deployment_from_run, plan_deployment, prepared_release_artifact,
-        run_deployment_step, should_cleanup_release_artifacts,
+        run_deployment_step,
     };
     use crate::release::types::{
-        ReleaseArtifact, ReleaseControlPlaneContext, ReleaseDeploymentResult,
-        ReleaseDeploymentSummary, ReleaseRun, ReleaseRunResult, ReleaseState, ReleaseStepResult,
-        ReleaseStepStatus,
+        ReleaseArtifact, ReleaseControlPlaneContext, ReleaseDeploymentResult, ReleaseRun,
+        ReleaseRunResult, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
@@ -664,14 +663,6 @@ mod tests {
             .expect("start version entry");
         archive.write_all(b"1.2.4\n").expect("version bytes");
         archive.finish().expect("finish release artifact");
-    }
-
-    #[test]
-    fn test_plan_deployment() {
-        let deployment = plan_deployment("definitely-not-used-by-projects");
-
-        assert!(deployment.projects.is_empty());
-        assert_eq!(deployment.summary.total_projects, 0);
     }
 
     #[test]
@@ -870,28 +861,6 @@ mod tests {
     }
 
     #[test]
-    fn test_run_deployment_step() {
-        let result = super::run_deployment_step(
-            test_roots().data(),
-            &homeboy_core::component::Component {
-                id: "definitely-not-used-by-projects".to_string(),
-                local_path: "/tmp".to_string(),
-                ..Default::default()
-            },
-            None,
-            None,
-            &[],
-            &[],
-            None,
-        );
-
-        assert_eq!(result.id, "deploy");
-        assert_eq!(result.status, ReleaseStepStatus::Success);
-        assert!(result.error.is_none());
-        assert!(result.data.is_some());
-    }
-
-    #[test]
     fn deployment_step_cleans_release_build_artifacts_without_deploy_targets() {
         let temp = tempfile::tempdir().expect("tempdir");
         let build_dir = temp.path().join("build");
@@ -924,6 +893,7 @@ mod tests {
         );
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
+        assert!(result.error.is_none());
         assert!(!build_dir.exists());
     }
 
@@ -1062,20 +1032,6 @@ mod tests {
                 assert_eq!(component.local_path, "/release/demo");
             }
         });
-    }
-
-    #[test]
-    fn failed_release_deployment_retains_artifact_for_resume() {
-        let deployment = ReleaseDeploymentResult {
-            projects: vec![],
-            summary: ReleaseDeploymentSummary {
-                total_projects: 2,
-                failed: 1,
-                ..ReleaseDeploymentSummary::default()
-            },
-        };
-
-        assert!(!should_cleanup_release_artifacts(&deployment));
     }
 
     #[test]

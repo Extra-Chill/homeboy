@@ -473,11 +473,6 @@ mod tests {
             "share was {share}"
         );
         assert!(!found.incomplete, "a complete run is not labelled partial");
-    }
-
-    #[test]
-    fn the_second_slowest_binary_is_reported_but_not_flagged() {
-        let durations = recorded(Some(BUDGET_SECONDS));
 
         let second = durations
             .binaries
@@ -485,7 +480,6 @@ mod tests {
             .find(|unit| unit.name.starts_with("tests/cook_lab_handoff_test.rs"))
             .expect("second slowest binary is reported");
         assert_eq!(second.seconds, Some(78.33));
-
         // 78 s clears the 30 s absolute floor and is the second largest cost in
         // the suite, yet it is only ~5% of the budget. Share, not rank and not
         // an absolute number, is what decides.
@@ -577,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn a_killed_run_keeps_partial_timings_and_labels_them_incomplete() {
+    fn a_killed_run_keeps_partial_timings_and_names_the_unfinished_unit() {
         let durations = build_test_durations(
             parse_duration_samples(RECORDED_TRUNCATED_OUTPUT),
             Some(BUDGET_SECONDS),
@@ -596,16 +590,6 @@ mod tests {
                 .iter()
                 .any(|unit| unit.seconds.is_some_and(|seconds| seconds > 0.0)),
             "binaries that finished before the kill keep their durations"
-        );
-    }
-
-    #[test]
-    fn the_unit_that_was_running_when_the_child_died_is_named_with_no_duration() {
-        let durations = build_test_durations(
-            parse_duration_samples(RECORDED_TRUNCATED_OUTPUT),
-            Some(BUDGET_SECONDS),
-            policy(Some(BUDGET_SECONDS)),
-            Some("test child terminated at its budget".to_string()),
         );
 
         let unfinished = finding(&durations, slow_rule::UNFINISHED_UNIT);
@@ -637,27 +621,8 @@ mod tests {
             found.budget_share, None,
             "no duration means no share, not a share of zero"
         );
-    }
-
-    #[test]
-    fn slow_and_unfinished_are_separate_rules() {
-        let durations = build_test_durations(
-            parse_duration_samples(RECORDED_TRUNCATED_OUTPUT),
-            Some(BUDGET_SECONDS),
-            policy(Some(BUDGET_SECONDS)),
-            Some("terminated".to_string()),
-        );
-        let rules: std::collections::BTreeSet<&str> = durations
-            .slow
-            .iter()
-            .map(|found| found.rule.as_str())
-            .collect();
         assert!(
-            rules.contains(slow_rule::UNFINISHED_UNIT),
-            "rules were {rules:?}"
-        );
-        assert!(
-            !rules.contains(slow_rule::SLOW_UNIT),
+            finding(&durations, slow_rule::SLOW_UNIT).is_empty(),
             "a unit with no duration must never be reported as a measured slow test"
         );
     }

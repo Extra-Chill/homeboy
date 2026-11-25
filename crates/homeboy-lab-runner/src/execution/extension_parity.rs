@@ -1592,8 +1592,7 @@ mod tests {
         dev_sync_extension_overlay, ensure_extension_materialized,
         ensure_extension_materialized_with_exec, is_stale_runner_extension_parity_error,
         plan_extension_parity, probe_extension_parity_from_show,
-        record_materialized_extension_overlay, remote_extension_core_compatibility,
-        remote_extension_ready_status, remote_extension_setting_ids,
+        record_materialized_extension_overlay, remote_extension_setting_ids,
         remote_extension_source_revision, requested_setting_keys_for_command,
         runner_extension_materialization_request, runner_extension_sync_command, same_git_revision,
         validate_extension_ready, validate_runner_extension_core_compatibility,
@@ -1939,18 +1938,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_extension_core_compatibility_reads_extension_show_output() {
-        let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","core_compatibility":{"status":"incompatible","installed_homeboy":"0.1.0","requires_homeboy":">=999.0.0","source_revision":"abc1234","remediation_command":"homeboy upgrade"}}}}"#;
-
-        let report = remote_extension_core_compatibility(stdout).expect("core compatibility");
-
-        assert_eq!(report.status, "incompatible");
-        assert_eq!(report.installed_homeboy, "0.1.0");
-        assert_eq!(report.requires_homeboy.as_deref(), Some(">=999.0.0"));
-        assert_eq!(report.source_revision.as_deref(), Some("abc1234"));
-    }
-
-    #[test]
     fn runner_extension_core_compatibility_fails_fast_with_remediation() {
         let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","core_compatibility":{"status":"incompatible","installed_homeboy":"0.1.0","requires_homeboy":">=999.0.0","source_revision":"abc1234","remediation_command":"homeboy upgrade"}}}}"#;
 
@@ -2177,16 +2164,6 @@ mod tests {
             &["rig_namespace".to_string()],
         )
         .expect_err("unknown settings must still fail runner extension parity");
-    }
-
-    #[test]
-    fn remote_extension_ready_status_reads_extension_show_output() {
-        let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","ready":false,"ready_reason":"ready_check_failed","ready_detail":"missing generated asset"}}}"#;
-        let status = remote_extension_ready_status(stdout).expect("ready status");
-
-        assert!(!status.ready);
-        assert_eq!(status.reason.as_deref(), Some("ready_check_failed"));
-        assert_eq!(status.detail.as_deref(), Some("missing generated asset"));
     }
 
     #[test]

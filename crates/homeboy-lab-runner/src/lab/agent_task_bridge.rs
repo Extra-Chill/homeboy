@@ -122,9 +122,9 @@ fn mirror_typed_agent_task_run_plan_lifecycle(
 /// Typed path first: when the workload declared
 /// `agent_task.handoff_mirror_policy = dispatch_handoff`, the runner emits a
 /// `homeboy/agent-task-dispatch-handoff-event/v1` job event carrying the
-/// handoff document and the controller-owned run id. Mirroring from that means
-/// a change to what the offloaded command prints can no longer break
-/// failure-evidence mirroring for a job that ran fine (#7530).
+/// handoff document and the controller-owned run id. Mirroring from that keeps
+/// failure-evidence mirroring independent of what the offloaded command
+/// prints (#7530).
 ///
 pub(super) fn resolve_offloaded_agent_task_handoff(
     agent_task: Option<&LabRunnerWorkloadAgentTask>,
@@ -616,37 +616,7 @@ fn structured_dependency_failure_message(envelope: &LabDependencyFailureEnvelope
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task_lifecycle_event::parse_offloaded_run_plan_envelope;
     use homeboy_agents::agent_task_lifecycle::agent_task_handoff_event::agent_task_handoff_document_from_output;
-
-    #[test]
-    fn legacy_offloaded_run_plan_envelope_parser_tolerates_extension_stdout_chatter() {
-        let stdout = concat!(
-            "Preparing extension runtime...\n",
-            "Installing declared dependencies...\n",
-            "{\"success\":false,\"data\":{\"status\":\"failed\"}}\n",
-            "trailing diagnostic\n"
-        );
-
-        let parsed = parse_offloaded_run_plan_envelope(stdout).expect("parse mixed stdout");
-
-        assert_eq!(parsed["success"], false);
-        assert_eq!(parsed["data"]["status"], "failed");
-    }
-
-    #[test]
-    fn legacy_offloaded_run_plan_envelope_parser_selects_aggregate_from_mixed_json() {
-        let stdout = concat!(
-            "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}\n",
-            "setup complete\n",
-            "{\"success\":true,\"data\":{\"schema\":\"homeboy/agent-task-aggregate/v1\",\"plan_id\":\"plan-1\",\"status\":\"succeeded\",\"totals\":{\"succeeded\":6}}}\n"
-        );
-
-        let parsed = parse_offloaded_run_plan_envelope(stdout).expect("parse aggregate envelope");
-
-        assert_eq!(parsed["data"]["plan_id"], "plan-1");
-        assert_eq!(parsed["data"]["totals"]["succeeded"], 6);
-    }
 
     #[test]
     fn offloaded_dispatch_envelope_parser_selects_structured_failure_from_mixed_stdout() {
@@ -723,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn offloaded_agent_task_handoff_wraps_legacy_dispatch_envelope() {
+    fn offloaded_agent_task_handoff_wraps_dispatch_envelope() {
         let stdout = concat!(
             "remote setup complete\n",
             "{\"success\":false,\"data\":{",

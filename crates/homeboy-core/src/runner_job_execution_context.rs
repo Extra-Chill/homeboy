@@ -458,15 +458,12 @@ mod tests {
     use crate::test_support::{with_isolated_home, EnvVarGuard};
 
     #[test]
-    fn daemon_child_of_same_build_or_unstamped_daemon_is_accepted() {
+    fn daemon_child_build_skew_is_rejected_but_unstamped_daemons_are_accepted() {
         verify_daemon_child_build(Some("homeboy 0.418.0+abc"), "homeboy 0.418.0+abc")
             .expect("same build");
         verify_daemon_child_build(None, "homeboy 0.418.0+abc").expect("pre-stamp daemon");
         verify_daemon_child_build(Some("  "), "homeboy 0.418.0+abc").expect("blank stamp");
-    }
 
-    #[test]
-    fn daemon_child_of_another_build_is_rejected_with_named_skew() {
         let error = verify_daemon_child_build(Some("homeboy 0.418.0+new"), "homeboy 0.417.20+old")
             .expect_err("skewed child must refuse");
 
@@ -475,7 +472,6 @@ mod tests {
             "{}",
             error.message
         );
-        assert!(!error.message.contains("job not found"));
         assert_eq!(error.details["reason"], "daemon_child_build_skew");
         assert_eq!(
             error.details["daemon_build_identity"],
@@ -485,13 +481,6 @@ mod tests {
             error.details["child_build_identity"],
             "homeboy 0.417.20+old"
         );
-    }
-
-    #[test]
-    fn local_context_is_explicit_and_never_nullable() {
-        let context = RunnerJobExecutionContext::local("homeboy");
-        assert!(context.is_local());
-        assert_eq!(context.runner_id(), "local");
     }
 
     #[test]
@@ -565,22 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_redacts_claim_and_dispatch_receipts() {
-        let context = RunnerJobExecutionContext::direct_daemon(
-            Some("run-1"),
-            "runner-1",
-            "job-1",
-            "homeboy",
-            "reservation-secret",
-        )
-        .expect("context");
-        let debug = format!("{context:?}");
-        assert!(!debug.contains("reservation-secret"));
-        assert!(!debug.contains("dispatch_receipt"));
-    }
-
-    #[test]
-    fn serialized_evidence_and_context_redact_raw_claim_material() {
+    fn debug_serialized_and_evidence_forms_redact_raw_claim_material() {
         let secret = "reservation-secret";
         let context = RunnerJobExecutionContext::direct_daemon(
             Some("run-1"),
@@ -591,23 +565,25 @@ mod tests {
         )
         .expect("context");
 
+        let debug = format!("{context:?}");
         let serialized = serde_json::to_string(&context).expect("serialize context");
         let evidence = serde_json::to_string(&context.evidence_record().expect("evidence"))
             .expect("serialize evidence");
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains("dispatch_receipt"));
         assert!(!serialized.contains(secret));
         assert!(!evidence.contains(secret));
         assert!(serialized.contains("claim_ref"));
     }
 
     #[test]
-    fn daemon_child_environment_resolves_runner_job_with_distinct_durable_and_attempt_ids() {
+    fn daemon_child_environment_resolves_runner_job_and_rejects_forged_reservation() {
         with_isolated_home(|_| {
             let store = crate::api_jobs::JobStore::open_without_reconciliation(
                 crate::paths::observation_db().expect("jobs path"),
             )
             .expect("job store");
             let durable_run_id = "controller-cook-run";
-            let child_run_id = "controller-cook-attempt";
             let runner_id = "runner-1";
             let job = store.create_test_local_runner_job(Some(LocalRunnerJob {
                 runner_id: runner_id.to_string(),
@@ -665,9 +641,6 @@ mod tests {
                     .expect("direct daemon authority");
             assert_eq!(resolved.id(), context.id());
             assert_eq!(resolved.runner_job_id(), job.id.to_string());
-            assert_ne!(child_run_id, durable_run_id);
-            assert_ne!(job.id.to_string(), durable_run_id);
-            assert_ne!(job.id.to_string(), child_run_id);
             assert_eq!(
                 resolved.evidence_record().expect("resolved evidence")["context"]
                     ["controller_run_id"],

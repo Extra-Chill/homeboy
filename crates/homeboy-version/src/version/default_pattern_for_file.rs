@@ -1,9 +1,5 @@
-//! default_pattern_for_file — extracted from version.rs.
-//!
-//! Pattern resolution and path resolution only. The readers that used to live
-//! here (`read_component_version` and friends) moved to
-//! [`super::component_version`], which is now the single place a component's
-//! `versionTargets` config is read (#11144).
+//! Version pattern resolution and path resolution only. Reading a component's
+//! `versionTargets` config happens in [`super::component_version`] (#11144).
 
 use homeboy_core::component::{self, Component, VersionTarget};
 use homeboy_core::engine::codebase_scan;
@@ -222,16 +218,9 @@ pub(crate) fn detect_unconfigured_patterns(component: &Component) -> Vec<Unconfi
 
 /// Resolve the single `deploy.since_tag` config that governs this component.
 ///
-/// This used to be `component.extensions.keys().find_map(..)` — a first-match
-/// scan over a `HashMap<String, ScopedExtensionConfig>` built with
-/// `RandomState`. With two linked extensions both declaring `since_tag`, *which
-/// config won changed every process*, and this drives `@since` placeholder
-/// rewriting during release (#11119). Nothing about that failure was visible:
-/// the release simply rewrote a different set of file extensions on different
-/// runs.
-///
-/// Providers are now collected into a `BTreeMap` and resolved with the shared
-/// ownership rule:
+/// This drives `@since` placeholder rewriting during release, so the winner
+/// must not depend on `HashMap` iteration order (#11119). Providers are
+/// collected into a `BTreeMap` and resolved with the shared ownership rule:
 ///
 /// - no provider → `Ok(None)` (no `@since` rewriting)
 /// - one distinct config → `Ok(Some(config))`, however many extensions declare

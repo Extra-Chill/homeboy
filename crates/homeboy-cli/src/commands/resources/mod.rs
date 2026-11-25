@@ -348,42 +348,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_relevant_process_rows_without_using_host_processes() {
+    fn selects_homeboy_and_configured_processes_only() {
         let row =
             parse_process_row("123 88.5 1048576 /usr/bin/homeboy homeboy worker run").unwrap();
         assert_eq!(row.pid, 123);
         assert_eq!(row.cpu_percent, 88.5);
         assert_eq!(row.rss_mb, 1024);
         assert!(is_relevant_process(&row));
-    }
 
-    #[test]
-    fn configured_matches_select_additional_processes() {
-        let row = ProcessRow {
+        let unrelated = ProcessRow {
             pid: 2,
             cpu_percent: 1.0,
             rss_mb: 100,
             command: "/usr/local/bin/preview-worker".to_string(),
             args: "serve --public".to_string(),
         };
-
+        assert!(!is_relevant_process(&unrelated));
         assert!(is_relevant_process_with_matches(
-            &row,
+            &unrelated,
             &["preview-worker".to_string()]
         ));
-    }
-
-    #[test]
-    fn ignores_unrelated_processes_without_configured_match() {
-        let row = ProcessRow {
-            pid: 2,
-            cpu_percent: 1.0,
-            rss_mb: 100,
-            command: "/Applications/Chat.app/Chat Helper".to_string(),
-            args: "--enable-worker-mode".to_string(),
-        };
-
-        assert!(!is_relevant_process(&row));
     }
 
     #[test]

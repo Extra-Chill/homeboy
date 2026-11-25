@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::RunnerRequiredTool;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8,10 +6,7 @@ pub(crate) struct LabOffloadCommandPrefix {
     pub(crate) required_tools: Vec<RunnerRequiredTool>,
 }
 
-pub(crate) fn lab_offload_command_prefix(
-    _source_path: &Path,
-    homeboy_path: &str,
-) -> LabOffloadCommandPrefix {
+pub(crate) fn lab_offload_command_prefix(homeboy_path: &str) -> LabOffloadCommandPrefix {
     // The runner already owns this execution. Keep nested agent-task and other
     // hot commands from applying controller resource policy and offloading again.
     let argv = vec![
@@ -20,23 +15,16 @@ pub(crate) fn lab_offload_command_prefix(
         "local".to_string(),
         "--wait".to_string(),
     ];
-    let required_tools = required_tools_for_command_prefix(&argv);
+    let program = executable_name(homeboy_path);
+    let required_tools = if program == "homeboy" {
+        vec![RunnerRequiredTool::homeboy()]
+    } else {
+        vec![RunnerRequiredTool::new(program)]
+    };
 
     LabOffloadCommandPrefix {
         argv,
         required_tools,
-    }
-}
-
-fn required_tools_for_command_prefix(argv: &[String]) -> Vec<RunnerRequiredTool> {
-    let Some(program) = argv.first().map(|value| executable_name(value)) else {
-        return vec![RunnerRequiredTool::homeboy()];
-    };
-
-    if program == "homeboy" {
-        vec![RunnerRequiredTool::homeboy()]
-    } else {
-        vec![RunnerRequiredTool::new(program)]
     }
 }
 
@@ -49,40 +37,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_self_command_prefix_uses_runner_homeboy_path() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"project"}"#)
-            .expect("write homeboy.json");
+    fn prefix_runs_the_runner_homeboy_path_locally_and_requires_homeboy() {
+        for homeboy_path in ["/usr/local/bin/homeboy", "homeboy"] {
+            let prefix = lab_offload_command_prefix(homeboy_path);
 
-        let prefix = lab_offload_command_prefix(dir.path(), "/usr/local/bin/homeboy");
-
-        assert_eq!(
-            prefix.argv,
-            vec![
-                "/usr/local/bin/homeboy".to_string(),
-                "--placement".to_string(),
-                "local".to_string(),
-                "--wait".to_string(),
-            ]
-        );
-        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
-    }
-
-    #[test]
-    fn bare_workspace_uses_runner_homeboy_path() {
-        let dir = tempfile::tempdir().expect("temp dir");
-
-        let prefix = lab_offload_command_prefix(dir.path(), "homeboy");
-
-        assert_eq!(
-            prefix.argv,
-            vec![
-                "homeboy".to_string(),
-                "--placement".to_string(),
-                "local".to_string(),
-                "--wait".to_string(),
-            ]
-        );
-        assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
+            assert_eq!(
+                prefix.argv,
+                vec![homeboy_path, "--placement", "local", "--wait"]
+            );
+            assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
+        }
     }
 }

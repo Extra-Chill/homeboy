@@ -686,7 +686,8 @@ mod build_failure_tests {
             component_id: "example".to_string(),
             build_command: "make release".to_string(),
             active_env_keys: Vec::new(),
-            output: CapturedOutput::new(String::new(), format!("{}tail", "x".repeat(20_000))),
+            // Multibyte output proves the bounded tail never splits a char.
+            output: CapturedOutput::new(String::new(), format!("{}tail", "x€".repeat(10_000))),
             artifact_inputs: Vec::new(),
             extension_phase_timings: Vec::new(),
             changed_scope: None,
@@ -701,18 +702,9 @@ mod build_failure_tests {
         assert!(error.contains("timeout after 30000ms"));
         assert!(error.contains("Command: make release"));
         assert!(error.contains("Working directory: /work/example"));
+        assert!(error.contains("[truncated]"));
         assert!(error.ends_with("tail"));
         assert!(error.len() < 17_000);
-    }
-
-    #[test]
-    fn output_tail_is_safe_for_multibyte_output() {
-        let output = format!("{}final diagnostic", "x€".repeat(10_000));
-
-        let tail = output_tail(&output, 16 * 1024);
-
-        assert!(tail.starts_with("[truncated]"));
-        assert!(tail.ends_with("final diagnostic"));
     }
 }
 
@@ -1272,10 +1264,10 @@ fn relevant_package_error_lines(stdout: &str, stderr: &str) -> Vec<String> {
     // diagnose — so the fallback has to be the most informative slice
     // available.
     //
-    // It previously returned the FIRST 12 lines, which for build output is the
-    // banner and dependency checks: identical for every component, and true of
-    // successful runs too. The end of the output is where a run diverges from
-    // a healthy one, so the tail is what gets kept (#14859).
+    // The first lines of build output are the banner and dependency checks:
+    // identical for every component, and true of successful runs too. The end
+    // of the output is where a run diverges from a healthy one, so the tail is
+    // what gets kept (#14859).
     let all: Vec<&str> = stderr
         .lines()
         .chain(stdout.lines())
@@ -1349,34 +1341,38 @@ mod package_failure_message_tests {
             message.starts_with("Package command failed (exit 255)"),
             "the message still identifies the failing step first; got: {message}"
         );
+
+        // With nothing matching, the message must not sprout an empty header.
+        let quiet = package_command_failure_error(1, "all quiet\n", "").to_string();
+        assert!(!quiet.contains("--- full output ---"), "got: {quiet}");
+        assert!(quiet.contains("all quiet"), "got: {quiet}");
     }
 
-    /// With nothing matching, the message must not sprout an empty header.
+    /// Keyword-matched lines are promoted; when nothing matches, the fallback
+    /// must surface where the run DIVERGED, not the banner every build prints --
+    /// including successful ones (#14859).
     #[test]
-    fn failure_message_omits_highlights_when_nothing_matches() {
-        let error = package_command_failure_error(1, "all quiet\n", "");
-        let message = error.to_string();
+    fn relevant_lines_promote_failures_and_fall_back_to_the_tail() {
+        let lines = relevant_package_error_lines(
+            "ENOENT: no such file or directory\nfine line\n",
+            "npm ERR! build failed\n",
+        );
+        assert!(lines.iter().any(|line| line.contains("npm ERR!")));
+        assert!(lines.iter().any(|line| line.contains("ENOENT")));
+        assert!(
+            !lines.iter().any(|line| line.contains("fine line")),
+            "unrelated output must not be promoted: {lines:?}"
+        );
 
-        assert!(!message.contains("--- full output ---"), "got: {message}");
-        assert!(message.contains("all quiet"), "got: {message}");
-    }
-
-    /// When nothing matches, the fallback must surface where the run DIVERGED,
-    /// not the banner every build prints — including successful ones (#14859).
-    #[test]
-    fn fallback_keeps_the_tail_not_the_banner() {
         let stdout = format!(
             "[BUILD] Universal WordPress Build Script\n{}[BUILD] final distinguishing line\n",
             "[BUILD] routine progress\n".repeat(30)
         );
-
         assert!(
             keyword_matched_error_lines(&stdout, "").is_empty(),
             "fixture must not match a keyword or it tests the wrong path"
         );
-
         let lines = relevant_package_error_lines(&stdout, "");
-
         assert!(
             lines
                 .iter()
@@ -1388,21 +1384,6 @@ mod package_failure_message_tests {
                 .iter()
                 .any(|line| line.contains("Universal WordPress Build Script")),
             "the banner is identical on success and tells nobody anything: {lines:?}"
-        );
-    }
-
-    #[test]
-    fn relevant_lines_pick_up_common_build_failure_shapes() {
-        let lines = relevant_package_error_lines(
-            "ENOENT: no such file or directory\nfine line\n",
-            "npm ERR! build failed\n",
-        );
-
-        assert!(lines.iter().any(|line| line.contains("npm ERR!")));
-        assert!(lines.iter().any(|line| line.contains("ENOENT")));
-        assert!(
-            !lines.iter().any(|line| line.contains("fine line")),
-            "unrelated output must not be promoted: {lines:?}"
         );
     }
 }

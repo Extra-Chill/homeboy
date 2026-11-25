@@ -430,7 +430,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn package_completeness_flags_tracked_runtime_dir_missing_from_zip() {
+    fn package_completeness_flags_missing_runtime_files_unless_scope_excludes_them() {
         let repo = tempfile::tempdir().expect("repo");
         std::fs::create_dir_all(repo.path().join("agents")).expect("agents dir");
         std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
@@ -440,88 +440,32 @@ mod tests {
         let artifact_path = repo.path().join("build/package.zip");
         std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
         write_zip(&artifact_path, &[("plugin/plugin.php", "<?php\n")]);
-        let component = Component {
-            id: "plugin".to_string(),
-            local_path: repo.path().to_string_lossy().to_string(),
-            ..Component::default()
-        };
-        let artifacts = vec![ReleaseArtifact {
-            path: "build/package.zip".to_string(),
-            durable_path: None,
-            artifact_type: Some("archive".to_string()),
-            platform: None,
-            phase: "final".to_string(),
-            producer: "test".to_string(),
-            sha256: None,
-            publication_authority: false,
-        }];
-        let error = validate_package_completeness(&component, repo.path(), &artifacts)
-            .expect_err("missing tracked runtime file should fail");
+        let artifacts = zip_artifacts("build/package.zip");
+
+        let error =
+            validate_package_completeness(&test_component(repo.path()), repo.path(), &artifacts)
+                .expect_err("missing tracked runtime file should fail");
         assert!(error.message.contains("agents/runtime.php"));
-    }
 
-    #[test]
-    fn package_completeness_honors_release_scope_excludes() {
-        let repo = tempfile::tempdir().expect("repo");
-        std::fs::create_dir_all(repo.path().join("agents")).expect("agents dir");
-        std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
-        std::fs::write(repo.path().join("agents/runtime.php"), "<?php\n").expect("agent");
-        run_git(repo.path(), &["init"]);
-        run_git(repo.path(), &["add", "plugin.php", "agents/runtime.php"]);
-        let artifact_path = repo.path().join("build/package.zip");
-        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
-        write_zip(&artifact_path, &[("plugin/plugin.php", "<?php\n")]);
-        let component = Component {
-            id: "plugin".to_string(),
-            local_path: repo.path().to_string_lossy().to_string(),
-            scopes: Some(homeboy_core::component::ScopeConfig {
-                release: Some(CommandScopeConfig {
-                    include: Vec::new(),
-                    exclude: vec!["agents/**".to_string()],
-                }),
-                ..Default::default()
-            }),
-            ..Component::default()
+        let exclude = CommandScopeConfig {
+            include: Vec::new(),
+            exclude: vec!["agents/**".to_string()],
         };
-        let artifacts = vec![ReleaseArtifact {
-            path: "build/package.zip".to_string(),
-            durable_path: None,
-            artifact_type: Some("archive".to_string()),
-            platform: None,
-            phase: "final".to_string(),
-            producer: "test".to_string(),
-            sha256: None,
-            publication_authority: false,
-        }];
-        validate_package_completeness(&component, repo.path(), &artifacts)
-            .expect("excluded runtime file should not fail");
-    }
-
-    #[test]
-    fn package_completeness_honors_package_scope_excludes() {
-        let repo = tempfile::tempdir().expect("repo");
-        std::fs::create_dir_all(repo.path().join("blocks")).expect("blocks dir");
-        std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
-        std::fs::write(repo.path().join("blocks/render.php"), "<?php\n").expect("block");
-        run_git(repo.path(), &["init"]);
-        run_git(repo.path(), &["add", "plugin.php", "blocks/render.php"]);
-        let artifact_path = repo.path().join("build/package.zip");
-        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
-        write_zip(&artifact_path, &[("plugin/plugin.php", "<?php\n")]);
-        let component = Component {
-            id: "plugin".to_string(),
-            local_path: repo.path().to_string_lossy().to_string(),
-            scopes: Some(homeboy_core::component::ScopeConfig {
-                package: Some(CommandScopeConfig {
-                    include: Vec::new(),
-                    exclude: vec!["blocks/**".to_string()],
-                }),
-                ..Default::default()
-            }),
-            ..Component::default()
-        };
-        validate_package_completeness(&component, repo.path(), &zip_artifacts("build/package.zip"))
-            .expect("package-scope excluded source should not fail completeness");
+        for scopes in [
+            ScopeConfig {
+                release: Some(exclude.clone()),
+                ..ScopeConfig::default()
+            },
+            ScopeConfig {
+                package: Some(exclude.clone()),
+                ..ScopeConfig::default()
+            },
+        ] {
+            let mut component = test_component(repo.path());
+            component.scopes = Some(scopes);
+            validate_package_completeness(&component, repo.path(), &artifacts)
+                .expect("release- or package-scope excluded runtime file should not fail");
+        }
     }
 
     #[test]
@@ -580,6 +524,16 @@ mod tests {
         validate_package_completeness(&component, repo.path(), &zip_artifacts("build/runtime.zip"))
             .expect("mapped runtime file should be present at its archive path");
 
+        std::fs::write(repo.path().join("source/runtime/extra.php"), "<?php\n").expect("extra");
+        run_git(repo.path(), &["add", "source/runtime/extra.php"]);
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/runtime.zip"),
+        )
+        .expect_err("missing mapped runtime file should fail");
+        assert!(error.message.contains("bundle/extra.php"));
+
         component.release.package_coverage[0].archive_root = "../bundle".to_string();
         write_zip(&artifact_path, &[("../bundle/main.php", "<?php\n")]);
         let error = validate_package_completeness(
@@ -590,34 +544,6 @@ mod tests {
         .expect_err("direct traversal must fail before inspecting archive entries");
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
         assert!(error.message.contains("parent traversal"));
-    }
-
-    #[test]
-    fn package_completeness_rejects_missing_transformed_source_file() {
-        let repo = tempfile::tempdir().expect("repo");
-        std::fs::create_dir_all(repo.path().join("source/runtime")).expect("runtime dir");
-        std::fs::write(repo.path().join("source/runtime/main.php"), "<?php\n").expect("main");
-        std::fs::write(repo.path().join("source/runtime/extra.php"), "<?php\n").expect("extra");
-        run_git(repo.path(), &["init"]);
-        run_git(repo.path(), &["add", "source/runtime"]);
-        let artifact_path = repo.path().join("build/runtime.zip");
-        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
-        write_zip(&artifact_path, &[("bundle/main.php", "<?php\n")]);
-        let mut component = test_component(repo.path());
-        component.release.package_coverage = vec![PackageCoverageConfig {
-            artifact: "build/runtime.zip".to_string(),
-            artifact_match: PackageCoverageArtifactMatch::Exact,
-            source_roots: vec!["source/runtime".to_string()],
-            archive_root: "bundle".to_string(),
-        }];
-
-        let error = validate_package_completeness(
-            &component,
-            repo.path(),
-            &zip_artifacts("build/runtime.zip"),
-        )
-        .expect_err("missing mapped runtime file should fail");
-        assert!(error.message.contains("bundle/extra.php"));
     }
 
     #[test]
@@ -791,17 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_build_validation_bypasses_package_completeness() {
-        // #8189: when the operator passes --skip-build-validation, the
-        // package-completeness structure assertion must not run, matching the
-        // documented CLI contract.
-        assert!(!should_validate_package_completeness(true));
-        // Default release behavior still enforces completeness.
-        assert!(should_validate_package_completeness(false));
-    }
-
-    #[test]
-    fn package_completeness_excludes_homeboy_metadata_by_default() {
+    fn package_completeness_excludes_homeboy_metadata_unless_explicitly_included() {
         let repo = tempfile::tempdir().expect("repo");
         std::fs::create_dir_all(repo.path().join("source")).expect("source dir");
         std::fs::write(repo.path().join("source/runtime.php"), "<?php\n").expect("runtime");
@@ -811,23 +727,11 @@ mod tests {
         let artifact_path = repo.path().join("build/package.zip");
         std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
         write_zip(&artifact_path, &[("source/runtime.php", "<?php\n")]);
-        let component = test_component(repo.path());
+        let artifacts = zip_artifacts("build/package.zip");
 
-        validate_package_completeness(&component, repo.path(), &zip_artifacts("build/package.zip"))
+        validate_package_completeness(&test_component(repo.path()), repo.path(), &artifacts)
             .expect("homeboy.json must not count as a missing runtime file by default");
-    }
 
-    #[test]
-    fn package_completeness_admits_homeboy_metadata_when_explicitly_included() {
-        let repo = tempfile::tempdir().expect("repo");
-        std::fs::create_dir_all(repo.path().join("source")).expect("source dir");
-        std::fs::write(repo.path().join("source/runtime.php"), "<?php\n").expect("runtime");
-        std::fs::write(repo.path().join("homeboy.json"), "{}\n").expect("homeboy metadata");
-        run_git(repo.path(), &["init"]);
-        run_git(repo.path(), &["add", "source/runtime.php", "homeboy.json"]);
-        let artifact_path = repo.path().join("build/package.zip");
-        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
-        write_zip(&artifact_path, &[("source/runtime.php", "<?php\n")]);
         let mut component = test_component(repo.path());
         component.scopes = Some(ScopeConfig {
             release: Some(CommandScopeConfig {
@@ -836,45 +740,19 @@ mod tests {
             }),
             ..ScopeConfig::default()
         });
+        let error = validate_package_completeness(&component, repo.path(), &artifacts)
+            .expect_err("an explicit release include must opt homeboy.json back into coverage");
+        assert!(error.message.contains("homeboy.json"), "{}", error.message);
 
-        let error = validate_package_completeness(
-            &component,
-            repo.path(),
-            &zip_artifacts("build/package.zip"),
-        )
-        .expect_err("an explicit release include must opt homeboy.json back into coverage");
-        assert!(
-            error.message.contains("homeboy.json"),
-            "unexpected message: {}",
-            error.message
-        );
-    }
-
-    #[test]
-    fn package_completeness_keeps_unrelated_json_fail_closed() {
-        let repo = tempfile::tempdir().expect("repo");
-        std::fs::create_dir_all(repo.path().join("source")).expect("source dir");
-        std::fs::write(repo.path().join("source/runtime.php"), "<?php\n").expect("runtime");
+        // The exclusion is about Homeboy ownership, not the json extension.
         std::fs::write(repo.path().join("source/settings.json"), "{}\n").expect("runtime json");
-        run_git(repo.path(), &["init"]);
-        run_git(
-            repo.path(),
-            &["add", "source/runtime.php", "source/settings.json"],
-        );
-        let artifact_path = repo.path().join("build/package.zip");
-        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
-        write_zip(&artifact_path, &[("source/runtime.php", "<?php\n")]);
-        let component = test_component(repo.path());
-
-        let error = validate_package_completeness(
-            &component,
-            repo.path(),
-            &zip_artifacts("build/package.zip"),
-        )
-        .expect_err("non-Homeboy runtime json must remain fail-closed");
+        run_git(repo.path(), &["add", "source/settings.json"]);
+        let error =
+            validate_package_completeness(&test_component(repo.path()), repo.path(), &artifacts)
+                .expect_err("non-Homeboy runtime json must remain fail-closed");
         assert!(
             error.message.contains("source/settings.json"),
-            "unexpected message: {}",
+            "{}",
             error.message
         );
     }

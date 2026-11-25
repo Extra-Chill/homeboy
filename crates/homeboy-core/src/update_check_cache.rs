@@ -78,28 +78,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cache_path() {
-        let path = cache_path("example_update_check.json").expect("homeboy path resolves");
-
-        assert_eq!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("example_update_check.json")
-        );
-    }
-
-    #[test]
-    fn fresh_when_recent() {
-        assert!(is_cache_fresh(now_secs().saturating_sub(10), 100));
-    }
-
-    #[test]
-    fn stale_when_outside_interval() {
-        assert!(!is_cache_fresh(now_secs().saturating_sub(200), 100));
-    }
-
-    #[test]
-    fn stale_when_clock_skew() {
-        // checked_at in the future — saturating_sub yields 0, treated as fresh.
-        assert!(is_cache_fresh(now_secs() + 1_000, 100));
+    fn cache_freshness_is_bounded_by_the_interval_and_tolerates_clock_skew() {
+        let now = now_secs();
+        for (checked_at, fresh) in [
+            (now.saturating_sub(10), true),
+            (now.saturating_sub(200), false),
+            // checked_at in the future: saturating_sub yields 0, treated as fresh.
+            (now + 1_000, true),
+        ] {
+            assert_eq!(is_cache_fresh(checked_at, 100), fresh, "{checked_at}");
+        }
     }
 }

@@ -114,43 +114,32 @@ fn normalize_relative_drift_path(path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Asserts the public contract of `drift_file_paths`; the detailed
-    /// behavior is exercised by the named tests below.
+    /// `homeboy.json` always leads; component extras are normalized,
+    /// invalid paths are dropped, and the tail is sorted and deduplicated.
     #[test]
-    fn test_drift_file_paths() {
-        let mut component = Component::default();
-        component.extra_drift_files = vec!["build/version.txt".to_string()];
-
-        let paths = drift_file_paths(&component);
-
-        // The portable config always comes first.
-        assert_eq!(paths.first().map(String::as_str), Some("homeboy.json"));
-        // Component extras land in the deduped tail.
-        assert!(paths.iter().any(|p| p == "build/version.txt"));
-        // No duplicates.
-        let mut sorted = paths.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), paths.len());
-    }
-
-    #[test]
-    fn normalize_strips_curdir_and_rejects_absolute() {
-        assert_eq!(
-            normalize_relative_drift_path("Cargo.lock").as_deref(),
-            Some("Cargo.lock")
-        );
-        assert_eq!(
-            normalize_relative_drift_path("./Cargo.lock").as_deref(),
-            Some("Cargo.lock")
-        );
-        assert_eq!(
-            normalize_relative_drift_path("packages/sdk/composer.lock").as_deref(),
-            Some("packages/sdk/composer.lock")
-        );
-        assert!(normalize_relative_drift_path("/etc/passwd").is_none());
-        assert!(normalize_relative_drift_path("../escape").is_none());
-        assert!(normalize_relative_drift_path("").is_none());
+    fn drift_list_leads_with_homeboy_json_and_normalizes_component_extras() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (&[], &["homeboy.json"]),
+            (
+                &["zzz.gen.json", "aaa.gen.txt"],
+                &["homeboy.json", "aaa.gen.txt", "zzz.gen.json"],
+            ),
+            (
+                &["Cargo.lock", "./Cargo.lock", "Cargo.lock"],
+                &["homeboy.json", "Cargo.lock"],
+            ),
+            (
+                &["packages/sdk/composer.lock", "/absolute", "../escape", ""],
+                &["homeboy.json", "packages/sdk/composer.lock"],
+            ),
+        ];
+        for (extras, expected) in cases {
+            let component = Component {
+                extra_drift_files: extras.iter().map(|path| path.to_string()).collect(),
+                ..Component::default()
+            };
+            assert_eq!(drift_file_paths(&component), *expected, "{extras:?}");
+        }
     }
 
     #[test]
@@ -165,62 +154,6 @@ mod tests {
             .into_iter()
             .collect::<Vec<_>>(),
             vec!["nested/pnpm-lock.yaml", "package-lock.json"]
-        );
-    }
-
-    #[test]
-    fn drift_list_has_homeboy_json_first_when_no_extensions() {
-        let component = Component::default();
-        let paths = drift_file_paths(&component);
-        assert_eq!(paths, vec!["homeboy.json".to_string()]);
-    }
-
-    #[test]
-    fn drift_list_includes_component_extras_sorted() {
-        let mut component = Component::default();
-        component.extra_drift_files = vec!["zzz.gen.json".to_string(), "aaa.gen.txt".to_string()];
-
-        let paths = drift_file_paths(&component);
-        assert_eq!(
-            paths,
-            vec![
-                "homeboy.json".to_string(),
-                "aaa.gen.txt".to_string(),
-                "zzz.gen.json".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn drift_list_dedupes_overlapping_entries() {
-        let mut component = Component::default();
-        component.extra_drift_files = vec![
-            "Cargo.lock".to_string(),
-            "./Cargo.lock".to_string(),
-            "Cargo.lock".to_string(),
-        ];
-
-        let paths = drift_file_paths(&component);
-        assert_eq!(
-            paths,
-            vec!["homeboy.json".to_string(), "Cargo.lock".to_string()]
-        );
-    }
-
-    #[test]
-    fn drift_list_silently_drops_invalid_paths() {
-        let mut component = Component::default();
-        component.extra_drift_files = vec![
-            "Cargo.lock".to_string(),
-            "/absolute".to_string(),
-            "../escape".to_string(),
-            "".to_string(),
-        ];
-
-        let paths = drift_file_paths(&component);
-        assert_eq!(
-            paths,
-            vec!["homeboy.json".to_string(), "Cargo.lock".to_string()]
         );
     }
 }

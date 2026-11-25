@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_session_requires_explicit_persist() {
+    fn managed_session_requires_an_explicit_well_formed_persist() {
         for mode in ["key_plus_password_controlmaster", "key_controlmaster"] {
             let without_persist = serde_json::from_str::<Server>(&format!(
                 r#"{{"host":"example.test","user":"deploy","auth":{{"mode":"{mode}"}}}}"#
@@ -438,10 +438,6 @@ mod tests {
         let mut server = managed_server("4h");
         server.auth.as_mut().expect("auth").mode = ServerAuthMode::KeyControlmaster;
         assert!(server.validate_in_root(unused_root()).is_ok());
-    }
-
-    #[test]
-    fn malformed_persist_is_rejected() {
         assert!(managed_server("four hours")
             .validate_in_root(unused_root())
             .is_err());

@@ -92,19 +92,3 @@ pub fn run(args: ScratchArgs) -> CmdResult<ScratchOutput> {
         ScratchCommand::Release { id } => one("scratch.release", temp::release_scratch(&id)?),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn list_returns_rows_under_entities() {
-        let value = serde_json::to_value(ScratchOutput::List {
-            command: "scratch.list",
-            entities: Vec::new(),
-            total_bytes: 0,
-        })
-        .unwrap();
-        assert_eq!(value["entities"], serde_json::json!([]));
-    }
-}

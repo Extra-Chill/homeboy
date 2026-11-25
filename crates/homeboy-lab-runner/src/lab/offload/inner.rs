@@ -1745,7 +1745,7 @@ pub(crate) fn run_lab_offload_inner(
             &runner_status,
         ));
     }
-    let command_prefix = lab_offload_command_prefix(&source_path, &homeboy_path);
+    let command_prefix = lab_offload_command_prefix(&homeboy_path);
     eprintln!(
         "Lab offload preflight: source checkout `{}` at {}; active Homeboy command `{}` from runner `{}`.",
         source_path.display(),
@@ -2973,7 +2973,7 @@ mod tests {
         .expect("runner");
         let path = final_preflight_homeboy_path(Some("/runner/current-homeboy"), &runner)
             .expect("converged path");
-        let prefix = lab_offload_command_prefix(std::path::Path::new("/source"), path);
+        let prefix = lab_offload_command_prefix(path);
 
         assert_eq!(path, "/runner/current-homeboy");
         assert_eq!(prefix.argv.first().map(String::as_str), Some(path));

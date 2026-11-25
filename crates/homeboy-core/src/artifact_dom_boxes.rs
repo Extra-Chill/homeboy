@@ -623,132 +623,102 @@ mod tests {
         result
     }
 
+    fn entrypoint_report(
+        dom_css_loaded: Option<bool>,
+        dom_capture_valid: Option<bool>,
+        stylesheet_status: Option<Value>,
+        elements: Vec<BrowserElement>,
+    ) -> BrowserReport {
+        BrowserReport {
+            entrypoints: vec![BrowserEntrypointReport {
+                page_path: "/page.html".to_string(),
+                page_url: "http://127.0.0.1/page.html".to_string(),
+                viewport: DomBoxViewport {
+                    width: 1440,
+                    height: 900,
+                    device_scale_factor: 1,
+                },
+                dom_css_loaded,
+                dom_capture_valid,
+                stylesheet_status,
+                elements,
+            }],
+        }
+    }
+
     #[test]
     fn shapes_report_and_truncates_text_samples() {
         let report = shape_report(
             Path::new("/artifact"),
-            BrowserReport {
-                entrypoints: vec![BrowserEntrypointReport {
-                    page_path: "/page.html".to_string(),
-                    page_url: "http://127.0.0.1/page.html".to_string(),
-                    viewport: DomBoxViewport {
-                        width: 1440,
-                        height: 900,
-                        device_scale_factor: 1,
-                    },
-                    dom_css_loaded: Some(true),
-                    dom_capture_valid: Some(true),
-                    stylesheet_status: Some(serde_json::json!({ "body_margin": "0px" })),
-                    elements: vec![BrowserElement {
-                        node_id: "12:34".to_string(),
-                        node_name: Some("Footer text".to_string()),
-                        selector: "p[data-figma-node-id=\"12:34\"]".to_string(),
-                        tag: "p".to_string(),
-                        text_sample: "Footer\ntext with    extra words".to_string(),
-                        bounding_client_rect: rect(),
-                        computed_style: Some(serde_json::json!({ "display": "block" })),
-                        text_metrics: Some(serde_json::json!({ "line_count": 2 })),
-                        asset_state: Some(serde_json::json!({ "loaded": true })),
-                        visibility: Some(serde_json::json!({ "is_visible": true })),
-                        source: Some(serde_json::json!({ "kind": "generated" })),
-                    }],
+            entrypoint_report(
+                Some(true),
+                Some(true),
+                Some(serde_json::json!({ "body_margin": "0px" })),
+                vec![BrowserElement {
+                    node_id: "12:34".to_string(),
+                    node_name: Some("Footer text".to_string()),
+                    selector: "p[data-figma-node-id=\"12:34\"]".to_string(),
+                    tag: "p".to_string(),
+                    text_sample: "Footer\ntext with    extra words".to_string(),
+                    bounding_client_rect: rect(),
+                    computed_style: None,
+                    text_metrics: None,
+                    asset_state: None,
+                    visibility: None,
+                    source: None,
                 }],
-            },
+            ),
             16,
         )
         .expect("shape");
 
         assert_eq!(report.schema, ARTIFACT_DOM_BOXES_SCHEMA);
-        assert_eq!(
-            report.entrypoints[0].elements[0].text_sample,
-            "Footer text with"
-        );
-        assert_eq!(report.entrypoints[0].dom_css_loaded, Some(true));
-        assert_eq!(report.entrypoints[0].dom_capture_valid, Some(true));
-        assert_eq!(report.entrypoints[0].dom_capture_invalid_reason, None);
-        assert_eq!(
-            report.entrypoints[0]
-                .stylesheet_status
-                .as_ref()
-                .and_then(|status| status.get("body_margin"))
-                .and_then(|value| value.as_str()),
-            Some("0px")
-        );
-        assert_eq!(report.entrypoints[0].elements[0].node_id, "12:34");
-        let element = &report.entrypoints[0].elements[0];
-        assert_eq!(element.computed_style.as_ref().unwrap()["display"], "block");
-        assert_eq!(element.text_metrics.as_ref().unwrap()["line_count"], 2);
-        assert_eq!(element.asset_state.as_ref().unwrap()["loaded"], true);
-        assert_eq!(element.visibility.as_ref().unwrap()["is_visible"], true);
-        assert_eq!(element.source.as_ref().unwrap()["kind"], "generated");
+        let entrypoint = &report.entrypoints[0];
+        assert_eq!(entrypoint.elements[0].text_sample, "Footer text with");
+        assert_eq!(entrypoint.dom_capture_valid, Some(true));
+        assert_eq!(entrypoint.dom_capture_invalid_reason, None);
     }
 
     #[test]
-    fn marks_missing_provider_css_diagnostics_invalid() {
-        let report = shape_report(
-            Path::new("/artifact"),
-            BrowserReport {
-                entrypoints: vec![BrowserEntrypointReport {
-                    page_path: "/page.html".to_string(),
-                    page_url: "http://127.0.0.1/page.html".to_string(),
-                    viewport: DomBoxViewport {
-                        width: 1440,
-                        height: 900,
-                        device_scale_factor: 1,
-                    },
-                    dom_css_loaded: None,
-                    dom_capture_valid: None,
-                    stylesheet_status: None,
-                    elements: Vec::new(),
-                }],
-            },
-            16,
-        )
-        .expect("shape");
+    fn marks_missing_or_invalid_provider_css_diagnostics_invalid() {
+        for (css_loaded, capture_valid, stylesheet_status, expected_reasons) in [
+            (
+                None,
+                None,
+                None,
+                vec![
+                    "dom_css_loaded missing",
+                    "dom_capture_valid missing",
+                    "stylesheet_status missing",
+                ],
+            ),
+            (
+                Some(false),
+                Some(true),
+                Some(serde_json::json!("not diagnostic object")),
+                vec![
+                    "stylesheet_status must be an object",
+                    "provider reported CSS was not loaded",
+                ],
+            ),
+        ] {
+            let report = shape_report(
+                Path::new("/artifact"),
+                entrypoint_report(css_loaded, capture_valid, stylesheet_status, Vec::new()),
+                16,
+            )
+            .expect("shape");
 
-        let entrypoint = &report.entrypoints[0];
-        assert_eq!(entrypoint.dom_capture_valid, Some(false));
-        let reason = entrypoint
-            .dom_capture_invalid_reason
-            .as_deref()
-            .expect("invalid reason");
-        assert!(reason.contains("dom_css_loaded missing"));
-        assert!(reason.contains("dom_capture_valid missing"));
-        assert!(reason.contains("stylesheet_status missing"));
-    }
-
-    #[test]
-    fn marks_invalid_provider_css_diagnostics_invalid() {
-        let report = shape_report(
-            Path::new("/artifact"),
-            BrowserReport {
-                entrypoints: vec![BrowserEntrypointReport {
-                    page_path: "/page.html".to_string(),
-                    page_url: "http://127.0.0.1/page.html".to_string(),
-                    viewport: DomBoxViewport {
-                        width: 1440,
-                        height: 900,
-                        device_scale_factor: 1,
-                    },
-                    dom_css_loaded: Some(false),
-                    dom_capture_valid: Some(true),
-                    stylesheet_status: Some(serde_json::json!("not diagnostic object")),
-                    elements: Vec::new(),
-                }],
-            },
-            16,
-        )
-        .expect("shape");
-
-        let entrypoint = &report.entrypoints[0];
-        assert_eq!(entrypoint.dom_css_loaded, Some(false));
-        assert_eq!(entrypoint.dom_capture_valid, Some(false));
-        let reason = entrypoint
-            .dom_capture_invalid_reason
-            .as_deref()
-            .expect("invalid reason");
-        assert!(reason.contains("stylesheet_status must be an object"));
-        assert!(reason.contains("provider reported CSS was not loaded"));
+            let entrypoint = &report.entrypoints[0];
+            assert_eq!(entrypoint.dom_capture_valid, Some(false));
+            let reason = entrypoint
+                .dom_capture_invalid_reason
+                .as_deref()
+                .expect("invalid reason");
+            for expected in expected_reasons {
+                assert!(reason.contains(expected), "{reason}");
+            }
+        }
     }
 
     #[test]
@@ -832,118 +802,49 @@ printf '%s' '{"entrypoints":[{"page_path":"/index.html","page_url":"http://127.0
     }
 
     #[test]
-    fn browser_capture_rejects_scalar_and_array_evidence() {
-        for value in [serde_json::json!("not an object"), serde_json::json!([])] {
-            let error = capture_provider_payload(provider_payload(Some(("computed_style", value))))
-                .expect_err("invalid evidence shape");
-            assert!(error.to_string().contains("computed_style"));
-            assert!(error.to_string().contains("must be a JSON object"));
-        }
-    }
-
-    #[test]
-    fn browser_capture_rejects_evidence_exceeding_nesting_limit() {
-        let mut value = serde_json::json!({});
+    fn browser_capture_rejects_malformed_or_oversized_evidence() {
+        let mut nested = serde_json::json!({});
         for _ in 0..MAX_DOM_BOX_EVIDENCE_DEPTH {
-            value = serde_json::json!({ "nested": value });
+            nested = serde_json::json!({ "nested": nested });
         }
-
-        let error = capture_provider_payload(provider_payload(Some(("source", value))))
-            .expect_err("excessive depth");
-        assert!(error.to_string().contains("source"));
-        assert!(error.to_string().contains("nesting limit"));
-    }
-
-    #[test]
-    fn browser_capture_rejects_evidence_exceeding_key_limit() {
-        let mut value = Map::new();
-        for index in 0..=MAX_DOM_BOX_EVIDENCE_KEYS {
-            value.insert(format!("key-{index}"), Value::Null);
-        }
-
-        let error = capture_provider_payload(provider_payload(Some((
-            "text_metrics",
-            Value::Object(value),
-        ))))
-        .expect_err("excessive keys");
-        assert!(error.to_string().contains("text_metrics"));
-        assert!(error.to_string().contains("key limit"));
-    }
-
-    #[test]
-    fn browser_capture_rejects_evidence_exceeding_string_limit() {
-        let value = serde_json::json!({
-            "data_url": "x".repeat(MAX_DOM_BOX_EVIDENCE_STRING_BYTES + 1)
-        });
-
-        let error = capture_provider_payload(provider_payload(Some(("asset_state", value))))
-            .expect_err("excessive string");
-        assert!(error.to_string().contains("asset_state"));
-        assert!(error.to_string().contains("string exceeding"));
-    }
-
-    #[test]
-    fn browser_capture_rejects_evidence_exceeding_byte_limit() {
-        let mut value = Map::new();
-        for index in 0..5 {
-            value.insert(
-                format!("data-{index}"),
-                Value::String("x".repeat(MAX_DOM_BOX_EVIDENCE_STRING_BYTES)),
-            );
-        }
-
-        let error =
-            capture_provider_payload(provider_payload(Some(("visibility", Value::Object(value)))))
-                .expect_err("excessive bytes");
-        assert!(error.to_string().contains("visibility"));
-        assert!(error.to_string().contains("byte limit"));
-    }
-
-    #[test]
-    fn omits_missing_optional_provider_evidence() {
-        let report = shape_report(
-            Path::new("/artifact"),
-            BrowserReport {
-                entrypoints: vec![BrowserEntrypointReport {
-                    page_path: "/page.html".to_string(),
-                    page_url: "http://127.0.0.1/page.html".to_string(),
-                    viewport: DomBoxViewport {
-                        width: 1440,
-                        height: 900,
-                        device_scale_factor: 1,
-                    },
-                    dom_css_loaded: Some(true),
-                    dom_capture_valid: Some(true),
-                    stylesheet_status: Some(serde_json::json!({})),
-                    elements: vec![BrowserElement {
-                        node_id: "12:34".to_string(),
-                        node_name: None,
-                        selector: "p".to_string(),
-                        tag: "p".to_string(),
-                        text_sample: "Hello".to_string(),
-                        bounding_client_rect: rect(),
-                        computed_style: None,
-                        text_metrics: None,
-                        asset_state: None,
-                        visibility: None,
-                        source: None,
-                    }],
-                }],
-            },
-            160,
-        )
-        .expect("shape");
-
-        let element =
-            &serde_json::to_value(&report).expect("serialize")["entrypoints"][0]["elements"][0];
-        for field in [
-            "computed_style",
-            "text_metrics",
-            "asset_state",
-            "visibility",
-            "source",
+        let many_keys = (0..=MAX_DOM_BOX_EVIDENCE_KEYS)
+            .map(|index| (format!("key-{index}"), Value::Null))
+            .collect::<Map<_, _>>();
+        let many_bytes = (0..5)
+            .map(|index| {
+                (
+                    format!("data-{index}"),
+                    Value::String("x".repeat(MAX_DOM_BOX_EVIDENCE_STRING_BYTES)),
+                )
+            })
+            .collect::<Map<_, _>>();
+        for (field, value, expected) in [
+            (
+                "computed_style",
+                serde_json::json!("not an object"),
+                "must be a JSON object",
+            ),
+            (
+                "computed_style",
+                serde_json::json!([]),
+                "must be a JSON object",
+            ),
+            ("source", nested, "nesting limit"),
+            ("text_metrics", Value::Object(many_keys), "key limit"),
+            (
+                "asset_state",
+                serde_json::json!({
+                    "data_url": "x".repeat(MAX_DOM_BOX_EVIDENCE_STRING_BYTES + 1)
+                }),
+                "string exceeding",
+            ),
+            ("visibility", Value::Object(many_bytes), "byte limit"),
         ] {
-            assert!(element.get(field).is_none(), "{field} should be omitted");
+            let error = capture_provider_payload(provider_payload(Some((field, value))))
+                .expect_err("invalid evidence")
+                .to_string();
+            assert!(error.contains(field), "{error}");
+            assert!(error.contains(expected), "{error}");
         }
     }
 

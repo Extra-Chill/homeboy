@@ -247,51 +247,30 @@ fn run_list_prefers_rig_workloads_over_component_bench_script() {
 }
 
 #[test]
-fn run_list_preserves_registered_component_path() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
+fn run_list_lists_registered_component_scenarios_and_filters_selection() {
+    // The plain (non-rig) fixture lists `in-tree slow visual`.
+    let cases: &[(&[&str], usize, &str)] = &[(&[], 3, "in-tree"), (&["slow"], 1, "slow")];
+    for (scenario_ids, count, first) in cases {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) =
-            run_list(&list_args(Some("studio"), Vec::new())).expect("plain bench list should run");
+            let mut args = list_args(Some("studio"), Vec::new());
+            args.scenario_ids = scenario_ids.iter().map(|id| id.to_string()).collect();
+            let (output, exit_code) = run_list(&args).expect("plain bench list should run");
 
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::List(result) => {
-                assert_eq!(result.component, "studio");
-                assert_eq!(result.component_id, "studio");
-                // The plain (non-rig) fixture lists its in-tree scenarios
-                // `in-tree slow visual` (the `visual` scenario was added with
-                // its artifact fixture in #7992).
-                assert_eq!(result.count, 3);
-                assert_eq!(result.scenarios[0].id, "in-tree");
+            assert_eq!(exit_code, 0);
+            match output {
+                BenchOutput::List(result) => {
+                    assert_eq!(result.component_id, "studio");
+                    assert_eq!(result.count, *count, "{scenario_ids:?}");
+                    assert_eq!(result.scenarios[0].id, *first, "{scenario_ids:?}");
+                }
+                _ => panic!("expected list output"),
             }
-            _ => panic!("expected list output"),
-        }
-    });
-}
-
-#[test]
-fn run_list_filters_selected_scenario() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let mut args = list_args(Some("studio"), Vec::new());
-        args.scenario_ids = vec!["slow".to_string()];
-        let (output, exit_code) = run_list(&args).expect("plain bench list should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::List(result) => {
-                assert_eq!(result.count, 1);
-                assert_eq!(result.scenarios[0].id, "slow");
-            }
-            _ => panic!("expected list output"),
-        }
-    });
+        });
+    }
 }
 
 #[test]

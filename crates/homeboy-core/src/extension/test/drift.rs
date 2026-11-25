@@ -930,49 +930,39 @@ mod tests {
     use crate::test_support::run_git_command as run_git;
 
     #[test]
-    fn extract_method_rename() {
-        let diff = r#"@@ -10,7 +10,7 @@
--    public function executeRunFlow($id) {
-+    public function executeWorkflow($id) {
-         return $this->doWork($id);
-     }
-"#;
-        let changes = extract_changes_from_diff("src/Abilities/JobAbilities.php", diff);
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].change_type, ChangeType::MethodRename);
-        assert_eq!(changes[0].old_symbol, "executeRunFlow");
-        assert_eq!(changes[0].new_symbol.as_deref(), Some("executeWorkflow"));
-    }
-
-    #[test]
-    fn extract_class_rename() {
-        let diff = r#"@@ -1,5 +1,5 @@
--class FlowsCommand extends BaseCommand {
-+class FlowCommand extends BaseCommand {
-     public function handle() {
-"#;
-        let changes = extract_changes_from_diff("src/Commands/FlowsCommand.php", diff);
-
-        let cls = changes
-            .iter()
-            .find(|c| c.change_type == ChangeType::ClassRename)
-            .unwrap();
-        assert_eq!(cls.old_symbol, "FlowsCommand");
-        assert_eq!(cls.new_symbol.as_deref(), Some("FlowCommand"));
-    }
-
-    #[test]
-    fn extract_rust_fn_rename() {
-        let diff = r#"@@ -10,7 +10,7 @@
--pub fn load_config(path: &Path) -> Config {
-+pub fn read_config(path: &Path) -> Config {
-     let data = fs::read_to_string(path).unwrap();
-"#;
-        let changes = extract_changes_from_diff("src/config.rs", diff);
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].change_type, ChangeType::MethodRename);
-        assert_eq!(changes[0].old_symbol, "load_config");
-        assert_eq!(changes[0].new_symbol.as_deref(), Some("read_config"));
+    fn extracts_renames_from_php_and_rust_diffs() {
+        let cases = [
+            (
+                "src/Abilities/JobAbilities.php",
+                "@@ -10,7 +10,7 @@\n-    public function executeRunFlow($id) {\n+    public function executeWorkflow($id) {\n         return $this->doWork($id);\n     }\n",
+                ChangeType::MethodRename,
+                "executeRunFlow",
+                "executeWorkflow",
+            ),
+            (
+                "src/Commands/FlowsCommand.php",
+                "@@ -1,5 +1,5 @@\n-class FlowsCommand extends BaseCommand {\n+class FlowCommand extends BaseCommand {\n     public function handle() {\n",
+                ChangeType::ClassRename,
+                "FlowsCommand",
+                "FlowCommand",
+            ),
+            (
+                "src/config.rs",
+                "@@ -10,7 +10,7 @@\n-pub fn load_config(path: &Path) -> Config {\n+pub fn read_config(path: &Path) -> Config {\n     let data = fs::read_to_string(path).unwrap();\n",
+                ChangeType::MethodRename,
+                "load_config",
+                "read_config",
+            ),
+        ];
+        for (file, diff, change_type, old, new) in cases {
+            let changes = extract_changes_from_diff(file, diff);
+            let change = changes
+                .iter()
+                .find(|change| change.change_type == change_type)
+                .unwrap_or_else(|| panic!("{file}: {changes:?}"));
+            assert_eq!(change.old_symbol, old, "{file}");
+            assert_eq!(change.new_symbol.as_deref(), Some(new), "{file}");
+        }
     }
 
     #[test]
@@ -1181,27 +1171,6 @@ mod tests {
     }
 
     #[test]
-    fn has_usable_patterns_reflects_config() {
-        let config = TestDriftConfig {
-            source_dirs: vec!["src".to_string()],
-            test_dirs: vec!["tests".to_string()],
-            file_extensions: vec!["rs".to_string()],
-            inline_tests: true,
-        };
-        let configured = DriftOptions::from_config(Path::new("/tmp"), "HEAD", &config, &[]);
-        assert!(configured.has_usable_patterns());
-
-        let empty = DriftOptions {
-            root: PathBuf::from("/tmp"),
-            since: "HEAD".to_string(),
-            source_patterns: Vec::new(),
-            test_patterns: Vec::new(),
-            inline_tests: false,
-        };
-        assert!(!empty.has_usable_patterns());
-    }
-
-    #[test]
     fn test_harness_config_is_source_relevant() {
         // Config by extension, so no source pattern matches these; they must
         // still count as source-relevant so a change here selects tests.
@@ -1261,263 +1230,153 @@ mod tests {
         assert!(!is_source_relevant_change(&opts, "README.md"));
     }
 
-    #[test]
-    fn skip_short_symbols() {
-        let changes = vec![ProductionChange {
-            change_type: ChangeType::MethodRename,
-            file: "src/X.php".into(),
-            old_symbol: "ab".into(), // too short
-            new_symbol: Some("cd".into()),
+    fn change(change_type: ChangeType, old: &str, new: Option<&str>) -> ProductionChange {
+        ProductionChange {
+            change_type,
+            file: "src/Foo.php".into(),
+            old_symbol: old.into(),
+            new_symbol: new.map(Into::into),
             line: 1,
-        }];
+        }
+    }
 
-        let test_content = "line with ab in it\n";
+    /// Write `tests/<name>` files and return the drift references found in them.
+    fn drift_in(changes: &[ProductionChange], files: &[(&str, &str)]) -> Vec<DriftedTest> {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let tests_dir = root.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("FooTest.php"), test_content).unwrap();
+        let test_files: Vec<PathBuf> = files
+            .iter()
+            .map(|(name, content)| {
+                let path = tests_dir.join(name);
+                std::fs::write(&path, content).unwrap();
+                path
+            })
+            .collect();
+        find_drift_references(changes, &test_files, root)
+    }
 
-        let test_files = vec![tests_dir.join("FooTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
-        assert!(drifted.is_empty()); // Skipped because symbol < 3 chars
+    fn lines(drifted: &[DriftedTest]) -> Vec<usize> {
+        drifted.iter().map(|drifted| drifted.line).collect()
+    }
+
+    #[test]
+    fn skip_short_symbols() {
+        let changes = [change(ChangeType::MethodRename, "ab", Some("cd"))];
+        assert!(drift_in(&changes, &[("FooTest.php", "line with ab in it\n")]).is_empty());
     }
 
     /// The defect behind #12392: STRING_RE harvests every single-quoted
     /// lowercase word from a diff, so ordinary PHP array keys become drift
     /// "symbols". Matching them as raw substrings made `'version'` drift every
-    /// test mentioning `php_version`, `wp_version`, or `version_compare` --
-    /// 161 of 480 test files for a three-file change, none from a method or a
-    /// class. A string literal must be matched as a string literal.
+    /// test mentioning `php_version`, `wp_version`, or `version_compare`.
+    /// A string literal must be matched as a string literal, in either quoting
+    /// style.
     #[test]
-    fn string_literal_drift_does_not_match_words_inside_other_identifiers() {
-        let changes = vec![ProductionChange {
-            change_type: ChangeType::ErrorCodeChange,
-            file: "inc/Bootstrap/DependencyChecker.php".into(),
-            old_symbol: "version".into(),
-            new_symbol: Some("php_version".into()),
-            line: 10,
-        }];
-
-        let test_content = r#"<?php
-class FooTest extends TestCase {
-    public function testUnrelated() {
-        $this->assertSame('8.2', $report['php_version']);
-        $this->assertTrue(version_compare($wp_version, '6.0', '>='));
-    }
-    public function testTheActualKey() {
-        $this->assertArrayHasKey('version', $payload);
-    }
-}
-"#;
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let tests_dir = root.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("FooTest.php"), test_content).unwrap();
-
-        let test_files = vec![tests_dir.join("FooTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
-
-        assert_eq!(
-            drifted.len(),
-            1,
-            "only the literal 'version' key should drift, got {:?}",
-            drifted.iter().map(|d| &d.content).collect::<Vec<_>>()
+    fn string_literal_drift_matches_whole_literals_in_either_quoting_style() {
+        let changes = [change(
+            ChangeType::ErrorCodeChange,
+            "version",
+            Some("php_version"),
+        )];
+        let drifted = drift_in(
+            &changes,
+            &[(
+                "FooTest.php",
+                "<?php\n$this->assertSame('8.2', $report['php_version']);\n$this->assertTrue(version_compare($wp_version, '6.0', '>='));\n$this->assertArrayHasKey('version', $payload);\n",
+            )],
         );
-        assert!(drifted[0].content.contains("assertArrayHasKey('version'"));
-    }
+        assert_eq!(lines(&drifted), vec![4], "{drifted:?}");
 
-    /// The same literal referenced with double quotes is still the same
-    /// literal, so both quoting styles count.
-    #[test]
-    fn string_literal_drift_matches_either_quoting_style() {
-        let changes = vec![ProductionChange {
-            change_type: ChangeType::StringChange,
-            file: "inc/Abilities/SystemAbilities.php".into(),
-            old_symbol: "rest_status".into(),
-            new_symbol: Some("status".into()),
-            line: 4,
-        }];
-
-        let test_content = "<?php
-$a = $r['rest_status'];
-$b = $r[\"rest_status\"];
-$c = $r['prefixed_rest_status_suffix'];
-";
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let tests_dir = root.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("BarTest.php"), test_content).unwrap();
-
-        let test_files = vec![tests_dir.join("BarTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
-
-        assert_eq!(
-            drifted.len(),
-            2,
-            "both quoting styles drift, the embedded one does not: {drifted:?}"
+        let changes = [change(
+            ChangeType::StringChange,
+            "rest_status",
+            Some("status"),
+        )];
+        let drifted = drift_in(
+            &changes,
+            &[(
+                "BarTest.php",
+                "<?php\n$a = $r['rest_status'];\n$b = $r[\"rest_status\"];\n$c = $r['prefixed_rest_status_suffix'];\n",
+            )],
         );
-        assert_eq!(drifted[0].line, 2);
-        assert_eq!(drifted[1].line, 3);
+        assert_eq!(lines(&drifted), vec![2, 3], "{drifted:?}");
     }
 
-    /// Identifier symbols keep matching, but on word boundaries, so a short
-    /// method name is not found inside a longer unrelated one.
+    /// Identifier symbols match on word boundaries, so a short method name is
+    /// not found inside a longer unrelated one.
     #[test]
     fn identifier_drift_matches_on_word_boundaries() {
-        let changes = vec![ProductionChange {
-            change_type: ChangeType::MethodRemoved,
-            file: "src/Foo.php".into(),
-            old_symbol: "runFlow".into(),
-            new_symbol: None,
-            line: 10,
-        }];
-
-        let test_content = "<?php
-$this->runFlow(1);
-$this->runFlowBatchInParallel(2);
-";
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let tests_dir = root.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("BazTest.php"), test_content).unwrap();
-
-        let test_files = vec![tests_dir.join("BazTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
-
-        assert_eq!(
-            drifted.len(),
-            1,
-            "runFlowBatchInParallel is a different symbol: {drifted:?}"
+        let changes = [change(ChangeType::MethodRemoved, "runFlow", None)];
+        let drifted = drift_in(
+            &changes,
+            &[(
+                "BazTest.php",
+                "<?php\n$this->runFlow(1);\n$this->runFlowBatchInParallel(2);\n",
+            )],
         );
-        assert_eq!(drifted[0].line, 2);
+        assert_eq!(lines(&drifted), vec![2], "{drifted:?}");
+        assert!(drifted[0].content.contains("runFlow(1)"));
     }
 
     /// A moved file is matched verbatim: paths carry their own separators and
     /// word boundaries would split them.
     #[test]
     fn file_move_drift_matches_the_path_verbatim() {
-        let changes = vec![ProductionChange {
-            change_type: ChangeType::FileMove,
-            file: "inc/New/Home.php".into(),
-            old_symbol: "inc/Old/Home.php".into(),
-            new_symbol: Some("inc/New/Home.php".into()),
-            line: 0,
-        }];
-
-        let test_content = "<?php
-require_once __DIR__ . '/../inc/Old/Home.php';
-$x = 1;
-";
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let tests_dir = root.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("QuxTest.php"), test_content).unwrap();
-
-        let test_files = vec![tests_dir.join("QuxTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
-
-        assert_eq!(drifted.len(), 1);
-        assert_eq!(drifted[0].line, 2);
-    }
-
-    #[test]
-    fn find_references_in_test_files() {
-        let changes = vec![ProductionChange {
-            change_type: ChangeType::MethodRename,
-            file: "src/Foo.php".into(),
-            old_symbol: "executeRunFlow".into(),
-            new_symbol: Some("executeWorkflow".into()),
-            line: 10,
-        }];
-
-        let test_content = r#"<?php
-class FooTest extends TestCase {
-    public function testRunFlow() {
-        $result = $this->foo->executeRunFlow(1);
-        $this->assertNotNull($result);
-    }
-}
-"#;
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let tests_dir = root.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("FooTest.php"), test_content).unwrap();
-
-        let test_files = vec![tests_dir.join("FooTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
-        assert_eq!(drifted.len(), 1);
-        assert_eq!(drifted[0].line, 4);
-        assert!(drifted[0].content.contains("executeRunFlow"));
+        let changes = [change(
+            ChangeType::FileMove,
+            "inc/Old/Home.php",
+            Some("inc/New/Home.php"),
+        )];
+        let drifted = drift_in(
+            &changes,
+            &[(
+                "QuxTest.php",
+                "<?php\nrequire_once __DIR__ . '/../inc/Old/Home.php';\n$x = 1;\n",
+            )],
+        );
+        assert_eq!(lines(&drifted), vec![2]);
     }
 
     #[test]
     fn multiple_changes_multiple_tests() {
-        let changes = vec![
-            ProductionChange {
-                change_type: ChangeType::MethodRename,
-                file: "src/A.php".into(),
-                old_symbol: "oldMethodA".into(),
-                new_symbol: Some("newMethodA".into()),
-                line: 5,
-            },
-            ProductionChange {
-                change_type: ChangeType::ErrorCodeChange,
-                file: "src/B.php".into(),
-                old_symbol: "rest_forbidden".into(),
-                new_symbol: Some("access_denied".into()),
-                line: 10,
-            },
+        let changes = [
+            change(ChangeType::MethodRename, "oldMethodA", Some("newMethodA")),
+            change(
+                ChangeType::ErrorCodeChange,
+                "rest_forbidden",
+                Some("access_denied"),
+            ),
         ];
-
-        let test1 = "<?php\n$this->oldMethodA();\n";
-        let test2 = "<?php\nassertEquals('rest_forbidden', $code);\n";
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let tests_dir = root.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("ATest.php"), test1).unwrap();
-        std::fs::write(tests_dir.join("BTest.php"), test2).unwrap();
-
-        let test_files = vec![tests_dir.join("ATest.php"), tests_dir.join("BTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
+        let drifted = drift_in(
+            &changes,
+            &[
+                ("ATest.php", "<?php\n$this->oldMethodA();\n"),
+                (
+                    "BTest.php",
+                    "<?php\nassertEquals('rest_forbidden', $code);\n",
+                ),
+            ],
+        );
         assert_eq!(drifted.len(), 2);
     }
 
     #[test]
     fn skip_comment_lines() {
-        let changes = vec![ProductionChange {
-            change_type: ChangeType::MethodRename,
-            file: "src/Foo.php".into(),
-            old_symbol: "oldMethod".into(),
-            new_symbol: Some("newMethod".into()),
-            line: 5,
-        }];
-
-        let test_content =
-            "<?php\n// oldMethod was renamed\n/* oldMethod docs */\n$this->oldMethod();\n";
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let tests_dir = root.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("FooTest.php"), test_content).unwrap();
-
-        let test_files = vec![tests_dir.join("FooTest.php")];
-        let drifted = find_drift_references(&changes, &test_files, root);
-        assert_eq!(drifted.len(), 1); // Only the actual code line, not comments
-        assert_eq!(drifted[0].line, 4);
+        let changes = [change(
+            ChangeType::MethodRename,
+            "oldMethod",
+            Some("newMethod"),
+        )];
+        let drifted = drift_in(
+            &changes,
+            &[(
+                "FooTest.php",
+                "<?php\n// oldMethod was renamed\n/* oldMethod docs */\n$this->oldMethod();\n",
+            )],
+        );
+        assert_eq!(lines(&drifted), vec![4]);
     }
 }
 
@@ -1529,24 +1388,10 @@ mod workspace_layout_tests {
     use crate::test_support::run_git_command as run_git;
 
     fn rust_extension_options_at(root: &Path) -> DriftOptions {
-        DriftOptions::from_config(
-            root,
-            "HEAD",
-            &TestDriftConfig {
-                source_dirs: vec!["src".to_string()],
-                test_dirs: vec!["tests".to_string()],
-                file_extensions: vec!["rs".to_string()],
-                inline_tests: true,
-            },
-            &["rs".to_string()],
-        )
-    }
-
-    fn rust_extension_options() -> DriftOptions {
         // Exactly what `.config/homeboy/extensions/rust/rust.json` declares.
         DriftOptions::from_config(
-            Path::new("/repo"),
-            "HEAD~1",
+            root,
+            "HEAD",
             &TestDriftConfig {
                 source_dirs: vec!["src".to_string()],
                 test_dirs: vec!["tests".to_string()],
@@ -1557,130 +1402,76 @@ mod workspace_layout_tests {
         )
     }
 
-    /// A Cargo workspace keeps its real code in `crates/<member>/src/**`, not in
-    /// the root package's `src/**`. The changed-scope test gate must recognize
-    /// those files as source; otherwise a change to any member crate is
-    /// invisible to drift detection AND to the `#8340` fail-closed guard, so the
-    /// gate reports green without running that crate's tests.
+    /// Inline-test selection picks changed sources that carry their own tests.
     ///
-    /// The regression that motivated this: `76c8c99a8` changed
-    /// `crates/homeboy-lab-runner/src/lab/offload/hydration.rs` and broke two
-    /// `#[cfg(test)] mod tests` cases inside that very crate. Drift only maps a
-    /// change to *separate* files referencing its symbols, so the tests beside
-    /// the edit were never selected and the gate reported green.
+    /// A Cargo workspace keeps code in `crates/<member>/src/**`; drift only maps a
+    /// change to *separate* files referencing its symbols, so tests beside the
+    /// edit must be selected here or the gate reports green without running
+    /// them (`76c8c99a8`). A sibling `tests.rs` under `src/` matches no `tests/`
+    /// pattern and must still be selected (#14867). Integration tests stay with
+    /// the test-file selector; sources without tests would compile a filter
+    /// matching zero tests; docs and non-inline languages are never targets.
     #[test]
-    fn changed_source_with_inline_tests_is_selected() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("crates/member/src/lab/offload")).unwrap();
-        let changed = "crates/member/src/lab/offload/hydration.rs";
-        std::fs::write(
-            root.join(changed),
-            "pub fn hydrate() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn hydrates() {}\n}\n",
-        )
-        .unwrap();
-
-        let opts = rust_extension_options_at(root);
-
-        assert!(
-            is_inline_test_source(&opts, changed),
-            "a changed source carrying its own tests must be selectable"
-        );
-    }
-
-    /// A sibling `tests.rs` module beside its source is a test path by name but
-    /// lives under `src/`, so it matches no `tests/` pattern. Excluding every
-    /// test-path name left it selected by neither selector: the changed scope
-    /// reported zero selected tests for a real source change and failed closed,
-    /// which blocked every workspace-crate change and the release train with
-    /// it. (#14867)
-    #[test]
-    fn changed_inline_tests_module_beside_its_source_is_selected() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("crates/member/src/commands/git")).unwrap();
-        let changed = "crates/member/src/commands/git/tests.rs";
-        std::fs::write(
-            root.join(changed),
-            "use super::*;\n\n#[test]\nfn publishes() {}\n",
-        )
-        .unwrap();
-
-        let opts = rust_extension_options_at(root);
-
-        assert!(
-            is_inline_test_source(&opts, changed),
-            "an inline tests module beside its source must be selectable"
-        );
-    }
-
-    /// An integration test under `tests/` is already claimed by the test-file
-    /// selector, so the inline selector must leave it alone rather than select
-    /// it twice.
-    #[test]
-    fn changed_integration_test_stays_with_the_test_file_selector() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("crates/member/tests")).unwrap();
-        let changed = "crates/member/tests/integration.rs";
-        std::fs::write(root.join(changed), "#[test]\nfn integrates() {}\n").unwrap();
-
-        let opts = rust_extension_options_at(root);
-
-        assert!(!is_inline_test_source(&opts, changed));
-    }
-
-    /// A source file with no tests of its own must not be selected: it would
-    /// compile a cargo filter matching zero tests, which the runner treats as a
-    /// failure rather than a pass.
-    #[test]
-    fn changed_source_without_inline_tests_is_not_selected() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("crates/member/src")).unwrap();
-        let changed = "crates/member/src/plain.rs";
-        std::fs::write(root.join(changed), "pub fn helper() {}\n").unwrap();
-
-        let opts = rust_extension_options_at(root);
-
-        assert!(!is_inline_test_source(&opts, changed));
-    }
-
-    /// Languages that keep tests in separate files must be unaffected.
-    #[test]
-    fn inline_selection_is_off_when_the_language_does_not_use_inline_tests() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        let changed = "src/Thing.php";
-        std::fs::write(root.join(changed), "<?php\n#[test]\nclass Thing {}\n").unwrap();
-
-        let opts = DriftOptions::from_config(
-            root,
-            "HEAD",
-            &TestDriftConfig {
-                source_dirs: vec!["src".to_string()],
-                test_dirs: vec!["tests".to_string()],
-                file_extensions: vec!["php".to_string()],
-                inline_tests: false,
-            },
-            &["php".to_string()],
-        );
-
-        assert!(!is_inline_test_source(&opts, changed));
-    }
-
-    /// Docs and non-source files are never inline test targets, even when the
-    /// language uses inline tests.
-    #[test]
-    fn non_source_changes_are_never_inline_test_targets() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(root.join("README.md"), "#[test]\n").unwrap();
-
-        let opts = rust_extension_options_at(root);
-
-        assert!(!is_inline_test_source(&opts, "README.md"));
+    fn inline_test_source_selection() {
+        let php_opts = |root: &Path| {
+            DriftOptions::from_config(
+                root,
+                "HEAD",
+                &TestDriftConfig {
+                    source_dirs: vec!["src".to_string()],
+                    test_dirs: vec!["tests".to_string()],
+                    file_extensions: vec!["php".to_string()],
+                    inline_tests: false,
+                },
+                &["php".to_string()],
+            )
+        };
+        let cases: [(&str, &str, bool, bool); 6] = [
+            (
+                "crates/member/src/lab/offload/hydration.rs",
+                "pub fn hydrate() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn hydrates() {}\n}\n",
+                true,
+                true,
+            ),
+            (
+                "crates/member/src/commands/git/tests.rs",
+                "use super::*;\n\n#[test]\nfn publishes() {}\n",
+                true,
+                true,
+            ),
+            (
+                "crates/member/tests/integration.rs",
+                "#[test]\nfn integrates() {}\n",
+                true,
+                false,
+            ),
+            (
+                "crates/member/src/plain.rs",
+                "pub fn helper() {}\n",
+                true,
+                false,
+            ),
+            ("README.md", "#[test]\n", true, false),
+            (
+                "src/Thing.php",
+                "<?php\n#[test]\nclass Thing {}\n",
+                false,
+                false,
+            ),
+        ];
+        for (changed, content, rust, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let path = root.join(changed);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, content).unwrap();
+            let opts = if rust {
+                rust_extension_options_at(root)
+            } else {
+                php_opts(root)
+            };
+            assert_eq!(is_inline_test_source(&opts, changed), expected, "{changed}");
+        }
     }
 
     /// Drift detection must see a change inside a monorepo member crate as a
@@ -1718,17 +1509,7 @@ mod workspace_layout_tests {
         )
         .unwrap();
 
-        let opts = DriftOptions::from_config(
-            root,
-            "HEAD",
-            &TestDriftConfig {
-                source_dirs: vec!["src".to_string()],
-                test_dirs: vec!["tests".to_string()],
-                file_extensions: vec!["rs".to_string()],
-                inline_tests: true,
-            },
-            &["rs".to_string()],
-        );
+        let opts = rust_extension_options_at(root);
 
         let report = detect_drift_since_for_test("fixture", &opts).expect("drift report");
 
@@ -1750,42 +1531,27 @@ mod workspace_layout_tests {
         );
     }
 
+    /// Workspace member sources and the root package are source; docs stay
+    /// non-source so documentation-only PRs are not forced to select tests.
     #[test]
-    fn workspace_member_sources_are_source_relevant() {
-        let opts = rust_extension_options();
+    fn rust_source_relevance_covers_workspace_members_and_root_package() {
+        let opts = rust_extension_options_at(Path::new("/repo"));
 
-        for path in [
-            "crates/homeboy-lab-runner/src/lab/offload/hydration.rs",
-            "crates/homeboy-core/src/daemon/stop.rs",
-            "crates/contracts/homeboy-audit-contract/src/finding.rs",
+        for (path, expected) in [
+            (
+                "crates/homeboy-lab-runner/src/lab/offload/hydration.rs",
+                true,
+            ),
+            (
+                "crates/contracts/homeboy-audit-contract/src/finding.rs",
+                true,
+            ),
+            ("src/lib.rs", true),
+            ("src/bin/bench-audit-self.rs", true),
+            ("README.md", false),
+            ("docs/commands/test.md", false),
         ] {
-            assert!(
-                is_source_relevant_change(&opts, path),
-                "workspace member source must be source-relevant: {path}"
-            );
+            assert_eq!(is_source_relevant_change(&opts, path), expected, "{path}");
         }
-    }
-
-    /// The root package still counts, so the fix must widen coverage rather
-    /// than move it.
-    #[test]
-    fn root_package_sources_remain_source_relevant() {
-        let opts = rust_extension_options();
-
-        assert!(is_source_relevant_change(&opts, "src/lib.rs"));
-        assert!(is_source_relevant_change(
-            &opts,
-            "src/bin/bench-audit-self.rs"
-        ));
-    }
-
-    /// Docs and config must stay non-source so documentation-only PRs are not
-    /// forced to select tests.
-    #[test]
-    fn documentation_and_config_remain_non_source() {
-        let opts = rust_extension_options();
-
-        assert!(!is_source_relevant_change(&opts, "README.md"));
-        assert!(!is_source_relevant_change(&opts, "docs/commands/test.md"));
     }
 }

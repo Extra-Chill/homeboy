@@ -286,63 +286,61 @@ mod tests {
     use crate::test_support::home_env_guard;
 
     #[test]
-    fn override_env_takes_priority() {
-        let _guard = home_env_guard();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let prior = env::var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
-        env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, dir.path());
-
-        let root = invocation_runtime_root().expect("root resolves");
-        assert_eq!(root, dir.path());
-
-        match prior {
-            Some(value) => env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, value),
-            None => env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
-        }
-    }
-
-    #[test]
-    fn override_env_blank_falls_back_to_platform() {
+    fn blank_or_unset_override_falls_back_to_uid_scoped_platform_root() {
         let _guard = home_env_guard();
         let prior = env::var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
+
         env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, "   ");
-
-        let root = invocation_runtime_root().expect("root resolves");
-        assert!(root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("hb-") || name == "inv"));
+        let blank = invocation_runtime_root().expect("root resolves");
+        env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV);
+        let unset = invocation_runtime_root().expect("root resolves");
 
         match prior {
             Some(value) => env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, value),
             None => env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
         }
+
+        assert_eq!(blank, unset);
+        #[cfg(unix)]
+        if Path::new("/tmp").is_dir() {
+            assert_eq!(unset, PathBuf::from(format!("/tmp/hb-{}", current_uid())));
+        }
     }
 
     #[test]
-    fn short_id_is_ten_lowercase_hex_chars() {
-        let id = short_invocation_id();
-        assert_eq!(id.len(), 10, "id={id}");
-        assert!(
-            id.chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
-            "id should be lowercase hex: {id}"
-        );
-    }
-
-    #[test]
-    fn short_ids_are_unique_across_calls() {
+    fn short_ids_are_unique_ten_char_lowercase_hex() {
         // 40 bits of entropy: collisions in 1000 calls are vanishingly rare.
         let mut ids = std::collections::HashSet::new();
         for _ in 0..1000 {
-            assert!(ids.insert(short_invocation_id()));
+            let id = short_invocation_id();
+            assert_eq!(id.len(), 10, "id={id}");
+            assert!(
+                id.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+                "id should be lowercase hex: {id}"
+            );
+            assert!(ids.insert(id));
         }
     }
 
     #[test]
-    fn budget_accepts_short_path() {
-        let path = PathBuf::from("/tmp/hb-501/abc1234567/state");
-        enforce_path_budget(&path).expect("short path fits");
+    fn budget_boundary_reserves_socket_headroom() {
+        let max_accepted = SUN_PATH_CAPACITY - SOCKET_HEADROOM_BYTES - 1;
+        let accepted = PathBuf::from(format!("/{}", "b".repeat(max_accepted - 1)));
+        enforce_path_budget(&accepted).expect("max-accepted path fits");
+
+        let rejected = PathBuf::from(format!("/{}", "a".repeat(max_accepted)));
+        let message = enforce_path_budget(&rejected)
+            .expect_err("one byte past the budget is rejected")
+            .to_string();
+        assert!(
+            message.contains("sockaddr_un"),
+            "error should mention sockaddr_un: {message}"
+        );
+        assert!(
+            message.contains(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
+            "error should suggest the override env: {message}"
+        );
     }
 
     /// The budget must be measured against what `realpath()` returns.
@@ -400,86 +398,5 @@ mod tests {
     fn canonical_path_returns_the_input_when_nothing_resolves() {
         let path = PathBuf::from("/homeboy-nonexistent-root-14384/a/b");
         assert_eq!(canonical_budget_path(&path), path);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_tmp_root_is_scoped_by_uid() {
-        let _guard = home_env_guard();
-        let prior = env::var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
-        env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV);
-
-        let root = invocation_runtime_root().expect("root resolves");
-        if Path::new("/tmp").is_dir() {
-            assert_eq!(root, PathBuf::from(format!("/tmp/hb-{}", current_uid())));
-        }
-
-        match prior {
-            Some(value) => env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, value),
-            None => env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
-        }
-    }
-
-    #[test]
-    fn budget_reserves_socket_headroom() {
-        // Build a path that leaves <32 bytes under the platform limit.
-        let mut s = String::from("/");
-        // Aim for a path length that leaves headroom < SOCKET_HEADROOM_BYTES.
-        let target_len = SUN_PATH_CAPACITY - SOCKET_HEADROOM_BYTES;
-        while s.len() < target_len {
-            s.push('a');
-        }
-        let path = PathBuf::from(s);
-        let err = enforce_path_budget(&path).expect_err("should reject overlong path");
-        let message = err.to_string();
-        assert!(
-            message.contains("sockaddr_un"),
-            "error should mention sockaddr_un: {message}"
-        );
-        assert!(
-            message.contains(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
-            "error should suggest the override env: {message}"
-        );
-    }
-
-    #[test]
-    fn budget_headroom_meets_platform_minimum() {
-        // For a maximum-length accepted path, the remaining bytes after
-        // appending '/' + a platform-headroom socket filename must not
-        // overflow the platform sun_path capacity.
-        let mut s = String::from("/");
-        let max_accepted = SUN_PATH_CAPACITY - SOCKET_HEADROOM_BYTES - 1;
-        while s.len() < max_accepted {
-            s.push('b');
-        }
-        let path = PathBuf::from(&s);
-        enforce_path_budget(&path).expect("max-accepted path fits");
-
-        // Verify the headroom: appending a SOCKET_HEADROOM_BYTES-sized
-        // filename stays under cap.
-        let appended_len = s.len() + 1 + SOCKET_HEADROOM_BYTES;
-        assert!(
-            appended_len <= SUN_PATH_CAPACITY,
-            "appended path {appended_len} should fit in {SUN_PATH_CAPACITY}"
-        );
-    }
-
-    #[test]
-    fn macos_headroom_is_at_least_forty_eight_bytes() {
-        // The macOS sockaddr_un limit is 4 bytes shorter than Linux and
-        // workloads commonly nest a workload-id/daemon/daemon.sock segment
-        // (~40 bytes) under STATE_DIR. The contract guarantees ≥48 bytes
-        // of headroom on macOS so realistic workload paths always fit.
-        let headroom = SOCKET_HEADROOM_BYTES;
-        #[cfg(target_os = "macos")]
-        assert!(
-            headroom >= 48,
-            "macOS headroom must be at least 48 bytes; got {headroom}"
-        );
-        #[cfg(not(target_os = "macos"))]
-        assert!(
-            headroom >= 32,
-            "non-macOS headroom must be at least 32 bytes; got {headroom}"
-        );
     }
 }

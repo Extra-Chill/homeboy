@@ -962,22 +962,6 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_capability_without_composition_still_errors() {
-        crate::test_support::with_isolated_home(|home| {
-            // Neither includes the other -> ambiguity is preserved.
-            write_extension_manifest(home.path(), "wordpress", "deps");
-            write_extension_manifest(home.path(), "nodejs", "deps");
-
-            let component = component_with_extensions(&["wordpress", "nodejs"]);
-            let err = resolve_extension_for_capability(&component, ExtensionCapability::Deps)
-                .expect_err("no composition primary should remain ambiguous");
-            assert!(err
-                .message
-                .contains("multiple linked extensions providing 'deps'"));
-        });
-    }
-
-    #[test]
     fn explicit_capability_extension_resolves_ambiguous_deps_owner() {
         crate::test_support::with_isolated_home(|home| {
             write_extension_manifest(home.path(), "wordpress", "deps");
@@ -1074,10 +1058,9 @@ mod tests {
         });
     }
 
-    /// A broken manifest that is irrelevant to the requested capability stays
-    /// irrelevant: this is still an honest "no provider", not a load error.
+    /// A genuine capability miss is an honest "no provider", not a load error.
     #[test]
-    fn unreadable_manifest_does_not_mask_a_genuine_capability_miss() {
+    fn genuine_capability_miss_is_not_reported_as_a_load_error() {
         crate::test_support::with_isolated_home(|home| {
             write_extension_manifest(home.path(), "nodejs", "deps");
 

@@ -336,25 +336,16 @@ mod tests {
     }
 
     #[test]
-    fn dotted_paths_canonicalize_to_json_pointers() {
-        assert_eq!(
-            config_pointer("retention").expect("top-level path"),
-            "/retention"
-        );
-        assert_eq!(
-            config_pointer("retention.limit").expect("nested path"),
-            "/retention/limit"
-        );
-        assert_eq!(
-            config_pointer("/retention/limit").expect("pointer is unchanged"),
-            "/retention/limit"
-        );
-    }
-
-    #[test]
-    fn empty_dotted_segments_are_rejected() {
-        assert!(config_pointer("retention.").is_err());
-        assert!(config_pointer(".retention").is_err());
-        assert!(config_pointer("retention..limit").is_err());
+    fn dotted_paths_canonicalize_to_json_pointers_and_reject_empty_segments() {
+        for (path, expected) in [
+            ("retention", "/retention"),
+            ("retention.limit", "/retention/limit"),
+            ("/retention/limit", "/retention/limit"),
+        ] {
+            assert_eq!(config_pointer(path).expect(path), expected);
+        }
+        for path in ["retention.", ".retention", "retention..limit"] {
+            assert!(config_pointer(path).is_err(), "{path}");
+        }
     }
 }

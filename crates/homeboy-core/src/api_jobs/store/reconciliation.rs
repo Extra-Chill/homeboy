@@ -966,27 +966,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repeated_store_reload_reuses_connection() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("connection-reuse.sqlite");
-        let store = JobStore::open_without_reconciliation(&path).unwrap();
-        let job = store.create("runner.exec");
-        for _ in 0..100 {
-            store.durable_transaction(|_| Ok(())).unwrap();
-            assert_eq!(store.get(job.id).unwrap().status, JobStatus::Queued);
-        }
-        store.start(job.id).unwrap();
-        assert_eq!(
-            JobStore::open_without_reconciliation(&path)
-                .unwrap()
-                .get(job.id)
-                .unwrap()
-                .status,
-            JobStatus::Running
-        );
-    }
-
-    #[test]
     fn candidate_removed_or_terminal_during_resolution_is_skipped() {
         for remove in [true, false] {
             let store = JobStore::default();

@@ -518,36 +518,68 @@ mod tests {
     }
 
     #[test]
-    fn bootstrapped_changelog_in_new_untracked_directory_is_allowed() {
-        // #9964: bootstrapping docs/CHANGELOG.md into a brand-new directory makes
-        // git report the untracked *directory* (`plugins/foo/docs/`), not the
-        // file. The allowed changelog path must still cover it, so the first
-        // release does not abort on the file it just wrote.
-        let allowed = vec!["plugins/foo/docs/CHANGELOG.md".to_string()];
-        let changes = uncommitted(&[], &[], &["plugins/foo/docs/"]);
-        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed, &[]);
-        assert!(
-            unexpected.is_empty(),
-            "the untracked changelog directory should be allowed: {unexpected:?}"
-        );
-    }
+    fn unexpected_files_exclude_allowed_declared_and_homeboy_managed_paths() {
+        // (staged, unstaged, untracked, allowed, declared artifacts, expected unexpected)
+        const CHANGELOG: &str = "plugins/foo/docs/CHANGELOG.md";
+        let cases: Vec<(&[&str], &[&str], &[&str], &[&str], &[&str], &[&str])> = vec![
+            // #9964: bootstrapping a changelog into a new directory makes git
+            // report the untracked directory, which the allowed path must cover.
+            (&[], &[], &["plugins/foo/docs/"], &[CHANGELOG], &[], &[]),
+            // A directory that does not contain an allowed path stays flagged.
+            (
+                &[],
+                &[],
+                &["plugins/foo/src/"],
+                &[CHANGELOG],
+                &[],
+                &["plugins/foo/src/"],
+            ),
+            (&[], &[CHANGELOG], &[], &[CHANGELOG], &[], &[]),
+            // Homeboy-managed scratch never trips the gate, user changes still do.
+            (
+                &[],
+                &[],
+                &[".homeboy-build/sample-plugin-0.70.1.zip"],
+                &[],
+                &[],
+                &[],
+            ),
+            (
+                &["src/lib.rs"],
+                &[],
+                &[".homeboy-build/foo"],
+                &[],
+                &[],
+                &["src/lib.rs"],
+            ),
+            (
+                &[],
+                &[],
+                &["plugins/a/build/a.zip", "src/lib.rs"],
+                &[],
+                &["plugins/a/build/a.zip"],
+                &["src/lib.rs"],
+            ),
+            (
+                &["docs/changelog.md", "manifest.toml"],
+                &[],
+                &[".homeboy-build/foo"],
+                &["docs/changelog.md", "manifest.toml"],
+                &[],
+                &[],
+            ),
+        ];
 
-    #[test]
-    fn unrelated_untracked_directory_is_still_unexpected() {
-        // A directory that does not contain an allowed path stays flagged.
-        let allowed = vec!["plugins/foo/docs/CHANGELOG.md".to_string()];
-        let changes = uncommitted(&[], &[], &["plugins/foo/src/"]);
-        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed, &[]);
-        assert_eq!(unexpected, vec!["plugins/foo/src/".to_string()]);
-    }
-
-    #[test]
-    fn allowed_changelog_file_path_is_matched() {
-        // The direct file entry (existing changelog updated in place) still matches.
-        let allowed = vec!["plugins/foo/docs/CHANGELOG.md".to_string()];
-        let changes = uncommitted(&[], &["plugins/foo/docs/CHANGELOG.md"], &[]);
-        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed, &[]);
-        assert!(unexpected.is_empty());
+        for (staged, unstaged, untracked, allowed, declared, expected) in cases {
+            let changes = uncommitted(staged, unstaged, untracked);
+            let allowed: Vec<String> = allowed.iter().map(|path| path.to_string()).collect();
+            let declared: Vec<String> = declared.iter().map(|path| path.to_string()).collect();
+            assert_eq!(
+                get_unexpected_uncommitted_files(&changes, &allowed, &declared),
+                expected,
+                "{staged:?} {unstaged:?} {untracked:?}"
+            );
+        }
     }
 
     #[test]
@@ -605,29 +637,16 @@ mod tests {
         assert!(details.is_none());
     }
 
-    #[test]
-    fn test_validate_working_tree_fail_fast() {
-        let temp = git_repo();
-        let dir = temp.path();
-        std::fs::write(dir.join("README.md"), "initial\n").unwrap();
-        run_git(dir, &["add", "."]);
-        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
-        std::fs::write(dir.join("src.rs"), "unexpected\n").unwrap();
-
-        let err = validate_working_tree_fail_fast(&git_component(dir), None)
-            .expect_err("unexpected user file should fail fast");
-
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("Uncommitted changes detected"));
-        assert!(err.details.to_string().contains("src.rs"));
-    }
-
     /// Regression for #9964: the gate must not abort on the changelog scaffold
     /// homeboy itself wrote moments earlier. Git collapses a wholly untracked new
     /// directory into a single `docs/` entry, so the allowlist has to cover the
     /// parent directory form and not just `docs/CHANGELOG.md`.
+    /// Regression for #9964: the gate must not abort on the changelog scaffold
+    /// homeboy itself wrote moments earlier. Git collapses a wholly untracked new
+    /// directory into a single `docs/` entry, so the allowlist has to cover the
+    /// parent directory form — while unrelated dirty files still fail closed.
     #[test]
-    fn bootstrapped_changelog_directory_does_not_fail_the_working_tree_gate() {
+    fn working_tree_gate_allows_bootstrapped_changelog_but_fails_fast_on_drift() {
         let temp = git_repo();
         let dir = temp.path();
         std::fs::write(dir.join("README.md"), "initial\n").unwrap();
@@ -642,31 +661,17 @@ mod tests {
 
         validate_working_tree_fail_fast(&component, None)
             .expect("a bootstrapped changelog must not abort the release that created it");
+
+        std::fs::write(dir.join("src.rs"), "unexpected\n").unwrap();
+        let err = validate_working_tree_fail_fast(&component, None)
+            .expect_err("unrelated dirty files must still fail fast");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("Uncommitted changes detected"));
+        assert!(err.details.to_string().contains("src.rs"));
     }
 
     /// The changelog allowlist must stay narrow: unrelated files inside the same
     /// directory are still operator drift and must fail closed.
-    #[test]
-    fn changelog_allowance_does_not_excuse_other_files() {
-        let temp = git_repo();
-        let dir = temp.path();
-        std::fs::write(dir.join("README.md"), "initial\n").unwrap();
-        run_git(dir, &["add", "."]);
-        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
-
-        std::fs::create_dir_all(dir.join("docs")).unwrap();
-        std::fs::write(dir.join("docs/CHANGELOG.md"), "# Changelog\n").unwrap();
-        run_git(dir, &["add", "docs/CHANGELOG.md"]);
-        std::fs::write(dir.join("src.rs"), "unexpected\n").unwrap();
-
-        let mut component = git_component(dir);
-        component.changelog_target = Some("docs/CHANGELOG.md".to_string());
-
-        let err = validate_working_tree_fail_fast(&component, None)
-            .expect_err("unrelated dirty files must still fail fast");
-        assert!(err.details.to_string().contains("src.rs"));
-    }
-
     #[test]
     fn head_recovery_allows_only_its_untracked_persisted_release_notes() {
         let temp = git_repo();
@@ -740,71 +745,39 @@ mod tests {
     }
 
     #[test]
-    fn homeboy_build_dir_is_managed_path() {
-        assert!(is_homeboy_managed_path(".homeboy-build/artifact.zip"));
-        assert!(is_homeboy_managed_path(".homeboy-build/"));
-        assert!(is_homeboy_managed_path(".homeboy-build"));
-    }
+    fn homeboy_managed_paths_are_only_top_level_build_and_bin_dirs() {
+        for path in [
+            ".homeboy-build/artifact.zip",
+            ".homeboy-build/",
+            ".homeboy-build",
+            ".homeboy-bin/homeboy",
+            ".homeboy-bin",
+        ] {
+            assert!(is_homeboy_managed_path(path), "{path}");
+        }
+        // Homeboy keeps no state in the checkout, so `.homeboy` is user drift.
+        for path in [
+            ".homeboy/cache",
+            ".homeboy",
+            "src/main.rs",
+            "docs/changelog.md",
+            "homeboy.json",
+            ".gitignore",
+            "src/.homeboy-build/foo",
+        ] {
+            assert!(!is_homeboy_managed_path(path), "{path}");
+        }
 
-    #[test]
-    fn homeboy_bin_dir_is_managed_path() {
-        assert!(is_homeboy_managed_path(".homeboy-bin/homeboy"));
-        assert!(is_homeboy_managed_path(".homeboy-bin"));
-    }
-
-    #[test]
-    fn homeboy_state_dir_is_not_compensated() {
-        // Homeboy keeps no state in the checkout, so a `.homeboy` path is user drift.
-        assert!(!is_homeboy_managed_path(".homeboy/cache"));
-        assert!(!is_homeboy_managed_path(".homeboy"));
-    }
-
-    #[test]
-    fn user_paths_are_not_managed() {
-        assert!(!is_homeboy_managed_path("src/main.rs"));
-        assert!(!is_homeboy_managed_path("docs/changelog.md"));
-        assert!(!is_homeboy_managed_path("homeboy.json"));
-        assert!(!is_homeboy_managed_path(".gitignore"));
-        assert!(!is_homeboy_managed_path("src/.homeboy-build/foo"));
-    }
-
-    #[test]
-    fn test_filter_homeboy_managed() {
         let files = vec![
             ".homeboy-build/artifact.zip".to_string(),
             "src/main.rs".to_string(),
             ".homeboy-bin/homeboy".to_string(),
             "manifest.toml".to_string(),
         ];
-        let filtered = filter_homeboy_managed(files);
-        assert_eq!(filtered, vec!["src/main.rs", "manifest.toml"]);
-    }
-
-    #[test]
-    fn unexpected_files_skip_homeboy_build_dir() {
-        let changes = uncommitted(&[], &[], &[".homeboy-build/sample-plugin-0.70.1.zip"]);
-        let unexpected = get_unexpected_uncommitted_files(&changes, &[], &[]);
-        assert!(
-            unexpected.is_empty(),
-            "homeboy-managed scratch should never trigger working_tree error, got: {:?}",
-            unexpected
+        assert_eq!(
+            filter_homeboy_managed(files),
+            vec!["src/main.rs", "manifest.toml"]
         );
-    }
-
-    #[test]
-    fn unexpected_files_still_catch_user_changes() {
-        let changes = uncommitted(&["src/lib.rs"], &[], &[".homeboy-build/foo"]);
-        let unexpected = get_unexpected_uncommitted_files(&changes, &[], &[]);
-        assert_eq!(unexpected, vec!["src/lib.rs"]);
-    }
-
-    #[test]
-    fn unexpected_files_skip_declared_build_artifacts() {
-        let changes = uncommitted(&[], &[], &["plugins/a/build/a.zip", "src/lib.rs"]);
-        let declared = vec!["plugins/a/build/a.zip".to_string()];
-        let unexpected = get_unexpected_uncommitted_files(&changes, &[], &declared);
-
-        assert_eq!(unexpected, vec!["src/lib.rs"]);
     }
 
     #[test]
@@ -825,23 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_files_honor_allowed_list_alongside_homeboy_filter() {
-        let changes = uncommitted(
-            &["docs/changelog.md", "manifest.toml"],
-            &[],
-            &[".homeboy-build/foo"],
-        );
-        let allowed = vec!["docs/changelog.md".to_string(), "manifest.toml".to_string()];
-        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed, &[]);
-        assert!(
-            unexpected.is_empty(),
-            "allowed files + homeboy scratch should yield clean result, got: {:?}",
-            unexpected
-        );
-    }
-
-    #[test]
-    fn release_allowed_files_are_only_declared_targets() {
+    fn release_allowed_files_are_declared_targets_plus_derived_lockfiles() {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo_root = temp_dir.path();
         let changelog = repo_root.join("docs/changelog.md");
@@ -852,15 +809,8 @@ mod tests {
             &[manifest.to_string_lossy().to_string()],
             repo_root,
         );
-
         assert_eq!(allowed, vec!["docs/changelog.md", "manifest.toml"]);
-    }
 
-    #[test]
-    fn release_allowed_files_include_lockfiles_derived_from_version_targets() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo_root = temp_dir.path();
-        let changelog = repo_root.join("docs/changelog.md");
         let cargo = repo_root.join("Cargo.toml");
         let package = repo_root.join("packages/app/package.json");
         let composer = repo_root.join("plugin/composer.json");

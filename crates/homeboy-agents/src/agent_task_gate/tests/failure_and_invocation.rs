@@ -602,10 +602,9 @@ fn baseline_comparison_round_trips_its_diagnostic() {
 /// `--gate-no-progress-timeout-seconds` (and the wall-clock budget) must
 /// reach a Lab runner even for gate runs that do not thread explicit
 /// supervision, such as the verified-base differential replays. Those runs
-/// execute inside the declared `with_gate_supervision` scope; the request
-/// builder previously ignored that scope and silently replaced the
-/// declared budgets with hardcoded 300s/1800s defaults the runner then
-/// enforced (Extra-Chill/homeboy#15856).
+/// execute inside the declared `with_gate_supervision` scope, and the request
+/// builder must carry that scope's budgets instead of hardcoded 300s/1800s
+/// defaults (Extra-Chill/homeboy#15856).
 #[test]
 fn lab_gate_request_budgets_inherit_the_declared_supervision_scope() {
     struct CapturingTransport {

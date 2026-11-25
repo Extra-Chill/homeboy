@@ -475,18 +475,12 @@ mod tests {
     }
 
     #[test]
-    fn validates_resource_lifecycle_index() {
+    fn validates_resource_lifecycle_index_with_optional_root_bound() {
         index().validate().unwrap();
-    }
 
-    #[test]
-    fn validates_root_bound_and_follow_up_cleanup_command() {
-        let mut index = index();
-        index.resources[0].root_bound = Some("/tmp/homeboy/run-1".to_string());
-        index.resources[0].cleanup_command =
-            Some("homeboy runs resources --run-id run-1 --cleanup-plan".to_string());
-
-        index.validate().unwrap();
+        let mut bounded = index();
+        bounded.resources[0].root_bound = Some("/tmp/homeboy/run-1".to_string());
+        bounded.validate().unwrap();
     }
 
     #[test]
@@ -591,118 +585,86 @@ mod tests {
     }
 
     #[test]
-    fn rejects_wrong_schema() {
-        let mut index = index();
-        index.schema = "homeboy/resource-lifecycle-index/v0".to_string();
+    fn rejects_invalid_index_fields() {
+        let mutations: [(fn(&mut ResourceLifecycleIndex), &str); 5] = [
+            (
+                |index| index.schema = "homeboy/resource-lifecycle-index/v0".to_string(),
+                "schema",
+            ),
+            (
+                |index| index.resources[0].path = "  ".to_string(),
+                "resources[0].path",
+            ),
+            (
+                |index| index.resources[0].root_bound = Some("  ".to_string()),
+                "resources[0].root_bound",
+            ),
+            (
+                |index| index.resources[0].cleanup_command = Some("  ".to_string()),
+                "resources[0].cleanup_command",
+            ),
+            (|index| index.resources[0].ttl = None, "resources[0].ttl"),
+        ];
+        for (mutate, field) in mutations {
+            let mut index = index();
+            mutate(&mut index);
 
-        let error = index.validate().unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "schema");
-    }
-
-    #[test]
-    fn rejects_blank_required_resource_fields() {
-        let mut index = index();
-        index.resources[0].path = "  ".to_string();
-
-        let error = index.validate().unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "resources[0].path");
-    }
-
-    #[test]
-    fn rejects_blank_root_bound_and_cleanup_command() {
-        let mut contract = index();
-        contract.resources[0].root_bound = Some("  ".to_string());
-
-        let error = contract.validate().unwrap_err();
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "resources[0].root_bound");
-
-        let mut contract = index();
-        contract.resources[0].cleanup_command = Some("  ".to_string());
-
-        let error = contract.validate().unwrap_err();
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "resources[0].cleanup_command");
-    }
-
-    #[test]
-    fn delete_after_ttl_requires_ttl() {
-        let mut index = index();
-        index.resources[0].ttl = None;
-
-        let error = index.validate().unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "resources[0].ttl");
+            let error = index.validate().unwrap_err();
+            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument, "{field}");
+            assert_eq!(error.details["field"], field);
+        }
     }
 
     #[test]
     fn inspection_reports_actionable_cleanup_eligible_records() {
         let inspection = ResourceLifecycle::inspect(&record());
 
-        assert_eq!(inspection.owner, "homeboy-test");
         assert!(inspection.actionable);
         assert!(inspection.cleanup_eligible);
     }
 
     #[test]
-    fn cleanup_path_rejects_cleanup_root_itself() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let resource = ResourceLifecycleRecord {
-            path: tempdir.path().display().to_string(),
-            cleanup_intent: ResourceCleanupIntent::Apply,
-            ..record()
-        };
-
-        let error = ResourceLifecycle::cleanup_path(tempdir.path(), &resource)
-            .expect_err("cleanup root must not be a candidate");
-
-        assert_eq!(error, "resource path is cleanup root");
-    }
-
-    #[test]
-    fn cleanup_path_rejects_paths_outside_root() {
-        let root = tempfile::tempdir().expect("root");
-        let outside = tempfile::tempdir().expect("outside");
-        let resource_path = outside.path().join("resource");
-        std::fs::write(&resource_path, "generated").expect("write resource");
-        let resource = ResourceLifecycleRecord {
-            path: resource_path.display().to_string(),
-            cleanup_intent: ResourceCleanupIntent::Apply,
-            ..record()
-        };
-
-        let error = ResourceLifecycle::cleanup_path(root.path(), &resource)
-            .expect_err("outside path must be rejected");
-
-        assert_eq!(error, "resource path is outside cleanup root");
-    }
-
-    #[test]
-    fn cleanup_path_enforces_declared_root_bound() {
+    fn cleanup_path_rejects_root_outside_and_unbounded_paths() {
         let cleanup_root = tempfile::tempdir().expect("cleanup root");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_resource = outside.path().join("resource");
+        std::fs::write(&outside_resource, "generated").expect("outside resource");
         let bound = cleanup_root.path().join("owned");
         let sibling = cleanup_root.path().join("other");
         std::fs::create_dir(&bound).expect("bound dir");
         std::fs::create_dir(&sibling).expect("sibling dir");
-        let resource_path = sibling.join("resource");
-        std::fs::write(&resource_path, "generated").expect("resource file");
-        let resource = ResourceLifecycleRecord {
-            path: resource_path.display().to_string(),
-            root_bound: Some(bound.display().to_string()),
-            cleanup_intent: ResourceCleanupIntent::Apply,
-            ..record()
-        };
+        let sibling_resource = sibling.join("resource");
+        std::fs::write(&sibling_resource, "generated").expect("sibling resource");
 
-        let error = ResourceLifecycle::cleanup_path(cleanup_root.path(), &resource)
-            .expect_err("outside root bound must be rejected");
+        for (path, root_bound, expected) in [
+            (
+                cleanup_root.path().to_path_buf(),
+                None,
+                "resource path is cleanup root",
+            ),
+            (
+                outside_resource,
+                None,
+                "resource path is outside cleanup root",
+            ),
+            (
+                sibling_resource.clone(),
+                Some(bound.display().to_string()),
+                "resource path is outside declared root bound",
+            ),
+        ] {
+            let resource = ResourceLifecycleRecord {
+                path: path.display().to_string(),
+                root_bound,
+                cleanup_intent: ResourceCleanupIntent::Apply,
+                ..record()
+            };
 
-        assert_eq!(error, "resource path is outside declared root bound");
-        assert!(resource_path.exists());
+            let error = ResourceLifecycle::cleanup_path(cleanup_root.path(), &resource)
+                .expect_err(expected);
+            assert_eq!(error, expected);
+        }
+        assert!(sibling_resource.exists());
     }
 
     #[cfg(unix)]

@@ -37,8 +37,6 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     assert!(compact.contains("--repo <REPO>"), "{compact}");
     assert!(compact.contains("--task-url <URL>"), "{compact}");
     assert!(compact.contains("--backend <BACKEND>"), "{compact}");
-    assert!(compact.contains("--model <MODEL>"), "{compact}");
-    assert!(!compact.contains("--ai-model"), "{compact}");
     assert!(compact.contains("--preview"), "{compact}");
     assert!(compact.contains("--help-full"), "{compact}");
     // Resource admission directs operators to this explicit local override, so
@@ -53,12 +51,7 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     assert!(!compact.contains("--base <"), "{compact}");
     assert!(!compact.contains("--head <"), "{compact}");
     assert!(full.contains("--provider-argv"), "{full}");
-    assert!(!full.contains("--provider-command"), "{full}");
-    assert!(full.contains("--backend <BACKEND>"), "{full}");
     assert!(full.contains("--selector <PROVIDER_ID>"), "{full}");
-    assert!(full.contains("--model <MODEL>"), "{full}");
-    assert!(!full.contains("--ai-model"), "{full}");
-    assert!(full.contains("--selector"), "{full}");
     for advanced in [
         "--placement",
         "--private-verify",

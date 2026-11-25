@@ -66,31 +66,25 @@ fn unacknowledged_model_override_is_refused_before_any_admission_work() {
     });
 }
 
+/// Only an explicit model that displaces a configured route needs the
+/// acknowledgement; pinning the configured model still suppresses fallback.
 #[test]
-fn acknowledged_model_override_is_admitted() {
-    crate::test_support::with_isolated_home(|_| {
-        configure_default_model_route();
-        let args = cook_with_explicit_model("operator-model", true);
-        require_model_override_acknowledgement_for_cook(&args)
-            .expect("an explicit acknowledgement admits the override");
-    });
-}
-
-#[test]
-fn pinning_a_configured_model_requires_acknowledgement() {
-    crate::test_support::with_isolated_home(|_| {
-        configure_default_model_route();
-        let args = cook_with_explicit_model("configured-model", false);
-        require_model_override_acknowledgement_for_cook(&args)
-            .expect_err("pinning a configured route still suppresses fallback");
-    });
-}
-
-#[test]
-fn no_configured_route_needs_no_acknowledgement() {
-    crate::test_support::with_isolated_home(|_| {
-        let args = cook_with_explicit_model("operator-model", false);
-        require_model_override_acknowledgement_for_cook(&args)
-            .expect("an explicit model with no configured route to conflict with is fine");
-    });
+fn model_override_acknowledgement_matrix() {
+    for (configured, model, acknowledge, admitted) in [
+        (true, "operator-model", true, true),
+        (true, "configured-model", false, false),
+        (false, "operator-model", false, true),
+    ] {
+        crate::test_support::with_isolated_home(|_| {
+            if configured {
+                configure_default_model_route();
+            }
+            let args = cook_with_explicit_model(model, acknowledge);
+            assert_eq!(
+                require_model_override_acknowledgement_for_cook(&args).is_ok(),
+                admitted,
+                "configured={configured} model={model} acknowledge={acknowledge}"
+            );
+        });
+    }
 }

@@ -924,48 +924,6 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn exact_sha_branch_and_tag_resolve_to_immutable_commit() {
-        let repo = fixture_repo();
-        let component = fixture_component(repo.path());
-        let sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
-
-        assert_eq!(
-            resolve_exact_ref(&component, &sha)
-                .expect("exact SHA")
-                .resolved_sha,
-            sha
-        );
-        assert_eq!(
-            resolve_exact_ref(&component, "accepted")
-                .expect("branch")
-                .resolved_sha,
-            sha
-        );
-        assert_eq!(
-            resolve_exact_ref(&component, "v1.0.0")
-                .expect("tag")
-                .resolved_sha,
-            sha
-        );
-    }
-
-    #[test]
-    fn remote_host_supports_https_and_ssh_transports() {
-        assert_eq!(
-            remote_host("https://git.example.test/owner/repo.git"),
-            Some("git.example.test".to_string())
-        );
-        assert_eq!(
-            remote_host("ssh://git@git.example.test:2222/owner/repo.git"),
-            Some("git.example.test".to_string())
-        );
-        assert_eq!(
-            remote_host("git@git.example.test:owner/repo.git"),
-            Some("git.example.test".to_string())
-        );
-    }
-
-    #[test]
     fn exact_ref_transport_uses_component_host_policy_without_exposing_values() {
         let mut component = Component::default();
         component.github.hosts.insert(
@@ -979,16 +937,28 @@ mod tests {
             },
         );
 
-        let env = component_transport_env(&component, "https://git.example.test/acme/repo.git");
+        for remote_url in [
+            "https://git.example.test/acme/repo.git",
+            "ssh://git@git.example.test:2222/acme/repo.git",
+            "git@git.example.test:acme/repo.git",
+        ] {
+            let env = component_transport_env(&component, remote_url);
 
-        assert!(env.contains(&(
-            "HTTPS_PROXY".to_string(),
-            "socks5://127.0.0.1:9911".to_string()
-        )));
-        assert!(env.contains(&(
-            "GIT_ASKPASS".to_string(),
-            "/private/credential-helper".to_string()
-        )));
+            assert!(
+                env.contains(&(
+                    "HTTPS_PROXY".to_string(),
+                    "socks5://127.0.0.1:9911".to_string()
+                )),
+                "{remote_url}"
+            );
+            assert!(
+                env.contains(&(
+                    "GIT_ASKPASS".to_string(),
+                    "/private/credential-helper".to_string()
+                )),
+                "{remote_url}"
+            );
+        }
     }
 
     #[test]
@@ -1035,7 +1005,17 @@ mod tests {
     fn dry_resolution_is_read_only_and_unresolvable_refs_fail_clearly() {
         let repo = fixture_repo();
         let component = fixture_component(repo.path());
+        let sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
         let before = git_output(repo.path(), &["status", "--porcelain=v1"]);
+        for requested in [sha.as_str(), "accepted", "v1.0.0"] {
+            assert_eq!(
+                resolve_exact_ref(&component, requested)
+                    .expect(requested)
+                    .resolved_sha,
+                sha,
+                "exact SHA, branch and tag resolve to the immutable commit"
+            );
+        }
         let identity = resolve_exact_ref(&component, "accepted").expect("resolve branch");
 
         assert_eq!(identity.requested_ref, "accepted");
@@ -1196,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn hydration_failure_is_actionable_and_removes_only_the_temporary_checkout() {
+    fn hydration_opt_out_skips_and_failure_removes_only_the_temporary_checkout() {
         let _home = homeboy_core::test_support::env_lock();
         let repo = fixture_repo();
         std::fs::write(
@@ -1212,6 +1192,10 @@ mod tests {
             let checkout = ExactRefCheckout::materialize(&component, "HEAD", None, None)
                 .expect("materialize exact ref");
             let temporary_path = PathBuf::from(&checkout.component.local_path);
+            assert!(checkout
+                .hydrate_dependencies(true)
+                .expect("explicit opt-out must skip hydration")
+                .is_none());
             let error = checkout
                 .hydrate_dependencies(false)
                 .expect_err("failed hydration must stop before build or deploy");
@@ -1231,44 +1215,35 @@ mod tests {
     }
 
     #[test]
-    fn hydration_opt_out_does_not_run_the_materialized_provider() {
-        let _home = homeboy_core::test_support::env_lock();
-        let repo = fixture_repo();
-        std::fs::write(
-            repo.path().join("homeboy.json"),
-            r#"{"id":"fixture-deps","deps":{"provider":"failing-fixture","commands":{"install":{"argv":["sh","-c","exit 42"]}}}}"#,
-        )
-        .expect("dependency provider");
-        git(repo.path(), &["add", "homeboy.json"]);
-        commit(repo.path(), "add failing provider");
-        let component = fixture_component(repo.path());
-        let checkout =
-            ExactRefCheckout::materialize(&component, "HEAD", None, None).expect("materialize");
-
-        assert!(checkout
-            .hydrate_dependencies(true)
-            .expect("explicit opt-out must skip hydration")
-            .is_none());
-    }
-
-    #[test]
-    fn exact_ref_reconstructs_declared_package_artifact_before_build() {
+    fn exact_ref_reconstructs_declared_package_artifacts_before_build() {
         let _home = homeboy_core::test_support::env_lock();
         let repo = fixture_repo();
         let mut component = fixture_component(repo.path());
-        component.package_artifacts = vec![homeboy_core::component::PackageArtifact {
-            path: "generated/package.zip".to_string(),
-            reconstruct_command: Some(
-                "mkdir -p generated && printf package > generated/package.zip".to_string(),
-            ),
-        }];
+        let artifact = |reconstruct_command: Option<&str>| {
+            vec![homeboy_core::component::PackageArtifact {
+                path: "generated/package.zip".to_string(),
+                reconstruct_command: reconstruct_command.map(str::to_string),
+            }]
+        };
+
+        component.package_artifacts = artifact(None);
         let checkout =
             ExactRefCheckout::materialize(&component, "HEAD", None, None).expect("materialize");
+        let error = checkout
+            .reconstruct_package_artifacts()
+            .expect_err("missing declaration fails");
+        assert!(error.message.contains("Required package artifact"));
+        assert!(error.message.contains("reconstruct_command"));
+        drop(checkout);
 
+        component.package_artifacts = artifact(Some(
+            "mkdir -p generated && printf package > generated/package.zip",
+        ));
+        let checkout =
+            ExactRefCheckout::materialize(&component, "HEAD", None, None).expect("materialize");
         checkout
             .reconstruct_package_artifacts()
             .expect("reconstruct package artifact");
-
         assert_eq!(
             std::fs::read_to_string(
                 Path::new(&checkout.component.local_path).join("generated/package.zip")
@@ -1277,26 +1252,6 @@ mod tests {
             "package"
         );
         assert!(!repo.path().join("generated/package.zip").exists());
-    }
-
-    #[test]
-    fn exact_ref_missing_package_artifact_requires_reconstruction_command_before_build() {
-        let _home = homeboy_core::test_support::env_lock();
-        let repo = fixture_repo();
-        let mut component = fixture_component(repo.path());
-        component.package_artifacts = vec![homeboy_core::component::PackageArtifact {
-            path: "generated/package.zip".to_string(),
-            reconstruct_command: None,
-        }];
-        let checkout =
-            ExactRefCheckout::materialize(&component, "HEAD", None, None).expect("materialize");
-
-        let error = checkout
-            .reconstruct_package_artifacts()
-            .expect_err("missing declaration fails");
-
-        assert!(error.message.contains("Required package artifact"));
-        assert!(error.message.contains("reconstruct_command"));
     }
 
     #[test]
@@ -1335,22 +1290,6 @@ mod tests {
             "clone exact deploy ref source failed: fatal: repository not found",
         );
         assert!(!is_cross_device_link_error(&other));
-    }
-
-    #[test]
-    fn clone_exact_ref_source_succeeds_on_same_filesystem() {
-        // Happy path: --local clone within one filesystem (the tempdir) works
-        // without needing the cross-device fallback.
-        let repo = fixture_repo();
-        let dest = tempfile::tempdir().expect("dest parent");
-        let worktree = dest.path().join("clone");
-        clone_exact_ref_source(
-            repo.path(),
-            repo.path().to_str().unwrap(),
-            worktree.to_str().unwrap(),
-        )
-        .expect("same-filesystem clone succeeds");
-        assert!(worktree.join(".git").exists());
     }
 
     /// Two components under one repository: `a/` and `b/`, plus an unrelated

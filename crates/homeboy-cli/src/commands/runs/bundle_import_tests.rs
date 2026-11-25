@@ -179,13 +179,12 @@ fn lab_bundle_run_id_conflicts_are_remapped_idempotently() {
 }
 
 #[test]
-fn runs_export_import_preserves_file_artifact_bytes_with_checksum_refs() {
+fn runs_export_import_preserves_file_and_directory_artifacts_with_checksum_refs() {
+    const ENVELOPE: &[u8] = br#"{"schema":"homeboy/fuzz-result-envelope/v1"}"#;
     let bundle_root = tempfile::tempdir().expect("bundle root");
     let bundle = bundle_root.path().join("fuzz-bundle");
     let mut exported_run_id = String::new();
-    let mut bundled_bytes = std::path::PathBuf::new();
-    let mut exported_sha256 = None;
-    let mut exported_size_bytes = None;
+    let mut exported_refs = Vec::new();
 
     with_isolated_home(|home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
@@ -195,88 +194,10 @@ fn runs_export_import_preserves_file_artifact_bytes_with_checksum_refs() {
             .expect("run");
         exported_run_id = run.id.clone();
         let artifact_path = home.path().join("fuzz-result-envelope.json");
-        std::fs::write(
-            &artifact_path,
-            br#"{"schema":"homeboy/fuzz-result-envelope/v1"}"#,
-        )
-        .expect("artifact file");
+        std::fs::write(&artifact_path, ENVELOPE).expect("artifact file");
         store
             .record_artifact(&run.id, "fuzz_result_envelope", &artifact_path)
             .expect("artifact");
-
-        let (output, exit) = export_runs(
-            &test_store(),
-            RunsExportArgs {
-                run: Some(run.id.clone()),
-                since: None,
-                output: bundle.clone(),
-            },
-        )
-        .expect("export");
-        assert_eq!(exit, 0);
-        let RunsOutput::Export(exported) = output else {
-            panic!("expected export output");
-        };
-        assert_eq!(exported.artifact_count, 1);
-        assert_eq!(exported.artifact_byte_count, 1);
-
-        let artifact_bytes: Vec<Value> = read_bundle_test_json(&bundle.join("artifact_bytes.json"));
-        assert_eq!(artifact_bytes.len(), 1);
-        let byte_ref = artifact_bytes[0]["path"].as_str().expect("byte path");
-        bundled_bytes = bundle.join(byte_ref);
-        assert_eq!(
-            std::fs::read(&bundled_bytes).expect("bundled bytes"),
-            br#"{"schema":"homeboy/fuzz-result-envelope/v1"}"#
-        );
-        assert!(artifact_bytes[0]["sha256"].as_str().is_some());
-        exported_sha256 = artifact_bytes[0]["sha256"].as_str().map(str::to_string);
-        exported_size_bytes = artifact_bytes[0]["size_bytes"].as_i64();
-        assert_eq!(
-            exported_size_bytes,
-            Some(br#"{"schema":"homeboy/fuzz-result-envelope/v1"}"#.len() as i64)
-        );
-    });
-
-    with_isolated_home(|_| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        import_runs(
-            &test_store(),
-            RunsImportArgs {
-                input: Some(bundle.clone()),
-                ..RunsImportArgs::default()
-            },
-        )
-        .expect("import");
-        let store = ObservationStore::open_initialized().expect("store");
-        let imported_artifact = store
-            .list_artifacts(&exported_run_id)
-            .expect("artifacts")
-            .into_iter()
-            .next()
-            .expect("artifact");
-        assert_eq!(imported_artifact.artifact_type, "file");
-        assert_eq!(imported_artifact.path, bundled_bytes.to_string_lossy());
-        assert_eq!(imported_artifact.sha256, exported_sha256);
-        assert_eq!(imported_artifact.size_bytes, exported_size_bytes);
-    });
-}
-
-#[test]
-fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
-    let bundle_root = tempfile::tempdir().expect("bundle root");
-    let bundle = bundle_root.path().join("directory-bundle");
-    let mut exported_run_id = String::new();
-    let mut exported_sha256 = None;
-    let mut exported_size_bytes = None;
-
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(sample_run("fuzz", "homeboy", "rig-a", Value::Null))
-            .expect("run");
-        exported_run_id = run.id.clone();
-
         let artifact_dir = home.path().join("fuzz-artifacts");
         std::fs::create_dir_all(artifact_dir.join("cases")).expect("artifact dir");
         std::fs::write(
@@ -302,25 +223,34 @@ fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
         let RunsOutput::Export(exported) = output else {
             panic!("expected export output");
         };
-        assert_eq!(exported.artifact_count, 1);
-        assert_eq!(exported.artifact_byte_count, 1);
+        assert_eq!(exported.artifact_count, 2);
+        assert_eq!(exported.artifact_byte_count, 2);
 
         let artifacts: Vec<ArtifactRecord> = read_bundle_test_json(&bundle.join("artifacts.json"));
-        assert_eq!(artifacts[0].artifact_type, "directory");
-        assert!(artifacts[0].path.starts_with("bundle://artifact-bytes/"));
+        let directory = artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_type == "directory")
+            .expect("directory artifact");
+        assert!(directory.path.starts_with("bundle://artifact-bytes/"));
         assert_eq!(
-            artifacts[0].metadata_json["portable_bundle"]["archive_format"].as_str(),
+            directory.metadata_json["portable_bundle"]["archive_format"].as_str(),
             Some("zip")
         );
 
         let artifact_bytes: Vec<Value> = read_bundle_test_json(&bundle.join("artifact_bytes.json"));
-        assert_eq!(artifact_bytes.len(), 1);
-        assert_eq!(artifact_bytes[0]["archive_format"].as_str(), Some("zip"));
-        let byte_ref = artifact_bytes[0]["path"].as_str().expect("byte path");
-        assert!(bundle.join(byte_ref).is_file());
-        exported_sha256 = artifact_bytes[0]["sha256"].as_str().map(str::to_string);
-        exported_size_bytes = artifact_bytes[0]["size_bytes"].as_i64();
-        assert!(exported_size_bytes.is_some_and(|size| size > 0));
+        assert_eq!(artifact_bytes.len(), 2);
+        for byte_ref in &artifact_bytes {
+            let path = bundle.join(byte_ref["path"].as_str().expect("byte path"));
+            assert!(path.is_file());
+            let sha256 = byte_ref["sha256"].as_str().map(str::to_string);
+            let size_bytes = byte_ref["size_bytes"].as_i64();
+            assert!(sha256.is_some());
+            if byte_ref["archive_format"].as_str() != Some("zip") {
+                assert_eq!(std::fs::read(&path).expect("bundled bytes"), ENVELOPE);
+                assert_eq!(size_bytes, Some(ENVELOPE.len() as i64));
+            }
+            exported_refs.push((sha256, size_bytes));
+        }
     });
 
     with_isolated_home(|_| {
@@ -334,17 +264,24 @@ fn runs_export_import_preserves_directory_artifact_as_checksumed_archive() {
         )
         .expect("import");
         let store = ObservationStore::open_initialized().expect("store");
-        let imported_artifact = store
-            .list_artifacts(&exported_run_id)
-            .expect("artifacts")
-            .into_iter()
-            .next()
-            .expect("artifact");
-        assert_eq!(imported_artifact.artifact_type, "directory");
-        assert_eq!(imported_artifact.sha256, exported_sha256);
-        assert_eq!(imported_artifact.size_bytes, exported_size_bytes);
-        let imported_dir = Path::new(&imported_artifact.path);
-        assert!(imported_dir.is_dir());
+        let imported = store.list_artifacts(&exported_run_id).expect("artifacts");
+        assert_eq!(imported.len(), 2);
+        for artifact in &imported {
+            assert!(exported_refs.contains(&(artifact.sha256.clone(), artifact.size_bytes)));
+        }
+
+        let file = imported
+            .iter()
+            .find(|artifact| artifact.artifact_type == "file")
+            .expect("imported file");
+        assert!(file.path.starts_with(&bundle.to_string_lossy().to_string()));
+        assert_eq!(std::fs::read(&file.path).expect("file bytes"), ENVELOPE);
+
+        let directory = imported
+            .iter()
+            .find(|artifact| artifact.artifact_type == "directory")
+            .expect("imported directory");
+        let imported_dir = Path::new(&directory.path);
         assert_eq!(
             std::fs::read_to_string(imported_dir.join("summary.txt")).expect("summary"),
             "portable directory"

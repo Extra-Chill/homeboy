@@ -37,30 +37,14 @@ fn timeout_is_distinct_from_no_progress() {
 }
 
 #[test]
-fn legacy_gate_report_deserializes_with_new_defaults() {
+fn persisted_gate_report_without_capture_fields_decodes() {
     let report: AgentTaskGateReport = serde_json::from_value(serde_json::json!({
         "schema": "homeboy/agent-task-gate-report/v2", "id": "gate-1",
         "status": "succeeded", "command": ["sh", "-lc", "true"], "exit_code": 0
     }))
-    .expect("legacy report");
+    .expect("persisted report");
     assert_eq!(report.termination, AgentTaskGateTermination::Completed);
     assert_eq!(report.capture.stdout.bytes_seen, 0);
-}
-
-#[test]
-fn agent_task_gate_status_bridges_to_homeboy_gate_status() {
-    assert_eq!(
-        HomeboyGateStatus::from(AgentTaskGateStatus::Succeeded),
-        HomeboyGateStatus::Passed
-    );
-    assert_eq!(
-        HomeboyGateStatus::from(AgentTaskGateStatus::Failed),
-        HomeboyGateStatus::Failed
-    );
-    assert_eq!(
-        HomeboyGateStatus::from(AgentTaskGateStatus::Skipped),
-        HomeboyGateStatus::Skipped
-    );
 }
 
 #[test]
@@ -120,24 +104,15 @@ fn absent_or_malformed_declared_sidecars_preserve_gate_failure() {
 }
 
 #[test]
-fn verify_gate_policy_defaults_are_durable_and_backward_compatible() {
-    let defaults = VerifyGateOptions::default();
-    assert_eq!(defaults.gate_timeout(), Duration::from_secs(30 * 60));
-    assert_eq!(defaults.gate_heartbeat_interval(), Duration::from_secs(5));
-    assert!(!defaults.rerun_completed_gates);
-    assert_eq!(
-        defaults.execution_policy,
-        AgentTaskGateExecutionPolicy::OrderedFailFast
-    );
-
-    let legacy: VerifyGateOptions = serde_json::from_value(serde_json::json!({
+fn persisted_minimal_gate_policy_decodes_to_defaults() {
+    let persisted: VerifyGateOptions = serde_json::from_value(serde_json::json!({
         "verify": ["cargo test"],
         "private_verify": [],
         "private_gate_reveal": "summary_only"
     }))
-    .expect("deserialize legacy gate policy");
+    .expect("deserialize persisted gate policy");
     assert_eq!(
-        legacy,
+        persisted,
         VerifyGateOptions {
             verify: vec!["cargo test".to_string()],
             ..VerifyGateOptions::default()

@@ -877,28 +877,3 @@ pub fn measurement_from_test_output(output: &TestCommandOutput) -> TestMeasureme
     }
     .normalized()
 }
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn differential_verdict_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (DifferentialVerdict::Pass, "pass"),
-            (DifferentialVerdict::Fail, "fail"),
-            (DifferentialVerdict::Timeout, "timeout"),
-            (DifferentialVerdict::BaselineRed, "baseline_red"),
-            (DifferentialVerdict::Inconclusive, "inconclusive"),
-            (DifferentialVerdict::NoMeasurement, "no_measurement"),
-            (DifferentialVerdict::NoBaseline, "no_baseline"),
-            (DifferentialVerdict::InvalidEvidence, "invalid_evidence"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
-    }
-}

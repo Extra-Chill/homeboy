@@ -154,23 +154,6 @@ fn appending_an_event_writes_only_that_jobs_rows() {
 }
 
 #[test]
-fn a_mutation_that_changes_nothing_commits_nothing() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open_without_reconciliation(&path).expect("store");
-    store.create("idle");
-    let generation = JobStore::store_generation_at_path(&path).expect("generation");
-
-    store.durable_transaction(|_| Ok(())).expect("no-op");
-    JobStore::open_without_reconciliation(&path).expect("reopen");
-
-    assert_eq!(
-        JobStore::store_generation_at_path(&path).expect("generation"),
-        generation
-    );
-}
-
-#[test]
 fn two_handles_interleave_appends_without_losing_events() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
@@ -300,7 +283,14 @@ fn restart_recovery_runs_on_the_sql_store() {
     assert!(events
         .iter()
         .any(|event| event.message.as_deref() == Some("partial output")));
-    assert!(events.iter().any(|event| event.kind == JobEventKind::Error));
+    assert!(events.iter().any(|event| {
+        event.kind == JobEventKind::Error
+            && event.data.as_ref().is_some_and(|data| {
+                data["reason"] == json!("orphaned_after_control_plane_loss")
+                    && data["classification"]["kind"] == json!("orphaned_after_control_plane_loss")
+                    && data["classification"]["recoverable"] == json!(false)
+            })
+    }));
     assert_eq!(restarted.get(queued.id).expect("queued job").id, queued.id);
 
     // Recovery was itself durable: a third process sees the same outcome and

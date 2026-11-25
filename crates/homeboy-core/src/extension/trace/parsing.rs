@@ -68,8 +68,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_trace_results_str() {
-        let parsed = parse_trace_results_str(
+    fn trace_results_file_parses_runner_envelope() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let path = temp.path().join("trace-results.json");
+        std::fs::write(
+            &path,
             r#"{
                 "component_id":"studio",
                 "scenario_id":"close-window-running-site",
@@ -77,86 +80,55 @@ mod tests {
                 "summary":"Window reopened after close",
                 "timeline":[{"t_ms":0,"source":"desktop","event":"window.closed","data":{"id":1}}],
                 "span_definitions":[{"id":"close_to_assertion","from":"desktop.window.closed","to":"assertion.checked"}],
-                "assertions":[{"id":"no-window-reopen","status":"fail","message":"Window reopened"}],
+                "assertions":[{"id":"no-window-reopen","status":"fail","message":"Window reopened","details":{"port":8026}}],
                 "metrics":{"assertion_count":1,"producer":"custom-provider"},
                 "artifacts":[{"label":"main log","path":"artifacts/main.log","kind":"log"}]
             }"#,
         )
-        .expect("minimal trace envelope should parse");
+        .expect("trace results should be written");
+
+        let parsed = parse_trace_results_file(&path).expect("trace results file should parse");
 
         assert_eq!(parsed.component_id, "studio");
         assert_eq!(parsed.status, TraceStatus::Fail);
         assert_eq!(parsed.timeline[0].t_ms, 0);
         assert_eq!(parsed.span_definitions[0].id, "close_to_assertion");
-        assert_eq!(parsed.assertions[0].id, "no-window-reopen");
-        assert_eq!(parsed.metrics["assertion_count"], serde_json::json!(1));
-        assert_eq!(parsed.artifacts[0].path, "artifacts/main.log");
-        assert_eq!(parsed.artifacts[0].kind.as_deref(), Some("log"));
-    }
-
-    #[test]
-    fn test_parse_trace_results_file() {
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        let path = temp.path().join("trace-results.json");
-        std::fs::write(
-            &path,
-            r#"{"component_id":"studio","scenario_id":"x","status":"pass","timeline":[],"span_results":[],"assertions":[],"artifacts":[]}"#,
-        )
-        .expect("trace results should be written");
-
-        let parsed = parse_trace_results_file(&path).expect("trace results file should parse");
-        assert_eq!(parsed.component_id, "studio");
-        assert_eq!(parsed.status, TraceStatus::Pass);
-    }
-
-    #[test]
-    fn trace_json_parser_keeps_assertion_details() {
-        let parsed = parse_trace_results_str(
-            r#"{"component_id":"studio","scenario_id":"x","status":"pass","timeline":[],"assertions":[{"id":"port-moved","status":"pass","message":"Moved off a taken port","details":{"port":8026}}],"artifacts":[]}"#,
-        )
-        .expect("assertion details should parse");
-
         assert_eq!(
             parsed.assertions[0].details,
             Some(serde_json::json!({ "port": 8026 }))
         );
+        assert_eq!(parsed.metrics["assertion_count"], serde_json::json!(1));
+        assert_eq!(parsed.artifacts[0].kind.as_deref(), Some("log"));
     }
 
     #[test]
-    fn trace_json_parser_rejects_invalid_status() {
-        let err = parse_trace_results_str(
-            r#"{"component_id":"studio","scenario_id":"x","status":"unknown","timeline":[],"assertions":[],"artifacts":[]}"#,
-        )
-        .unwrap_err();
-
-        let detail = err.details["error"].as_str().expect("JSON error detail");
-        assert!(detail.contains("`status`"), "{}", detail);
+    fn trace_results_errors_name_the_offending_json_path() {
+        for (raw, path) in [
+            (
+                r#"{"component_id":"studio","scenario_id":"x","status":"unknown","timeline":[],"assertions":[],"artifacts":[]}"#,
+                "`status`",
+            ),
+            (
+                r#"{"component_id":"studio","scenario_id":"x","status":"pass","timeline":[{"source":"desktop","event":"x"}],"assertions":[],"artifacts":[]}"#,
+                "`timeline[0]`",
+            ),
+        ] {
+            let err = parse_trace_results_str(raw).unwrap_err();
+            let detail = err.details["error"].as_str().expect("JSON error detail");
+            assert!(detail.contains(path), "{}", detail);
+        }
     }
 
     #[test]
-    fn trace_json_parser_rejects_malformed_timeline_shape() {
-        let err = parse_trace_results_str(
-            r#"{"component_id":"studio","scenario_id":"x","status":"pass","timeline":[{"source":"desktop","event":"x"}],"assertions":[],"artifacts":[]}"#,
-        )
-        .unwrap_err();
-
-        let detail = err.details["error"].as_str().expect("JSON error detail");
-        assert!(detail.contains("`timeline[0]`"), "{}", detail);
-    }
-
-    #[test]
-    fn test_parse_trace_list_str() {
-        let parsed = parse_trace_list_str(
+    fn trace_list_parses_minimal_and_trace_shaped_envelopes() {
+        let minimal = parse_trace_list_str(
             r#"{"component_id":"studio","scenarios":[{"id":"close-window","summary":"Close window lifecycle"}]}"#,
         )
         .expect("list envelope should parse");
+        assert_eq!(minimal.scenarios[0].id, "close-window");
+        assert_eq!(minimal.status, None);
 
-        assert_eq!(parsed.scenarios[0].id, "close-window");
-    }
-
-    #[test]
-    fn trace_list_parser_accepts_trace_shaped_inventory_envelope() {
-        let parsed = parse_trace_list_str(
+        let trace_shaped = parse_trace_list_str(
             r#"{
                 "component_id":"studio",
                 "scenario_id":"__list__",
@@ -168,13 +140,10 @@ mod tests {
             }"#,
         )
         .expect("trace-shaped list envelope should parse");
-
-        assert_eq!(parsed.component_id, "studio");
-        assert_eq!(parsed.scenario_id.as_deref(), Some("__list__"));
-        assert_eq!(parsed.status, Some(TraceStatus::Pass));
-        assert_eq!(parsed.scenarios[0].id, "close-window-running-site");
+        assert_eq!(trace_shaped.scenario_id.as_deref(), Some("__list__"));
+        assert_eq!(trace_shaped.status, Some(TraceStatus::Pass));
         assert_eq!(
-            parsed.scenarios[0].source.as_deref(),
+            trace_shaped.scenarios[0].source.as_deref(),
             Some("fixtures/close-window.trace.js")
         );
     }

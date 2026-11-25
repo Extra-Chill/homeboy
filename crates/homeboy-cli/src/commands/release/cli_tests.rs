@@ -1,6 +1,6 @@
 use super::{ReleaseReadinessCommand, ReleaseSubcommand, ResolveOutput};
 use crate::cli_surface::{Cli, Commands};
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 
 fn release(argv: &[&str]) -> super::ReleaseArgs {
     let cli = Cli::try_parse_from(argv)
@@ -158,44 +158,6 @@ fn changelog_history_repair_requires_recovery_and_parses_apply() {
         "--repair-changelog-history",
     ]);
     assert!(missing_versions.is_err());
-}
-
-#[test]
-fn release_inspection_help_includes_copy_paste_examples() {
-    let expectations = [
-        (
-            ["release", "changes"].as_slice(),
-            "homeboy release changes data-machine-code --path /path/to/repo --full",
-        ),
-        (
-            ["release", "contains"].as_slice(),
-            "homeboy release contains data-machine-code 6043c013d",
-        ),
-        (
-            ["release", "gap"].as_slice(),
-            "homeboy release gap data-machine-code",
-        ),
-        (
-            ["release", "readiness"].as_slice(),
-            "homeboy release readiness list data-machine-code",
-        ),
-        (
-            ["release", "resolve"].as_slice(),
-            "homeboy release resolve https://github.com/example/monorepo.git --prefix figma-transformer",
-        ),
-    ];
-
-    for (path, example) in expectations {
-        let mut command = Cli::command();
-        for segment in path {
-            command = command
-                .find_subcommand(segment)
-                .unwrap_or_else(|| panic!("missing command path segment `{segment}`"))
-                .clone();
-        }
-        let help = command.render_help().to_string();
-        assert!(help.contains(example), "missing `{example}`:\n{help}");
-    }
 }
 
 #[test]

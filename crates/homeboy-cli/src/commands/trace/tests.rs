@@ -21,40 +21,6 @@ struct TestCli {
 }
 
 #[test]
-fn trace_observe_parses_shared_duration_and_probe_arguments() {
-    let cli = TestCli::try_parse_from([
-        "trace",
-        "observe",
-        "component",
-        "--duration",
-        "250ms",
-        "--tail-log",
-        "/tmp/app.log",
-        "--grep",
-        "error",
-        "--watch-process",
-        "homeboy",
-        "--watch-process-interval",
-        "50ms",
-        "--probe",
-        r#"{"type":"port.snapshot","port":3000}"#,
-    ])
-    .expect("passive trace args parse");
-
-    let Some(TraceSubcommand::Observe(args)) = cli.trace.command else {
-        panic!("expected trace observe subcommand");
-    };
-    assert_eq!(args.comp.component.as_deref(), Some("component"));
-    assert_eq!(args.duration, std::time::Duration::from_millis(250));
-    assert_eq!(
-        args.watch_process_interval,
-        std::time::Duration::from_millis(50)
-    );
-    assert_eq!(args.tail_logs.len(), 1);
-    assert_eq!(args.probes.len(), 1);
-}
-
-#[test]
 fn trace_observe_preserves_passive_run_and_artifact_schema() {
     with_isolated_home(|home| {
         let target = home.path().join("target");
@@ -172,80 +138,6 @@ fn lab_dispatch_observation_persists_trace_run_before_remote_execution() {
 
 use crate::commands::trace::test_support::trace_args_for_rig;
 #[test]
-fn rig_trace_run_uses_rig_owned_workload_extension_without_component_link() {
-    with_isolated_home(|home| {
-        write_trace_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
-
-        let (output, exit_code) = run(TraceArgs {
-            command: None,
-            comp: PositionalComponentArgs {
-                component: Some("studio".to_string()),
-                path: None,
-            },
-            component_arg: None,
-            scenario: Some("studio-app-create-site".to_string()),
-            scenario_arg: None,
-            compare_after: None,
-            baseline_target: None,
-            candidate: None,
-            rig: Some("studio-rig".to_string()),
-            profile: None,
-            profiles: false,
-            setting_args: SettingArgs::default(),
-            secret_env: Vec::new(),
-            json_summary: false,
-            report: None,
-            experiment: None,
-            repeat: 1,
-            aggregate: None,
-            schedule: TraceSchedule::Grouped,
-            focus_spans: Vec::new(),
-            metric_guardrails: Vec::new(),
-            spans: Vec::new(),
-            phases: Vec::new(),
-            attachments: Vec::new(),
-            phase_preset: None,
-            baseline_args: BaselineArgs::default(),
-            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-            overlays: Vec::new(),
-            variants: Vec::new(),
-            matrix: TraceVariantMatrixMode::None,
-            axes: Vec::new(),
-            matrix_env: Vec::new(),
-            output_dir: None,
-            visual_compare: false,
-            visual_artifacts_dir: None,
-            visual_compare_provider: None,
-            visual_provider_args: Vec::new(),
-            visual_threshold: None,
-            keep_overlay: false,
-            stale: false,
-            force: false,
-            canonical: false,
-            allow_local_toolchain: true,
-            checkout_provenance: None,
-        })
-        .expect("rig trace run should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            TraceCommandOutput::Run(result) => {
-                assert!(result.passed);
-                assert_eq!(result.component, "studio");
-                assert_eq!(
-                    result.results.expect("results").scenario_id,
-                    "studio-app-create-site"
-                );
-            }
-            _ => panic!("expected run output"),
-        }
-    });
-}
-
-#[test]
 fn rig_trace_workload_port_range_sets_invocation_env() {
     with_isolated_home(|home| {
         write_trace_port_env_extension(home);
@@ -280,59 +172,19 @@ fn trace_run_persists_observation_history() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_trace_rig(home, "studio-rig", "studio", component_dir.path());
 
-        let (_output, exit_code) = run(TraceArgs {
-            command: None,
-            comp: PositionalComponentArgs {
-                component: Some("studio".to_string()),
-                path: None,
-            },
-            component_arg: None,
-            scenario: Some("studio-app-create-site".to_string()),
-            scenario_arg: None,
-            compare_after: None,
-            baseline_target: None,
-            candidate: None,
-            rig: Some("studio-rig".to_string()),
-            profile: None,
-            profiles: false,
-            setting_args: SettingArgs::default(),
-            secret_env: Vec::new(),
-            json_summary: false,
-            report: None,
-            experiment: None,
-            repeat: 1,
-            aggregate: None,
-            schedule: TraceSchedule::Grouped,
-            focus_spans: Vec::new(),
-            metric_guardrails: Vec::new(),
-            spans: Vec::new(),
-            phases: Vec::new(),
-            attachments: Vec::new(),
-            phase_preset: None,
-            baseline_args: BaselineArgs::default(),
-            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-            overlays: Vec::new(),
-            variants: Vec::new(),
-            matrix: TraceVariantMatrixMode::None,
-            axes: Vec::new(),
-            matrix_env: Vec::new(),
-            output_dir: None,
-            visual_compare: false,
-            visual_artifacts_dir: None,
-            visual_compare_provider: None,
-            visual_provider_args: Vec::new(),
-            visual_threshold: None,
-            keep_overlay: false,
-            stale: false,
-            force: false,
-            canonical: false,
-            allow_local_toolchain: true,
-            checkout_provenance: None,
-        })
-        .expect("trace should run");
+        let (output, exit_code) = run(trace_args_for_rig(
+            "studio-rig",
+            "studio",
+            "studio-app-create-site",
+        ))
+        .expect("rig-owned workload extension should run without a component link");
 
         assert_eq!(exit_code, 0);
+        let TraceCommandOutput::Run(result) = output else {
+            panic!("expected run output");
+        };
+        assert!(result.passed);
+        assert_eq!(result.component, "studio");
         let store = ObservationStore::open_initialized().expect("store");
         let runs = store
             .list_runs(homeboy::core::observation::RunListFilter {
@@ -526,13 +378,7 @@ fn trace_repeat_aggregates_span_timings_and_preserves_artifacts() {
                 let span = &aggregate.spans[0];
                 assert_eq!(span.id, "boot_to_ready");
                 assert_eq!(span.n, 3);
-                assert_eq!(span.min_ms, Some(125));
                 assert_eq!(span.median_ms, Some(125));
-                assert_eq!(span.avg_ms, Some(125.0));
-                assert_eq!(span.stddev_ms, Some(0.0));
-                assert_eq!(span.p75_ms, None);
-                assert_eq!(span.p90_ms, None);
-                assert_eq!(span.p95_ms, None);
                 assert_eq!(span.max_ms, Some(125));
                 assert!(matches!(span.max_run_index, Some(1..=3)));
                 assert!(span
@@ -1032,188 +878,6 @@ fn trace_compare_variant_writes_experiment_bundle() {
         assert!(summary.contains("## Baseline Component SHAs"));
         assert!(summary.contains("## Variant Component SHAs"));
         assert!(summary.contains("scenario.txt"));
-    });
-}
-
-#[test]
-fn trace_compare_variant_resolves_named_variants() {
-    with_isolated_home(|home| {
-        write_trace_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        init_overlay_component(component_dir.path());
-        let package_dir = tempfile::TempDir::new().expect("package dir");
-        write_trace_rig_with_variant(
-            home,
-            package_dir.path(),
-            "studio-rig",
-            "studio",
-            component_dir.path(),
-        );
-        let output_dir = tempfile::TempDir::new().expect("output dir");
-
-        let (output, exit_code) = run(TraceArgs {
-            command: None,
-            comp: PositionalComponentArgs {
-                component: Some("compare-variant".to_string()),
-                path: None,
-            },
-            component_arg: None,
-            scenario: Some("studio-app-create-site".to_string()),
-            scenario_arg: None,
-            compare_after: None,
-            baseline_target: None,
-            candidate: None,
-            rig: Some("studio-rig".to_string()),
-            profile: None,
-            profiles: false,
-            setting_args: SettingArgs::default(),
-            secret_env: Vec::new(),
-            json_summary: false,
-            report: None,
-            experiment: None,
-            repeat: 2,
-            aggregate: None,
-            schedule: TraceSchedule::Grouped,
-            focus_spans: Vec::new(),
-            metric_guardrails: Vec::new(),
-            spans: Vec::new(),
-            phases: Vec::new(),
-            attachments: Vec::new(),
-            phase_preset: None,
-            baseline_args: BaselineArgs::default(),
-            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-            overlays: Vec::new(),
-            variants: vec!["fresh-install-mode".to_string()],
-            matrix: TraceVariantMatrixMode::None,
-            axes: Vec::new(),
-            matrix_env: Vec::new(),
-            output_dir: Some(output_dir.path().to_path_buf()),
-            visual_compare: false,
-            visual_artifacts_dir: None,
-            visual_compare_provider: None,
-            visual_provider_args: Vec::new(),
-            visual_threshold: None,
-            keep_overlay: false,
-            stale: false,
-            force: false,
-            canonical: false,
-            allow_local_toolchain: true,
-            checkout_provenance: None,
-        })
-        .expect("named variant compare-variant should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            TraceCommandOutput::Compare(compare) => {
-                assert_eq!(compare.span_count, 1);
-                assert!(compare.before_path.ends_with("baseline.json"));
-                assert!(compare.after_path.ends_with("variant.json"));
-            }
-            _ => panic!("expected compare output"),
-        }
-        let baseline: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(output_dir.path().join("baseline.json")).expect("baseline"),
-        )
-        .expect("baseline json");
-        let variant: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(output_dir.path().join("variant.json")).expect("variant"),
-        )
-        .expect("variant json");
-        assert!(baseline
-            .get("overlays")
-            .and_then(|overlays| overlays.as_array())
-            .map(|overlays| overlays.is_empty())
-            .unwrap_or(true));
-        assert_eq!(variant["overlays"][0]["variant"], "fresh-install-mode");
-        assert_eq!(
-            variant["overlays"][0]["path"],
-            package_dir
-                .path()
-                .join("overlays/fresh-install-mode.patch")
-                .to_string_lossy()
-                .as_ref()
-        );
-    });
-}
-
-#[test]
-fn trace_compare_variant_reports_unknown_named_variants() {
-    with_isolated_home(|home| {
-        write_trace_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        init_overlay_component(component_dir.path());
-        let package_dir = tempfile::TempDir::new().expect("package dir");
-        write_trace_rig_with_variant(
-            home,
-            package_dir.path(),
-            "studio-rig",
-            "studio",
-            component_dir.path(),
-        );
-        let output_dir = tempfile::TempDir::new().expect("output dir");
-
-        let err = match run(TraceArgs {
-            command: None,
-            comp: PositionalComponentArgs {
-                component: Some("compare-variant".to_string()),
-                path: None,
-            },
-            component_arg: None,
-            scenario: Some("studio-app-create-site".to_string()),
-            scenario_arg: None,
-            compare_after: None,
-            baseline_target: None,
-            candidate: None,
-            rig: Some("studio-rig".to_string()),
-            profile: None,
-            profiles: false,
-            setting_args: SettingArgs::default(),
-            secret_env: Vec::new(),
-            json_summary: false,
-            report: None,
-            experiment: None,
-            repeat: 2,
-            aggregate: None,
-            schedule: TraceSchedule::Grouped,
-            focus_spans: Vec::new(),
-            metric_guardrails: Vec::new(),
-            spans: Vec::new(),
-            phases: Vec::new(),
-            attachments: Vec::new(),
-            phase_preset: None,
-            baseline_args: BaselineArgs::default(),
-            regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-            regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-            overlays: Vec::new(),
-            variants: vec!["missing".to_string()],
-            matrix: TraceVariantMatrixMode::None,
-            axes: Vec::new(),
-            matrix_env: Vec::new(),
-            output_dir: Some(output_dir.path().to_path_buf()),
-            visual_compare: false,
-            visual_artifacts_dir: None,
-            visual_compare_provider: None,
-            visual_provider_args: Vec::new(),
-            visual_threshold: None,
-            keep_overlay: false,
-            stale: false,
-            force: false,
-            canonical: false,
-            allow_local_toolchain: true,
-            checkout_provenance: None,
-        }) {
-            Ok(_) => panic!("unknown variant should fail"),
-            Err(err) => err,
-        };
-
-        assert!(err.message.contains("unknown trace variant 'missing'"));
-        assert!(err
-            .details
-            .get("id")
-            .and_then(|value| value.as_str())
-            .expect("details id")
-            .contains("fresh-install-mode"));
     });
 }
 

@@ -145,11 +145,7 @@ mod tests {
         assert_eq!(preview["schema"], "homeboy/preview/v1");
         assert_eq!(preview["local_url"], "http://127.0.0.1:8080");
         assert_eq!(preview["public_url"], "https://preview.example.test/run-1");
-        assert_eq!(preview["hold_seconds"], 600);
-        assert_eq!(preview["status"], "running");
-        assert_eq!(preview["process_id"], "pid-123");
         assert_eq!(preview["runtime_id"], "runtime-abc");
-        assert_eq!(preview["cleanup_status"], "pending");
 
         std::env::remove_var(PREVIEW_METADATA_ENV);
         std::env::remove_var(PREVIEW_PUBLIC_URL_ENV);

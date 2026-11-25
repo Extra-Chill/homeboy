@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_temporal_assertions() {
+    fn passing_temporal_assertion_is_promoted_to_a_pass_assertion() {
         let mut results = results(
             vec![event(10, "runner", "ready")],
             vec![TraceTemporalAssertionDefinition::Count {

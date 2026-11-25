@@ -97,48 +97,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn noop_secret_env_plan_uses_explicit_names() {
-        let noop = NoopRunnerJobPreparationProvider;
-        let plan = noop.runner_exec_secret_env_plan(
-            &["cmd".to_string()],
-            None,
-            &["EXPLICIT_SECRET".to_string()],
-            &HashMap::new(),
-            None,
-        );
-        assert!(plan
-            .secret_env_names()
-            .contains(&"EXPLICIT_SECRET".to_string()));
-    }
-
-    #[test]
-    fn noop_secret_env_plan_prefers_base_plan() {
-        let noop = NoopRunnerJobPreparationProvider;
+    fn noop_secret_env_plan_uses_base_plan_or_explicit_names() {
         let base = SecretEnvPlan::from_secret_env_names(vec!["BASE_SECRET".to_string()]);
-        let plan = noop.runner_exec_secret_env_plan(
-            &["cmd".to_string()],
-            None,
-            &["EXPLICIT_SECRET".to_string()],
-            &HashMap::new(),
-            Some(base),
-        );
-        let names = plan.secret_env_names();
-        assert!(names.contains(&"BASE_SECRET".to_string()));
-    }
-
-    #[test]
-    fn noop_workload_validation_passes() {
-        let noop = NoopRunnerJobPreparationProvider;
-        let plan = SecretEnvPlan::from_secret_env_names(Vec::<String>::new());
-        assert!(noop
-            .validate_lab_runner_workload_dispatch(
-                None,
-                "runner",
-                None,
+        for (base_plan, expected) in [(None, "EXPLICIT_SECRET"), (Some(base), "BASE_SECRET")] {
+            let plan = NoopRunnerJobPreparationProvider.runner_exec_secret_env_plan(
                 &["cmd".to_string()],
-                &plan,
-                false
-            )
-            .is_ok());
+                None,
+                &["EXPLICIT_SECRET".to_string()],
+                &HashMap::new(),
+                base_plan,
+            );
+            assert_eq!(plan.secret_env_names(), vec![expected.to_string()]);
+        }
     }
 }

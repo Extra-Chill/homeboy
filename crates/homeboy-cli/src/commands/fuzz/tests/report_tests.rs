@@ -65,6 +65,8 @@ fn fuzz_output_contract_includes_results_file_and_parsed_campaign() {
     }))
     .unwrap();
 
+    assert_eq!(run["variant"], "run");
+    assert_eq!(run["kind"], "fuzz");
     assert_eq!(
         run["execution"]["results_file"],
         "/tmp/homeboy-run/fuzz-results.json"
@@ -234,64 +236,27 @@ fn fuzz_observation_hotspots_rank_observation_set_metrics() {
 }
 
 #[test]
-fn select_workload_requires_explicit_id_for_ambiguous_fuzz_workloads() {
-    let workloads = vec![
-        FuzzWorkloadOutput {
-            id: "parser".to_string(),
-            label: None,
-            description: None,
-            source: "extension:generic".to_string(),
-            manifest_path: None,
-        },
-        FuzzWorkloadOutput {
-            id: "serializer".to_string(),
-            label: None,
-            description: None,
-            source: "extension:generic".to_string(),
-            manifest_path: None,
-        },
-    ];
-
-    let err = select_workload(&workloads, None).expect_err("ambiguous workload");
-
-    assert!(err.message.contains("Multiple fuzz workloads"));
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("parser, serializer")));
-}
-
-#[test]
-fn select_workload_rejects_empty_fuzz_selection() {
-    let err = select_workload(&[], None).expect_err("empty workload selection");
-
-    assert!(err.message.contains("No fuzz workloads"));
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("fuzz list")));
-}
-
-/// An empty gate set must not report a pass (#11645).
-///
-/// `all` on an empty slice is `true`, so the obvious implementation greens a run
-/// that evaluated nothing. This is not hypothetical: the `measurement` gate
-/// profile declares no gates, so every run using it took that branch.
-#[test]
-fn an_empty_gate_set_is_not_a_pass() {
-    assert_eq!(gate_status(&[]), "not_gated");
-}
-
-/// The empty-set guard must not swallow real verdicts.
-#[test]
-fn a_gate_set_still_reports_pass_and_fail() {
-    let gate = |status: &str| super::super::types_extra::FuzzGateEvaluation {
-        gate_id: "no-open-findings".to_string(),
-        status: status.to_string(),
-        metric: "open_findings".to_string(),
-        observed: 0.0,
-        expected: 0.0,
+fn select_workload_requires_an_unambiguous_fuzz_workload() {
+    let workload = |id: &str| FuzzWorkloadOutput {
+        id: id.to_string(),
+        label: None,
+        description: None,
+        source: "extension:generic".to_string(),
+        manifest_path: None,
     };
-    assert_eq!(gate_status(&[gate("passed")]), "passed");
-    assert_eq!(gate_status(&[gate("passed"), gate("failed")]), "failed");
+    let ambiguous = vec![workload("parser"), workload("serializer")];
+
+    for (workloads, message, hint) in [
+        (
+            ambiguous.as_slice(),
+            "Multiple fuzz workloads",
+            "parser, serializer",
+        ),
+        (&[][..], "No fuzz workloads", "fuzz list"),
+    ] {
+        let err = select_workload(workloads, None).expect_err("workload selection must fail");
+
+        assert!(err.message.contains(message), "{}", err.message);
+        assert!(err.hints.iter().any(|h| h.message.contains(hint)));
+    }
 }

@@ -8,7 +8,7 @@ struct TestCli {
 }
 
 #[test]
-fn parses_bench_compare_and_keeps_it_local() {
+fn bench_compare_stays_local() {
     let cli = TestCli::try_parse_from([
         "bench",
         "compare",
@@ -18,22 +18,11 @@ fn parses_bench_compare_and_keeps_it_local() {
         "abc123",
         "--head",
         "def456",
-        "--corpus",
-        "/captures",
     ])
     .expect("bench compare should parse");
 
     assert!(!cli.bench.is_lab_offload_command());
     assert!(cli.bench.lab_rig_workload_arguments().is_none());
-    match cli.bench.command.expect("compare command") {
-        BenchCommand::Compare(args) => {
-            assert_eq!(args.component.as_deref(), Some("blocks-engine"));
-            assert_eq!(args.base.as_deref(), Some("abc123"));
-            assert_eq!(args.head.as_deref(), Some("def456"));
-            assert_eq!(args.corpus.as_deref(), Some("/captures"));
-        }
-        _ => panic!("expected bench compare command"),
-    }
 }
 
 #[test]
@@ -91,26 +80,6 @@ fn non_integer_runs_hints_at_run_id() {
     );
 }
 
-#[test]
-fn parses_dotted_setting_override_for_nested_bench_env() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "--rig",
-        "woocommerce-performance",
-        "--setting",
-        "bench_env.WC_REST_BATCH_IMPORT_ITEMS=100",
-    ])
-    .expect("bench dotted --setting should parse");
-
-    assert_eq!(
-        cli.bench.run.setting_args.setting,
-        vec![(
-            "bench_env.WC_REST_BATCH_IMPORT_ITEMS".to_string(),
-            "100".to_string()
-        )]
-    );
-}
-
 // --- Presentation vocabulary (#11138) -------------------------------------
 //
 // `bench --json` and `--format json` both request the full JSON payload;
@@ -148,52 +117,27 @@ fn folded(args: &[&str]) -> BenchArgs {
 }
 
 #[test]
-fn detail_summary_is_the_canonical_json_summary_spelling() {
-    assert!(!folded(&["bench", "homeboy"]).run.json_summary);
-    assert!(
-        folded(&["bench", "homeboy", "--json-summary"])
-            .run
-            .json_summary
-    );
-    assert!(
-        folded(&["bench", "homeboy", "--detail", "summary"])
-            .run
-            .json_summary
-    );
-    assert!(
-        !folded(&["bench", "homeboy", "--detail", "full"])
-            .run
-            .json_summary
-    );
-}
-
-#[test]
-fn detail_full_does_not_cancel_the_json_summary_flag() {
-    // The `--json-summary` bool has no "off" state, so `--detail full` cannot be read
-    // as a request to suppress a summary the caller explicitly asked for.
-    assert!(
-        folded(&["bench", "homeboy", "--json-summary", "--detail=full"])
-            .run
-            .json_summary
-    );
-}
-
-#[test]
-fn detail_is_independent_of_format() {
-    let bench = folded(&["bench", "homeboy", "--detail=summary"]);
-
-    assert!(bench.run.json_summary);
-    assert!(
-        !bench.wants_full_json(),
-        "--detail must not imply the full JSON payload"
-    );
-
-    let json_only = folded(&["bench", "homeboy", "--format=json"]);
-    assert!(json_only.wants_full_json());
-    assert!(
-        !json_only.run.json_summary,
-        "--format must not imply the compact summary"
-    );
+fn detail_folds_onto_json_summary_independently_of_format() {
+    // (argv, expected json_summary, expected wants_full_json)
+    let cases: &[(&[&str], bool, bool)] = &[
+        (&["bench", "homeboy"], false, false),
+        (&["bench", "homeboy", "--json-summary"], true, false),
+        (&["bench", "homeboy", "--detail", "summary"], true, false),
+        (&["bench", "homeboy", "--detail", "full"], false, false),
+        // `--json-summary` has no "off" state, so `--detail full` cannot cancel it.
+        (
+            &["bench", "homeboy", "--json-summary", "--detail=full"],
+            true,
+            false,
+        ),
+        // `--format` must not imply the compact summary.
+        (&["bench", "homeboy", "--format=json"], false, true),
+    ];
+    for (argv, json_summary, full_json) in cases {
+        let bench = folded(argv);
+        assert_eq!(bench.run.json_summary, *json_summary, "argv: {argv:?}");
+        assert_eq!(bench.wants_full_json(), *full_json, "argv: {argv:?}");
+    }
 }
 
 #[test]

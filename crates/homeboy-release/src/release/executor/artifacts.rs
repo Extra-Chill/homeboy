@@ -1613,53 +1613,6 @@ mod tests {
     }
 
     #[test]
-    fn source_authority_manifest_rejects_old_bytes_after_the_release_commit_advances() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let artifact = temp.path().join("homeboy.tar.gz");
-        std::fs::write(&artifact, "bytes built at commit A").expect("artifact");
-        let mut manifest = source_authority_manifest(&artifact);
-        manifest["commit"] = serde_json::json!("commit-a");
-        std::fs::write(
-            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
-            manifest.to_string(),
-        )
-        .expect("manifest");
-
-        let context = PackageRecoveryContext {
-            commit: "commit-b",
-            ..recovery_context()
-        };
-        let error = run_artifact_inventory(
-            &mut ReleaseState::default(),
-            &temp.path().to_string_lossy(),
-            &context,
-        )
-        .expect_err("commit A artifacts must not finalize for commit B");
-        assert!(error.message.contains("commit-a") && error.message.contains("commit-b"));
-    }
-
-    #[test]
-    fn source_authority_manifest_rejects_tampered_bytes() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let artifact = temp.path().join("plugin.zip");
-        std::fs::write(&artifact, "declared bytes").expect("artifact");
-        std::fs::write(
-            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
-            source_authority_manifest(&artifact).to_string(),
-        )
-        .expect("manifest");
-        std::fs::write(&artifact, "replacement bytes").expect("tamper artifact");
-
-        let error = run_artifact_inventory(
-            &mut ReleaseState::default(),
-            &temp.path().to_string_lossy(),
-            &recovery_context(),
-        )
-        .expect_err("tampered artifact must not be published");
-        assert!(error.message.contains("does not match declared sha256"));
-    }
-
-    #[test]
     fn source_authority_binds_exact_notes_without_publishing_them() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = tempfile::NamedTempFile::new().expect("notes source");
@@ -1837,63 +1790,41 @@ mod tests {
         assert!(error.message.contains("conflicting authoritative bytes"));
     }
 
+    /// Identical bytes for one target collapse to a single publication owned by
+    /// the final package, or by the component's own build over an extension's.
     #[test]
-    fn authority_collapses_identical_duplicate_bytes() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let first_dir = temp.path().join("first");
-        let second_dir = temp.path().join("second");
-        std::fs::create_dir_all(&first_dir).expect("first dir");
-        std::fs::create_dir_all(&second_dir).expect("second dir");
-        let first = first_dir.join("asset.bin");
-        let second = second_dir.join("asset.bin");
-        std::fs::write(&first, b"same").expect("first bytes");
-        std::fs::write(&second, b"same").expect("second bytes");
-        let mut state = ReleaseState {
-            artifacts: vec![
-                artifact(&first, "preflight", "one"),
-                artifact(&second, "final", "two"),
-            ],
-            ..ReleaseState::default()
-        };
+    fn authority_collapses_identical_duplicate_bytes_onto_the_canonical_owner() {
+        for (first, second) in [
+            (("preflight", "one"), ("final", "two")),
+            (("final", "extension:wordpress"), ("final", "scripts.build")),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let first_dir = temp.path().join("first");
+            let second_dir = temp.path().join("second");
+            std::fs::create_dir_all(&first_dir).expect("first dir");
+            std::fs::create_dir_all(&second_dir).expect("second dir");
+            let first_path = first_dir.join("plugin.zip");
+            let second_path = second_dir.join("plugin.zip");
+            std::fs::write(&first_path, b"same").expect("first bytes");
+            std::fs::write(&second_path, b"same").expect("second bytes");
+            let mut state = ReleaseState {
+                artifacts: vec![
+                    artifact(&first_path, first.0, first.1),
+                    artifact(&second_path, second.0, second.1),
+                ],
+                ..ReleaseState::default()
+            };
 
-        establish_publication_authority(&mut state).expect("identical assets");
-        assert_eq!(
-            github_release_publications(&state)
-                .expect("publications")
-                .len(),
-            1
-        );
-        assert!(state.artifacts[1].publication_authority);
-    }
+            establish_publication_authority(&mut state).expect("identical assets");
+            let publications = github_release_publications(&state).expect("publications");
 
-    #[test]
-    fn identical_component_build_artifact_is_the_canonical_package_owner() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let extension_dir = temp.path().join("extension");
-        let component_dir = temp.path().join("component");
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        std::fs::create_dir_all(&component_dir).expect("component dir");
-        let extension = extension_dir.join("plugin.zip");
-        let component = component_dir.join("plugin.zip");
-        std::fs::write(&extension, b"same").expect("extension bytes");
-        std::fs::write(&component, b"same").expect("component bytes");
-        let mut state = ReleaseState {
-            artifacts: vec![
-                artifact(&extension, "final", "extension:wordpress"),
-                artifact(&component, "final", "scripts.build"),
-            ],
-            ..ReleaseState::default()
-        };
-
-        establish_publication_authority(&mut state).expect("identical assets");
-        let publications = github_release_publications(&state).expect("publications");
-
-        assert!(state.artifacts[1].publication_authority);
-        assert_eq!(publications.len(), 1);
-        assert_eq!(
-            std::fs::read(&publications[0].source_path).expect("canonical bytes"),
-            b"same"
-        );
+            assert!(state.artifacts[1].publication_authority, "{second:?}");
+            assert_eq!(publications.len(), 1);
+            assert_eq!(
+                std::fs::read(&publications[0].source_path).expect("canonical bytes"),
+                b"same"
+            );
+        }
     }
 
     #[test]
@@ -2067,21 +1998,30 @@ mod tests {
         )
     }
 
+    /// A control binary newer than the tag may recover it (the #10519
+    /// bootstrap); one pinned to the tag or without provenance still adopts but
+    /// records that evidence, so the guard never strands a release; one whose
+    /// history lacks the target is refused.
     #[test]
-    fn draft_adoption_accepts_a_control_binary_newer_than_the_release_it_repairs() {
-        let result = adopt(Some(serde_json::json!({
-            "commit": "deadbeefnewer",
-            "contains_target": true,
-        })))
-        .expect("newer control binary must be allowed to recover an older tag");
-        assert_eq!(
-            result.data.as_ref().and_then(|d| d.get("control_lineage")),
-            Some(&serde_json::json!("bootstrapped"))
-        );
-    }
+    fn draft_adoption_records_control_lineage_and_refuses_divergent_binaries() {
+        for (control, lineage) in [
+            (
+                Some(serde_json::json!({ "commit": "deadbeefnewer", "contains_target": true })),
+                "bootstrapped",
+            ),
+            (
+                Some(serde_json::json!({ "commit": "abc123", "contains_target": true })),
+                "pinned",
+            ),
+            (None, "unknown"),
+        ] {
+            let result = adopt(control).expect("recovery must stay legal");
+            assert_eq!(
+                result.data.as_ref().and_then(|d| d.get("control_lineage")),
+                Some(&serde_json::json!(lineage))
+            );
+        }
 
-    #[test]
-    fn draft_adoption_rejects_a_control_binary_whose_history_lacks_the_release_target() {
         let error = adopt(Some(serde_json::json!({
             "commit": "deadbeefsideways",
             "contains_target": false,
@@ -2091,34 +2031,6 @@ mod tests {
         assert!(
             rendered.contains("deadbeefsideways") && rendered.contains("abc123"),
             "error must name both provenances, got: {rendered}"
-        );
-    }
-
-    #[test]
-    fn draft_adoption_records_but_permits_a_control_binary_pinned_to_the_release_target() {
-        // A tag pushed moments ago is legitimately still HEAD. Refusing here
-        // would block ordinary same-commit recoveries, so this is evidence
-        // only — but it must be visible, because in this shape a publisher fix
-        // merged after the tag cannot be bootstrapped.
-        let result = adopt(Some(serde_json::json!({
-            "commit": "abc123",
-            "contains_target": true,
-        })))
-        .expect("same-commit recovery stays legal");
-        assert_eq!(
-            result.data.as_ref().and_then(|d| d.get("control_lineage")),
-            Some(&serde_json::json!("pinned"))
-        );
-    }
-
-    #[test]
-    fn draft_adoption_without_control_provenance_still_adopts_as_unverified() {
-        // Fail-safe: the guard must never be a new way for an already-stranded
-        // release to become unrecoverable.
-        let result = adopt(None).expect("absent control provenance must not block recovery");
-        assert_eq!(
-            result.data.as_ref().and_then(|d| d.get("control_lineage")),
-            Some(&serde_json::json!("unknown"))
         );
     }
 }

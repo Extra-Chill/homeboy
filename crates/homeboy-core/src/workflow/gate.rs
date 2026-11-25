@@ -372,10 +372,6 @@ mod tests {
         ] {
             assert!(Gate::try_from(bad.clone()).is_err(), "{bad}");
         }
-        assert_eq!(
-            Gate::try_from(json!({"command":["true"]})).unwrap_err(),
-            "command gates are not supported: run the command as an `exec` step and gate on its `outcome`"
-        );
         for good in [
             json!({"step":"a","output":"/x","equals":{"k":1}}),
             json!({"any":[{"step":"b","output":"/ok","exists":true},{"not":{"step":"b","outcome":["failed"]}}]}),

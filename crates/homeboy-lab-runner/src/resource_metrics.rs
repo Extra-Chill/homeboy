@@ -1541,6 +1541,10 @@ mod tests {
         assert_eq!(payload["process"]["root_pid"], 1234);
         assert_eq!(payload["process"]["resources"]["process_count"], 3);
         assert_eq!(payload["process"]["resources"]["child_process_count"], 2);
+
+        let without_resources = runner_command_heartbeat_data(Duration::from_millis(5), 9, None);
+        assert_eq!(without_resources["process"]["root_pid"], 9);
+        assert!(without_resources["process"]["resources"].is_null());
     }
 
     #[test]
@@ -1703,16 +1707,6 @@ mod tests {
             "runner cancel left TERM-resistant descendant {descendant_pid}"
         );
         assert!(!homeboy_core::process::pid_is_running(root_pid));
-    }
-
-    #[test]
-    fn heartbeat_payload_allows_missing_resource_summary() {
-        let payload = runner_command_heartbeat_data(Duration::from_millis(5), 9, None);
-
-        assert_eq!(payload["phase"], "heartbeat");
-        assert_eq!(payload["elapsed_ms"], 5);
-        assert_eq!(payload["process"]["root_pid"], 9);
-        assert!(payload["process"]["resources"].is_null());
     }
 
     #[cfg(unix)]
@@ -2016,28 +2010,23 @@ mod tests {
     }
 
     #[test]
-    fn resource_guard_classifies_rss_limit_exceeded() {
-        let violation = classify_resource_guard_violation(17, 3, 16, 128).expect("rss violation");
+    fn resource_guard_classifies_rss_and_process_count_violations() {
+        let rss = classify_resource_guard_violation(17, 3, 16, 128).expect("rss violation");
+        assert_eq!(rss.reason, "rss_limit_exceeded");
+        assert_eq!(rss.rss_bytes, 17);
+        assert_eq!(rss.rss_limit_bytes, 16);
+        assert_eq!(rss.process_count, 3);
 
-        assert_eq!(violation.reason, "rss_limit_exceeded");
-        assert_eq!(violation.rss_bytes, 17);
-        assert_eq!(violation.rss_limit_bytes, 16);
-        assert_eq!(violation.process_count, 3);
-    }
-
-    #[test]
-    fn resource_guard_classifies_process_count_limit_exceeded() {
-        let violation =
+        let processes =
             classify_resource_guard_violation(8, 129, 16, 128).expect("process count violation");
+        assert_eq!(processes.reason, "process_count_limit_exceeded");
+        assert_eq!(processes.process_count, 129);
+        assert_eq!(processes.process_count_limit, 128);
 
-        assert_eq!(violation.reason, "process_count_limit_exceeded");
-        assert_eq!(violation.process_count, 129);
-        assert_eq!(violation.process_count_limit, 128);
-    }
-
-    #[test]
-    fn resource_guard_allows_zero_limits_to_disable_guard() {
-        assert!(classify_resource_guard_violation(u64::MAX, u64::MAX, 0, 0).is_none());
+        assert!(
+            classify_resource_guard_violation(u64::MAX, u64::MAX, 0, 0).is_none(),
+            "zero limits disable the guard"
+        );
     }
 
     #[test]
@@ -2097,29 +2086,20 @@ mod tests {
     }
 
     #[test]
-    fn resource_guard_keeps_a_limit_when_capacity_is_smaller_than_headroom() {
-        let limits = resolved_rss_limit(Some(2 * 1024 * 1024 * 1024), None);
+    fn rss_limit_resolution_covers_small_hosts_missing_capacity_and_overrides() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let small_host = resolved_rss_limit(Some(2 * GIB), None);
+        assert_eq!(small_host.rss_limit_bytes, GIB);
+        assert_eq!(small_host.source, "active_load_aware");
 
-        assert_eq!(limits.rss_limit_bytes, 1024 * 1024 * 1024);
-        assert_eq!(limits.source, "active_load_aware");
-    }
+        let unknown_capacity = resolved_rss_limit(None, None);
+        assert_eq!(unknown_capacity.rss_limit_bytes, FALLBACK_RSS_LIMIT_BYTES);
+        assert_eq!(unknown_capacity.source, "fallback");
 
-    #[test]
-    fn resource_guard_uses_fallback_when_memory_capacity_is_unavailable() {
-        let limits = resolved_rss_limit(None, None);
-
-        assert_eq!(limits.rss_limit_bytes, FALLBACK_RSS_LIMIT_BYTES);
-        assert_eq!(limits.source, "fallback");
-    }
-
-    #[test]
-    fn resource_guard_explicit_rss_limit_takes_precedence_over_active_load() {
-        let limits =
-            resolved_rss_limit(Some(96 * 1024 * 1024 * 1024), Some(7 * 1024 * 1024 * 1024));
-
-        assert_eq!(limits.rss_limit_bytes, 7 * 1024 * 1024 * 1024);
-        assert_eq!(limits.source, "explicit_override");
-        assert_eq!(limits.aggregate_rss_budget_bytes, None);
+        let explicit = resolved_rss_limit(Some(96 * GIB), Some(7 * GIB));
+        assert_eq!(explicit.rss_limit_bytes, 7 * GIB);
+        assert_eq!(explicit.source, "explicit_override");
+        assert_eq!(explicit.aggregate_rss_budget_bytes, None);
     }
 
     fn resolved(limit: u64, ceiling: u64, source: &str) -> ResolvedProcessCountLimit {
@@ -2132,23 +2112,17 @@ mod tests {
     }
 
     #[test]
-    fn default_process_limit_and_ceiling_scale_with_parallelism() {
-        assert_eq!(
-            resolve_process_count_limit(32, None, None),
-            resolved(512, 1024, "default")
-        );
-        assert_eq!(
-            resolve_process_count_limit(12, None, None),
-            resolved(192, 384, "default")
-        );
-    }
-
-    #[test]
-    fn default_process_limit_and_ceiling_keep_their_floors_on_small_hosts() {
-        for parallelism in [1, 4, 8] {
+    fn default_process_limit_and_ceiling_scale_with_parallelism_above_their_floors() {
+        for (parallelism, limit, ceiling) in [
+            (32, 512, 1024),
+            (12, 192, 384),
+            (8, 128, 256),
+            (1, 128, 256),
+        ] {
             assert_eq!(
                 resolve_process_count_limit(parallelism, None, None),
-                resolved(128, 256, "default")
+                resolved(limit, ceiling, "default"),
+                "parallelism={parallelism}"
             );
         }
     }

@@ -771,30 +771,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn glob_matches_design_distribution_artifacts() {
-        let pattern = compile_glob("design-distribution-*").expect("compile glob");
-        assert!(pattern.matches("design-distribution-koji"));
-        assert!(pattern.matches("design-distribution-spore-ledger"));
-        assert!(!pattern.matches("ssi-validation-koji"));
-    }
-
-    #[test]
-    fn deterministic_run_id_is_stable() {
-        let a = deterministic_run_id("example-org/wc-site-generator", 12345);
-        let b = deterministic_run_id("example-org/wc-site-generator", 12345);
-        assert_eq!(a, b);
-        let c = deterministic_run_id("example-org/wc-site-generator", 12346);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn deterministic_artifact_id_is_stable_per_filename() {
+    fn deterministic_ids_are_stable_for_idempotent_reimport() {
         let run_id = deterministic_run_id("example-org/wc-site-generator", 12345);
-        let a = deterministic_artifact_id(&run_id, 9000, "design-distribution.json");
-        let b = deterministic_artifact_id(&run_id, 9000, "design-distribution.json");
-        assert_eq!(a, b);
-        let c = deterministic_artifact_id(&run_id, 9000, "ssi-validation.json");
-        assert_ne!(a, c);
+        assert_eq!(
+            run_id,
+            deterministic_run_id("example-org/wc-site-generator", 12345)
+        );
+        assert_ne!(
+            run_id,
+            deterministic_run_id("example-org/wc-site-generator", 12346)
+        );
+
+        let artifact_id = deterministic_artifact_id(&run_id, 9000, "design-distribution.json");
+        assert_eq!(
+            artifact_id,
+            deterministic_artifact_id(&run_id, 9000, "design-distribution.json")
+        );
+        assert_ne!(
+            artifact_id,
+            deterministic_artifact_id(&run_id, 9000, "ssi-validation.json")
+        );
     }
 
     #[test]

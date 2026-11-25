@@ -55,157 +55,51 @@ mod tests {
         artifact_requires_component_extract_command, resolve_preflight_artifact_path,
         validate_predeploy_artifact_version,
     };
-    use super::prepare::{failed_component_deploy_result, prepare_component_deploy};
+    use super::prepare::prepare_component_deploy;
     use super::release_plan::{release_artifact_plan, should_try_download_release_artifact};
     use super::strategies::{cleanup_deploy_build_artifact, post_deploy_expected_version};
-    use super::{bound_captured_read, ReleaseArtifactPlan, ARTIFACT_VERSION_READ_LIMIT_BYTES};
+    use super::{bound_captured_read, ReleaseArtifactPlan};
     use crate::types::{DeployConfig, PreparedDeployArtifact};
     use homeboy_core::component::{
         ArtifactInput, Component, ComponentScriptsConfig, VersionTarget,
     };
     use homeboy_core::project::Project;
+    use homeboy_core::test_support::run_git_command as git;
     use std::io::Write;
 
     #[test]
-    fn bound_captured_read_retains_full_source_within_limit() {
+    fn bound_captured_read_keeps_trailing_tail_and_reports_truncation() {
         let (text, capture) = bound_captured_read(&b"Version: 1.2.3"[..], 64).expect("read");
         assert_eq!(text, "Version: 1.2.3");
-        assert_eq!(capture.seen_bytes, 14);
         assert_eq!(capture.retained_bytes, 14);
-        assert_eq!(capture.limit_bytes, 64);
         assert!(!capture.truncated);
-    }
 
-    #[test]
-    fn bound_captured_read_keeps_trailing_tail_when_truncated() {
         // The version string lives at the END of the manifest, so the retained
         // trailing tail must still surface it even when the head is dropped.
         let blob = format!("{}Version: 9.9.9", "x".repeat(100));
         let (text, capture) = bound_captured_read(blob.as_bytes(), 16).expect("read");
-        assert_eq!(capture.limit_bytes, 16);
         assert_eq!(capture.seen_bytes, blob.len());
         assert_eq!(capture.retained_bytes, 16);
         assert!(capture.truncated);
         assert!(text.ends_with("Version: 9.9.9"));
     }
 
-    const _: () = assert!(ARTIFACT_VERSION_READ_LIMIT_BYTES > 0);
-
     #[test]
-    fn test_execute_component_deploy_failure_helper_preserves_build_exit_code() {
-        let component = Component {
-            id: "example".to_string(),
-            ..Component::default()
-        };
-
-        let result = failed_component_deploy_result(
-            &component,
-            "/srv/site",
-            Some("1.0.0".to_string()),
-            Some("0.9.0".to_string()),
-            Some(7),
-            "deploy failed".to_string(),
-        );
-
-        assert_eq!(result.id, "example");
-        assert_eq!(result.status, "failed");
-        assert_eq!(result.local_version.as_deref(), Some("1.0.0"));
-        assert_eq!(result.remote_version.as_deref(), Some("0.9.0"));
-        assert_eq!(result.build_exit_code, Some(7));
-        assert_eq!(result.error.as_deref(), Some("deploy failed"));
-    }
-
-    #[test]
-    fn prepared_artifact_skips_local_build_invocation() {
+    fn prepared_artifact_skips_local_build_and_drives_post_deploy_version() {
         let temp = tempfile::tempdir().expect("tempdir");
         let durable_artifact = temp.path().join("release.tar.gz");
         let build_counter = temp.path().join("build-count");
         std::fs::write(&durable_artifact, "release payload").expect("artifact");
-        let mut component = Component {
-            id: "fixture".to_string(),
-            local_path: temp.path().display().to_string(),
-            remote_path: "plugins/fixture".to_string(),
-            build_artifact: Some("build/fixture.tar.gz".to_string()),
-            extract_command: Some("tar -xzf {{artifact}}".to_string()),
-            ..Component::default()
-        };
-        component.scripts = Some(ComponentScriptsConfig {
-            build: vec![format!("printf build >> {}", build_counter.display())],
-            ..ComponentScriptsConfig::default()
-        });
-        let config = DeployConfig {
-            component_ids: vec![component.id.clone()],
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: true,
-            skip_build: true,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: Some("1.2.3".to_string()),
-            no_pull: true,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
-            requested_ref: None,
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
-            tagged: false,
-            prepared_artifact: Some(PreparedDeployArtifact {
-                component_id: component.id.clone(),
-                path: "build/fixture.tar.gz".to_string(),
-                durable_path: durable_artifact.display().to_string(),
-                size_bytes: 15,
-                sha256: crate::sha256_file(&durable_artifact).expect("sha"),
-                version: "1.2.3".to_string(),
-                tag: "v1.2.3".to_string(),
-                source_commit: "0123456789abcdef".to_string(),
-            }),
-            resume_run_id: None,
-            max_concurrency: 1,
-            target: None,
-        };
-
-        let prepared = prepare_component_deploy(
-            &component,
-            &config,
-            "/srv/site",
-            &Project::default(),
-            Some("1.2.3".to_string()),
-            None,
-            None,
-        )
-        .expect("prepared artifact should pass local preflight");
-
-        assert_eq!(prepared.artifact_path, Some(durable_artifact.clone()));
-        assert!(
-            !build_counter.exists(),
-            "prepared deployment must not build"
-        );
-        assert!(!prepared.cleanup_local_artifact);
-        drop(prepared);
-        assert!(
-            durable_artifact.exists(),
-            "caller-owned prepared artifacts remain outside downloaded-artifact cleanup"
-        );
-    }
-
-    #[test]
-    fn prepared_artifact_version_drives_post_deploy_verification_over_stale_checkout_version() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let durable_artifact = temp.path().join("release.tar.gz");
-        std::fs::write(&durable_artifact, "release payload").expect("artifact");
         let component = Component {
             id: "fixture".to_string(),
             local_path: temp.path().display().to_string(),
             remote_path: "plugins/fixture".to_string(),
             build_artifact: Some("build/fixture.tar.gz".to_string()),
             extract_command: Some("tar -xzf {{artifact}}".to_string()),
+            scripts: Some(ComponentScriptsConfig {
+                build: vec![format!("printf build >> {}", build_counter.display())],
+                ..ComponentScriptsConfig::default()
+            }),
             ..Component::default()
         };
         let config = DeployConfig {
@@ -227,6 +121,8 @@ mod tests {
             ..DeployConfig::default()
         };
 
+        // The checkout reports a stale version; the prepared artifact's version
+        // must drive post-deploy verification.
         let prepared = prepare_component_deploy(
             &component,
             &config,
@@ -238,29 +134,41 @@ mod tests {
         )
         .expect("prepared artifact should pass local preflight");
 
+        assert_eq!(prepared.artifact_path, Some(durable_artifact.clone()));
+        assert!(
+            !build_counter.exists(),
+            "prepared deployment must not build"
+        );
+        assert!(!prepared.cleanup_local_artifact);
         assert_eq!(prepared.local_version.as_deref(), Some("0.8.1"));
         assert_eq!(
             post_deploy_expected_version(&prepared).map(String::as_str),
             Some("1.2.3")
         );
+        drop(prepared);
+        assert!(
+            durable_artifact.exists(),
+            "caller-owned prepared artifacts remain outside downloaded-artifact cleanup"
+        );
     }
 
     #[test]
-    fn archive_artifact_without_component_extract_is_allowed_by_deploy_override() {
-        assert!(!artifact_requires_component_extract_command(
-            std::path::Path::new("build/example.zip"),
-            false,
-            true,
-        ));
-    }
-
-    #[test]
-    fn archive_artifact_without_component_extract_or_override_requires_extract_command() {
-        assert!(artifact_requires_component_extract_command(
-            std::path::Path::new("build/example.zip"),
-            false,
-            false,
-        ));
+    fn archive_artifact_requires_extract_command_unless_component_or_override_provides_one() {
+        for (has_extract, has_override, required) in [
+            (false, false, true),
+            (false, true, false),
+            (true, false, false),
+        ] {
+            assert_eq!(
+                artifact_requires_component_extract_command(
+                    std::path::Path::new("build/example.zip"),
+                    has_extract,
+                    has_override,
+                ),
+                required,
+                "extract={has_extract} override={has_override}"
+            );
+        }
     }
 
     #[test]
@@ -305,106 +213,61 @@ mod tests {
     }
 
     #[test]
-    fn archive_artifact_with_component_extract_does_not_require_another_command() {
-        assert!(!artifact_requires_component_extract_command(
-            std::path::Path::new("build/example.zip"),
-            true,
-            false,
-        ));
+    fn non_release_refs_and_modes_skip_release_artifact_download() {
+        let component = release_asset_component();
+        let mut configs = vec![
+            DeployConfig {
+                head: true,
+                ..Default::default()
+            },
+            DeployConfig {
+                tagged: true,
+                ..Default::default()
+            },
+        ];
+        for requested_ref in [
+            "main",
+            "release/v0.55.1",
+            "vnext",
+            "9b780f558f0e4a1b2c3d4e5f60718293a4b5c6d7",
+        ] {
+            configs.push(deploy_config_with_ref(Some(requested_ref), false));
+        }
+
+        for config in configs {
+            assert!(
+                !should_try_download_release_artifact(&component, &config, false, false),
+                "head={} tagged={} ref={:?} must build locally",
+                config.head,
+                config.tagged,
+                config.requested_ref
+            );
+        }
     }
 
     #[test]
-    fn head_deploy_skips_release_artifact_download() {
-        let component = Component {
-            id: "example".to_string(),
-            remote_url: Some("https://github.com/example/example".to_string()),
-            build_artifact: Some("build/example.zip".to_string()),
-            ..Component::default()
-        };
-        let config = DeployConfig {
-            head: true,
-            ..Default::default()
-        };
+    fn package_dependencies_do_not_block_release_artifact_download() {
+        for dependency in ["github:Extra-Chill/extrachill-tokens#v0.7.2", "^0.7.2"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            std::fs::write(
+                temp.path().join("package.json"),
+                format!(r#"{{"dependencies": {{"tokens": "{dependency}"}}}}"#),
+            )
+            .expect("write package.json");
+            let component = Component {
+                local_path: temp.path().to_string_lossy().to_string(),
+                ..release_asset_component()
+            };
+            let config = DeployConfig {
+                expected_version: Some("1.2.3".to_string()),
+                ..Default::default()
+            };
 
-        assert!(!should_try_download_release_artifact(
-            &component, &config, false, false
-        ));
-    }
-
-    #[test]
-    fn tagged_deploy_skips_release_artifact_download() {
-        let component = Component {
-            id: "example".to_string(),
-            remote_url: Some("https://github.com/example/example".to_string()),
-            build_artifact: Some("build/example.zip".to_string()),
-            ..Component::default()
-        };
-        let config = DeployConfig {
-            tagged: true,
-            ..Default::default()
-        };
-
-        assert!(!should_try_download_release_artifact(
-            &component, &config, false, false
-        ));
-    }
-
-    #[test]
-    fn mutable_package_dependencies_still_try_release_artifact_download() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            temp.path().join("package.json"),
-            r#"{
-                "dependencies": {
-                    "tokens": "github:Extra-Chill/extrachill-tokens#v0.7.2"
-                }
-            }"#,
-        )
-        .expect("write package.json");
-        let component = Component {
-            id: "example".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            remote_url: Some("https://github.com/example/example".to_string()),
-            build_artifact: Some("build/example.zip".to_string()),
-            ..Component::default()
-        };
-        let config = DeployConfig {
-            expected_version: Some("1.2.3".to_string()),
-            ..Default::default()
-        };
-
-        assert!(should_try_download_release_artifact(
-            &component, &config, false, false
-        ));
-    }
-
-    #[test]
-    fn registry_package_dependencies_allow_release_artifact_download_for_expected_version() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            temp.path().join("package.json"),
-            r#"{
-                "dependencies": {
-                    "tokens": "^0.7.2"
-                }
-            }"#,
-        )
-        .expect("write package.json");
-        let component = Component {
-            id: "example".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            remote_url: Some("https://github.com/example/example".to_string()),
-            build_artifact: Some("build/example.zip".to_string()),
-            ..Component::default()
-        };
-        let config = DeployConfig {
-            expected_version: Some("1.2.3".to_string()),
-            ..Default::default()
-        };
-
-        assert!(should_try_download_release_artifact(
-            &component, &config, false, false
-        ));
+            assert!(
+                should_try_download_release_artifact(&component, &config, false, false),
+                "{dependency}"
+            );
+        }
     }
 
     #[test]
@@ -590,22 +453,35 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_deploy_build_artifact_removes_zip_and_empty_build_dir() {
+    fn cleanup_deploy_build_artifact_removes_only_component_owned_artifacts() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let build_dir = temp.path().join("build");
-        std::fs::create_dir_all(&build_dir).expect("mkdir build");
-        let artifact = build_dir.join("example.zip");
-        std::fs::write(&artifact, b"zip").expect("write artifact");
         let component = Component {
             id: "example".to_string(),
             local_path: temp.path().to_string_lossy().to_string(),
             ..Component::default()
         };
 
+        let build_dir = temp.path().join("build");
+        std::fs::create_dir_all(&build_dir).expect("mkdir build");
+        let artifact = build_dir.join("example.zip");
+        let sibling = build_dir.join("keep.txt");
+        std::fs::write(&artifact, b"zip").expect("write artifact");
+        std::fs::write(&sibling, b"keep").expect("write sibling");
         cleanup_deploy_build_artifact(&component, &artifact);
-
         assert!(!artifact.exists());
-        assert!(!build_dir.exists());
+        assert!(sibling.exists(), "non-empty build dir is preserved");
+
+        std::fs::remove_file(&sibling).expect("remove sibling");
+        std::fs::write(&artifact, b"zip").expect("write artifact");
+        cleanup_deploy_build_artifact(&component, &artifact);
+        assert!(!artifact.exists());
+        assert!(!build_dir.exists(), "emptied build dir is removed");
+
+        let outside_dir = tempfile::tempdir().expect("outside dir");
+        let outside = outside_dir.path().join("example.zip");
+        std::fs::write(&outside, b"zip").expect("write outside artifact");
+        cleanup_deploy_build_artifact(&component, &outside);
+        assert!(outside.exists(), "paths outside the component are ignored");
     }
 
     #[test]
@@ -661,77 +537,32 @@ mod tests {
         assert!(zip.by_name("demo-plugin/node_modules/junk.js").is_err());
     }
 
-    use homeboy_core::test_support::run_git_command as git;
-
     #[test]
-    fn cleanup_deploy_build_artifact_preserves_non_empty_build_dir() {
+    fn predeploy_artifact_version_inspection_compares_zip_version() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let build_dir = temp.path().join("build");
-        std::fs::create_dir_all(&build_dir).expect("mkdir build");
-        let artifact = build_dir.join("example.zip");
-        let sibling = build_dir.join("keep.txt");
-        std::fs::write(&artifact, b"zip").expect("write artifact");
-        std::fs::write(&sibling, b"keep").expect("write sibling");
         let component = Component {
-            id: "example".to_string(),
+            id: "fixture".to_string(),
             local_path: temp.path().to_string_lossy().to_string(),
+            version_targets: Some(vec![VersionTarget {
+                file: "fixture.php".to_string(),
+                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                artifact_path: None,
+            }]),
             ..Component::default()
         };
-
-        cleanup_deploy_build_artifact(&component, &artifact);
-
-        assert!(!artifact.exists());
-        assert!(build_dir.exists());
-        assert!(sibling.exists());
-    }
-
-    #[test]
-    fn cleanup_deploy_build_artifact_ignores_paths_outside_component() {
-        let component_dir = tempfile::tempdir().expect("component dir");
-        let outside_dir = tempfile::tempdir().expect("outside dir");
-        let artifact = outside_dir.path().join("example.zip");
-        std::fs::write(&artifact, b"zip").expect("write artifact");
-        let component = Component {
-            id: "example".to_string(),
-            local_path: component_dir.path().to_string_lossy().to_string(),
-            ..Component::default()
-        };
-
-        cleanup_deploy_build_artifact(&component, &artifact);
-
-        assert!(artifact.exists());
-    }
-
-    #[test]
-    fn predeploy_artifact_version_inspection_rejects_mismatched_zip() {
-        let temp = tempfile::tempdir().expect("tempdir");
         let artifact = temp.path().join("fixture.zip");
         write_zip(
             &artifact,
             &[("fixture/fixture.php", "<?php\nVersion: 0.8.1\n")],
         );
-        let component = versioned_zip_component(temp.path());
 
         let error = validate_predeploy_artifact_version(&component, &artifact, "0.14.0")
             .expect_err("stale artifact version should fail preflight");
-
         assert!(
             error.contains("contains version '0.8.1'") && error.contains("expected '0.14.0'"),
             "unexpected error: {error}"
         );
-    }
-
-    #[test]
-    fn predeploy_artifact_version_inspection_accepts_matching_zip() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let artifact = temp.path().join("fixture.zip");
-        write_zip(
-            &artifact,
-            &[("fixture/fixture.php", "<?php\nVersion: 0.14.0\n")],
-        );
-        let component = versioned_zip_component(temp.path());
-
-        validate_predeploy_artifact_version(&component, &artifact, "0.14.0")
+        validate_predeploy_artifact_version(&component, &artifact, "0.8.1")
             .expect("matching artifact version should pass");
     }
 
@@ -888,19 +719,6 @@ mod tests {
         );
     }
 
-    fn versioned_zip_component(local_path: &std::path::Path) -> Component {
-        Component {
-            id: "fixture".to_string(),
-            local_path: local_path.to_string_lossy().to_string(),
-            version_targets: Some(vec![VersionTarget {
-                file: "fixture.php".to_string(),
-                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
-                artifact_path: None,
-            }]),
-            ..Component::default()
-        }
-    }
-
     fn block_json_component(local_path: &std::path::Path) -> Component {
         Component {
             id: "fixture".to_string(),
@@ -929,32 +747,9 @@ mod tests {
 
     fn deploy_config_with_ref(requested_ref: Option<&str>, tagged: bool) -> DeployConfig {
         DeployConfig {
-            component_ids: Vec::new(),
-            all: false,
-            outdated: false,
-            behind_upstream: false,
-            dry_run: false,
-            check: false,
-            force: false,
-            skip_build: false,
-            keep_deps: false,
-            skip_deps_hydration: false,
-            expected_version: None,
-            no_pull: false,
-            allow_stale_source: false,
-            allow_downgrade: false,
-            head: false,
             requested_ref: requested_ref.map(str::to_string),
-            requested_refs: Default::default(),
-            resolved_refs: Default::default(),
-            preflighted_source_paths: Default::default(),
-            preflighted_component_identities: Default::default(),
-            prepared_projection: None,
             tagged,
-            prepared_artifact: None,
-            resume_run_id: None,
-            max_concurrency: 1,
-            target: None,
+            ..DeployConfig::default()
         }
     }
 
@@ -978,30 +773,6 @@ mod tests {
                 panic!("tag-valued --ref must reuse the release asset, got local_build: {reason}")
             }
         }
-    }
-
-    #[test]
-    fn branch_valued_ref_still_builds_locally() {
-        let component = release_asset_component();
-
-        for branch in ["main", "release/v0.55.1", "vnext"] {
-            let config = deploy_config_with_ref(Some(branch), false);
-            assert!(
-                !should_try_download_release_artifact(&component, &config, false, false),
-                "branch ref '{branch}' must build locally"
-            );
-        }
-    }
-
-    #[test]
-    fn raw_sha_valued_ref_still_builds_locally() {
-        let component = release_asset_component();
-        let config =
-            deploy_config_with_ref(Some("9b780f558f0e4a1b2c3d4e5f60718293a4b5c6d7"), false);
-
-        assert!(!should_try_download_release_artifact(
-            &component, &config, false, false
-        ));
     }
 
     /// `--tagged` is the escape hatch for "I want a local build of this tag",

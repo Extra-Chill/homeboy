@@ -494,26 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn extension_suggestions_are_manifest_driven() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]").expect("cargo marker");
-
-        let suggestions = extension_suggestions_from_manifests(
-            dir.path(),
-            &[
-                manifest("rust-like", serde_json::json!([{ "all": ["Cargo.toml"] }])),
-                manifest(
-                    "wordpress-like",
-                    serde_json::json!([{ "all": ["style.css", "functions.php"] }]),
-                ),
-            ],
-        );
-
-        assert_eq!(suggestions, vec!["rust-like"]);
-    }
-
-    #[test]
-    fn extension_suggestions_support_globs_and_ambiguity() {
+    fn extension_suggestions_are_manifest_driven_with_globs_and_ambiguity() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
         std::fs::write(dir.path().join("package.json"), "{}").expect("package marker");
@@ -529,6 +510,10 @@ mod tests {
                 manifest(
                     "typescript-like",
                     serde_json::json!([{ "all": ["package.json"], "any": ["src/**/*.ts"] }]),
+                ),
+                manifest(
+                    "wordpress-like",
+                    serde_json::json!([{ "all": ["style.css", "functions.php"] }]),
                 ),
             ],
         );
@@ -581,32 +566,11 @@ mod tests {
             init_git(&repo);
             write_component_registration(home.path(), "registered-component", &repo);
 
-            let (output, status) = run(Some(nested.to_str().expect("utf8 path"))).expect("context");
+            let (output, inventory, status) =
+                run_with_inventory(Some(nested.to_str().expect("utf8 path"))).expect("context");
 
             assert_eq!(status, 0);
             assert!(output.managed);
-            assert_eq!(output.matched_components, vec!["registered-component"]);
-            assert_eq!(
-                output.git_root,
-                Some(repo.canonicalize().unwrap().to_string_lossy().to_string())
-            );
-            assert_eq!(output.suggestion, None);
-        });
-    }
-
-    #[test]
-    fn context_snapshot_returns_the_inventory_used_for_matching() {
-        with_isolated_home(|home| {
-            let repo = home.path().join("registered-component");
-            std::fs::create_dir_all(&repo).expect("component dir");
-            init_git(&repo);
-            write_component_registration(home.path(), "registered-component", &repo);
-
-            let (output, inventory, status) =
-                run_with_inventory(Some(repo.to_str().expect("utf8 path")))
-                    .expect("context snapshot");
-
-            assert_eq!(status, 0);
             assert_eq!(output.matched_components, vec!["registered-component"]);
             assert!(
                 inventory
@@ -614,6 +578,11 @@ mod tests {
                     .any(|component| component.id == "registered-component"),
                 "snapshot retains the inventory record used for matching"
             );
+            assert_eq!(
+                output.git_root,
+                Some(repo.canonicalize().unwrap().to_string_lossy().to_string())
+            );
+            assert_eq!(output.suggestion, None);
         });
     }
 

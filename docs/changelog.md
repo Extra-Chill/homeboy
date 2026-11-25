@@ -4,6 +4,96 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.11] - 2026-11-25
+
+### Changed
+- prune and fold status, test, trace and upgrade command tests (wave 2, homeboy-cli 14/16)
+
+## [0.497.10] - 2026-11-25
+
+### Changed
+- prune and fold homeboy-cli tests (wave 2, homeboy-cli 16/16)
+- prune and fold homeboy-release executor and lifecycle tests (wave 2, homeboy-release 2/4)
+
+## [0.497.9] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in homeboy-cli commands slice 10/16
+- prune and fold low-value tests in homeboy-release (wave 2, 1/4)
+- prune and fold command utils tests (wave 2, homeboy-cli 15/16)
+- prune and fold low-value tests in homeboy-cli rig/runner slice 11/16
+- prune and fold homeboy-cli command tests (wave 2, slice 13/16)
+
+## [0.497.8] - 2026-11-25
+
+### Changed
+- prune and fold low-value homeboy-cli tests (wave 2, slice 1/16)
+
+## [0.497.7] - 2026-11-25
+
+### Changed
+- prune route, json_output, lint and command tests to behavioral regressions
+- prune fuzz, git and infra command tests file by file
+- prune and fold low-value runner/runs command tests (homeboy-cli 12/16)
+
+## [0.497.6] - 2026-11-25
+
+### Changed
+- prune low-value agent-task command tests (wave 2, homeboy-cli 4/16)
+- prune and fold agent_task command tests (wave 2, homeboy-cli 2/16)
+- prune and fold low-value tests in contract, control-plane, cook verdict, daemon, extension and fuzz command modules
+- prune and fold agent-task status/run/dispatch tests (wave 2, homeboy-cli 3/16)
+- prune and fold server, transfer, snapshot and sidecar tests (wave 2, slice 20/22)
+- prune and fold homeboy-core project/runner/runtime tests (wave 2, slice 19/22)
+- prune and fold low-value tests in ci, cleanup, component, config and contract commands
+- prune and fold low-value bench, agent-task summary and build tests (wave 2, slice 5/16)
+- prune and fold homeboy-core tests (wave 2, slice 21/22)
+- prune worktree and provider tests file by file
+
+## [0.497.5] - 2026-11-25
+
+### Changed
+- one collision check and one root builder for unmaterialized Cook admission
+- prune restating and duplicate tests in api_jobs and artifact modules
+
+## [0.497.4] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in homeboy-core slice 15/22
+
+## [0.497.3] - 2026-11-25
+
+### Changed
+- prune redundant lab/workspace tests, dead command-prefix input, and history comments
+- prune retired gate sentinel, test-only provider env wrapper and non-earning scheduler/gate tests
+- prune notify, observation and reconcile tests file-by-file
+- prune low-value trace, workload, gate and git tests file-by-file
+- prune duplicate and low-value tests in homeboy-core observation
+
+## [0.497.2] - 2026-11-25
+
+### Changed
+- prune redundant execution/connection tests and dead tunnel wrapper
+- prune and fold low-value tests in output, paths, preflight, plan, process and project component modules
+- prune and fold homeboy-core extension tests (wave 2, slice 11/22)
+- prune low-value tests in engine, evidence manifest, execution and bench modules
+- prune and fold low-value tests in extension test/trace modules
+- prune restating and duplicate tests in daemon, defaults, deps and cli_tool
+
+## [0.497.1] - 2026-11-25
+
+### Changed
+- prune dead code, low-value tests and history comments
+- prune agent_task_service retired compat, dead code and low-value tests
+- prune restating and duplicate cleanup and component tests
+- prune restating and duplicate tests in homeboy-core src/daemon
+- fold redundant staging, runner and resource tests; drop test-only cache wrapper
+- prune restating and duplicate tests in component, config, context, control-plane and daemon
+- prune restating and duplicate tests in homeboy-core cleanup modules
+- prune restating and duplicate tests in artifact, broker auth, build, capacity and CI profile modules
+- prune low-value top-level integration tests and orphan fixtures
+- prune history comments, dead code and restating tests from agent_task_lifecycle
+
 ## [0.497.0] - 2026-11-24
 
 ### Added

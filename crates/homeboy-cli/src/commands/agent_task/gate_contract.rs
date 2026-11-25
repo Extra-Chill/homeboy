@@ -504,17 +504,18 @@ mod tests {
     }
 
     #[test]
-    fn accepts_builtin_and_extension_commands() {
+    fn accepts_builtin_extension_and_global_flag_commands() {
         let result = validate_gate_contracts(
             [
                 "homeboy review lint --path .".to_string(),
                 "homeboy extension-quality project".to_string(),
+                "homeboy --placement local review lint".to_string(),
             ],
             None,
             &contract(),
         )
         .unwrap();
-        assert_eq!(result.gates.len(), 2);
+        assert_eq!(result.gates.len(), 3);
         assert!(result
             .gates
             .iter()
@@ -540,31 +541,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_command_and_version_skew() {
-        let error =
-            validate_gate_contracts(["homeboy lint component".to_string()], None, &contract())
-                .unwrap_err();
-        assert!(
-            error.message.contains("no `lint` command"),
-            "{}",
-            error.message
-        );
-        let error =
-            validate_gate_contracts(["homeboy review missing".to_string()], None, &contract())
-                .unwrap_err();
-        assert!(error.message.contains("no `review missing` command"));
+    fn rejects_missing_incomplete_and_version_skewed_commands() {
+        for (gate, expected) in [
+            ("homeboy lint component", "no `lint` command"),
+            ("homeboy review missing", "no `review missing` command"),
+            ("homeboy extension-quality", "incomplete"),
+        ] {
+            let error =
+                validate_gate_contracts([gate.to_string()], None, &contract()).expect_err(gate);
+            assert!(
+                error.message.contains(expected),
+                "{gate}: {}",
+                error.message
+            );
+        }
     }
 
+    /// External executables and compound shell are recorded unvalidated and
+    /// never executed during admission.
     #[test]
-    fn preserves_missing_external_executable_without_executing_it() {
-        let result = validate_gate_contracts(
-            ["missing-executable --would-run".to_string()],
-            None,
-            &contract(),
-        )
-        .unwrap();
-        assert_eq!(result.gates[0].kind, "external");
-        assert_eq!(result.gates[0].status, "unvalidated");
+    fn marks_external_and_compound_shell_gates_unvalidated() {
+        for gate in [
+            "missing-executable --would-run",
+            "homeboy review lint && echo done",
+        ] {
+            let result = validate_gate_contracts([gate.to_string()], None, &contract()).unwrap();
+            assert_eq!(result.gates[0].kind, "external", "{gate}");
+            assert_eq!(result.gates[0].status, "unvalidated", "{gate}");
+        }
     }
 
     #[test]
@@ -581,158 +585,69 @@ mod tests {
         assert_eq!(result.gates.len(), 1);
     }
 
+    /// #14963 / #14731: admission only refuses a gate it can prove cannot run.
+    /// A bare `review test` runs locally or defers recoverably; local-fallback
+    /// placements and `review lint` have no Lab-only route; a ready Lab runner
+    /// or a Lab-selected placement admits even a pinned gate.
     #[test]
-    fn accepts_documented_global_flags_before_the_subcommand() {
-        let result = validate_gate_contracts(
-            ["homeboy --placement local review lint".to_string()],
-            None,
-            &contract(),
-        )
-        .unwrap();
-        assert_eq!(result.gates[0].status, "syntax_valid");
-    }
-
-    #[test]
-    fn rejects_incomplete_homeboy_command() {
-        let error =
-            validate_gate_contracts(["homeboy extension-quality".to_string()], None, &contract())
-                .unwrap_err();
-        assert!(error.message.contains("incomplete"));
-    }
-
-    #[test]
-    fn marks_compound_shell_as_unvalidated() {
-        let result = validate_gate_contracts(
-            ["homeboy review lint && echo done".to_string()],
-            None,
-            &contract(),
-        )
-        .unwrap();
-        assert_eq!(result.gates[0].kind, "external");
-        assert_eq!(result.gates[0].status, "unvalidated");
-    }
-
-    /// #14963: a bare `review test` gate — Cook's own documented default
-    /// gate (`homeboy --help` quick start) — must be admitted under local
-    /// placement with no ready Lab runner. It either runs locally (the
-    /// common case) or gracefully defers to a recoverable `Deferred` gate
-    /// outcome (#14731); neither destroys the provider's work, so admission
-    /// must not preemptively refuse it.
-    #[test]
-    fn admits_a_bare_review_test_gate_when_local_is_selected_and_no_lab_runner_is_ready() {
-        reject_gates_unexecutable_under_placement(
-            ["homeboy review test homeboy".to_string()],
-            true,
-            false,
-        )
-        .expect("a bare review test gate can run locally or defer gracefully");
-    }
-
-    /// `--placement local` and `--placement lab-or-local` both admit a local
-    /// fallback, so neither hard-fails when Lab is unavailable.
-    #[test]
-    fn admits_a_review_test_gate_with_a_local_fallback_placement() {
-        for placement in ["local", "lab-or-local"] {
-            reject_gates_unexecutable_under_placement(
-                [format!(
-                    "homeboy review test homeboy --placement {placement}"
-                )],
+    fn admits_gates_that_can_run_or_defer_under_the_resolved_placement() {
+        for (gate, local_selected, lab_ready) in [
+            ("homeboy review test homeboy", true, false),
+            ("homeboy review test homeboy --placement local", true, false),
+            (
+                "homeboy review test homeboy --placement lab-or-local",
                 true,
                 false,
-            )
-            .unwrap_or_else(|_| panic!("--placement {placement} permits a local fallback"));
-        }
-    }
-
-    /// #14731 / #14963: admission must still refuse a `review test` gate that
-    /// *pins* an unavailable Lab route — `--placement lab` has no local
-    /// fallback and hard-fails at execution time instead of deferring, so
-    /// dispatching a provider first would still discard its work.
-    #[test]
-    fn rejects_a_review_test_gate_pinned_to_explicit_lab_placement_when_no_lab_runner_is_ready() {
-        let error = reject_gates_unexecutable_under_placement(
-            ["homeboy review test homeboy --placement lab".to_string()],
-            true,
-            false,
-        )
-        .expect_err("--placement lab has no local fallback and cannot execute locally");
-        assert!(error
-            .message
-            .contains("homeboy review test homeboy --placement lab"));
-        assert!(error
-            .message
-            .contains("cannot execute under the resolved local placement"));
-        assert!(error.message.contains("--placement lab"));
-    }
-
-    /// An explicit `--runner <id>` pin is equally unrecoverable: it requires
-    /// that specific runner, not just any ready Lab route.
-    #[test]
-    fn rejects_a_review_test_gate_pinned_to_an_explicit_runner_when_no_lab_runner_is_ready() {
-        let error = reject_gates_unexecutable_under_placement(
-            ["homeboy review test homeboy --runner homeboy-lab".to_string()],
-            true,
-            false,
-        )
-        .expect_err("a pinned --runner cannot execute locally");
-        assert!(error.message.contains("--runner homeboy-lab"));
-    }
-
-    /// `--runner=<id>` (equals form) must be recognized identically to the
-    /// space-separated form.
-    #[test]
-    fn recognizes_the_equals_form_of_a_pinned_runner_flag() {
-        let error = reject_gates_unexecutable_under_placement(
-            ["homeboy review test homeboy --runner=homeboy-lab".to_string()],
-            true,
-            false,
-        )
-        .expect_err("--runner=<id> is the same pin as the space-separated form");
-        assert!(error.message.contains("homeboy-lab"));
-    }
-
-    #[test]
-    fn admits_the_gate_when_a_lab_runner_is_ready() {
-        reject_gates_unexecutable_under_placement(
-            ["homeboy review test homeboy --placement lab".to_string()],
-            true,
-            true,
-        )
-        .expect("a ready Lab runner admits the same pinned gate");
-    }
-
-    #[test]
-    fn admits_the_gate_when_placement_selected_lab() {
-        reject_gates_unexecutable_under_placement(
-            ["homeboy review test homeboy --placement lab".to_string()],
-            false,
-            false,
-        )
-        .expect("a Lab-selected placement admits the gate regardless of this local-only check");
-    }
-
-    /// #14963: `review lint` is not a Lab-routed gate under this admission
-    /// check — it must be admitted under local placement with no ready Lab
-    /// runner just like a bare `review test`.
-    #[test]
-    fn admits_review_lint_gates_under_local_placement() {
-        for gate in [
-            "homeboy review lint --path .",
-            "homeboy review lint data-machine --changed-since origin/main",
+            ),
+            ("homeboy review lint --path .", true, false),
+            (
+                "homeboy review lint data-machine --changed-since origin/main",
+                true,
+                false,
+            ),
+            ("homeboy review test homeboy --placement lab", true, true),
+            ("homeboy review test homeboy --placement lab", false, false),
         ] {
-            reject_gates_unexecutable_under_placement([gate.to_string()], true, false)
-                .unwrap_or_else(|_| panic!("`{gate}` has no Lab-routed defer path to reject"));
+            reject_gates_unexecutable_under_placement(
+                [gate.to_string()],
+                local_selected,
+                lab_ready,
+            )
+            .unwrap_or_else(|_| panic!("`{gate}` ({local_selected}, {lab_ready}) is admitted"));
         }
     }
 
+    /// #14731 / #14963: a `review test` gate pinned to Lab (`--placement lab`
+    /// or `--runner`, either flag form) has no local fallback, so admission
+    /// refuses it before a provider's work could be discarded.
     #[test]
-    fn does_not_classify_unrelated_gates_as_lab_routed() {
-        reject_gates_unexecutable_under_placement(
-            ["homeboy review lint --path .".to_string()],
-            true,
-            false,
-        )
-        .expect("only a pinned `homeboy review test` gate is rejected here");
+    fn rejects_review_test_gates_pinned_to_an_unavailable_lab_route() {
+        for (gate, pin) in [
+            (
+                "homeboy review test homeboy --placement lab",
+                "--placement lab",
+            ),
+            (
+                "homeboy review test homeboy --runner homeboy-lab",
+                "--runner homeboy-lab",
+            ),
+            (
+                "homeboy review test homeboy --runner=homeboy-lab",
+                "homeboy-lab",
+            ),
+        ] {
+            let error = reject_gates_unexecutable_under_placement([gate.to_string()], true, false)
+                .expect_err(gate);
+            assert!(error.message.contains(gate), "{}", error.message);
+            assert!(error.message.contains(pin), "{}", error.message);
+            assert!(
+                error
+                    .message
+                    .contains("cannot execute under the resolved local placement"),
+                "{}",
+                error.message
+            );
+        }
     }
 
     #[test]

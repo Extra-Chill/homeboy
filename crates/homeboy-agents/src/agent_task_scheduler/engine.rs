@@ -205,10 +205,10 @@ impl AgentTaskScheduler {
     ///
     /// A reservation, its terminal record, and its cleanup record are one
     /// exactly-once sequence spanning a provider execution that can run for
-    /// minutes. They used to resolve the environment independently, so a
-    /// repoint mid-execution could reserve in one installation and record the
-    /// terminal state in another, leaving the reservation held. Resolving at
-    /// most once here makes that impossible (#7505).
+    /// minutes. Resolving the store at most once here keeps a repoint
+    /// mid-execution from reserving in one installation and recording the
+    /// terminal state in another, which would leave the reservation held
+    /// (#7505).
     fn durable_lifecycle_store(
         &self,
     ) -> homeboy_core::Result<&crate::agent_task_lifecycle::AgentTaskLifecycleStore> {
@@ -474,7 +474,7 @@ impl AgentTaskScheduler {
             .collect();
         let mut events = Vec::new();
         let execution_budget = plan.options.execution_budget.clone();
-        // Legacy retry policy remains an operator-facing cap; the execution
+        // The retry policy is an operator-facing cap; the execution
         // budget adds a shared hard ceiling across retries and rotations.
         let retry_max_attempts = plan.options.retry.max_attempts;
         let (tx, rx) = mpsc::channel();

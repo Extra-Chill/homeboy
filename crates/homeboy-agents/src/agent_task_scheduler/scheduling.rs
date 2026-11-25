@@ -1488,11 +1488,10 @@ impl AgentTaskScheduleSupport {
                 | AgentTaskOutcomeStatus::NoOp
                 | AgentTaskOutcomeStatus::Cancelled
         );
-        // Only name a budget that was actually reached. This used to fall
-        // through to `same_provider_retries` for *any* terminal failure, so a
-        // task that failed for unrelated reasons was still decorated with an
-        // authoritative "execution budget exhausted" diagnostic — which sends
-        // whoever reads it after the wrong cause (#11419).
+        // Only name a budget that was actually reached. A task that failed for
+        // unrelated reasons must not carry an authoritative "execution budget
+        // exhausted" diagnostic, which would send whoever reads it after the
+        // wrong cause (#11419).
         //
         // The rotation and retry arms additionally require that the budget was
         // consumed at all. A limit of zero was never available to exhaust, so
@@ -1713,9 +1712,8 @@ mod execution_budget_evidence_tests {
     }
 
     /// A failure that never approached a limit must not be labelled a budget
-    /// exhaustion. This previously fell through to `same_provider_retries` for
-    /// every terminal failure, which reported an authoritative cause that had
-    /// nothing to do with the actual one (#11419).
+    /// exhaustion; that would report an authoritative cause unrelated to the
+    /// actual one (#11419).
     #[test]
     fn a_failure_within_budget_is_not_labelled_exhausted() {
         let mut outcome = failed_outcome();

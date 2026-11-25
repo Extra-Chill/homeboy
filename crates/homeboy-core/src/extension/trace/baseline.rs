@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compare() {
+    fn compare_flags_span_regression_over_threshold() {
         let baseline = TraceBaseline {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             context_id: "studio".to_string(),
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compare_requires_min_delta_for_regression() {
+    fn compare_requires_min_delta_for_regression() {
         let baseline = TraceBaseline {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             context_id: "studio".to_string(),
@@ -405,17 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save_baseline() {
-        let temp = tempfile::tempdir().unwrap();
-        save_baseline(temp.path(), "studio", &results(100), None).unwrap();
-
-        let loaded = load_baseline(temp.path(), None).expect("baseline loads");
-        assert_eq!(loaded.metadata.spans[0].id, "submit_to_cli");
-        assert_eq!(loaded.known_fingerprints[0], "trace-span:submit_to_cli");
-    }
-
-    #[test]
-    fn test_compare_assertion_metric_regression() {
+    fn compare_assertion_metric_regression() {
         let baseline = TraceBaseline {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             context_id: "studio".to_string(),
@@ -450,10 +440,11 @@ mod tests {
     }
 
     #[test]
-    fn test_save_baseline_includes_assertions() {
+    fn save_baseline_round_trips_span_and_assertion_fingerprints() {
         let temp = tempfile::tempdir().unwrap();
+        assert!(load_baseline(temp.path(), None).is_none());
+
         let mut current = results(100);
-        current.span_results.clear();
         current.assertions.push(TraceAssertion {
             id: "no-invalid-grant".to_string(),
             status: TraceAssertionStatus::Pass,
@@ -467,17 +458,19 @@ mod tests {
         save_baseline(temp.path(), "studio", &current, None).unwrap();
 
         let loaded = load_baseline(temp.path(), None).expect("baseline loads");
-        assert!(loaded.metadata.spans.is_empty());
+        assert_eq!(loaded.metadata.spans[0].id, "submit_to_cli");
         assert_eq!(loaded.metadata.assertions[0].id, "no-invalid-grant");
         assert_eq!(loaded.metadata.assertions[0].metric, Some(0.0));
-        assert_eq!(
-            loaded.known_fingerprints[0],
-            "trace-assertion:no-invalid-grant"
-        );
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"trace-span:submit_to_cli".to_string()));
+        assert!(loaded
+            .known_fingerprints
+            .contains(&"trace-assertion:no-invalid-grant".to_string()));
     }
 
     #[test]
-    fn test_save_baseline_updates_assertion_metadata_for_same_fingerprint() {
+    fn save_baseline_updates_assertion_metadata_for_same_fingerprint() {
         let temp = tempfile::tempdir().unwrap();
         let mut current = results(100);
         current.span_results.clear();
@@ -500,12 +493,5 @@ mod tests {
 
         let loaded = load_baseline(temp.path(), None).expect("baseline loads");
         assert_eq!(loaded.metadata.assertions[0].metric, Some(0.0));
-    }
-
-    #[test]
-    fn test_load_baseline() {
-        let temp = tempfile::tempdir().unwrap();
-
-        assert!(load_baseline(temp.path(), Some("studio-rig")).is_none());
     }
 }

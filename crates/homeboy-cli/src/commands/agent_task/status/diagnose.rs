@@ -24,7 +24,11 @@ mod probe_tests {
     use super::*;
 
     #[test]
-    fn stalled_observation_returns_within_its_budget() {
+    fn probe_keeps_a_completed_result_and_abandons_a_stalled_one_within_budget() {
+        assert_eq!(
+            bounded_diagnostic_probe(DIAGNOSTIC_PROBE_TIMEOUT, || 42),
+            Some(42)
+        );
         let (release, stalled) = std::sync::mpsc::channel();
         let start = std::time::Instant::now();
         let result = bounded_diagnostic_probe(std::time::Duration::from_millis(20), move || {
@@ -33,14 +37,6 @@ mod probe_tests {
         assert!(result.is_none());
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
         release.send(()).unwrap();
-    }
-
-    #[test]
-    fn completed_observation_keeps_its_result() {
-        assert_eq!(
-            bounded_diagnostic_probe(DIAGNOSTIC_PROBE_TIMEOUT, || 42),
-            Some(42)
-        );
     }
 }
 
