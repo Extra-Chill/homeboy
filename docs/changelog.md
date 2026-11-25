@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.1] - 2026-11-25
+
+### Changed
+- prune dead code, low-value tests and history comments
+- prune agent_task_service retired compat, dead code and low-value tests
+- prune restating and duplicate cleanup and component tests
+- prune restating and duplicate tests in homeboy-core src/daemon
+- fold redundant staging, runner and resource tests; drop test-only cache wrapper
+- prune restating and duplicate tests in component, config, context, control-plane and daemon
+- prune restating and duplicate tests in homeboy-core cleanup modules
+- prune restating and duplicate tests in artifact, broker auth, build, capacity and CI profile modules
+- prune low-value top-level integration tests and orphan fixtures
+- prune history comments, dead code and restating tests from agent_task_lifecycle
+
 ## [0.497.0] - 2026-11-24
 
 ### Added
