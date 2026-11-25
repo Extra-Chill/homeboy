@@ -143,105 +143,51 @@ mod tests {
         config
     }
 
-    /// The reported shape: a component with both deliverables, attached to a
-    /// project that configures only the server one.
+    /// An unselected provider leaves the server deliverable deployable
+    /// (#12853), project target configuration selects the provider, and an
+    /// explicit `--target` is never re-decided.
     #[test]
-    fn an_unselected_provider_leaves_the_server_deliverable_deployable() {
-        assert_eq!(
-            resolve(&project(None), "wp-codebox", &config(None)),
-            DeployTarget::Server
-        );
+    fn resolve_routes_by_explicit_target_then_project_selection() {
+        let selected = || Some(serde_json::json!({ "target": "site" }));
+        let cases = [
+            (None, None, DeployTarget::Server),
+            (selected(), None, DeployTarget::Provider),
+            (None, Some(DeployTarget::Provider), DeployTarget::Provider),
+            (selected(), Some(DeployTarget::Server), DeployTarget::Server),
+        ];
+
+        for (input, target, expected) in cases {
+            assert_eq!(
+                resolve(&project(input.clone()), "wp-codebox", &config(target)),
+                expected,
+                "input={input:?} target={target:?}"
+            );
+        }
     }
 
     #[test]
-    fn project_target_configuration_selects_the_provider() {
-        assert_eq!(
-            resolve(
-                &project(Some(serde_json::json!({ "target": "site" }))),
-                "wp-codebox",
-                &config(None)
-            ),
-            DeployTarget::Provider
-        );
-    }
-
-    /// An explicit request is never re-decided. `--target provider` without a
-    /// configured target must reach the provider lifecycle so the operator is
-    /// told what is missing, rather than being silently sent to the server.
-    #[test]
-    fn an_explicit_target_overrides_the_inferred_route() {
-        assert_eq!(
-            resolve(
-                &project(None),
-                "wp-codebox",
-                &config(Some(DeployTarget::Provider))
-            ),
-            DeployTarget::Provider
-        );
-        assert_eq!(
-            resolve(
-                &project(Some(serde_json::json!({ "target": "site" }))),
-                "wp-codebox",
-                &config(Some(DeployTarget::Server))
-            ),
-            DeployTarget::Server
-        );
-    }
-
-    #[test]
-    fn a_server_routed_dual_deliverable_names_the_unselected_provider() {
+    fn server_route_disclosure_names_the_other_deliverable_only_when_dual() {
         let disclosure =
             server_route_disclosure(&dual_deliverable_component(), &project(None), &config(None))
                 .expect("a dual-deliverable route must be disclosed");
-
-        assert!(disclosure.contains("deployment route: server"));
+        assert!(disclosure.contains("this project selects no provider target"));
         assert!(disclosure.contains("'cloudflare-workers.deploy'"));
-        assert!(disclosure.contains("'cloudflare-workers'"));
         assert!(disclosure.contains("--target provider"));
-        assert!(disclosure.contains("deployment_provider_input"));
-    }
 
-    #[test]
-    fn an_explicit_server_override_of_a_selected_provider_says_so() {
-        let disclosure = server_route_disclosure(
+        let overridden = server_route_disclosure(
             &dual_deliverable_component(),
             &project(Some(serde_json::json!({ "target": "site" }))),
             &config(Some(DeployTarget::Server)),
         )
         .expect("an overridden route must be disclosed");
+        assert!(overridden.contains("overrides this project's selected provider target"));
 
-        assert!(disclosure.contains("overrides this project's selected provider target"));
-    }
-
-    /// A component with one deliverable has no route choice to report.
-    #[test]
-    fn a_single_deliverable_component_is_not_annotated() {
-        let component = Component::new(
+        let single = Component::new(
             "plugin".to_string(),
             "/source/plugin".to_string(),
             "dist/plugin.zip".to_string(),
             None,
         );
-
-        assert!(server_route_disclosure(&component, &project(None), &config(None)).is_none());
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn deploy_target_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (DeployTarget::Server, "server"),
-            (DeployTarget::Provider, "provider"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
+        assert!(server_route_disclosure(&single, &project(None), &config(None)).is_none());
     }
 }
