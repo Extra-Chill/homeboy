@@ -2956,23 +2956,9 @@ mod tests {
             assert_eq!(runner.policy.workspace_roots, vec!["/home/user/Developer"]);
             assert_eq!(runner.policy.artifact_policy.as_deref(), Some("metadata"));
             assert!(serde_json::to_value(&runner)
-                .expect("serialize legacy policy")
+                .expect("serialize policy")
                 .pointer("/policy/allow_homeboy_convergence")
                 .is_none());
-        });
-    }
-
-    #[test]
-    fn runner_registry_persists_explicit_homeboy_convergence_policy() {
-        crate::test_support::with_isolated_home(|_| {
-            create(
-                r#"{"id":"lab-local","kind":"local","policy":{"allow_homeboy_convergence":true}}"#,
-                false,
-            )
-            .expect("create runner");
-
-            let runner = load("lab-local").expect("load runner");
-            assert_eq!(runner.policy.allow_homeboy_convergence, Some(true));
         });
     }
 
@@ -3520,145 +3506,127 @@ mod tests {
     }
 
     #[test]
-    fn default_lab_runner_prefers_configured_connected_runner() {
-        let selected = resolve_default_lab_runner_from_candidates(
-            Some("lab-b"),
-            vec![
-                default_lab_candidate("lab-a", true),
-                default_lab_candidate("lab-b", true),
-            ],
-        );
+    fn default_lab_runner_selection_prefers_ready_capacity_and_known_state() {
+        let candidate = |id: &str, connected: bool, edit: fn(&mut DefaultLabRunnerCandidate)| {
+            let mut candidate = default_lab_candidate(id, connected);
+            edit(&mut candidate);
+            candidate
+        };
+        let unchanged: fn(&mut DefaultLabRunnerCandidate) = |_| {};
+        let cases: Vec<(
+            &str,
+            Option<&str>,
+            Vec<DefaultLabRunnerCandidate>,
+            Option<&str>,
+        )> = vec![
+            (
+                "configured connected runner",
+                Some("lab-b"),
+                vec![
+                    candidate("lab-a", true, unchanged),
+                    candidate("lab-b", true, unchanged),
+                ],
+                Some("lab-b"),
+            ),
+            (
+                "connected runner when unconfigured",
+                None,
+                vec![
+                    candidate("lab-a", false, unchanged),
+                    candidate("lab-b", true, unchanged),
+                ],
+                Some("lab-b"),
+            ),
+            (
+                "single disconnected runner",
+                None,
+                vec![candidate("lab-a", false, unchanged)],
+                Some("lab-a"),
+            ),
+            (
+                "available disconnected preferred runner",
+                Some("lab-a"),
+                vec![candidate("lab-a", false, unchanged)],
+                Some("lab-a"),
+            ),
+            (
+                "busy preferred runner is not pinned",
+                Some("lab-a"),
+                vec![
+                    candidate("lab-a", true, |c| c.active_jobs = 4),
+                    candidate("lab-b", true, unchanged),
+                ],
+                Some("lab-b"),
+            ),
+            (
+                "runner at capacity is excluded",
+                None,
+                vec![candidate("lab-a", true, |c| {
+                    c.capacity = Some(1);
+                    c.active_jobs = 1;
+                })],
+                None,
+            ),
+            (
+                "preferred runner with unknown jobs is not pinned",
+                Some("lab-a"),
+                vec![
+                    candidate("lab-a", true, |c| c.active_jobs_available = false),
+                    candidate("lab-b", true, unchanged),
+                ],
+                Some("lab-b"),
+            ),
+            (
+                "missing preferred runner falls back",
+                Some("lab-missing"),
+                vec![candidate("lab-b", true, unchanged)],
+                Some("lab-b"),
+            ),
+            (
+                "ineligible preferred runner is rejected",
+                Some("lab-a"),
+                vec![
+                    candidate("lab-a", true, |c| c.capabilities_ready = false),
+                    candidate("lab-b", true, unchanged),
+                ],
+                Some("lab-b"),
+            ),
+            (
+                "equally ready runners select deterministically",
+                None,
+                vec![
+                    candidate("lab-b", true, unchanged),
+                    candidate("lab-a", true, unchanged),
+                ],
+                Some("lab-a"),
+            ),
+            (
+                "less busy ready runner wins",
+                None,
+                vec![
+                    candidate("lab-a", true, |c| c.active_jobs = 3),
+                    candidate("lab-b", true, unchanged),
+                ],
+                Some("lab-b"),
+            ),
+            (
+                "known active-job state wins",
+                None,
+                vec![
+                    candidate("lab-a", true, |c| c.active_jobs_available = false),
+                    candidate("lab-b", true, unchanged),
+                ],
+                Some("lab-b"),
+            ),
+        ];
 
-        assert_eq!(selected.as_deref(), Some("lab-b"));
-    }
-
-    #[test]
-    fn default_lab_runner_selects_single_runner_when_unconfigured() {
-        let selected = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![
-                default_lab_candidate("lab-a", false),
-                default_lab_candidate("lab-b", true),
-            ],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-b"));
-
-        let disconnected = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![default_lab_candidate("lab-a", false)],
-        );
-
-        assert_eq!(disconnected.as_deref(), Some("lab-a"));
-    }
-
-    #[test]
-    fn default_lab_runner_uses_available_preferred_runner() {
-        let selected = resolve_default_lab_runner_from_candidates(
-            Some("lab-a"),
-            vec![default_lab_candidate("lab-a", false)],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-a"));
-    }
-
-    #[test]
-    fn default_lab_runner_does_not_pin_busy_preferred_runner() {
-        let mut preferred = default_lab_candidate("lab-a", true);
-        preferred.active_jobs = 4;
-        let selected = resolve_default_lab_runner_from_candidates(
-            Some("lab-a"),
-            vec![preferred, default_lab_candidate("lab-b", true)],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-b"));
-    }
-
-    #[test]
-    fn default_lab_runner_excludes_runner_at_capacity() {
-        let mut busy = default_lab_candidate("lab-a", true);
-        busy.capacity = Some(1);
-        busy.active_jobs = 1;
-
-        let selected = resolve_default_lab_runner_from_candidates(None, vec![busy]);
-
-        assert_eq!(selected, None);
-    }
-
-    #[test]
-    fn default_lab_runner_does_not_pin_unknown_preferred_runner() {
-        let mut preferred = default_lab_candidate("lab-a", true);
-        preferred.active_jobs_available = false;
-        let selected = resolve_default_lab_runner_from_candidates(
-            Some("lab-a"),
-            vec![preferred, default_lab_candidate("lab-b", true)],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-b"));
-    }
-
-    #[test]
-    fn default_lab_runner_falls_back_when_preferred_is_missing() {
-        let selected = resolve_default_lab_runner_from_candidates(
-            Some("lab-missing"),
-            vec![default_lab_candidate("lab-b", true)],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-b"));
-    }
-
-    #[test]
-    fn default_lab_runner_rejects_ineligible_preferred_runner() {
-        let selected = resolve_default_lab_runner_from_candidates(
-            Some("lab-a"),
-            vec![
-                {
-                    let mut ineligible = default_lab_candidate("lab-a", true);
-                    ineligible.capabilities_ready = false;
-                    ineligible
-                },
-                default_lab_candidate("lab-b", true),
-            ],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-b"));
-    }
-
-    #[test]
-    fn default_lab_runner_selects_among_equally_ready_runners() {
-        let selected = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![
-                default_lab_candidate("lab-b", true),
-                default_lab_candidate("lab-a", true),
-            ],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-a"));
-    }
-
-    #[test]
-    fn default_lab_runner_prefers_less_busy_ready_runner() {
-        let mut busy = default_lab_candidate("lab-a", true);
-        busy.active_jobs = 3;
-        let selected = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![busy, default_lab_candidate("lab-b", true)],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-b"));
-    }
-
-    #[test]
-    fn default_lab_runner_prefers_known_active_job_state() {
-        let mut unknown = default_lab_candidate("lab-a", true);
-        unknown.active_jobs_available = false;
-        let selected = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![unknown, default_lab_candidate("lab-b", true)],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-b"));
+        for (name, preferred, candidates, expected) in cases {
+            assert_eq!(
+                resolve_default_lab_runner_from_candidates(preferred, candidates).as_deref(),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]

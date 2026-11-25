@@ -4908,20 +4908,18 @@ mod stale_lease_rejection_tests {
     use super::*;
 
     #[test]
-    fn stale_lease_rejection_is_retryable() {
-        let value = serde_json::json!({
+    fn only_stale_lease_rejections_are_retryable() {
+        let stale = serde_json::json!({
             "success": false,
             "data": {"details": {}, "error": "internal.unexpected", "hints": [], "message": "daemon lease is not fresh"},
             "error": {"details": {}, "error": "internal.unexpected", "hints": [], "message": "daemon lease is not fresh"}
         });
-        let error = controller_job_from_response(&value, 500).expect_err("rejected");
+        let error = controller_job_from_response(&stale, 500).expect_err("rejected");
         assert_eq!(error.retryable, Some(true));
-    }
 
-    #[test]
-    fn other_rejections_stay_non_retryable() {
-        let value = serde_json::json!({"success": false, "error": {"message": "invalid request"}});
-        let error = controller_job_from_response(&value, 400).expect_err("rejected");
+        let invalid =
+            serde_json::json!({"success": false, "error": {"message": "invalid request"}});
+        let error = controller_job_from_response(&invalid, 400).expect_err("rejected");
         assert_ne!(error.retryable, Some(true));
     }
 }
@@ -7828,52 +7826,34 @@ mod tests {
     }
 
     #[test]
-    fn staging_poll_budget_prefers_the_plan_execution_deadline() {
+    fn staging_poll_budget_follows_the_plan_deadline_with_floor_and_fallback() {
+        let request = execution_request();
+        assert_eq!(
+            staging_poll_budget(&request),
+            LAB_STAGING_POLL_FALLBACK_BUDGET,
+            "a plan without a deadline uses the fallback budget"
+        );
+
         let mut request = execution_request();
         request
             .durable_agent_task_plan
             .options
             .execution_budget
             .deadline_unix_ms = Some(now_unix_ms() + 900_000);
-
         let budget = staging_poll_budget(&request);
-
         assert!(
             budget > Duration::from_secs(870) && budget <= Duration::from_secs(900),
             "expected roughly the plan's remaining 900s, got {budget:?}"
         );
-    }
 
-    #[test]
-    fn staging_poll_budget_floors_an_expired_plan_deadline() {
-        let mut request = execution_request();
+        // An expired plan deadline still buys a bounded grace to observe the
+        // remote job's terminal transition instead of abandoning it instantly.
         request
             .durable_agent_task_plan
             .options
             .execution_budget
             .deadline_unix_ms = Some(now_unix_ms().saturating_sub(60_000));
-
-        // An expired plan deadline still buys a bounded grace to observe the
-        // remote job's terminal transition instead of abandoning it instantly.
         assert_eq!(staging_poll_budget(&request), LAB_STAGING_POLL_MIN_BUDGET);
-    }
-
-    #[test]
-    fn staging_poll_budget_falls_back_when_the_plan_carries_no_deadline() {
-        let request = execution_request();
-
-        assert_eq!(
-            request
-                .durable_agent_task_plan
-                .options
-                .execution_budget
-                .deadline_unix_ms,
-            None
-        );
-        assert_eq!(
-            staging_poll_budget(&request),
-            LAB_STAGING_POLL_FALLBACK_BUDGET
-        );
     }
 
     #[test]
@@ -8810,19 +8790,14 @@ mod tests {
     }
 
     #[test]
-    fn registration_keeps_lab_routing_disabled_without_submission_hook() {
+    fn lab_routing_is_ready_only_after_production_enablement() {
         crate::test_support::with_isolated_home(|_| {
             clear_installed_adapter();
             register();
-            assert!(!routing_ready());
-        });
-    }
-
-    #[test]
-    fn production_enablement_installs_the_staging_adapter() {
-        crate::test_support::with_isolated_home(|_| {
-            clear_installed_adapter();
-            register();
+            assert!(
+                !routing_ready(),
+                "registration alone keeps routing disabled"
+            );
             enable_production_routing();
             assert!(routing_ready());
             clear_installed_adapter();
