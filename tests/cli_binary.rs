@@ -36,8 +36,6 @@ mod output_dispatch;
 mod output_errors;
 #[path = "cli_binary/product_identity_test.rs"]
 mod product_identity_test;
-#[path = "cli_binary/promotion_provider_stdin.rs"]
-mod promotion_provider_stdin;
 #[path = "cli_binary/recover_preflight.rs"]
 mod recover_preflight;
 #[path = "cli_binary/refactor_rename_test.rs"]

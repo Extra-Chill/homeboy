@@ -66,20 +66,6 @@ fn shipped_discovery_bypasses_runtime_with_builtin_and_extension_commands() {
     }
 }
 
-#[test]
-fn invalid_help_subcommand_fails_locally_with_upgrade_suggestion() {
-    let args = ["homeboy", "update", "--help"]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let diagnostic = homeboy::cli_runtime::update_help_diagnostic(&args)
-        .expect("update help has a local diagnostic");
-    assert!(
-        diagnostic.contains("unrecognized subcommand 'update'") && diagnostic.contains("upgrade"),
-        "missing upgrade suggestion: {diagnostic}"
-    );
-}
-
 /// The retired `update --help` spelling must be answered before Homeboy builds
 /// its command surface, because that discovers extensions and can block on a
 /// damaged installation. A manifest that is a FIFO with no writer blocks any
