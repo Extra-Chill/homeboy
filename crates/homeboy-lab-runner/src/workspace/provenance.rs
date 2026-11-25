@@ -2534,20 +2534,25 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn verifier_accepts_explicit_unix_permission_policies() {
+    fn verifier_accepts_every_supported_permission_policy() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
         let snapshot = snapshot(workspace.path());
 
-        for policy in [
+        #[cfg(unix)]
+        let policies = [
+            WORKSPACE_CONTENT_PERMISSION_PORTABLE,
             super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
             super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        ] {
+        ];
+        #[cfg(not(unix))]
+        let policies = [WORKSPACE_CONTENT_PERMISSION_PORTABLE];
+
+        for policy in policies {
             let mut metadata = lab(workspace.path(), &snapshot);
             metadata["workspace_verification"]["permission_policy"] = serde_json::json!(policy);
             metadata["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
-                workspace_content_hash_algorithm(policy).expect("Unix content hash algorithm")
+                workspace_content_hash_algorithm(policy).expect("content hash algorithm")
             );
             metadata["workspace_verification"]["content_hash"] =
                 serde_json::json!(workspace_content_hash_for_policy(
@@ -2555,45 +2560,15 @@ mod tests {
                     &snapshot.sync_excludes,
                     policy
                 )
-                .expect("Unix content hash"));
+                .expect("content hash"));
             verify_lab_workspace(
                 &workspace.path().display().to_string(),
                 workspace.path(),
                 snapshot.clone(),
                 metadata,
             )
-            .expect("explicit Unix policy verifies");
+            .unwrap_or_else(|error| panic!("policy {policy} must verify: {error}"));
         }
-    }
-
-    #[test]
-    fn verifier_accepts_portable_v2_content_hash_on_all_platforms() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
-        let snapshot = snapshot(workspace.path());
-        let content_hash = workspace_content_hash_for_policy(
-            workspace.path(),
-            &snapshot.sync_excludes,
-            WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-        )
-        .expect("portable v2 content hash");
-        let mut v2 = lab(workspace.path(), &snapshot);
-        v2["workspace_verification"]["schema"] =
-            serde_json::json!("homeboy/lab-workspace-verification/v2");
-        v2["workspace_verification"]["permission_policy"] =
-            serde_json::json!(WORKSPACE_CONTENT_PERMISSION_PORTABLE);
-        v2["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
-            workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_PORTABLE)
-                .expect("portable v2 content hash algorithm")
-        );
-        v2["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
-        verify_lab_workspace(
-            &workspace.path().display().to_string(),
-            workspace.path(),
-            snapshot,
-            v2,
-        )
-        .expect("portable v2 metadata remains valid");
     }
 
     #[test]

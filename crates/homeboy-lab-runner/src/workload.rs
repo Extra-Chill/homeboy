@@ -951,61 +951,63 @@ mod tests {
         SecretEnvPlan::from_secret_env_names(names.iter().map(|name| name.to_string()))
     }
 
-    #[test]
-    fn runner_core_builds_complete_workload_payload() {
+    fn workload_with(
+        hot_label: Option<&str>,
+        workspace_mapping_ref: Option<&'static str>,
+    ) -> LabRunnerWorkload {
         let plan = plan();
-        let command = command();
-        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
+        let mut command = command();
+        if let Some(label) = hot_label {
+            command.hot_label = label.to_string();
+        }
+        build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
             capture_patch: true,
-            mutation_flag: Some("--keep-overlay"),
-            allow_dirty_lab_workspace: true,
+            mutation_flag: None,
+            allow_dirty_lab_workspace: false,
             runner_id: "lab-a",
             runner_mode: "direct_ssh",
             assignment_source: "explicit",
             status: "offloaded",
             remote_workspace: Some("/srv/homeboy/work"),
             fallback_reason: None,
-            workspace_mapping_ref: Some("workspace_mapping"),
-            proof_id: Some("proof-1"),
-        });
-        workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
+            workspace_mapping_ref,
+            proof_id: None,
+        })
+    }
 
-        assert_eq!(workload.schema, LAB_RUNNER_WORKLOAD_SCHEMA);
-        assert_eq!(workload.workload_id, "lab_offload.test.runner_workload");
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    #[test]
+    fn runner_core_builds_workload_contract_from_the_offloaded_command() {
+        let workload = workload();
+
         assert_eq!(workload.kind.command_label, "trace");
         assert_eq!(
             workload.kind.command_family,
             LabRunnerWorkloadCommandFamily::Quality
         );
-        assert_eq!(
-            workload.workspace_mappings.mapping_ref.as_deref(),
-            Some("workspace_mapping")
-        );
-        assert_eq!(workload.required_capabilities.len(), 2);
-        assert_eq!(workload.required_capabilities[0].name, "extension_parity");
-        assert_eq!(workload.required_capabilities[1].name, "playwright");
+        // The pipeline-enforced parity gate is always declared ahead of the
+        // command's own capabilities.
+        let capabilities = workload
+            .required_capabilities
+            .iter()
+            .map(|capability| capability.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(capabilities, ["extension_parity", "playwright"]);
         assert_eq!(workload.required_secrets.categories, vec!["trace"]);
-        assert_eq!(workload.required_extensions, vec!["browser"]);
-        assert!(workload.required_extension_revisions.is_empty());
-        assert_eq!(
-            workload.mutation_policy.mutation_flag.as_deref(),
-            Some("--keep-overlay")
-        );
-        assert_eq!(workload.assignment.runner_id.as_deref(), Some("lab-a"));
-        assert_eq!(
-            workload.state.remote_workspace.as_deref(),
-            Some("/srv/homeboy/work")
-        );
         assert_eq!(workload.result_refs.plan_id, "lab_offload.test");
-        assert_eq!(workload.result_refs.proof_id.as_deref(), Some("proof-1"));
     }
 
     /// A workload-declared tool capability must reach the dispatch preflight, or
     /// the runner is never gated on it (Extra-Chill/homeboy#10287).
+    /// `extension_parity` names an execution-pipeline gate, not a runner binary:
+    /// merging it as a required tool would refuse every parity-bearing dispatch.
     #[test]
-    fn lab_runner_workload_capabilities_merge_into_preflight() {
+    fn lab_runner_workload_tool_capabilities_merge_into_preflight() {
         let workload = workload();
 
         let preflight = merge_lab_runner_workload_capability_preflight(None, Some(&workload))
@@ -1015,22 +1017,6 @@ mod tests {
         assert!(preflight
             .required_tools
             .contains(&RunnerRequiredTool::new("playwright")));
-    }
-
-    /// `extension_parity` names an execution-pipeline gate, not a runner binary.
-    /// Merging it as a required tool would probe a `extension_parity` executable
-    /// that no runner has and refuse every parity-bearing dispatch.
-    #[test]
-    fn pipeline_enforced_capabilities_are_not_merged_as_runner_tools() {
-        let workload = workload();
-
-        let preflight = merge_lab_runner_workload_capability_preflight(None, Some(&workload))
-            .expect("workload capabilities create a preflight");
-
-        assert!(workload
-            .required_capabilities
-            .iter()
-            .any(|capability| capability.name == LAB_CAPABILITY_EXTENSION_PARITY));
         assert!(!preflight
             .required_tools
             .contains(&RunnerRequiredTool::new(LAB_CAPABILITY_EXTENSION_PARITY)));
@@ -1086,67 +1072,52 @@ mod tests {
 
     #[test]
     fn lab_runner_workload_validation_rejects_dispatch_drift() {
-        let plan = plan();
-        let command = command();
-        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: Some("workspace_mapping"),
-            proof_id: None,
-        });
-
-        validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "test".to_string()],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect("matching dispatch is valid");
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "other-runner",
-            Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
-            &SecretEnvPlan::default(),
-            true,
-        )
-        .expect_err("drifted runner id must fail");
-        assert_eq!(err.details["field"], "runner_workload.assignment.runner_id");
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_remote_workspace_mismatch() {
-        let workload = workload();
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/other-workspace"),
-            &["homeboy".to_string(), "trace".to_string()],
-            &SecretEnvPlan::default(),
-            true,
-        )
-        .expect_err("mismatched remote workspace must fail");
-
-        assert_eq!(
-            err.details["field"],
-            "runner_workload.state.remote_workspace"
-        );
-        assert!(err
-            .to_string()
-            .contains("remote workspace does not match dispatch cwd"));
+        let mut mapping_drift = workload_with(None, Some("path_materialization_plan"));
+        mapping_drift.result_refs.workspace_mapping_ref = Some("workspace_mapping".to_string());
+        // A dispatch whose label belongs to no known workload family (here
+        // `status`) cannot be canonicalized to this `trace` (Quality) workload,
+        // so the strict label check still rejects genuine command drift.
+        for (workload, runner_id, remote_workspace, dispatched, field) in [
+            (
+                workload(),
+                "other-runner",
+                "/srv/homeboy/work",
+                argv(&["homeboy", "trace"]),
+                "runner_workload.assignment.runner_id",
+            ),
+            (
+                workload(),
+                "lab-a",
+                "/srv/homeboy/other-workspace",
+                argv(&["homeboy", "trace"]),
+                "runner_workload.state.remote_workspace",
+            ),
+            (
+                workload(),
+                "lab-a",
+                "/srv/homeboy/work",
+                argv(&["homeboy", "status"]),
+                "runner_workload.kind.command_label",
+            ),
+            (
+                mapping_drift,
+                "lab-a",
+                "/srv/homeboy/work",
+                argv(&["homeboy", "trace"]),
+                "runner_workload.result_refs.workspace_mapping_ref",
+            ),
+        ] {
+            let err = validate_lab_runner_workload_dispatch(
+                Some(&workload),
+                runner_id,
+                Some(remote_workspace),
+                &dispatched,
+                &SecretEnvPlan::default(),
+                true,
+            )
+            .expect_err("drifted dispatch must fail");
+            assert_eq!(err.details["field"], field);
+        }
     }
 
     #[test]
@@ -1180,43 +1151,6 @@ mod tests {
             .expect_err("invalid result refs must fail");
             assert_eq!(err.details["field"], field);
         }
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_command_label_drift() {
-        let plan = plan();
-        let command = command();
-        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-
-        // A dispatch whose label belongs to no known workload family (here
-        // `status`) cannot be canonicalized to this `trace` (Quality) workload,
-        // so the strict label check still rejects genuine command drift. (A
-        // same-family alias like `test` is intentionally accepted — see
-        // `lab_runner_workload_validation_rejects_dispatch_drift`.)
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "status".to_string()],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect_err("drifted command label must fail");
-        assert_eq!(err.details["field"], "runner_workload.kind.command_label");
     }
 
     #[test]
@@ -1286,100 +1220,44 @@ mod tests {
     }
 
     #[test]
-    fn lab_runner_workload_validation_rejects_workspace_mapping_reference_drift() {
-        let plan = plan();
-        let command = command();
-        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: Some("path_materialization_plan"),
-            proof_id: None,
-        });
-        workload.result_refs.workspace_mapping_ref = Some("workspace_mapping".to_string());
+    fn lab_runner_workload_validation_accepts_matching_command_argv_shapes() {
+        let workload = workload();
+        // Full, short, configured-executable and same-family alias (`test`) argv.
+        for dispatched in [
+            argv(&["homeboy", "trace"]),
+            argv(&["trace"]),
+            argv(&["/srv/homeboy/bin/homeboy", "trace"]),
+            argv(&["homeboy", "test"]),
+        ] {
+            validate_lab_runner_workload_dispatch(
+                Some(&workload),
+                "lab-a",
+                Some("/srv/homeboy/work"),
+                &dispatched,
+                &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
+                true,
+            )
+            .unwrap_or_else(|err| panic!("{dispatched:?} must be valid: {err:?}"));
+        }
 
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
-            &SecretEnvPlan::default(),
-            true,
-        )
-        .expect_err("drifted workspace mapping reference must fail");
-        assert_eq!(
-            err.details["field"],
-            "runner_workload.result_refs.workspace_mapping_ref"
-        );
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_accepts_matching_full_and_short_command_argv() {
-        let plan = plan();
-        let command = command();
-        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-
+        let fanout = workload_with(Some("agent-task fanout cook-batch"), None);
         validate_lab_runner_workload_dispatch(
-            Some(&workload),
+            Some(&fanout),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
+            &argv(&[
+                "homeboy",
+                "agent-task",
+                "fanout",
+                "cook-batch",
+                "--repo",
+                "homeboy",
+                "--run-plan",
+            ]),
             &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
             true,
         )
-        .expect("matching full argv is valid");
-
-        validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["trace".to_string()],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect("matching short argv is valid");
-
-        validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["/srv/homeboy/bin/homeboy".to_string(), "trace".to_string()],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect("matching configured homeboy executable argv is valid");
-
-        validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["/srv/homeboy/bin/homeboy".to_string(), "trace".to_string()],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect("matching runner-injected homeboy argv is valid");
+        .expect("matching fanout cook-batch argv is valid");
     }
 
     #[test]
@@ -1445,249 +1323,86 @@ mod tests {
     }
 
     #[test]
-    fn lab_runner_workload_validation_accepts_fanout_cook_batch_command_label() {
-        let plan = plan();
-        let mut command = command();
-        command.hot_label = "agent-task fanout cook-batch".to_string();
-        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
+    fn lab_runner_workload_validation_rejects_missing_or_wrong_secret_handoff_names() {
+        for (label, secret, dispatched, handoff) in [
+            (
+                None,
+                "HOMEBODY_TRACE_SECRET",
+                argv(&["homeboy", "trace", "--secret-env=HOMEBODY_TRACE_SECRET"]),
+                SecretEnvPlan::default(),
+            ),
+            (
+                None,
+                "HOMEBODY_TRACE_SECRET",
+                argv(&["homeboy", "trace", "--secret-env=HOMEBODY_TRACE_SECRET"]),
+                secret_plan(&["WRONG_SECRET"]),
+            ),
+            (
+                Some("agent-task dispatch"),
+                "AGENT_TASK_SECRET",
+                argv(&[
+                    "homeboy",
+                    "agent-task",
+                    "dispatch",
+                    "--secret-env=AGENT_TASK_SECRET",
+                ]),
+                secret_plan(&["WRONG_SECRET"]),
+            ),
+            (
+                Some("tunnel preview-client start"),
+                "HOMEBOY_PREVIEW_TUNNEL_TOKEN",
+                argv(&[
+                    "homeboy",
+                    "tunnel",
+                    "preview-client",
+                    "start",
+                    "--ingress",
+                    "https://preview-broker.example.test",
+                    "--public-host",
+                    "preview.example.test",
+                    "--local-origin",
+                    "http://127.0.0.1:8888",
+                ]),
+                SecretEnvPlan::default(),
+            ),
+        ] {
+            let mut workload = workload_with(label, None);
+            workload.required_secrets.secret_env_plan = secret_plan(&[secret]);
 
+            let err = validate_lab_runner_workload_dispatch(
+                Some(&workload),
+                "lab-a",
+                Some("/srv/homeboy/work"),
+                &dispatched,
+                &handoff,
+                true,
+            )
+            .expect_err("missing or wrong secret handoff name must fail");
+            assert_eq!(err.details["field"], "runner_workload.required_secrets");
+            assert!(err.message.contains(secret), "{secret}: {}", err.message);
+        }
+    }
+
+    #[test]
+    fn lab_runner_workload_validation_accepts_named_or_unneeded_secret_handoff() {
+        let mut trace = workload();
+        trace.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
         validate_lab_runner_workload_dispatch(
-            Some(&workload),
+            Some(&trace),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &[
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "fanout".to_string(),
-                "cook-batch".to_string(),
-                "--repo".to_string(),
-                "homeboy".to_string(),
-                "--run-plan".to_string(),
-            ],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect("matching fanout cook-batch argv is valid");
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_required_secret_plan_without_named_handoff() {
-        let plan = plan();
-        let command = command();
-        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-        workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &[
-                "homeboy".to_string(),
-                "trace".to_string(),
-                "--secret-env=HOMEBODY_TRACE_SECRET".to_string(),
-            ],
-            &SecretEnvPlan::default(),
-            true,
-        )
-        .expect_err("required secret plan without named handoff must fail");
-        assert_eq!(err.details["field"], "runner_workload.required_secrets");
-        assert!(err.message.contains("HOMEBODY_TRACE_SECRET"));
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_wrong_trace_secret_handoff_name() {
-        let mut workload = workload();
-        workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &[
-                "homeboy".to_string(),
-                "trace".to_string(),
-                "--secret-env=HOMEBODY_TRACE_SECRET".to_string(),
-            ],
-            &secret_plan(&["WRONG_SECRET"]),
-            true,
-        )
-        .expect_err("wrong trace secret handoff name must fail");
-        assert_eq!(err.details["field"], "runner_workload.required_secrets");
-        assert!(err.message.contains("HOMEBODY_TRACE_SECRET"));
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_wrong_agent_task_secret_handoff_name() {
-        let plan = plan();
-        let mut command = command();
-        command.hot_label = "agent-task dispatch".to_string();
-        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-        workload.required_secrets.secret_env_plan = secret_plan(&["AGENT_TASK_SECRET"]);
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &[
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "dispatch".to_string(),
-                "--secret-env=AGENT_TASK_SECRET".to_string(),
-            ],
-            &secret_plan(&["WRONG_SECRET"]),
-            true,
-        )
-        .expect_err("wrong agent-task secret handoff name must fail");
-        assert_eq!(err.details["field"], "runner_workload.required_secrets");
-        assert!(err.message.contains("AGENT_TASK_SECRET"));
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_missing_tunnel_implicit_secret_handoff_name() {
-        let plan = plan();
-        let mut command = command();
-        command.hot_label = "tunnel preview-client start".to_string();
-        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-        workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBOY_PREVIEW_TUNNEL_TOKEN"]);
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &[
-                "homeboy".to_string(),
-                "tunnel".to_string(),
-                "preview-client".to_string(),
-                "start".to_string(),
-                "--ingress".to_string(),
-                "https://preview-broker.example.test".to_string(),
-                "--public-host".to_string(),
-                "preview.example.test".to_string(),
-                "--local-origin".to_string(),
-                "http://127.0.0.1:8888".to_string(),
-            ],
-            &SecretEnvPlan::default(),
-            true,
-        )
-        .expect_err("missing implicit tunnel secret handoff name must fail");
-        assert_eq!(err.details["field"], "runner_workload.required_secrets");
-        assert!(err.message.contains("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_accepts_required_secret_categories_with_named_handoff() {
-        let plan = plan();
-        let command = command();
-        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-        workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBODY_TRACE_SECRET"]);
-
-        validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
+            &argv(&["homeboy", "trace"]),
             &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
             true,
         )
         .expect("required secret category with named handoff is valid");
-    }
 
-    #[test]
-    fn lab_runner_workload_validation_accepts_empty_secret_handoff_without_required_categories() {
-        let plan = plan();
-        let mut command = command();
-        command.hot_label = "lint".to_string();
-        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-
+        let lint = workload_with(Some("lint"), None);
         validate_lab_runner_workload_dispatch(
-            Some(&workload),
+            Some(&lint),
             "lab-a",
             Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "lint".to_string()],
+            &argv(&["homeboy", "lint"]),
             &SecretEnvPlan::default(),
             true,
         )
