@@ -1,9 +1,7 @@
 //! The one `gh pr view` fetch contract: a single `--json` field superset, one
 //! raw record, and one parser.
 //!
-//! `github/pulls.rs`, `git/pr_land.rs`, and `git/pr_refresh.rs` each used to
-//! request and parse `gh pr view` independently, with their own field lists,
-//! raw serde structs, and error kinds. All three now share
+//! `github/pulls.rs`, `git/pr_land.rs`, and `git/pr_refresh.rs` share
 //! [`PR_VIEW_JSON_FIELDS`], [`pr_view_args`], and [`parse_pr_view`]. This
 //! module is deliberately a faithful wire projection only: consumers keep
 //! their own projection semantics on top of [`PrViewRecord`] (the pr-land
@@ -36,8 +34,7 @@ pub fn pr_view_args(pr_ref: &str, repo: Option<&str>) -> Vec<String> {
 
 /// Raw `gh pr view --json PR_VIEW_JSON_FIELDS` payload.
 ///
-/// Every field defaults, so a minimal payload (e.g. only the fields pr_refresh
-/// historically requested) still parses. `headRepository` keeps both
+/// Every field defaults, so a minimal payload still parses. `headRepository` keeps both
 /// `nameWithOwner` and `name` because consumers disagree on the fallback, and
 /// `statusCheckRollup` stays untyped because each consumer classifies it
 /// differently.
@@ -95,10 +92,8 @@ pub struct PrViewHeadRepository {
 
 /// Treat an explicit JSON `null` like an absent field.
 ///
-/// `#[serde(default)]` alone only covers a missing key. The hand-rolled
-/// `Value`-pointer parser this replaced turned `null` into an empty value for
-/// every field, so the shared record keeps that tolerance for its non-`Option`
-/// fields.
+/// `#[serde(default)]` alone only covers a missing key; `gh` can also emit
+/// explicit `null`s, which the non-`Option` fields read as empty.
 fn null_as_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -120,7 +115,6 @@ pub fn parse_pr_view(raw: &str) -> Result<PrViewRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorCode;
 
     #[test]
     fn parses_the_full_superset_payload() {
@@ -167,68 +161,29 @@ mod tests {
         assert_eq!(record.status_check_rollup.len(), 1);
     }
 
-    #[test]
-    fn minimal_payload_defaults_everything_else() {
-        // Only the fields pr_refresh reads.
-        let raw = r#"{
-            "number": 7,
-            "url": "https://github.com/Extra-Chill/homeboy/pull/7",
-            "state": "OPEN",
-            "baseRefName": "main",
-            "headRefName": "feature",
-            "mergeStateStatus": "BEHIND"
-        }"#;
-        let record = parse_pr_view(raw).unwrap();
-        assert_eq!(record.number, 7);
-        assert_eq!(record.url, "https://github.com/Extra-Chill/homeboy/pull/7");
-        assert_eq!(record.state, "OPEN");
-        assert_eq!(record.base_ref_name, "main");
-        assert_eq!(record.head_ref_name, "feature");
-        assert_eq!(record.merge_state_status.as_deref(), Some("BEHIND"));
-        assert!(!record.is_draft);
-        assert!(record.title.is_none());
-        assert!(record.author.is_none());
-        assert!(record.head_repository.is_none());
-        assert!(record.head_ref_oid.is_none());
-        assert!(record.merged_at.is_none());
-        assert!(record.review_decision.is_none());
-        assert!(record.status_check_rollup.is_empty());
-    }
-
-    #[test]
-    fn head_repository_with_only_name_keeps_the_name_fallback() {
-        let raw = r#"{"headRepository": {"name": "homeboy"}}"#;
-        let record = parse_pr_view(raw).unwrap();
-        let head_repository = record.head_repository.unwrap();
-        assert!(head_repository.name_with_owner.is_none());
-        assert_eq!(head_repository.name.as_deref(), Some("homeboy"));
-    }
-
-    #[test]
-    fn malformed_json_is_one_internal_json_error() {
-        let error = parse_pr_view("not json").unwrap_err();
-        assert_eq!(error.code, ErrorCode::InternalJsonError);
-    }
-
-    /// `gh` can emit explicit `null`s; every field must read them as empty
+    /// `gh` can omit fields or emit explicit `null`s; both read as empty
     /// rather than rejecting the payload.
     #[test]
-    fn explicit_nulls_parse_as_defaults() {
-        let raw = r#"{
-            "number": null, "url": null, "state": null, "isDraft": null,
-            "baseRefName": null, "headRefName": null, "statusCheckRollup": null,
-            "title": null, "author": null, "headRepository": null,
-            "headRefOid": null, "mergedAt": null, "reviewDecision": null,
-            "mergeStateStatus": null
-        }"#;
-        let record = parse_pr_view(raw).expect("explicit nulls parse");
-        assert_eq!(record.number, 0);
-        assert_eq!(record.state, "");
-        assert!(!record.is_draft);
-        assert_eq!(record.base_ref_name, "");
-        assert!(record.status_check_rollup.is_empty());
-        assert!(record.head_repository.is_none());
-        assert!(record.merged_at.is_none());
+    fn missing_and_null_fields_parse_as_defaults() {
+        for raw in [
+            r#"{"number": 7}"#,
+            r#"{
+                "number": 7, "url": null, "state": null, "isDraft": null,
+                "baseRefName": null, "headRefName": null, "statusCheckRollup": null,
+                "title": null, "author": null, "headRepository": null,
+                "headRefOid": null, "mergedAt": null, "reviewDecision": null,
+                "mergeStateStatus": null
+            }"#,
+        ] {
+            let record = parse_pr_view(raw).expect("sparse payload parses");
+            assert_eq!(record.number, 7);
+            assert_eq!(record.state, "");
+            assert!(!record.is_draft);
+            assert_eq!(record.base_ref_name, "");
+            assert!(record.status_check_rollup.is_empty());
+            assert!(record.head_repository.is_none());
+            assert!(record.merge_state_status.is_none());
+        }
     }
 
     #[test]

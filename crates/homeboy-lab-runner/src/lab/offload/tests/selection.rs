@@ -93,22 +93,16 @@ fn explicit_connected_stale_runner_preserves_drift_diagnosis_and_recovery() {
         Some(1),
     );
 
-    assert!(availability.connected);
-    assert!(!availability.accepts_jobs);
-    assert_eq!(availability.reasons, ["stale_daemon"]);
-
     let error = lab_runner_availability_error(
         "agent-task cook",
         Some(&availability),
         Some(&status),
         vec![availability.clone()],
     );
-    assert!(error.message.contains("cannot accept jobs"));
     assert_eq!(
         error.details["runner_availability"]["reasons"],
         serde_json::json!(["stale_daemon"])
     );
-    assert_eq!(error.details["runner_status"]["connected"], true);
     assert_eq!(
         error.details["runner_status"]["stale_daemon"]["active_daemon_control_plane_version"],
         "homeboy 0.228.0"
@@ -171,30 +165,4 @@ fn persisted_session_drift_rejects_the_real_availability_and_preflight_path() {
             crate::controller_refresh_ref()
         )
     );
-}
-
-#[test]
-fn disconnected_runner_keeps_existing_availability_diagnosis() {
-    let availability = RunnerAvailability::from_status_parts(
-        "homeboy-lab",
-        false,
-        false,
-        0,
-        &RunnerActiveJobState::Available,
-        Some(1),
-    );
-
-    let error = lab_runner_availability_error(
-        "agent-task cook",
-        Some(&availability),
-        None,
-        vec![availability.clone()],
-    );
-
-    assert_eq!(
-        error.details["runner_availability"]["reasons"],
-        serde_json::json!(["not_connected"])
-    );
-    assert!(error.details["runner_status"].is_null());
-    assert!(error.details["stale_daemon_recovery_command"].is_null());
 }

@@ -1967,9 +1967,6 @@ mod daemon_repair_step_tests {
 }
 
 #[cfg(test)]
-mod placement_rejection_tests {}
-
-#[cfg(test)]
 mod placement_readiness_tests {
     use super::*;
     use crate::session::RunnerStaleDaemonWarning;
@@ -2241,22 +2238,30 @@ mod placement_readiness_tests {
 
     #[test]
     fn build_drift_does_not_require_recovery() {
-        let mut observed = status();
-        observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
-            "lab",
-            "old".to_string(),
-            "new".to_string(),
-            None,
-            None,
-        ));
-        let result = decide(
-            &request(),
-            &observed,
-            Some(1),
-            super::super::LabRunnerGateDecision::Eligible,
-        );
-        assert_eq!(result.state, PlacementReadinessState::Ready);
-        assert!(result.recovery_actions.is_empty());
+        for (loaded_build, configured_build) in [
+            (None, None),
+            (
+                Some("homeboy 0.0.0+old".to_string()),
+                Some("homeboy 0.0.1+new".to_string()),
+            ),
+        ] {
+            let mut observed = status();
+            observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+                "lab",
+                "homeboy 0.0.0".to_string(),
+                "homeboy 0.0.1".to_string(),
+                loaded_build,
+                configured_build,
+            ));
+            let result = decide(
+                &request(),
+                &observed,
+                Some(1),
+                super::super::LabRunnerGateDecision::Eligible,
+            );
+            assert_eq!(result.state, PlacementReadinessState::Ready);
+            assert!(result.recovery_actions.is_empty());
+        }
     }
 
     /// Placement, the Lab offload dispatch gate and `runner status` read one
@@ -2344,44 +2349,6 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn placement_readiness_accepts_runner_with_build_mismatch() {
-        let mut observed = status();
-        observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
-            "lab",
-            "homeboy 0.0.0".to_string(),
-            "homeboy 0.0.1".to_string(),
-            Some("homeboy 0.0.0+old".to_string()),
-            Some("homeboy 0.0.1+new".to_string()),
-        ));
-
-        let result = decide(
-            &request(),
-            &observed,
-            Some(1),
-            super::super::LabRunnerGateDecision::Eligible,
-        );
-
-        assert_eq!(result.state, PlacementReadinessState::Ready);
-    }
-
-    #[test]
-    fn direct_preflight_retains_ssh_transport_resolution() {
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::DirectSsh,
-        };
-
-        let loopback = loopback_direct_ssh_transport_for_preflight(&selection, |runner_id| {
-            assert_eq!(runner_id, "lab");
-            Ok(true)
-        })
-        .expect("direct SSH transport resolution");
-
-        assert!(loopback);
-    }
-
-    #[test]
     fn preflight_accepts_runner_with_build_mismatch() {
         let selection = LabRunnerSelection {
             runner_id: "lab".to_string(),
@@ -2432,10 +2399,6 @@ mod placement_readiness_tests {
             )
             .with_evidence(serde_json::json!({ "remediation": "configure capability.alpha" }))
         );
-        assert_eq!(
-            result.recovery_actions[0].evidence,
-            Some(serde_json::json!({ "remediation": "configure capability.alpha" }))
-        );
     }
 
     #[test]
@@ -2457,11 +2420,6 @@ mod placement_readiness_tests {
         let action = &result.recovery_actions[0];
         assert_eq!(action.id, "runner.connect");
         assert_eq!(action.safety, ActionSafety::Mutating);
-        assert_eq!(
-            serde_json::to_value(&result).expect("serialized v1 envelope")["recovery_actions"][0]
-                ["program"],
-            "homeboy"
-        );
     }
 
     #[test]

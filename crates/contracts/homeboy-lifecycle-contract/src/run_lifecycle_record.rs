@@ -405,108 +405,42 @@ mod tests {
 }
 
 #[cfg(test)]
-mod run_execution_state_compatibility_tests {
+mod durable_state_label_tests {
     use super::*;
 
-    /// A record written before #6761 added the recoverable variants must still
-    /// read. This is the read-path migration test: every label the previous
-    /// vocabulary could persist is listed, so a rename or reorder that would
-    /// strand durable records fails here.
+    /// Every state label a durable record can hold keeps its spelling in both
+    /// directions. A rename or reorder that would strand records on disk
+    /// fails here.
     #[test]
-    fn every_pre_existing_durable_label_still_deserializes() {
-        for (label, expected) in [
-            ("unknown", RunExecutionState::Unknown),
-            ("queued", RunExecutionState::Queued),
-            ("running", RunExecutionState::Running),
-            ("succeeded", RunExecutionState::Succeeded),
-            ("partial_failure", RunExecutionState::PartialFailure),
-            ("failed", RunExecutionState::Failed),
-            ("cancelled", RunExecutionState::Cancelled),
-        ] {
-            let parsed: RunExecutionState =
-                serde_json::from_value(label.into()).expect("legacy label must parse");
-            assert_eq!(parsed, expected, "{label}");
+    fn durable_state_labels_round_trip() {
+        fn assert_round_trip<T>(label: &str, state: T)
+        where
+            T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let parsed: T = serde_json::from_value(label.into()).expect("durable label parses");
+            assert_eq!(parsed, state, "{label}");
             assert_eq!(
                 serde_json::to_value(parsed).expect("serialize"),
                 serde_json::json!(label),
                 "{label} must round-trip to the same durable string"
             );
         }
-    }
 
-    /// The variant added by #6761, pinned to its wire string. It is
-    /// persisted, so changing it is a durable-format break.
-    #[test]
-    fn recoverable_states_have_stable_wire_labels() {
-        let (label, state) = (
-            "candidate_recoverable",
-            RunExecutionState::CandidateRecoverable,
-        );
-        assert_eq!(
-            serde_json::to_value(state).expect("serialize"),
-            serde_json::json!(label)
-        );
-        let parsed: RunExecutionState = serde_json::from_value(label.into()).expect("parse");
-        assert_eq!(parsed, state);
-    }
-
-    /// The tolerance hatch, and the reason adding a variant here is safe from
-    /// now on: a state minted by a newer binary degrades to `Unknown` instead
-    /// of failing the enclosing record parse.
-    ///
-    /// Without `#[serde(other)]` this test fails and, more importantly, every
-    /// older reader of a record containing a new state fails with it.
-    #[test]
-    fn a_state_from_a_newer_binary_degrades_to_unknown() {
-        let parsed: RunExecutionState =
-            serde_json::from_value("some_state_from_a_newer_binary".into())
-                .expect("unknown state must not fail the parse");
-
-        assert_eq!(parsed, RunExecutionState::Unknown);
-    }
-
-    /// The degradation must hold through the enclosing record, which is the
-    /// shape that actually lands on disk.
-    #[test]
-    fn an_unknown_state_does_not_fail_the_enclosing_record() {
-        let record: RunLifecycleRecord = serde_json::from_value(serde_json::json!({
-            "schema": RUN_LIFECYCLE_RECORD_SCHEMA,
-            "execution": { "state": "a_state_this_binary_has_never_heard_of" },
-        }))
-        .expect("record with an unknown execution state must still parse");
-
-        assert_eq!(record.execution.state, RunExecutionState::Unknown);
-    }
-}
-
-#[cfg(test)]
-mod subsystem_state_tests {
-    use super::*;
-
-    /// Degradation has to survive the enclosing record, which is the shape that
-    /// actually lands on disk.
-    #[test]
-    fn unknown_subsystem_states_parse_through_the_enclosing_record() {
-        let record: RunLifecycleRecord = serde_json::from_value(serde_json::json!({
-            "schema": RUN_LIFECYCLE_RECORD_SCHEMA,
-            "execution": { "state": "running" },
-            "cleanup": { "state": "a_future_cleanup_state" },
-            "artifact_retention": { "status": "a_future_retention_status" },
-            // Retired, never-written field: old records still parse.
-            "finalization": { "state": "not_requested" },
-        }))
-        .expect("record carrying unknown subsystem states must still parse");
-
-        assert_eq!(record.cleanup.state, CleanupState::Unknown);
-        assert_eq!(
-            record.artifact_retention.status,
-            ArtifactRetentionStatus::Unknown
-        );
-    }
-
-    /// Every supported subsystem state keeps its durable spelling.
-    #[test]
-    fn subsystem_states_keep_their_wire_labels() {
+        for (label, state) in [
+            ("unknown", RunExecutionState::Unknown),
+            ("queued", RunExecutionState::Queued),
+            ("running", RunExecutionState::Running),
+            ("succeeded", RunExecutionState::Succeeded),
+            (
+                "candidate_recoverable",
+                RunExecutionState::CandidateRecoverable,
+            ),
+            ("partial_failure", RunExecutionState::PartialFailure),
+            ("failed", RunExecutionState::Failed),
+            ("cancelled", RunExecutionState::Cancelled),
+        ] {
+            assert_round_trip(label, state);
+        }
         for (label, state) in [
             ("pending", CleanupState::Pending),
             ("running", CleanupState::Running),
@@ -515,12 +449,8 @@ mod subsystem_state_tests {
             ("preserved", CleanupState::Preserved),
             ("unknown", CleanupState::Unknown),
         ] {
-            assert_eq!(
-                serde_json::to_value(state).expect("serialize"),
-                serde_json::json!(label)
-            );
+            assert_round_trip(label, state);
         }
-
         for (label, status) in [
             ("not_applicable", ArtifactRetentionStatus::NotApplicable),
             ("pending", ArtifactRetentionStatus::Pending),
@@ -528,11 +458,30 @@ mod subsystem_state_tests {
             ("failed", ArtifactRetentionStatus::Failed),
             ("unknown", ArtifactRetentionStatus::Unknown),
         ] {
-            assert_eq!(
-                serde_json::to_value(status).expect("serialize"),
-                serde_json::json!(label)
-            );
+            assert_round_trip(label, status);
         }
+    }
+
+    /// States minted by a newer binary degrade to `Unknown` instead of failing
+    /// the enclosing record parse, which is the shape that lands on disk.
+    #[test]
+    fn states_from_a_newer_binary_degrade_to_unknown_through_the_record() {
+        let record: RunLifecycleRecord = serde_json::from_value(serde_json::json!({
+            "schema": RUN_LIFECYCLE_RECORD_SCHEMA,
+            "execution": { "state": "a_state_this_binary_has_never_heard_of" },
+            "cleanup": { "state": "a_future_cleanup_state" },
+            "artifact_retention": { "status": "a_future_retention_status" },
+            // Retired, never-written field: old records still parse.
+            "finalization": { "state": "not_requested" },
+        }))
+        .expect("record carrying unknown states must still parse");
+
+        assert_eq!(record.execution.state, RunExecutionState::Unknown);
+        assert_eq!(record.cleanup.state, CleanupState::Unknown);
+        assert_eq!(
+            record.artifact_retention.status,
+            ArtifactRetentionStatus::Unknown
+        );
     }
 }
 

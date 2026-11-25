@@ -236,38 +236,22 @@ mod tests {
     }
 
     #[test]
-    fn detects_a_relative_reset_window() {
-        let reset_at = detect_usage_cap("5-hour usage limit reached. Resets in 3hr 3min.", now())
-            .expect("relative reset parsed");
-        assert_eq!(
-            reset_at,
-            now() + chrono::Duration::hours(3) + chrono::Duration::minutes(3)
-        );
-    }
-
-    #[test]
-    fn detects_an_absolute_reset_timestamp() {
-        let reset_at = detect_usage_cap(
-            "Usage limit reached for 5 hour. Resets at 2026-08-27 12:37:03.",
-            now(),
-        )
-        .expect("absolute reset parsed");
-        assert_eq!(
-            reset_at,
-            Utc.with_ymd_and_hms(2026, 8, 27, 12, 37, 3)
-                .single()
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn a_bare_rate_limit_without_the_usage_cap_phrase_is_not_a_cap() {
-        assert!(detect_usage_cap("429 too many requests, try again shortly", now()).is_none());
-    }
-
-    #[test]
-    fn a_usage_cap_phrase_without_a_parseable_reset_time_is_not_recorded() {
-        assert!(detect_usage_cap("daily usage limit reached", now()).is_none());
+    fn detects_usage_caps_only_with_a_parseable_reset_time() {
+        let at = |h, m, s| Utc.with_ymd_and_hms(2026, 8, 27, h, m, s).single().unwrap();
+        for (text, expected) in [
+            (
+                "5-hour usage limit reached. Resets in 3hr 3min.",
+                Some(at(12, 37, 0)),
+            ),
+            (
+                "Usage limit reached for 5 hour. Resets at 2026-08-27 12:37:03.",
+                Some(at(12, 37, 3)),
+            ),
+            ("429 too many requests, try again shortly", None),
+            ("daily usage limit reached", None),
+        ] {
+            assert_eq!(detect_usage_cap(text, now()), expected, "{text}");
+        }
     }
 
     #[test]
@@ -283,14 +267,9 @@ mod tests {
             None
         );
         assert_eq!(registry.active("other-backend", now()), None);
-    }
-
-    #[test]
-    fn registry_key_includes_the_selector_when_present() {
-        assert_eq!(provider_usage_cap_key("pi-go", None), "pi-go");
         assert_eq!(
-            provider_usage_cap_key("pi-go", Some("secondary")),
-            "pi-go::secondary"
+            registry.active(&provider_usage_cap_key("zai-coding-plan", Some("b")), now()),
+            None
         );
         assert_ne!(
             provider_usage_cap_key_for_model("pi", None, Some("zai/glm")),
@@ -310,15 +289,19 @@ mod tests {
     }
 
     #[test]
-    fn registry_preserves_more_than_sixty_four_active_capacity_bindings() {
+    fn registry_prunes_expired_bindings_but_never_drops_active_ones() {
         let mut registry = ProviderUsageCapRegistry::default();
+        registry.capped.insert(
+            "expired".to_string(),
+            Utc::now() - chrono::Duration::seconds(1),
+        );
         let reset_at = Utc::now() + chrono::Duration::hours(1);
         for index in 0..64 {
             registry.record(format!("active-{index}"), reset_at);
         }
-
         registry.record("overflow", reset_at);
 
+        assert!(!registry.capped.contains_key("expired"));
         assert_eq!(registry.capped.len(), 65);
         for index in 0..64 {
             assert_eq!(
@@ -327,24 +310,5 @@ mod tests {
             );
         }
         assert_eq!(registry.active("overflow", Utc::now()), Some(reset_at));
-    }
-
-    #[test]
-    fn bounded_registry_prunes_expired_bindings_before_admitting_new_evidence() {
-        let mut registry = ProviderUsageCapRegistry::default();
-        registry.capped.insert(
-            "expired".to_string(),
-            Utc::now() - chrono::Duration::seconds(1),
-        );
-        for index in 0..63 {
-            registry.capped.insert(
-                format!("active-{index}"),
-                Utc::now() + chrono::Duration::hours(1),
-            );
-        }
-        registry.record("replacement", Utc::now() + chrono::Duration::hours(1));
-
-        assert!(!registry.capped.contains_key("expired"));
-        assert!(registry.capped.contains_key("replacement"));
     }
 }

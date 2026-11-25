@@ -459,102 +459,106 @@ mod batch_concurrency_tests {
         }
     }
 
-    /// The regression this whole path exists for: a large batch on a host with
-    /// no flag and no config must not fan out to the core count.
+    /// Precedence table: the built-in default caps an unconfigured batch, an
+    /// explicit flag beats host config, a resource budget lowers even a flag
+    /// (but never raises it), a small batch is limited by its own child count,
+    /// and a batch with work always gets at least one worker.
     #[test]
-    fn an_unconfigured_batch_is_capped_by_the_built_in_default() {
-        let budget = AgentTaskResourceBudget::default();
-        let decision = resolve_batch_concurrency(inputs(&budget, 32));
-        assert_eq!(decision.limit, 4);
-        assert_eq!(decision.source, BatchConcurrencySource::Config);
-    }
-
-    #[test]
-    fn an_explicit_flag_is_the_ceiling_and_is_reported_as_the_source() {
-        let budget = AgentTaskResourceBudget::default();
-        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
-            requested: Some(2),
-            configured: Some(8),
-            ..inputs(&budget, 32)
-        });
-        assert_eq!(decision.limit, 2);
-        assert_eq!(decision.source, BatchConcurrencySource::Flag);
-    }
-
-    #[test]
-    fn host_config_applies_when_no_flag_is_given() {
-        let budget = AgentTaskResourceBudget::default();
-        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
-            configured: Some(1),
-            ..inputs(&budget, 32)
-        });
-        assert_eq!(decision.limit, 1);
-        assert_eq!(decision.source, BatchConcurrencySource::Config);
-    }
-
-    /// A budget is a statement about the host, so it lowers even an explicit
-    /// flag. Getting this backwards is how a declared budget stops protecting.
-    #[test]
-    fn a_resource_budget_lowers_even_an_explicit_flag() {
-        let budget = AgentTaskResourceBudget {
-            max_active_units: Some(2),
-            default_task_units: 1,
+    fn batch_concurrency_resolution_follows_source_precedence() {
+        let unbounded = AgentTaskResourceBudget::default();
+        let budget = |max: u32, units: u32| AgentTaskResourceBudget {
+            max_active_units: Some(max),
+            default_task_units: units,
             ..AgentTaskResourceBudget::default()
         };
-        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
-            requested: Some(8),
-            ..inputs(&budget, 32)
-        });
-        assert_eq!(decision.limit, 2);
-        assert_eq!(decision.source, BatchConcurrencySource::ResourceBudget);
-        assert!(
-            decision.reason.contains("resource budget"),
-            "{}",
-            decision.reason
-        );
+        let tight = budget(2, 1);
+        let loose = budget(64, 1);
+        let exhausted = budget(0, 8);
+        let cases: [(
+            &str,
+            BatchConcurrencyInputs<'_>,
+            usize,
+            Option<BatchConcurrencySource>,
+        ); 7] = [
+            (
+                "unconfigured",
+                inputs(&unbounded, 32),
+                4,
+                Some(BatchConcurrencySource::Config),
+            ),
+            (
+                "flag beats config",
+                BatchConcurrencyInputs {
+                    requested: Some(2),
+                    configured: Some(8),
+                    ..inputs(&unbounded, 32)
+                },
+                2,
+                Some(BatchConcurrencySource::Flag),
+            ),
+            (
+                "host config",
+                BatchConcurrencyInputs {
+                    configured: Some(1),
+                    ..inputs(&unbounded, 32)
+                },
+                1,
+                Some(BatchConcurrencySource::Config),
+            ),
+            (
+                "budget lowers flag",
+                BatchConcurrencyInputs {
+                    requested: Some(8),
+                    ..inputs(&tight, 32)
+                },
+                2,
+                Some(BatchConcurrencySource::ResourceBudget),
+            ),
+            (
+                "budget never raises",
+                BatchConcurrencyInputs {
+                    requested: Some(2),
+                    ..inputs(&loose, 32)
+                },
+                2,
+                Some(BatchConcurrencySource::Flag),
+            ),
+            (
+                "child count",
+                BatchConcurrencyInputs {
+                    requested: Some(8),
+                    ..inputs(&unbounded, 2)
+                },
+                2,
+                Some(BatchConcurrencySource::ChildCount),
+            ),
+            (
+                "floor of one",
+                BatchConcurrencyInputs {
+                    requested: Some(0),
+                    ..inputs(&exhausted, 32)
+                },
+                1,
+                None,
+            ),
+        ];
+        for (label, input, limit, source) in cases {
+            let decision = resolve_batch_concurrency(input);
+            assert_eq!(decision.limit, limit, "{label}");
+            if let Some(source) = source {
+                assert_eq!(decision.source, source, "{label}");
+            }
+            if source == Some(BatchConcurrencySource::ResourceBudget) {
+                assert!(
+                    decision.reason.contains("resource budget"),
+                    "{}",
+                    decision.reason
+                );
+            }
+        }
     }
 
-    #[test]
-    fn a_budget_larger_than_the_ceiling_does_not_raise_it() {
-        let budget = AgentTaskResourceBudget {
-            max_active_units: Some(64),
-            default_task_units: 1,
-            ..AgentTaskResourceBudget::default()
-        };
-        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
-            requested: Some(2),
-            ..inputs(&budget, 32)
-        });
-        assert_eq!(decision.limit, 2);
-        assert_eq!(decision.source, BatchConcurrencySource::Flag);
-    }
-
-    #[test]
-    fn a_small_batch_is_limited_by_its_own_child_count() {
-        let budget = AgentTaskResourceBudget::default();
-        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
-            requested: Some(8),
-            ..inputs(&budget, 2)
-        });
-        assert_eq!(decision.limit, 2);
-        assert_eq!(decision.source, BatchConcurrencySource::ChildCount);
-    }
-
-    /// A batch with work to do always makes progress, however tight the budget.
-    #[test]
-    fn the_floor_is_one_worker() {
-        let budget = AgentTaskResourceBudget {
-            max_active_units: Some(0),
-            default_task_units: 8,
-            ..AgentTaskResourceBudget::default()
-        };
-        let decision = resolve_batch_concurrency(BatchConcurrencyInputs {
-            requested: Some(0),
-            ..inputs(&budget, 32)
-        });
-        assert_eq!(decision.limit, 1);
-    }
-
+    /// Wire contract: these labels appear in batch status JSON.
     #[test]
     fn the_source_serializes_as_the_documented_vocabulary() {
         for (source, expected) in [
@@ -563,7 +567,6 @@ mod batch_concurrency_tests {
             (BatchConcurrencySource::ResourceBudget, "resource_budget"),
             (BatchConcurrencySource::ChildCount, "child_count"),
         ] {
-            assert_eq!(source.as_str(), expected);
             assert_eq!(
                 serde_json::to_value(source).expect("source serializes"),
                 serde_json::Value::String(expected.to_string()),
@@ -586,26 +589,5 @@ mod batch_concurrency_tests {
         assert_eq!(resource_budget_slots(&bounded, 0), Some(2));
         assert_eq!(resource_budget_slots(&bounded, 8), Some(0));
         assert_eq!(resource_budget_slots(&bounded, 999), Some(0));
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn batch_concurrency_source_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (BatchConcurrencySource::Flag, "flag"),
-            (BatchConcurrencySource::Config, "config"),
-            (BatchConcurrencySource::ResourceBudget, "resource_budget"),
-            (BatchConcurrencySource::ChildCount, "child_count"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
     }
 }

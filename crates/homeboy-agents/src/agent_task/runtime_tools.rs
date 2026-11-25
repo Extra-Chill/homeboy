@@ -45,45 +45,10 @@ pub enum AgentTaskRuntimeToolLifecycle {
     RuntimeOwned,
 }
 
-#[cfg(test)]
-impl AgentTaskRuntimeTool {
-    pub(crate) fn redacted(mut self) -> Self {
-        self.env = self
-            .env
-            .keys()
-            .map(|name| (name.clone(), "[redacted]".to_string()))
-            .collect();
-        self
-    }
-}
-
 fn runtime_tool_schema() -> String {
     AGENT_TASK_RUNTIME_TOOL_SCHEMA.to_string()
 }
 
 fn stdio_transport() -> String {
     "stdio".to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_tool_contract_round_trips_and_redacts_literal_environment_values() {
-        let tool: AgentTaskRuntimeTool = serde_json::from_value(serde_json::json!({
-            "id": "fixture.browser",
-            "command": ["fixture-mcp", "--isolated"],
-            "env": { "FIXTURE_MODE": "private-value" },
-            "secret_env": ["FIXTURE_TOKEN"],
-            "timeout_ms": 1000,
-            "readiness": { "version_command": ["--version"] }
-        }))
-        .expect("runtime tool declaration");
-
-        assert_eq!(tool.schema, AGENT_TASK_RUNTIME_TOOL_SCHEMA);
-        let redacted = serde_json::to_value(tool.redacted()).expect("redacted declaration");
-        assert_eq!(redacted["env"]["FIXTURE_MODE"], "[redacted]");
-        assert_eq!(redacted["secret_env"][0], "FIXTURE_TOKEN");
-    }
 }

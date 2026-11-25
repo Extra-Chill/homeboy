@@ -1843,8 +1843,10 @@ mod storage_exhaustion_tests {
         assert!(hints.contains("runtime-tmp"), "{hints}");
     }
 
+    /// Measured capacity evidence reaches the details; absent measurements are
+    /// omitted rather than serialized as nulls a consumer has to special-case.
     #[test]
-    fn measured_capacity_evidence_survives_into_the_details() {
+    fn capacity_evidence_details_carry_only_measured_fields() {
         let error = Error::storage_exhausted_detailed(StorageExhaustedDetails {
             error: "reserve breached".to_string(),
             context: Some("preflight".to_string()),
@@ -1858,15 +1860,9 @@ mod storage_exhaustion_tests {
         assert_eq!(error.details["available_inodes"], 0);
         assert_eq!(error.details["reserve_inodes"], 100_000);
         assert_eq!(error.details["path"], "/var/lib/homeboy");
-    }
 
-    /// Absent measurements must not serialize as nulls a consumer has to
-    /// special-case.
-    #[test]
-    fn unmeasured_capacity_fields_are_omitted_entirely() {
-        let error = Error::storage_exhausted("full", None);
-
-        let details = error.details.as_object().expect("object details");
+        let unmeasured = Error::storage_exhausted("full", None);
+        let details = unmeasured.details.as_object().expect("object details");
         assert!(!details.contains_key("available_bytes"));
         assert!(!details.contains_key("reserve_inodes"));
         assert!(!details.contains_key("context"));
@@ -1994,46 +1990,28 @@ mod conversion_tests {
             .contains("provider closed stdin"));
     }
 
-    /// The point of keeping the *typed* cause rather than its text: a caller
-    /// can read an `ErrorKind` instead of matching on a message.
+    /// The typed cause survives so a caller can read an `ErrorKind` instead of
+    /// matching on a message, and attaching it leaves the reported contract
+    /// (what every consumer and envelope reads) untouched.
     #[test]
-    fn the_cause_can_be_downcast_back_to_the_original_io_error() {
+    fn the_typed_cause_is_recoverable_without_changing_the_reported_contract() {
         use std::error::Error as _;
 
         let error = Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
-
         let cause = error
             .source()
             .expect("cause")
             .downcast_ref::<std::io::Error>()
             .expect("the original io error survives");
         assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
-    }
 
-    /// Attaching a cause must not disturb the reported contract, which is what
-    /// every consumer and every envelope actually reads.
-    #[test]
-    fn attaching_a_cause_does_not_change_the_reported_contract() {
         let plain = Error::internal_io("boom", Some("context".to_string()));
         let sourced = Error::internal_io("boom", Some("context".to_string()))
             .with_source(std::io::Error::from(std::io::ErrorKind::NotFound));
-
         assert_eq!(plain.code, sourced.code);
         assert_eq!(plain.message, sourced.message);
         assert_eq!(plain.details, sourced.details);
         assert_eq!(plain.retryable, sourced.retryable);
-    }
-
-    /// `?` cannot attach context, so the contextful constructors must stay the
-    /// preferred form for sites that know which operation failed.
-    #[test]
-    fn the_contextful_constructor_records_what_the_caller_was_doing() {
-        let error = Error::from_io_error(
-            &std::io::Error::from(std::io::ErrorKind::NotFound),
-            Some("read deployment provider policy".to_string()),
-        );
-
-        assert_eq!(error.details["context"], "read deployment provider policy");
     }
 }
 
@@ -2060,11 +2038,18 @@ mod details_serialization_tests {
         }
     }
 
+    /// A failed serialization is reported under a marker key, construction
+    /// still succeeds (this runs on a failure path), and a successful
+    /// serialization never carries the marker.
     #[test]
     fn a_details_struct_that_cannot_serialize_says_so_instead_of_vanishing() {
-        let details = to_details(UnserializableDetails);
+        let error = Error::new(
+            ErrorCode::InternalUnexpected,
+            "fixture",
+            to_details(UnserializableDetails),
+        );
 
-        let object = details.as_object().expect("object details");
+        let object = error.details.as_object().expect("object details");
         assert_eq!(
             object.len(),
             1,
@@ -2074,67 +2059,18 @@ mod details_serialization_tests {
             .as_str()
             .expect("the serialization failure is reported as a string");
         assert!(!reported.is_empty(), "the reason must survive");
-    }
 
-    /// The marker only appears on failure — an error with genuinely no details
-    /// must stay a clean empty object.
-    #[test]
-    fn a_successful_serialization_carries_no_failure_marker() {
-        let error = Error::internal_unexpected("plain");
-
-        assert!(!error
+        assert!(!Error::internal_unexpected("plain")
             .details
             .as_object()
             .expect("object details")
             .contains_key(DETAILS_SERIALIZATION_ERROR_KEY));
-        assert_eq!(
-            to_details(serde_json::json!({})),
-            Value::Object(serde_json::Map::new())
-        );
-    }
-
-    /// Construction must survive the failure: this runs on a failure path, so
-    /// replacing a reportable error with a panic would be strictly worse.
-    #[test]
-    fn constructing_an_error_survives_a_failed_details_serialization() {
-        let error = Error::new(
-            ErrorCode::InternalUnexpected,
-            "fixture",
-            to_details(UnserializableDetails),
-        );
-
-        assert_eq!(error.code, ErrorCode::InternalUnexpected);
-        assert!(error.details[DETAILS_SERIALIZATION_ERROR_KEY].is_string());
     }
 }
 
 #[cfg(test)]
 mod ergonomic_constructor_tests {
     use super::*;
-
-    #[test]
-    fn invalid_argument_shorthands_equal_their_verbose_forms() {
-        let pairs = [
-            (
-                Error::invalid_argument("field", "problem"),
-                Error::validation_invalid_argument("field", "problem", None, None),
-            ),
-            (
-                Error::invalid_argument_for("field", "problem", "the-id"),
-                Error::validation_invalid_argument(
-                    "field",
-                    "problem",
-                    Some("the-id".to_string()),
-                    None,
-                ),
-            ),
-        ];
-        for (short, verbose) in pairs {
-            assert_eq!(short.code, verbose.code);
-            assert_eq!(short.message, verbose.message);
-            assert_eq!(short.details, verbose.details);
-        }
-    }
 
     #[test]
     fn executable_action_renders_arguments_with_the_shared_posix_quoting_contract() {

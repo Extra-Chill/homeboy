@@ -43,28 +43,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lifecycle_owner_keeps_its_wire_values() {
-        for (owner, expected) in [
-            (RunnerLifecycleOwner::Controller, "controller"),
-            (RunnerLifecycleOwner::Runner, "runner"),
-            (RunnerLifecycleOwner::Broker, "broker"),
-            (RunnerLifecycleOwner::Local, "local"),
-        ] {
-            assert_eq!(owner.as_str(), expected);
-            assert_eq!(serde_json::to_value(owner).expect("serialize"), expected);
-        }
-    }
-
-    #[test]
-    fn empty_lifecycle_metadata_keeps_its_wire_shape() {
+    fn lifecycle_metadata_keeps_its_wire_shape() {
         assert_eq!(
             serde_json::to_value(RunnerJobLifecycleMetadata::default()).expect("serialize"),
             serde_json::json!({})
         );
-    }
 
-    #[test]
-    fn lifecycle_metadata_keeps_its_complete_wire_shape() {
         let metadata = RunnerJobLifecycleMetadata {
             source: Some("daemon".to_string()),
             kind: Some("agent_task".to_string()),

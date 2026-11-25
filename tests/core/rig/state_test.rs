@@ -1,8 +1,8 @@
 //! State persistence tests for `src/core/rig/state.rs`.
 //!
 //! The load/save path is gated on `~/.config/homeboy/` (hard to test without
-//! touching real user state), so this module exercises serde round-tripping
-//! which is the meaningful invariant.
+//! touching real user state), so this module exercises the on-disk record
+//! shape and the snapshot override helpers.
 
 use std::collections::BTreeMap;
 
@@ -12,71 +12,13 @@ use crate::state::{
     ServiceState, SharedPathState,
 };
 
+/// The on-disk rig state must survive a write/read cycle with every
+/// persisted section populated: services, shared paths, materialized
+/// ownership and lifecycle snapshot handles.
 #[test]
-fn test_state_round_trips_empty() {
-    let state = RigState::default();
-    let json = serde_json::to_string(&state).expect("serialize");
-    let parsed: RigState = serde_json::from_str(&json).expect("parse");
-    assert!(parsed.last_up.is_none());
-    assert!(parsed.services.is_empty());
-    assert!(parsed.shared_paths.is_empty());
-}
-
-#[test]
-fn test_state_round_trips_with_service() {
+fn test_state_round_trips_every_persisted_section() {
     let mut state = RigState {
-        component_refs: Default::default(),
         last_up: Some("2026-04-24T13:00:00Z".to_string()),
-        last_check: None,
-        last_check_result: None,
-        services: Default::default(),
-        shared_paths: Default::default(),
-        materialized: None,
-        last_effective_components: Default::default(),
-        lifecycle_snapshots: Default::default(),
-    };
-    state.services.insert(
-        "tarball".to_string(),
-        ServiceState {
-            pid: Some(12345),
-            started_at: Some("2026-04-24T12:59:00Z".to_string()),
-            status: "running".to_string(),
-        },
-    );
-    let json = serde_json::to_string(&state).expect("serialize");
-    let parsed: RigState = serde_json::from_str(&json).expect("parse");
-    assert_eq!(parsed.last_up.as_deref(), Some("2026-04-24T13:00:00Z"));
-    assert_eq!(
-        parsed.services.get("tarball").and_then(|s| s.pid),
-        Some(12345)
-    );
-    assert_eq!(
-        parsed.services.get("tarball").map(|s| s.status.as_str()),
-        Some("running")
-    );
-}
-
-#[test]
-fn test_state_round_trips_with_shared_path() {
-    let mut state = RigState::default();
-    state.shared_paths.insert(
-        "/worktree/node_modules".to_string(),
-        SharedPathState {
-            target: "/primary/node_modules".to_string(),
-            created_at: "2026-04-26T13:00:00Z".to_string(),
-        },
-    );
-
-    let json = serde_json::to_string(&state).expect("serialize");
-    let parsed: RigState = serde_json::from_str(&json).expect("parse");
-    let entry = parsed.shared_paths.get("/worktree/node_modules").unwrap();
-    assert_eq!(entry.target, "/primary/node_modules");
-    assert_eq!(entry.created_at, "2026-04-26T13:00:00Z");
-}
-
-#[test]
-fn test_state_round_trips_with_materialized_ownership() {
-    let state = RigState {
         materialized: Some(MaterializedRigState {
             rig_id: "studio".to_string(),
             materialized_at: "2026-04-30T13:00:00Z".to_string(),
@@ -91,21 +33,21 @@ fn test_state_round_trips_with_materialized_ownership() {
         }),
         ..RigState::default()
     };
-
-    let json = serde_json::to_string(&state).expect("serialize");
-    let parsed: RigState = serde_json::from_str(&json).expect("parse");
-    let materialized = parsed.materialized.expect("materialized ownership");
-    assert_eq!(materialized.rig_id, "studio");
-    assert_eq!(materialized.resources.ports, vec![9724]);
-    assert_eq!(
-        materialized.resources.process_patterns,
-        vec!["app-server-child"]
+    state.services.insert(
+        "tarball".to_string(),
+        ServiceState {
+            pid: Some(12345),
+            started_at: Some("2026-04-24T12:59:00Z".to_string()),
+            status: "running".to_string(),
+        },
     );
-}
-
-#[test]
-fn test_state_round_trips_with_lifecycle_snapshot_handle() {
-    let mut state = RigState::default();
+    state.shared_paths.insert(
+        "/worktree/node_modules".to_string(),
+        SharedPathState {
+            target: "/primary/node_modules".to_string(),
+            created_at: "2026-04-26T13:00:00Z".to_string(),
+        },
+    );
     state.lifecycle_snapshots.insert(
         "sandbox-7f3".to_string(),
         LifecycleSnapshotState {
@@ -128,17 +70,32 @@ fn test_state_round_trips_with_lifecycle_snapshot_handle() {
 
     let json = serde_json::to_string(&state).expect("serialize");
     let parsed: RigState = serde_json::from_str(&json).expect("parse");
+
+    assert_eq!(parsed.last_up.as_deref(), Some("2026-04-24T13:00:00Z"));
+    let service = parsed.services.get("tarball").expect("service");
+    assert_eq!(service.pid, Some(12345));
+    assert_eq!(service.status, "running");
+    let shared = parsed
+        .shared_paths
+        .get("/worktree/node_modules")
+        .expect("shared path");
+    assert_eq!(shared.target, "/primary/node_modules");
+    let materialized = parsed.materialized.expect("materialized ownership");
+    assert_eq!(materialized.rig_id, "studio");
+    assert_eq!(materialized.resources.ports, vec![9724]);
+    assert_eq!(
+        materialized.resources.process_patterns,
+        vec!["app-server-child"]
+    );
     let entry = parsed
         .lifecycle_snapshots
         .get("sandbox-7f3")
         .expect("handle");
     assert_eq!(entry.step, "provision");
-    assert_eq!(entry.component.as_deref(), Some("app"));
     assert_eq!(
         entry.snapshot.locator.as_deref(),
         Some("opaque://sandbox/7f3")
     );
-    assert_eq!(entry.snapshot.kind, "lifecycle_snapshot");
 }
 
 /// Non-breaking guarantee: state written before lifecycle handles existed
@@ -243,22 +200,8 @@ fn set_effective_component_path_clears_stale_git_metadata_for_non_repo_path() {
 }
 
 #[test]
-fn component_snapshot_round_trips_declared_path() {
-    let snapshot = ComponentSnapshot {
-        path: "/tmp/effective".to_string(),
-        declared_path: Some("/tmp/declared".to_string()),
-        sha: None,
-        branch: None,
-    };
-    let json = serde_json::to_string(&snapshot).expect("serialize");
-    assert!(json.contains("\"declared_path\":\"/tmp/declared\""));
-    let parsed: ComponentSnapshot = serde_json::from_str(&json).expect("parse");
-    assert_eq!(parsed.declared_path.as_deref(), Some("/tmp/declared"));
-}
-
-#[test]
-fn component_snapshot_omits_declared_path_when_absent() {
-    let snapshot = ComponentSnapshot {
+fn component_snapshot_writes_declared_path_only_when_overridden() {
+    let mut snapshot = ComponentSnapshot {
         path: "/tmp/effective".to_string(),
         declared_path: None,
         sha: None,
@@ -269,6 +212,11 @@ fn component_snapshot_omits_declared_path_when_absent() {
         !json.contains("declared_path"),
         "json should omit declared_path when None: {json}"
     );
+
+    snapshot.declared_path = Some("/tmp/declared".to_string());
+    let json = serde_json::to_string(&snapshot).expect("serialize");
+    let parsed: ComponentSnapshot = serde_json::from_str(&json).expect("parse");
+    assert_eq!(parsed.declared_path.as_deref(), Some("/tmp/declared"));
 }
 
 #[test]

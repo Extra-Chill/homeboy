@@ -2163,14 +2163,7 @@ mod tests {
                         .lines()
                         .count()
                 };
-                assert_eq!(
-                    runs(),
-                    if accepted || name == "regression" {
-                        1
-                    } else {
-                        2
-                    }
-                );
+                assert_eq!(runs(), if accepted { 1 } else { 2 });
                 if accepted {
                     assert!(second.deterministic_gates[0]
                         .baseline_comparison

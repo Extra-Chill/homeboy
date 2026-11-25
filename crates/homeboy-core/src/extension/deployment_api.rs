@@ -1115,7 +1115,7 @@ mod tests {
     };
 
     #[test]
-    fn structured_layered_failure_is_operator_facing() {
+    fn layered_failure_error_surfaces_only_structured_failures() {
         let evidence = serde_json::json!({
             "failure": {
                 "stage": "remote_preflight",
@@ -1127,10 +1127,6 @@ mod tests {
             layered_failure_error(&evidence).as_deref(),
             Some("Deployment provider failed at remote_preflight (remote_checkout_dirty): The remote checkout has local changes.")
         );
-    }
-
-    #[test]
-    fn opaque_layered_failure_has_no_untrusted_cause() {
         assert_eq!(
             layered_failure_error(&serde_json::json!({"status": "opaque"})),
             None

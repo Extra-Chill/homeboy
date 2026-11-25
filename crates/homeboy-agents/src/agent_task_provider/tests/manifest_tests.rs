@@ -4,39 +4,6 @@ use super::*;
 use crate::agent_task::AgentTaskOutputDeclaration;
 
 #[test]
-fn provider_capability_contract_exports_core_owned_schema_ids() {
-    let contract = provider_capability_contract();
-
-    assert_eq!(
-        contract.schema,
-        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
-    );
-    assert_eq!(
-        contract.provider_schema,
-        AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
-    );
-    assert_eq!(contract.schemas.request_schema, AGENT_TASK_REQUEST_SCHEMA);
-    assert_eq!(contract.schemas.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
-    assert_eq!(contract.tool_request_schema, AGENT_TOOL_REQUEST_SCHEMA);
-    assert_eq!(contract.tool_result_schema, AGENT_TOOL_RESULT_SCHEMA);
-    assert_eq!(contract.tool_policy_schema, AGENT_TOOL_POLICY_SCHEMA);
-}
-
-#[test]
-fn provider_manifest_defaults_core_owned_schema_ids() {
-    let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-        "id": "minimal.provider",
-        "backend": "minimal",
-        "invocation": { "argv": ["minimal-provider"] }
-    }))
-    .expect("provider manifest");
-
-    assert_eq!(provider.schema, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA);
-    assert_eq!(provider.request_schema, AGENT_TASK_REQUEST_SCHEMA);
-    assert_eq!(provider.outcome_schema, AGENT_TASK_OUTCOME_SCHEMA);
-}
-
-#[test]
 fn provider_manifest_accepts_command_invocation_contract() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "invocation.provider",
@@ -408,73 +375,49 @@ fn provider_attests_worktree_root_and_executes_nested_component() {
 
 #[cfg(unix)]
 #[test]
-fn provider_refuses_legacy_source_attestation_git_file_replaced_before_spawn() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (workspace, _) = linked_workspace(&temp);
-    let attestation = workspace_attestation(&workspace);
-    let marker = workspace.join("provider-started");
-    let script = script(&format!(
-        "require('fs').writeFileSync({:?}, 'started')",
-        marker.display().to_string()
-    ));
-    let (mut request, provider) = request("attested-workspace", format!("node {script}"));
-    request.workspace.root = Some(workspace.display().to_string());
-    request.metadata = serde_json::json!({ "cook_workspace_identity": attestation });
+fn provider_refuses_changed_workspace_git_identity_before_spawn() {
+    type Tamper = fn(&std::path::Path, &std::path::Path);
+    let replace_git_file: Tamper = |_, workspace| {
+        std::fs::remove_file(workspace.join(".git")).expect("remove linked git file");
+        std::fs::create_dir(workspace.join(".git")).expect("replace with git directory");
+    };
+    let swap_gitdir_target: Tamper = |root, workspace| {
+        std::fs::create_dir_all(root.join("replacement-gitdir")).expect("replacement gitdir");
+        std::fs::write(workspace.join(".git"), "gitdir: ../replacement-gitdir\n")
+            .expect("replace linked git target");
+    };
+    for (metadata_key, tamper, expected_class) in [
+        (
+            "cook_workspace_identity",
+            replace_git_file,
+            "agent_task.workspace_git_representation_changed",
+        ),
+        (
+            "cook_attempt_workspace_identity",
+            swap_gitdir_target,
+            "agent_task.workspace_identity_changed",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (workspace, _) = linked_workspace(&temp);
+        let attestation = workspace_attestation(&workspace);
+        let marker = workspace.join("provider-started");
+        let script = script(&format!(
+            "require('fs').writeFileSync({:?}, 'started')",
+            marker.display().to_string()
+        ));
+        let (mut request, provider) = request("attested-workspace", format!("node {script}"));
+        request.workspace.root = Some(workspace.display().to_string());
+        request.metadata = serde_json::json!({ metadata_key: attestation });
 
-    std::fs::remove_file(workspace.join(".git")).expect("remove linked git file");
-    std::fs::create_dir(workspace.join(".git")).expect("replace with git directory");
+        tamper(temp.path(), &workspace);
 
-    let outcome = run_provider_command_once(&request, &provider);
+        let outcome = run_provider_command_once(&request, &provider);
 
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.workspace_git_representation_changed"
-    );
-    assert!(!marker.exists(), "provider command must not start");
-}
-
-#[cfg(unix)]
-#[test]
-fn provider_refuses_linked_git_target_swap_before_spawn() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let (workspace, _) = linked_workspace(&temp);
-    let attestation = workspace_attestation(&workspace);
-    let marker = workspace.join("provider-started");
-    let script = script(&format!(
-        "require('fs').writeFileSync({:?}, 'started')",
-        marker.display().to_string()
-    ));
-    let (mut request, provider) = request("attested-workspace", format!("node {script}"));
-    request.workspace.root = Some(workspace.display().to_string());
-    request.metadata = serde_json::json!({ "cook_attempt_workspace_identity": attestation });
-
-    std::fs::create_dir_all(temp.path().join("replacement-gitdir")).expect("replacement gitdir");
-    std::fs::write(workspace.join(".git"), "gitdir: ../replacement-gitdir\n")
-        .expect("replace linked git target");
-
-    let outcome = run_provider_command_once(&request, &provider);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.workspace_identity_changed"
-    );
-    assert!(!marker.exists(), "provider command must not start");
-}
-
-#[test]
-fn provider_manifest_rejects_deprecated_string_command() {
-    let error = serde_json::from_value::<AgentTaskExecutorProvider>(json!({
-        "id": "legacy.provider",
-        "backend": "legacy",
-        "command": "legacy-provider --flag"
-    }))
-    .expect_err("string-form command must be rejected");
-
-    assert!(error.to_string().contains(
-        "agent-task provider string-form 'command' is no longer supported; use invocation.argv or argv instead"
-    ));
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+        assert_eq!(outcome.diagnostics[0].class, expected_class);
+        assert!(!marker.exists(), "provider command must not start");
+    }
 }
 
 #[test]
@@ -521,6 +464,15 @@ fn provider_command_env_exposes_generic_agent_tool_contracts() {
             reason: Some("test policy".to_string()),
         },
     );
+    // The command policy rides the same env handshake so a runtime calling
+    // back into `homeboy agent-task tool dispatch` inherits its refusals (#11481).
+    request.policy.tools.commands = crate::agent_task::AgentCommandPolicy {
+        deny: vec![crate::agent_task::AgentCommandRule::with_reason(
+            "cargo test",
+            "this host routes builds to CI",
+        )],
+        ..crate::agent_task::AgentCommandPolicy::default()
+    };
 
     let env =
         provider_command_env_with_credentials(&request, &provider, None).expect("provider env");
@@ -566,32 +518,6 @@ fn provider_command_env_exposes_generic_agent_tool_contracts() {
         policy.execution_location_for("unknown"),
         AgentToolExecutionLocation::Disabled
     );
-}
-
-/// The command policy must reach the provider process through the same env
-/// handshake the tool policy already uses, so a runtime that calls back into
-/// `homeboy agent-task tool dispatch` inherits the refusals (#11481).
-#[test]
-fn provider_command_env_carries_the_command_policy() {
-    let (mut request, provider) = request("task-1", "minimal-provider".to_string());
-    request.policy.tools.commands = crate::agent_task::AgentCommandPolicy {
-        deny: vec![crate::agent_task::AgentCommandRule::with_reason(
-            "cargo test",
-            "this host routes builds to CI",
-        )],
-        ..crate::agent_task::AgentCommandPolicy::default()
-    };
-
-    let env =
-        provider_command_env_with_credentials(&request, &provider, None).expect("provider env");
-    let env: BTreeMap<String, String> = env.into_iter().collect();
-
-    let policy: crate::agent_task::AgentToolPolicy = serde_json::from_str(
-        env.get("HOMEBOY_AGENT_TOOL_POLICY_JSON")
-            .expect("tool policy env"),
-    )
-    .expect("tool policy json");
-
     let denial = policy
         .evaluate_command("timeout 1200 cargo test -p homeboy-agents")
         .denial()

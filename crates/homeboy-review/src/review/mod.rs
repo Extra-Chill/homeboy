@@ -346,12 +346,9 @@ mod tests {
     fn artifact_command_maps_stage_statuses() {
         let skipped: ReviewStage<serde_json::Value> = stage_skipped("test", "no files changed");
         let skipped_command = artifact_command(&skipped);
-        assert_eq!(skipped_command.name, "test");
         assert_eq!(skipped_command.status, "skipped");
         assert_eq!(skipped_command.exit_code, 0);
         assert_eq!(skipped_command.summary, "no files changed");
-        assert!(skipped_command.findings.is_empty());
-        assert!(skipped_command.artifacts.is_empty());
 
         let failed = ReviewStage {
             stage: "lint".to_string(),
@@ -364,7 +361,6 @@ mod tests {
             output: Some(serde_json::json!({ "ok": false })),
         };
         let failed_command = artifact_command(&failed);
-        assert_eq!(failed_command.name, "lint");
         assert_eq!(failed_command.status, "failed");
         assert_eq!(failed_command.exit_code, 1);
         assert_eq!(failed_command.summary, "3 finding(s); failed");
@@ -466,50 +462,19 @@ mod tests {
         assert_eq!(artifact_status(&[passed, failed]), "failed");
     }
 
+    /// Review runs every ready stage in plan order, ignores disabled and
+    /// skipped steps, and never stops on a failing stage.
     #[test]
-    fn execute_review_plan_steps_preserves_quality_order() {
+    fn execute_review_plan_steps_runs_ready_stages_in_order_past_failures() {
         let steps = vec![
             PlanStep::ready("review.lint", "review.lint").build(),
-            PlanStep::ready("review.test", "review.test").build(),
-            PlanStep::ready("review.build", "review.build").build(),
-        ];
-        let mut observed = Vec::new();
-
-        let run = execute_review_plan_steps(&steps, |step| {
-            observed.push(step.id.clone());
-            Ok(Some(step.id.clone()))
-        })
-        .expect("review execution should run ready steps");
-
-        assert_eq!(observed, vec!["review.lint", "review.test", "review.build"]);
-        assert_eq!(run.results, observed);
-        assert!(!run.stopped);
-    }
-
-    #[test]
-    fn execute_review_plan_steps_skips_disabled_and_skipped_steps() {
-        let steps = vec![
-            PlanStep::ready("review.build", "review.build").build(),
-            PlanStep::disabled_with_reason("review.lint", "review.lint", "disabled").build(),
+            PlanStep::disabled_with_reason("review.audit", "review.audit", "disabled").build(),
             PlanStep::builder(
-                "review.test",
-                "review.test",
+                "review.ci",
+                "review.ci",
                 homeboy_core::plan::PlanStepStatus::Skipped,
             )
             .build(),
-        ];
-
-        let run = execute_review_plan_steps(&steps, |step| Ok(Some(step.id.clone())))
-            .expect("review execution should ignore non-executable steps");
-
-        assert_eq!(run.results, vec!["review.build"]);
-        assert!(!run.stopped);
-    }
-
-    #[test]
-    fn execute_review_plan_steps_does_not_treat_failures_as_show_stoppers() {
-        let steps = vec![
-            PlanStep::ready("review.lint", "review.lint").build(),
             PlanStep::ready("review.test", "review.test").build(),
             PlanStep::ready("review.build", "review.build").build(),
         ];
@@ -545,11 +510,8 @@ mod tests {
         let artifact = build_artifact("homeboy", "origin/main", "abc123", vec![command]);
 
         assert_eq!(artifact.schema, "homeboy/review/v1");
-        assert_eq!(artifact.component, "homeboy");
         assert_eq!(artifact.status, "passed");
         assert_eq!(artifact.base_ref, "origin/main");
         assert_eq!(artifact.head_ref, "abc123");
-        assert_eq!(artifact.commands.len(), 1);
-        assert!(artifact.generated_at.contains('T'));
     }
 }

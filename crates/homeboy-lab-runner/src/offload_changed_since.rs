@@ -286,114 +286,92 @@ mod tests {
         );
     }
 
-    #[test]
-    fn detects_changed_since_before_passthrough_args() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/user/Developer/project".to_string(),
-            "--changed-since=origin/main".to_string(),
-            "--".to_string(),
-            "--changed-since".to_string(),
-            "fixture".to_string(),
-        ];
-
-        assert_eq!(
-            lab_offload_changed_since_ref(&args),
-            Some("origin/main".to_string())
-        );
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
     }
 
     #[test]
-    fn ignores_passthrough_changed_since_args() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/user/Developer/project".to_string(),
-            "--".to_string(),
-            "--changed-since".to_string(),
-            "fixture".to_string(),
+    fn changed_since_ref_honors_controller_args_only() {
+        let cases: [(&[&str], Option<&str>); 5] = [
+            (
+                &[
+                    "homeboy",
+                    "test",
+                    "--changed-since=origin/main",
+                    "--",
+                    "--changed-since",
+                    "x",
+                ],
+                Some("origin/main"),
+            ),
+            (
+                &["homeboy", "test", "--changed-since", "origin/main"],
+                Some("origin/main"),
+            ),
+            (
+                &["homeboy", "test", "--", "--changed-since", "fixture"],
+                None,
+            ),
+            (
+                &[
+                    "homeboy",
+                    "test",
+                    "--changed-since",
+                    "origin/main",
+                    "--lab-changed-files-json",
+                    "[]",
+                ],
+                None,
+            ),
+            (
+                &[
+                    "homeboy",
+                    "test",
+                    "--changed-since",
+                    "origin/main",
+                    "--",
+                    "--lab-changed-files-json",
+                    "[]",
+                ],
+                Some("origin/main"),
+            ),
         ];
 
-        assert_eq!(lab_offload_changed_since_ref(&args), None);
+        for (args, expected) in cases {
+            assert_eq!(
+                lab_offload_changed_since_ref(&argv(args)).as_deref(),
+                expected,
+                "{args:?}"
+            );
+        }
     }
 
     #[test]
-    fn rejects_changed_since_for_snapshot_lab_offload() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/user/Developer/project".to_string(),
-            "--changed-since".to_string(),
-            "origin/main".to_string(),
-        ];
+    fn preflight_rejects_changed_since_only_for_snapshot_without_precomputed_files() {
+        let changed_since = argv(&["homeboy", "test", "--changed-since", "origin/main"]);
 
-        let err = preflight_lab_offload_changed_since(&args, RunnerWorkspaceSyncMode::Snapshot)
-            .expect_err("snapshot Lab offload must reject changed-since");
-
+        let err =
+            preflight_lab_offload_changed_since(&changed_since, RunnerWorkspaceSyncMode::Snapshot)
+                .expect_err("snapshot Lab offload must reject changed-since");
         assert!(err.message.contains("cannot honor --changed-since"));
-        assert!(err.message.contains("snapshot workspaces"));
         assert_eq!(err.details["id"], "origin/main");
-    }
 
-    #[test]
-    fn precomputed_changed_files_make_changed_since_snapshot_portable() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/user/Developer/project".to_string(),
-            "--changed-since".to_string(),
-            "origin/main".to_string(),
-            "--lab-changed-files-json".to_string(),
-            "[\"src/lib.rs\"]".to_string(),
-        ];
-
-        assert_eq!(lab_offload_changed_since_ref(&args), None);
-
-        let preflight =
-            preflight_lab_offload_changed_since(&args, RunnerWorkspaceSyncMode::Snapshot)
-                .expect("precomputed changed-file scope should be snapshot portable");
-        assert_eq!(preflight.args, args);
-        assert_eq!(preflight.requested_ref, None);
-        assert_eq!(preflight.resolved_base, None);
-        assert!(preflight.git_fetch_refs.is_empty());
-    }
-
-    #[test]
-    fn precomputed_changed_files_ignore_passthrough_payloads() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--changed-since".to_string(),
-            "origin/main".to_string(),
-            "--".to_string(),
-            "--lab-changed-files-json".to_string(),
-            "[\"fixture\"]".to_string(),
-        ];
-
-        assert_eq!(
-            lab_offload_changed_since_ref(&args),
-            Some("origin/main".to_string())
-        );
-    }
-
-    #[test]
-    fn allows_changed_since_for_git_lab_offload() {
-        let args = vec![
-            "homeboy".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            "/Users/user/Developer/project".to_string(),
-            "--changed-since".to_string(),
-            "origin/main".to_string(),
-        ];
-
-        preflight_lab_offload_changed_since(&args, RunnerWorkspaceSyncMode::Git)
+        preflight_lab_offload_changed_since(&changed_since, RunnerWorkspaceSyncMode::Git)
             .expect("git Lab offload can preserve changed-since semantics");
+
+        let precomputed = argv(&[
+            "homeboy",
+            "test",
+            "--changed-since",
+            "origin/main",
+            "--lab-changed-files-json",
+            "[\"src/lib.rs\"]",
+        ]);
+        let preflight =
+            preflight_lab_offload_changed_since(&precomputed, RunnerWorkspaceSyncMode::Snapshot)
+                .expect("precomputed changed-file scope should be snapshot portable");
+        assert_eq!(preflight.args, precomputed);
+        assert_eq!(preflight.resolved_base, None);
     }
 
     #[test]

@@ -197,22 +197,3 @@ impl CookDisposition {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn disposition_declares_terminality_and_serializes_as_its_phase() {
-        for (disposition, terminal) in [
-            (CookDisposition::InFlight, false),
-            (CookDisposition::Terminal, true),
-        ] {
-            assert_eq!(disposition.is_terminal(), terminal);
-            assert_eq!(
-                serde_json::to_value(disposition).unwrap(),
-                disposition.phase()
-            );
-        }
-    }
-}

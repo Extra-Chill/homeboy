@@ -204,16 +204,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_product_neutral() {
-        let policy = SourceMaterializationPolicy::default();
-
-        assert_eq!(
-            private_proxied_source_host("git@github.example.com:example-org/example.git", &policy),
-            None
-        );
-    }
-
-    #[test]
     fn detects_configured_private_proxied_source_hosts() {
         let policy = SourceMaterializationPolicy {
             private_proxied_source_hosts: vec!["github.example.com".to_string()],
@@ -233,6 +223,22 @@ mod tests {
         assert_eq!(
             private_proxied_source_host("https://github.com/Extra-Chill/homeboy.git", &policy),
             None
+        );
+        assert!(requires_controller_routed_workspace_sync_with_policy(
+            "git@github.example.com:example-org/example.git",
+            &policy
+        ));
+        assert!(!requires_controller_routed_workspace_sync_with_policy(
+            "https://github.com/Extra-Chill/homeboy.git",
+            &policy
+        ));
+        assert_eq!(
+            private_proxied_source_host(
+                "git@github.example.com:example-org/example.git",
+                &SourceMaterializationPolicy::default()
+            ),
+            None,
+            "no host is private/proxied unless configured"
         );
     }
 
@@ -254,33 +260,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_credential_bearing_https_remote_without_echoing_the_secret() {
-        let remote = "https://token-value@github.example.com/example/private.git";
-        let error = validate_sanitized_git_remote(remote).expect_err("credential URL is unsafe");
-
-        assert!(error.message.contains("credential-bearing"));
-        assert!(!error.message.contains("token-value"));
-        assert!(!error.details.to_string().contains("token-value"));
-    }
-
-    #[test]
-    fn accepts_credential_free_uri_usernames_and_scp_style_ssh() {
+    fn sanitized_remote_accepts_ssh_usernames_and_refuses_secrets_without_echoing_them() {
         for remote in [
             "ssh://git@example.org/org/repo.git",
             "git@example.org:org/repo.git",
         ] {
             validate_sanitized_git_remote(remote).expect("credential-free repository URL");
         }
-    }
-
-    #[test]
-    fn rejects_password_bearing_uri_userinfo_without_echoing_the_secret() {
         for remote in [
+            "https://secret-value@github.example.com/example/private.git",
             "https://example.test/repo.git?access_token=secret-value",
             "https://example.test/repo.git#secret-value",
             "ssh://git:secret-value@example.test/repo.git",
         ] {
             let error = validate_sanitized_git_remote(remote).expect_err("unsafe repository URL");
+            assert!(error.message.contains("credential-bearing"));
             assert!(!error.to_string().contains("secret-value"));
             assert!(!error.details.to_string().contains("secret-value"));
         }
@@ -293,21 +287,6 @@ mod tests {
         let error = validate_lab_stack_repository("file:///tmp/private.git", "lab")
             .expect_err("filesystem transport bypasses Lab network policy");
         assert!(error.message.contains("sanitized HTTPS or SSH"));
-    }
-
-    #[test]
-    fn identifies_sources_that_need_controller_routed_workspace_sync() {
-        let policy = SourceMaterializationPolicy {
-            private_proxied_source_hosts: vec!["github.example.com".to_string()],
-        };
-        assert!(requires_controller_routed_workspace_sync_with_policy(
-            "git@github.example.com:example-org/example.git",
-            &policy
-        ));
-        assert!(!requires_controller_routed_workspace_sync_with_policy(
-            "https://github.com/Extra-Chill/homeboy.git",
-            &policy
-        ));
     }
 
     #[test]

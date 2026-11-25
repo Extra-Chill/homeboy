@@ -1023,33 +1023,7 @@ mod tests {
     #[test]
     fn materialization_fails_before_execution_when_runner_root_is_not_a_directory() {
         let blocked_root = tempfile::NamedTempFile::new().expect("blocked artifact root");
-        let request = AgentTaskRequest {
-            schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-            task_id: "blocked-artifacts".to_string(),
-            group_key: None,
-            parent_plan_id: None,
-            executor: AgentTaskExecutor {
-                backend: "test".to_string(),
-                selector: None,
-                runtime_selection: None,
-                required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
-                model: None,
-                config: Value::Null,
-            },
-            instructions: "run".to_string(),
-            inputs: Value::Null,
-            source_refs: Vec::new(),
-            workspace: AgentTaskWorkspace::default(),
-            component_contracts: Vec::new(),
-            policy: AgentTaskPolicy::default(),
-            limits: AgentTaskLimits::default(),
-            expected_artifacts: Vec::new(),
-            artifact_declarations: Vec::new(),
-            output_declarations: Vec::new(),
-            runtime_tools: Vec::new(),
-            metadata: Value::Null,
-        };
+        let request = readiness_request("blocked-artifacts");
         let context = AgentTaskExecutionContext {
             plan_id: "blocked-plan".to_string(),
             run_id: Some("blocked-run".to_string()),

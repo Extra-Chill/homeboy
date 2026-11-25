@@ -215,10 +215,13 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
             if run.phase.as_deref()
                 == Some(homeboy::agents::orchestration::LIVE_GATE_VERIFYING_PHASE) =>
         {
-            Some(
-                "verifying: a live Cook driver is running the candidate's gates; watch it instead of recovering"
+            Some(match run.progress.as_deref() {
+                Some(progress) => format!(
+                    "verifying: gates are still running ({progress}); watch them instead of recovering"
+                ),
+                None => "verifying: a live owner is running the candidate's gates; watch it instead of recovering"
                     .to_string(),
-            )
+            })
         }
         State::Queued | State::Running | State::Blocked => None,
         State::Stale => Some(

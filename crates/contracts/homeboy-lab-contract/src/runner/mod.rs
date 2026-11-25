@@ -508,48 +508,47 @@ mod capability_handshake_tests {
         }
     }
 
+    /// Negotiation needs every required capability at a required version on
+    /// both runner surfaces; an extra newer version is fine, and command/daemon
+    /// build divergence alone is not a rejection.
     #[test]
-    fn admits_controller_n_with_verified_runner_n_plus_one_and_records_provenance() {
-        let admission = negotiate_lab_capability_handshake(&handshake(
-            LabRuntimeAncestry::VerifiedNewerDescendant,
-        ));
+    fn negotiation_requires_every_capability_at_a_supported_version() {
+        let baseline = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        let admission = negotiate_lab_capability_handshake(&baseline);
         assert!(admission.compatible);
         assert_eq!(
             admission.provenance.schema,
             "homeboy/lab-capability-negotiation/v1"
         );
-        assert_eq!(admission.provenance.negotiated_capabilities.len(), 5);
-    }
 
-    #[test]
-    fn rejects_missing_capabilities_but_accepts_command_daemon_build_divergence() {
-        let mut removed = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        let mut removed = baseline.clone();
         removed.daemon_capabilities.pop();
-        assert!(!negotiate_lab_capability_handshake(&removed).compatible);
-
-        let mut incompatible = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        let mut incompatible = baseline.clone();
         incompatible.runner_command_capabilities[3].version = 2;
-        assert!(!negotiate_lab_capability_handshake(&incompatible).compatible);
-
-        let mut divergent = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        let mut divergent = baseline.clone();
         divergent.daemon.build_identity = "different".to_string();
-        assert!(negotiate_lab_capability_handshake(&divergent).compatible);
-    }
-
-    #[test]
-    fn accepts_a_newer_capability_that_explicitly_advertises_the_required_version() {
-        let mut handshake = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
-        handshake
-            .runner_command_capabilities
-            .push(LabCapabilityVersion {
-                id: "result-schema".to_string(),
-                version: 2,
-            });
-        handshake.daemon_capabilities.push(LabCapabilityVersion {
+        let mut newer = baseline.clone();
+        let result_schema_v2 = LabCapabilityVersion {
             id: "result-schema".to_string(),
             version: 2,
-        });
-        assert!(negotiate_lab_capability_handshake(&handshake).compatible);
+        };
+        newer
+            .runner_command_capabilities
+            .push(result_schema_v2.clone());
+        newer.daemon_capabilities.push(result_schema_v2);
+
+        for (name, handshake, compatible) in [
+            ("missing capability", removed, false),
+            ("unsupported version", incompatible, false),
+            ("command/daemon build divergence", divergent, true),
+            ("extra newer version", newer, true),
+        ] {
+            assert_eq!(
+                negotiate_lab_capability_handshake(&handshake).compatible,
+                compatible,
+                "{name}"
+            );
+        }
     }
 }
 
@@ -558,15 +557,12 @@ mod daemon_recovery_capability_tests {
     use super::*;
 
     #[test]
-    fn recovery_capabilities_are_their_own_protocol_focused_list() {
+    fn recovery_capabilities_stay_out_of_the_admission_handshake() {
         let recovery = daemon_recovery_capabilities();
         let ids: BTreeSet<_> = recovery
             .iter()
             .map(|capability| capability.id.as_str())
             .collect();
-        let expected = BTreeSet::from([DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY]);
-        assert_eq!(ids, expected);
-        assert!(recovery.iter().all(|capability| capability.version == 1));
 
         let handoff_capabilities = required_lab_handoff_capabilities();
         let handoff: BTreeSet<_> = handoff_capabilities

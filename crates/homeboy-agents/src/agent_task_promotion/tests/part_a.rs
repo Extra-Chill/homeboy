@@ -197,17 +197,6 @@ fn committed_changes_retention_uses_the_explicit_observation_store() {
 }
 
 #[test]
-fn normalize_fixture_diff_leaves_unrelated_workspace_paths() {
-    let patch = "diff --git a/workspace/fixture.txt b/workspace/fixture.txt\n--- a/workspace/fixture.txt\n+++ b/workspace/fixture.txt\n@@ -1 +1 @@\n-old\n+new\n";
-
-    let normalized = normalize_fixture_diff(patch, "homeboy@promoted-task")
-        .expect("unrelated workspace path remains repo-relative");
-
-    assert_eq!(normalized.changed_files, vec!["workspace/fixture.txt"]);
-    assert_eq!(normalized.content, patch);
-}
-
-#[test]
 fn empty_patch_failing_gate_is_reported_against_destination() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -348,16 +337,6 @@ fn promote_exports_committed_changes_when_executor_reports_no_candidate() {
     assert_eq!(report.changed_files, vec!["lib.rs"]);
     assert_eq!(report.provenance["candidate_commit"]["tree_sha"], tree_sha);
     assert!(provider.apply_calls.is_empty());
-}
-
-#[test]
-fn normalize_fixture_diff_rejects_repo_sandbox_without_relative_suffix() {
-    let patch = "diff --git a/workspace/homeboy-refactor b/workspace/homeboy-refactor\n--- a/workspace/homeboy-refactor\n+++ b/workspace/homeboy-refactor\n@@ -1 +1 @@\n-old\n+new\n";
-
-    let err = normalize_fixture_diff(patch, "homeboy@promoted-task")
-        .expect_err("repo sandbox path without suffix rejected");
-
-    assert!(err.message.contains("no repo-relative suffix"));
 }
 
 #[test]
@@ -807,4 +786,49 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
             Some("main")
         );
     });
+}
+
+/// Patch normalization keeps repo-relative paths, strips a Lab sandbox
+/// workspace prefix, and rejects empty patches, sandbox paths with no
+/// repo-relative suffix, and path traversal.
+#[test]
+fn normalize_fixture_diff_rewrites_sandbox_paths_and_rejects_unsafe_patches() {
+    let unrelated = "diff --git a/workspace/fixture.txt b/workspace/fixture.txt\n--- a/workspace/fixture.txt\n+++ b/workspace/fixture.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    let sandboxed = "diff --git a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n--- a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n+++ b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+    for (case, patch, changed_files, content) in [
+        (
+            "repo-relative patch",
+            VALID_PATCH,
+            "src/lib.rs",
+            VALID_PATCH,
+        ),
+        (
+            "unrelated workspace path",
+            unrelated,
+            "workspace/fixture.txt",
+            unrelated,
+        ),
+        ("Lab sandbox prefix", sandboxed, "src/lib.rs", VALID_PATCH),
+    ] {
+        let normalized = normalize_fixture_diff(patch, "homeboy@promoted-task")
+            .unwrap_or_else(|error| panic!("{case} normalizes: {error:?}"));
+        assert_eq!(normalized.changed_files, vec![changed_files], "{case}");
+        assert_eq!(normalized.content, content, "{case}");
+    }
+
+    for (patch, message) in [
+        ("\n\t", "empty patch"),
+        (
+            "diff --git a/workspace/homeboy-refactor b/workspace/homeboy-refactor\n--- a/workspace/homeboy-refactor\n+++ b/workspace/homeboy-refactor\n@@ -1 +1 @@\n-old\n+new\n",
+            "no repo-relative suffix",
+        ),
+        (
+            "--- a/src/lib.rs\n+++ b/../secret\n@@ -1 +1 @@\n-old\n+new\n",
+            "unsafe patch path",
+        ),
+    ] {
+        let error = normalize_fixture_diff(patch, "homeboy@promoted-task")
+            .expect_err("unsafe patch is rejected");
+        assert!(error.message.contains(message), "{message}: {}", error.message);
+    }
 }

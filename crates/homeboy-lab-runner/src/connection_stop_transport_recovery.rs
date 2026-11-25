@@ -1039,18 +1039,6 @@ mod tests {
     }
 
     #[test]
-    fn transport_drop_refuses_daemon_still_live_after_ssh_stop() {
-        let session = direct_ssh_session("lease-live");
-        let live = remote_daemon_status(true, 0, "lease-live", 4242, None);
-
-        let error =
-            complete_stop_transport_recovery(&session, &live, || Ok(()), || Ok(live.clone()))
-                .expect_err("a live daemon after SSH fallback must remain protected");
-
-        assert!(error.contains("still reports lease `lease-live`"));
-    }
-
-    #[test]
     fn failed_stop_recovery_uses_the_final_authoritative_lease_not_the_persisted_lease() {
         let session = direct_ssh_session("272459a6-e66b-4f84-9eb5-58032619bec4");
         let final_status = remote_daemon_status(
@@ -1081,55 +1069,13 @@ mod tests {
         assert!(recovery.contains("PID 4167692"));
     }
 
+    /// A transport drop during stop resolves when the daemon is proven gone:
+    /// matching clean-stop evidence, the exact owner already dead, or the lease
+    /// missing after an idempotent zero-job stop.
     #[test]
-    fn transport_drop_after_successful_stop_accepts_matching_clean_stop_evidence() {
-        let session = direct_ssh_session("lease-stopped");
-        let status = remote_daemon::RemoteDaemonStatus {
-            runtime_paths: None,
-            daemon: None,
-            stale_reason: None,
-            stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
-            fresh: false,
-            reachable: false,
-            active_jobs: 0,
-            work_evidence: RemoteDaemonWorkEvidence::Unknown,
-            endpoint_probe_error: None,
-            termination_evidence: Some(homeboy_core::daemon::DaemonTerminationEvidence {
-                classification: homeboy_core::daemon::DaemonTerminationClassification::CleanStop,
-                observed_at: Utc::now().to_rfc3339(),
-                lease_id: Some("lease-stopped".to_string()),
-                pid: Some(4242),
-                binary_identity: None,
-                active_jobs: 0,
-                resource_evidence: "test".to_string(),
-                os_evidence: "test".to_string(),
-                stop_requested: true,
-            }),
-        };
-
-        confirm_remote_daemon_stopped_after_transport_error(&session, &status)
-            .expect("matching clean-stop evidence resolves the transport drop");
-    }
-
-    #[test]
-    fn transport_drop_accepts_already_dead_exact_owner_without_active_jobs() {
-        let session = direct_ssh_session("lease-dead");
-        let status = remote_daemon_status(
-            false,
-            0,
-            "lease-dead",
-            4242,
-            Some(DaemonStaleReasonCode::PidDead),
-        );
-
-        confirm_remote_daemon_stopped_after_transport_error(&session, &status)
-            .expect("the exact already-dead owner is safe to disconnect");
-    }
-
-    #[test]
-    fn transport_drop_reconciles_missing_lease_after_idempotent_stop() {
-        let session = direct_ssh_session("lease-removed");
-        let status = remote_daemon::RemoteDaemonStatus {
+    fn transport_drop_accepts_proven_stopped_daemon_evidence() {
+        let session = direct_ssh_session("lease-owned");
+        let lease_missing = remote_daemon::RemoteDaemonStatus {
             runtime_paths: None,
             daemon: None,
             stale_reason: None,
@@ -1141,9 +1087,34 @@ mod tests {
             endpoint_probe_error: None,
             termination_evidence: None,
         };
+        let mut clean_stop = lease_missing.clone();
+        clean_stop.termination_evidence = Some(homeboy_core::daemon::DaemonTerminationEvidence {
+            classification: homeboy_core::daemon::DaemonTerminationClassification::CleanStop,
+            observed_at: Utc::now().to_rfc3339(),
+            lease_id: Some("lease-owned".to_string()),
+            pid: Some(4242),
+            binary_identity: None,
+            active_jobs: 0,
+            resource_evidence: "test".to_string(),
+            os_evidence: "test".to_string(),
+            stop_requested: true,
+        });
+        let already_dead = remote_daemon_status(
+            false,
+            0,
+            "lease-owned",
+            4242,
+            Some(DaemonStaleReasonCode::PidDead),
+        );
 
-        confirm_remote_daemon_stopped_after_transport_error(&session, &status)
-            .expect("missing lease after a zero-job stop is idempotently reconciled");
+        for (case, status) in [
+            ("clean stop", clean_stop),
+            ("already dead", already_dead),
+            ("lease missing", lease_missing),
+        ] {
+            confirm_remote_daemon_stopped_after_transport_error(&session, &status)
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+        }
     }
 
     #[test]
@@ -1167,68 +1138,42 @@ mod tests {
         assert!(mismatch_error.contains("lease `lease-other`"));
     }
 
+    /// A lease-bound stop must prove completion: a timeout, malformed output or
+    /// `stopped:false` fails closed, while a proven already-absent lease is an
+    /// idempotent completion.
     #[test]
-    fn lease_bound_ssh_stop_rejects_timeout_and_malformed_output() {
-        let timeout = homeboy_core::server::CommandOutput {
-            stdout: String::new(),
+    fn lease_bound_ssh_stop_accepts_only_proven_completion() {
+        let output = |stdout: &str, timed_out: bool| homeboy_core::server::CommandOutput {
+            stdout: stdout.to_string(),
             stderr: String::new(),
-            success: false,
-            exit_code: 124,
-            timed_out: true,
+            success: !timed_out,
+            exit_code: if timed_out { 124 } else { 0 },
+            timed_out,
             observation: Default::default(),
             child_resource: None,
         };
-        let timeout_error = validate_remote_lease_bound_daemon_stop_output(&timeout)
-            .expect_err("timed out SSH stop must fail closed");
-        assert!(timeout_error.contains("timed out"));
-
-        let malformed = homeboy_core::server::CommandOutput {
-            stdout: "not JSON".to_string(),
-            stderr: String::new(),
-            success: true,
-            exit_code: 0,
-            timed_out: false,
-            observation: Default::default(),
-            child_resource: None,
-        };
-        let malformed_error = validate_remote_lease_bound_daemon_stop_output(&malformed)
-            .expect_err("malformed SSH stop output must fail closed");
-        assert!(malformed_error.contains("invalid JSON"));
-    }
-
-    #[test]
-    fn lease_bound_ssh_stop_rejects_successful_stopped_false_response() {
-        let output = homeboy_core::server::CommandOutput {
-            stdout: r#"{"success":true,"data":{"action":"stop","stopped":false}}"#.to_string(),
-            stderr: String::new(),
-            success: true,
-            exit_code: 0,
-            timed_out: false,
-            observation: Default::default(),
-            child_resource: None,
-        };
-
-        let error = validate_remote_lease_bound_daemon_stop_output(&output)
-            .expect_err("a lease-bound stop must prove completion");
-
-        assert!(error.contains("stopped:false"));
-    }
-
-    #[test]
-    fn lease_bound_ssh_stop_accepts_proven_already_absent_response() {
-        let output = homeboy_core::server::CommandOutput {
-            stdout:
-                r#"{"success":true,"data":{"action":"stop","stopped":false,"already_absent":true}}"#
-                    .to_string(),
-            stderr: String::new(),
-            success: true,
-            exit_code: 0,
-            timed_out: false,
-            observation: Default::default(),
-            child_resource: None,
-        };
-
-        validate_remote_lease_bound_daemon_stop_output(&output)
-            .expect("an exact already-absent lease is an idempotent completion");
+        for (stdout, timed_out, expected_error) in [
+            ("", true, Some("timed out")),
+            ("not JSON", false, Some("invalid JSON")),
+            (
+                r#"{"success":true,"data":{"action":"stop","stopped":false}}"#,
+                false,
+                Some("stopped:false"),
+            ),
+            (
+                r#"{"success":true,"data":{"action":"stop","stopped":false,"already_absent":true}}"#,
+                false,
+                None,
+            ),
+        ] {
+            let result = validate_remote_lease_bound_daemon_stop_output(&output(stdout, timed_out));
+            match expected_error {
+                Some(expected) => assert!(
+                    result.as_ref().is_err_and(|error| error.contains(expected)),
+                    "{stdout}: {result:?}"
+                ),
+                None => assert!(result.is_ok(), "{stdout}: {result:?}"),
+            }
+        }
     }
 }

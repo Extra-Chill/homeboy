@@ -233,30 +233,6 @@ mod tests {
     }
 
     #[test]
-    fn reports_missing_executable() {
-        let rig = RigSpec {
-            requirements: RigRequirementsSpec {
-                executables: vec![ExecutableRequirementSpec {
-                    executable: "homeboy-definitely-missing-tool".to_string(),
-                    remediation: Some("install it".to_string()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let outcome = evaluate_requirements(&rig);
-
-        assert_eq!(outcome.failed, 1);
-        assert!(outcome.steps[0]
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("Remediation: install it"));
-    }
-
-    #[test]
     fn executable_requirement_uses_env_aliases_before_path() {
         let temp = tempdir().expect("tempdir");
         let alias_bin = temp.path().join("alias-tool");
@@ -301,6 +277,7 @@ mod tests {
                     executable: "/nonexistent/missing-tool".to_string(),
                     env: Some(primary_env.to_string()),
                     env_aliases: vec![alias_env.to_string()],
+                    remediation: Some("install it".to_string()),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -326,5 +303,6 @@ mod tests {
             error.contains("declared executable `/nonexistent/missing-tool`"),
             "error: {error}"
         );
+        assert!(error.contains("Remediation: install it"), "error: {error}");
     }
 }

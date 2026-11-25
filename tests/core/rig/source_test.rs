@@ -24,10 +24,6 @@ fn test_config_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-fn commit_package(package: &Path, message: &str) {
-    commit_all(package, message);
-}
-
 fn create_bare_source(package: &Path) -> tempfile::TempDir {
     init_main(package);
     commit_all(package, "initial rigs");
@@ -320,7 +316,7 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
         minimal_rig("alpha").replace("alpha rig", "alpha rig updated"),
     )
     .expect("update rig");
-    commit_package(package.path(), "update alpha");
+    commit_all(package.path(), "update alpha");
     push_main(package.path(), &source);
 
     let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
@@ -369,7 +365,7 @@ fn legacy_source_without_a_valid_discovery_path_fails_before_refresh_mutation() 
         minimal_rig("alpha").replace("alpha rig", "remote update"),
     )
     .expect("update remote package");
-    commit_package(package.path(), "remote update");
+    commit_all(package.path(), "remote update");
     push_main(package.path(), &source);
 
     let error = update_source_for_rig(&test_config_root(), "alpha")
@@ -410,11 +406,12 @@ fn update_all_reports_broken_sources_and_continues() {
         minimal_rig("good").replace("good rig", "good rig updated"),
     )
     .expect("update good rig");
-    commit_package(good_package.path(), "update good rig");
+    commit_all(good_package.path(), "update good rig");
     push_main(good_package.path(), &good_source);
 
+    // No selector refreshes every source, same as `update_all_sources`.
     let result =
-        update_all_sources(&test_config_root()).expect("update all continues after broken source");
+        update_source(&test_config_root(), None).expect("update all continues after broken source");
 
     assert_eq!(result.failed.len(), 1);
     assert_eq!(result.failed[0].source, broken_source);
@@ -447,7 +444,7 @@ fn refresh_source_selector_updates_recorded_package() {
         minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed"),
     )
     .expect("update rig");
-    commit_package(package.path(), "refresh alpha");
+    commit_all(package.path(), "refresh alpha");
     push_main(package.path(), &source);
 
     let package_id = list_sources(&test_config_root()).expect("sources").sources[0]
@@ -470,31 +467,6 @@ fn refresh_source_selector_updates_recorded_package() {
     ))
     .expect("installed rig")
     .contains("alpha rig refreshed"));
-}
-
-#[test]
-fn refresh_without_selector_updates_all_sources() {
-    let _home = HomeGuard::new();
-    let package = tempfile::tempdir().expect("package");
-    let source_rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-    let bare = create_bare_source(package.path());
-    let source = bare_source_path(&bare).to_string_lossy().to_string();
-
-    install(&test_config_root(), &source, None, false).expect("install");
-    fs::write(
-        &source_rig,
-        minimal_rig("alpha").replace("alpha rig", "alpha rig refreshed"),
-    )
-    .expect("update rig");
-    commit_package(package.path(), "refresh alpha");
-    push_main(package.path(), &source);
-
-    let result = update_source(&test_config_root(), None).expect("refresh all sources");
-
-    assert_eq!(result.updated.len(), 1);
-    assert_eq!(result.updated[0].id, "alpha");
-    assert!(result.skipped.is_empty());
-    assert!(result.failed.is_empty());
 }
 
 #[test]

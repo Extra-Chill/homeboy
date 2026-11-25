@@ -6417,6 +6417,18 @@ mod recovery_action_tests {
             actions(&recovery.next_actions),
             actions(&recovery.legal_actions)
         );
+
+        // Only the typed `fork_replacement` recovery names a mismatch.
+        assert!(exact_checkpoint_candidate_mismatch(&Some(
+            serde_json::json!({
+                "details": { "recovery": { "action": "fork_replacement" } },
+            })
+        )));
+        assert!(!exact_checkpoint_candidate_mismatch(&Some(
+            serde_json::json!({
+                "details": { "recovery": { "action": "resume" } },
+            })
+        )));
     }
 
     #[test]
@@ -6473,20 +6485,6 @@ mod recovery_action_tests {
     }
 
     #[test]
-    fn exact_checkpoint_mismatch_matches_only_the_typed_recovery_action() {
-        assert!(exact_checkpoint_candidate_mismatch(&Some(
-            serde_json::json!({
-                "details": { "recovery": { "action": "fork_replacement" } },
-            })
-        )));
-        assert!(!exact_checkpoint_candidate_mismatch(&Some(
-            serde_json::json!({
-                "details": { "recovery": { "action": "resume" } },
-            })
-        )));
-    }
-
-    #[test]
     fn patch_evidence_does_not_select_a_recovery_candidate() {
         let recovery = cook_recovery_actions(
             "promotion_failed",
@@ -6510,30 +6508,6 @@ mod recovery_action_tests {
                 "homeboy agent-task recover ambiguous-attempt-1",
             ]
         );
-    }
-
-    #[test]
-    fn ambiguous_selector_actions_do_not_advertise_mime_shaped_or_invalid_artifacts() {
-        let recovery = cook_recovery_actions(
-            "promotion_failed",
-            "ambiguous-attempt-1",
-            true,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert_eq!(
-            recovery
-                .legal_actions
-                .last()
-                .map(|action| action.command.as_str()),
-            Some("homeboy agent-task recover ambiguous-attempt-1")
-        );
-        assert!(!recovery
-            .legal_actions
-            .iter()
-            .any(|action| action.command.contains("mime-shaped")));
     }
 }
 

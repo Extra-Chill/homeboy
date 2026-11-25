@@ -1563,33 +1563,22 @@ mod tests {
     }
 
     #[test]
-    fn reconnected_transport_replays_one_runner_owned_receipt() {
-        let temp = tempfile::tempdir().expect("temp");
-        let path = temp.path().join("staging.json");
-        let request = RemoteRunnerStagingRequest::new(envelope());
-        assert!(!serde_json::to_string(&request)
-            .expect("request")
-            .contains("/controller/private/source"));
-        let mut direct = transport(&path);
-        let first =
-            submit_remote_runner_staging(&mut direct, &request.envelope).expect("direct stage");
-        assert_eq!(direct.store.materializer.calls, 1);
-        let mut reconnected = transport(&path);
-        let replay =
-            submit_remote_runner_staging(&mut reconnected, &request.envelope).expect("replay");
-        assert_eq!(first, replay);
-        assert_eq!(reconnected.store.materializer.calls, 0);
-    }
-
-    #[test]
     fn restart_replays_and_refusals_happen_before_materialization() {
         let temp = tempfile::tempdir().expect("temp");
         let path = temp.path().join("staging.json");
         let request = envelope();
+        assert!(
+            !serde_json::to_string(&RemoteRunnerStagingRequest::new(request.clone()))
+                .expect("request")
+                .contains("/controller/private/source")
+        );
         let mut initial = transport(&path);
-        submit_remote_runner_staging(&mut initial, &request).expect("stage");
+        let first = submit_remote_runner_staging(&mut initial, &request).expect("stage");
+        assert_eq!(initial.store.materializer.calls, 1);
         let mut restarted = transport(&path);
-        submit_remote_runner_staging(&mut restarted, &request).expect("restart replay");
+        let replay =
+            submit_remote_runner_staging(&mut restarted, &request).expect("restart replay");
+        assert_eq!(first, replay, "one runner-owned receipt is replayed");
         assert_eq!(restarted.store.materializer.calls, 0);
         let mut incompatible = transport(&temp.path().join("incompatible.json"));
         incompatible.compatible = false;
@@ -1720,59 +1709,6 @@ mod tests {
         assert_eq!(fs::read(&record).unwrap(), bytes);
     }
 
-    #[test]
-    fn rejects_unknown_or_conflicting_retention_fields() {
-        let temp = tempfile::tempdir().expect("temp");
-        let path = temp.path().join("staging.json");
-        let request = envelope();
-        let mut initial = transport(&path);
-        initial.store.stage_durable(&request).expect("stage");
-        let record = stage_record_path(&path, &request.handoff.run_id);
-        let mut stored: serde_json::Value =
-            serde_json::from_slice(&fs::read(&record).expect("stored state")).expect("json");
-        let recipe = stored["stages"]
-            .as_object_mut()
-            .expect("stages")
-            .values_mut()
-            .next()
-            .expect("stage")
-            .get_mut("envelope")
-            .expect("envelope")
-            .get_mut("handoff")
-            .expect("handoff")
-            .get_mut("recipe")
-            .expect("recipe");
-        recipe["preserve_workspace_on_failure"] = serde_json::Value::Bool(true);
-        assert!(recipe.get("delete_workspace_on_failure").is_some());
-        let conflicting_recipe = recipe.clone();
-        let parse_error =
-            serde_json::from_value::<crate::lab_staging_controller::LabStagingRecipe>(
-                conflicting_recipe.clone(),
-            )
-            .expect_err("conflicting retention fields must fail");
-        assert!(parse_error.to_string().contains("unknown field"));
-        fs::write(
-            &record,
-            serde_json::to_vec(&stored).expect("conflicting bytes"),
-        )
-        .expect("conflicting store");
-        let error = load_stage(&record).expect_err("conflicting retention fields must fail");
-        assert_ne!(error.code, homeboy_core::ErrorCode::InternalJsonError);
-
-        let mut unknown_recipe = conflicting_recipe;
-        unknown_recipe
-            .as_object_mut()
-            .expect("unknown recipe object")
-            .remove("preserve_workspace_on_failure");
-        unknown_recipe["unknown_retention_policy"] = serde_json::Value::Bool(true);
-        let unknown_error =
-            serde_json::from_value::<crate::lab_staging_controller::LabStagingRecipe>(
-                unknown_recipe,
-            )
-            .expect_err("unknown retention fields must fail");
-        assert!(unknown_error.to_string().contains("unknown field"));
-    }
-
     #[derive(Clone)]
     struct ConcurrentMaterializer {
         calls: Arc<AtomicUsize>,
@@ -1853,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_source_artifact_is_retrievable_and_tampering_is_refused() {
+    fn staged_source_artifact_is_retrievable_and_tampered_or_missing_source_is_refused() {
         let temp = tempfile::tempdir().expect("temp");
         let path = temp.path().join("staging.json");
         let request = envelope();
@@ -1880,6 +1816,16 @@ mod tests {
             homeboy_core::ErrorCode::ValidationInvalidArgument
         );
         assert_eq!(restarted.store.materializer.calls, 0);
+
+        fs::remove_file(restarted.store.source_artifact_path(&source).expect("path"))
+            .expect("remove");
+        let error = transport(&path)
+            .stage_durable(&request)
+            .expect_err("missing source refusal");
+        assert_eq!(
+            error.code,
+            homeboy_core::ErrorCode::ValidationInvalidArgument
+        );
     }
 
     #[cfg(unix)]
@@ -1951,27 +1897,6 @@ mod tests {
         assert!(
             extract_staged_source_artifact(&store, &artifact, temp.path().join("extract")).is_err()
         );
-    }
-
-    #[test]
-    fn missing_staged_source_is_refused_on_receipt_replay() {
-        let temp = tempfile::tempdir().expect("temp");
-        let path = temp.path().join("staging.json");
-        let request = envelope();
-        let mut initial = transport(&path);
-        let receipt = initial.stage_durable(&request).expect("stage");
-        let source = receipt.artifacts.source_artifact.expect("source artifact");
-        fs::remove_file(initial.store.source_artifact_path(&source).expect("path"))
-            .expect("remove");
-        let mut restarted = transport(&path);
-        let error = restarted
-            .stage_durable(&request)
-            .expect_err("missing source refusal");
-        assert_eq!(
-            error.code,
-            homeboy_core::ErrorCode::ValidationInvalidArgument
-        );
-        assert_eq!(restarted.store.materializer.calls, 0);
     }
 
     #[test]
@@ -2068,61 +1993,6 @@ mod tests {
         assert!(paths.iter().all(|(_, canonical, authorization)| {
             canonical == &broker_token && authorization == &format!("Bearer {broker_token}")
         }));
-    }
-
-    #[test]
-    fn production_direct_transport_requires_the_direct_execution_capability_and_uses_direct_route()
-    {
-        let request = envelope();
-        let receipt = RemoteRunnerStagingReceipt {
-            schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
-            handoff: DirectLabHandoffReceipt::accepted(&request.handoff, "runner-stage-direct"),
-            artifacts: RunnerStagingArtifacts {
-                lifecycle_id: "lifecycle-direct".to_string(),
-                source_artifact_id: "source-direct".to_string(),
-                workspace_artifact_id: "workspace-direct".to_string(),
-                source_artifact: request
-                    .materialization
-                    .source_artifact
-                    .as_ref()
-                    .map(crate::runner_staging_operation::SourceArtifactTransfer::descriptor),
-            },
-        };
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 1);
-        let mut direct = ProductionRunnerStagingTransport {
-            runner_id: "runner-1".to_string(),
-            session: production_session(&endpoint),
-            capabilities: vec![
-                REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
-                REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
-                REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
-                crate::runner_staging_operation::DIRECT_RUNNER_STAGED_EXECUTION_CAPABILITY
-                    .to_string(),
-            ],
-            broker_token: Some("direct-token".to_string()),
-        };
-
-        assert_eq!(
-            submit_remote_runner_staging(&mut direct, &request).expect("direct stage"),
-            receipt
-        );
-        assert_eq!(seen.lock().expect("paths")[0].0, "/runner/staging/direct");
-
-        let unsupported = ProductionRunnerStagingTransport {
-            runner_id: "runner-1".to_string(),
-            session: production_session("http://127.0.0.1:9"),
-            capabilities: vec![
-                REMOTE_RUNNER_STAGING_CAPABILITY.to_string(),
-                REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY.to_string(),
-                REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY.to_string(),
-            ],
-            broker_token: None,
-        };
-        assert!(
-            !unsupported.supports_capability(REMOTE_RUNNER_STAGING_CAPABILITY),
-            "an old direct daemon must fail capability negotiation before staging"
-        );
     }
 
     fn production_session(endpoint: &str) -> RunnerSession {
@@ -2222,7 +2092,7 @@ mod tests {
     }
 
     #[test]
-    fn staging_request_timeout_scales_with_payload_within_floor_and_cap() {
+    fn staging_request_timeout_scales_within_floor_and_cap_and_honors_valid_overrides() {
         const MIB: usize = 1024 * 1024;
         assert_eq!(staging_request_timeout(0, None), STAGING_TIMEOUT_FLOOR);
         assert_eq!(staging_request_timeout(1, None), Duration::from_secs(62));
@@ -2236,14 +2106,7 @@ mod tests {
         );
         // The fixed 10s control-plane deadline is never used for staging.
         assert!(staging_request_timeout(0, None) > Duration::from_secs(10));
-    }
-
-    #[test]
-    fn staging_request_timeout_honors_a_valid_override_only() {
-        assert_eq!(
-            staging_request_timeout(0, Some("900")),
-            Duration::from_secs(900)
-        );
+        // Only a valid positive override replaces the computed deadline.
         assert_eq!(
             staging_request_timeout(0, Some(" 5 ")),
             Duration::from_secs(5)

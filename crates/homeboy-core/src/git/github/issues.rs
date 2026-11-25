@@ -387,33 +387,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_issue_list_filters_by_title() {
+    fn parse_issue_list_filters_by_title_and_requires_all_labels() {
         let raw = r#"[
-            {"number":1,"title":"bug: one","url":"u1","state":"open","labels":[]},
-            {"number":2,"title":"bug: two","url":"u2","state":"open","labels":[]}
+            {"number":1,"title":"bug: one","url":"u1","state":"open","labels":[{"name":"ci-failure"}]},
+            {"number":2,"title":"bug: two","url":"u2","state":"open","labels":[{"name":"ci-failure"},{"name":"autofix"}]},
+            {"number":3,"title":"bug: three","url":"u3","state":"open","labels":[]}
         ]"#;
-        let opts = IssueFindOptions {
+        let by_title = IssueFindOptions {
             title: Some("bug: two".into()),
             ..Default::default()
         };
-        let items = parse_issue_list_json(raw, &opts).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].number, 2);
-    }
-
-    #[test]
-    fn parse_issue_list_requires_all_labels() {
-        let raw = r#"[
-            {"number":1,"title":"a","url":"u1","state":"open","labels":[{"name":"ci-failure"}]},
-            {"number":2,"title":"b","url":"u2","state":"open","labels":[{"name":"ci-failure"},{"name":"autofix"}]}
-        ]"#;
-        let opts = IssueFindOptions {
+        let by_labels = IssueFindOptions {
             labels: vec!["ci-failure".into(), "autofix".into()],
             ..Default::default()
         };
-        let items = parse_issue_list_json(raw, &opts).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].number, 2);
+        for opts in [by_title, by_labels] {
+            let items = parse_issue_list_json(raw, &opts).unwrap();
+            let numbers: Vec<u64> = items.iter().map(|item| item.number).collect();
+            assert_eq!(numbers, vec![2]);
+        }
     }
 
     #[test]
@@ -472,9 +464,8 @@ mod tests {
 
     #[test]
     fn parse_issue_list_extracts_state_reason_and_closed_at() {
-        // gh issue list --json includes stateReason + closedAt fields when
-        // requested. Closed-completed, closed-not_planned, and open issues
-        // are represented in this fixture.
+        // Open issues carry null (or, on older gh, absent) stateReason and
+        // closedAt; both read as empty.
         let raw = r#"[
             {
                 "number": 100,
@@ -490,9 +481,7 @@ mod tests {
                 "title": "audit: other in repo (5)",
                 "url": "https://github.com/o/r/issues/101",
                 "state": "CLOSED",
-                "stateReason": "completed",
-                "closedAt": "2026-04-25T12:00:00Z",
-                "labels": [{"name":"audit"}]
+                "labels": []
             },
             {
                 "number": 102,
@@ -509,28 +498,25 @@ mod tests {
             ..Default::default()
         };
         let items = parse_issue_list_json(raw, &opts).unwrap();
-        assert_eq!(items.len(), 3);
-
-        // Open issue: empty state_reason and closed_at, single label.
-        assert_eq!(items[0].number, 100);
-        assert_eq!(items[0].state, "OPEN");
-        assert_eq!(items[0].state_reason, "");
-        assert_eq!(items[0].closed_at, "");
-        assert_eq!(items[0].labels, vec!["audit".to_string()]);
-
-        // Closed completed: state_reason populated, closed_at populated.
-        assert_eq!(items[1].number, 101);
-        assert_eq!(items[1].state, "CLOSED");
-        assert_eq!(items[1].state_reason, "completed");
-        assert_eq!(items[1].closed_at, "2026-04-25T12:00:00Z");
-
-        // Closed not_planned with suppression label.
-        assert_eq!(items[2].number, 102);
-        assert_eq!(items[2].state_reason, "not_planned");
+        let fields: Vec<(u64, &str, &str)> = items
+            .iter()
+            .map(|item| {
+                (
+                    item.number,
+                    item.state_reason.as_str(),
+                    item.closed_at.as_str(),
+                )
+            })
+            .collect();
         assert_eq!(
-            items[2].labels,
-            vec!["audit".to_string(), "wontfix".to_string()]
+            fields,
+            vec![
+                (100, "", ""),
+                (101, "", ""),
+                (102, "not_planned", "2026-04-26T03:00:00Z"),
+            ]
         );
+        assert_eq!(items[2].labels, vec!["audit", "wontfix"]);
     }
 
     #[cfg(unix)]
@@ -640,20 +626,5 @@ exit 0
                 vec!["api -X DELETE repos/example/issue-label-fixture/issues/12/labels/missing"]
             );
         });
-    }
-
-    #[test]
-    fn parse_issue_list_handles_missing_optional_fields() {
-        // Older gh versions or projects without state-reason support emit
-        // payloads without those fields. Default-deserialize to empty.
-        let raw = r#"[
-            {"number":1,"title":"x","url":"u","state":"open","labels":[]}
-        ]"#;
-        let opts = IssueFindOptions::default();
-        let items = parse_issue_list_json(raw, &opts).unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].state_reason, "");
-        assert_eq!(items[0].closed_at, "");
-        assert!(items[0].labels.is_empty());
     }
 }

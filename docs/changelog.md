@@ -4,6 +4,98 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.22] - 2026-11-25
+
+### Changed
+- prune and fold staging-controller and lab-workspace tests
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 9/12)
+- prune lab offload and preparation tests (6/12)
+- prune and fold redundant tests in lab-runner slice 10/12
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 7/12)
+
+## [0.497.21] - 2026-11-25
+
+### Changed
+- prune agent_task_service and control-plane tests file by file
+
+## [0.497.20] - 2026-11-25
+
+### Changed
+- prune and fold homeboy-lab-runner connection tests file by file
+- prune homeboy-agents agent_task tests file-by-file (9/15)
+- prune agent_task_provider tests file-by-file (8/15)
+- prune homeboy-agents scratch and orchestration tests file by file
+- prune redundant tests in homeboy-lab-runner slice 3/12
+
+## [0.497.19] - 2026-11-25
+
+### Changed
+- prune agent_task_service tests file-by-file (13/15)
+- prune and fold low-value homeboy-agents scheduler and cook tests (wave 1 follow-up)
+- prune and fold low-value tests in agent-task lifecycle, notify and promotion suites (6/15)
+- prune and fold redundant contract tests (contracts 2/2)
+- prune and fold homeboy-rig tests file-by-file (homeboy-rig 1/1)
+- prune and fold homeboy-agents finalization and gate tests (2/15)
+- prune homeboy-agents agent_task_service cook tests file-by-file (11/15)
+- prune cook_tests file-by-file (homeboy-agents 12/15)
+
+### Fixed
+- Cook status/diagnose report a run with gates still running as candidate_recoverable, inviting a duplicate regate
+
+## [0.497.18] - 2026-11-25
+
+### Changed
+- prune and fold low-value agent-task promotion, prompt and provider tests (7/15)
+- prune and fold homeboy-fuzz tests file by file
+- prune redundant lifecycle tests and stale history comments
+- prune agent_task_lifecycle status/submit tests file-by-file
+
+## [0.497.17] - 2026-11-25
+
+### Changed
+- prune redundant tests in remaining contract files
+- prune and fold low-value tests in small crates (homeboy-error, paths, redaction, review, product-identity)
+
+## [0.497.16] - 2026-11-25
+
+### Changed
+- prune homeboy-agents agent_task tests file-by-file (1/15)
+
+## [0.497.15] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in rig, daemon, deps, installer, release and report suites (tests 5/6)
+
+## [0.497.14] - 2026-11-25
+
+### Changed
+- prune and fold low-value homeboy-core git tests file-by-file
+
+## [0.497.13] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in tests/core/rig (tests 4/6)
+
+## [0.497.12] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in homeboy-core src/extension (9/22)
+- prune and fold daemon, invocation, bench and component-script tests (tests 2/6)
+- prune redundant tests in the tests/ wave 6 slice
+- prune and fold src/extension invoke/lifecycle/lint tests
+- prune and fold low-value tests in tests 1/6 slice
+- prune and fold low-value contract-crate tests
+- prune and fold homeboy-upgrade tests file by file (1/2)
+- prune and fold homeboy-engine-primitives tests file-by-file
+- prune and fold homeboy-version unit tests
+- prune and fold homeboy-upgrade upgrade tests file-by-file (2/2)
+- prune and fold low-value release planning tests (homeboy-release 3/4)
+- prune workflow, workflow_recover and workspace tests
+
+### Fixed
+- Prune tests file-by-file: homeboy-deploy 1/2 (crates/homeboy-deploy/src, 199 tests)
+- Prune tests file-by-file: homeboy-deploy 2/2 (crates/homeboy-deploy/src, 191 tests)
+
 ## [0.497.11] - 2026-11-25
 
 ### Changed

@@ -719,53 +719,35 @@ mod tests {
     }
 
     #[test]
-    fn execute_api_rejects_unverified_canonical_identity() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            crate::control_plane::register_control_plane_provider(Box::new(
-                ExtensionIdentityProvider,
-            ));
-            let mut request = captured_request("fixture", "forged-identity", Vec::new());
-            request.control_plane = Some(ExtensionApiControlPlaneIdentity {
-                mission: MissionId::new("different-mission").unwrap(),
-                run: RunId::new("run-extension").unwrap(),
-                task: TaskId::new("task-extension").unwrap(),
-                attempt: AttemptId::new("attempt-extension").unwrap(),
-                attempt_number: 1,
-                execution: ExecutionId::new("execution-extension").unwrap(),
+    fn execute_api_rejects_identity_the_control_plane_does_not_verify() {
+        // A forged mission, and a real task claimed by an extension that does not own it.
+        for (extension_id, mission) in [
+            ("fixture", "different-mission"),
+            ("different-extension", "mission-extension"),
+        ] {
+            homeboy_core::test_support::with_isolated_home(|_| {
+                crate::control_plane::register_control_plane_provider(Box::new(
+                    ExtensionIdentityProvider,
+                ));
+                let mut request = captured_request(extension_id, "forged-identity", Vec::new());
+                request.control_plane = Some(ExtensionApiControlPlaneIdentity {
+                    mission: MissionId::new(mission).unwrap(),
+                    run: RunId::new("run-extension").unwrap(),
+                    task: TaskId::new("task-extension").unwrap(),
+                    attempt: AttemptId::new("attempt-extension").unwrap(),
+                    attempt_number: 1,
+                    execution: ExecutionId::new("execution-extension").unwrap(),
+                });
+
+                let response = execute_api(&request);
+
+                assert_eq!(
+                    response.failure.map(|failure| failure.code),
+                    Some(ExtensionApiOperationFailureCode::InvalidRequestSchema),
+                    "{extension_id}/{mission}"
+                );
             });
-
-            let response = execute_api(&request);
-
-            assert_eq!(
-                response.failure.map(|failure| failure.code),
-                Some(ExtensionApiOperationFailureCode::InvalidRequestSchema)
-            );
-        });
-    }
-
-    #[test]
-    fn execute_api_rejects_an_extension_that_does_not_own_the_canonical_task() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            crate::control_plane::register_control_plane_provider(Box::new(
-                ExtensionIdentityProvider,
-            ));
-            let mut request = captured_request("different-extension", "wrong-owner", Vec::new());
-            request.control_plane = Some(ExtensionApiControlPlaneIdentity {
-                mission: MissionId::new("mission-extension").unwrap(),
-                run: RunId::new("run-extension").unwrap(),
-                task: TaskId::new("task-extension").unwrap(),
-                attempt: AttemptId::new("attempt-extension").unwrap(),
-                attempt_number: 1,
-                execution: ExecutionId::new("execution-extension").unwrap(),
-            });
-
-            let response = execute_api(&request);
-
-            assert_eq!(
-                response.failure.map(|failure| failure.code),
-                Some(ExtensionApiOperationFailureCode::InvalidRequestSchema)
-            );
-        });
+        }
     }
 
     #[test]
