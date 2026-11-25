@@ -1578,17 +1578,18 @@ fn is_transient_provider_error_classifies_transient_and_permanent_text() {
     ));
 }
 
-/// Node script that increments a counter file and emits a transient cURL-28
+/// Node script that increments a counter file and emits `error` as the
 /// provider error for the first `fail_until` attempts, then a success
 /// outcome. Used to prove transient retries recover.
-fn transient_then_success_script(state_path: &Path, fail_until: u32) -> String {
+fn transient_then_success_script(state_path: &Path, fail_until: u32, error: &str) -> String {
     let state = state_path.to_string_lossy().replace('\\', "\\\\");
+    let error = serde_json::to_string(error).expect("error literal");
     script(&format!(
         "let fs=require('fs'); \
          let p='{state}'; let n=0; try {{ n=parseInt(fs.readFileSync(p,'utf8'))||0; }} catch(e) {{}} \
          n+=1; fs.writeFileSync(p, String(n)); \
          let message = n <= {fail_until} \
-           ? {{role:'assistant',stopReason:'error',errorMessage:'Network error ... cURL error 28: Operation timed out after 15000ms',content:[]}} \
+           ? {{role:'assistant',stopReason:'error',errorMessage:{error},content:[]}} \
            : {{role:'assistant',stopReason:'stop',content:[{{type:'text',text:'recovered'}}]}}; \
          process.stdout.write(JSON.stringify({{type:'message_end',message}})+'\\n');", 
     ))
@@ -1621,31 +1622,49 @@ fn unique_state_path(label: &str) -> PathBuf {
 
 #[test]
 fn provider_retries_transient_error_then_succeeds() {
-    let state_path = unique_state_path("recover");
-    let _ = fs::remove_file(&state_path);
-    let command = format!("node {}", transient_then_success_script(&state_path, 2));
-    let (request, provider) = request("task-transient-recover", command);
+    for (label, error) in [
+        (
+            "curl-28",
+            "Network error ... cURL error 28: Operation timed out after 15000ms",
+        ),
+        // Anthropic capacity overload (HTTP 529), as Pi surfaces it.
+        (
+            "overloaded",
+            r#"{"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011ChP3p82s23drvuUF58jEz"}"#,
+        ),
+    ] {
+        let state_path = unique_state_path(label);
+        let _ = fs::remove_file(&state_path);
+        let command = format!(
+            "node {}",
+            transient_then_success_script(&state_path, 2, error)
+        );
+        let (request, provider) = request("task-transient-recover", command);
 
-    let outcome = run_provider_command(&request, &provider, None);
+        let outcome = run_provider_command(&request, &provider, None);
 
-    assert_eq!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Succeeded,
-        "transient blip should be retried until it recovers"
-    );
-    let attempts: u32 = fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-        .unwrap_or_default();
-    assert_eq!(attempts, 3, "two transient failures plus one success");
-    assert!(
-        outcome
-            .diagnostics
-            .iter()
-            .any(|d| d.class == "agent_task.provider_transient_retry"),
-        "recovery should be surfaced as a diagnostic"
-    );
-    let _ = fs::remove_file(&state_path);
+        assert_eq!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded,
+            "{label}: transient blip should be retried until it recovers"
+        );
+        let attempts: u32 = fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or_default();
+        assert_eq!(
+            attempts, 3,
+            "{label}: two transient failures plus one success"
+        );
+        assert!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|d| d.class == "agent_task.provider_transient_retry"),
+            "{label}: recovery should be surfaced as a diagnostic"
+        );
+        let _ = fs::remove_file(&state_path);
+    }
 }
 
 #[test]

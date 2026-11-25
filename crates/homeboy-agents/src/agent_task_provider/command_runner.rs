@@ -684,8 +684,9 @@ fn outcome_text_is_transient(outcome: &AgentTaskOutcome) -> bool {
 /// failure. Matching is case-insensitive.
 pub(super) fn is_transient_provider_error(text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
-    const TRANSIENT_PATTERNS: [&str; 15] = [
+    const TRANSIENT_PATTERNS: [&str; 16] = [
         "curl error 28",
+        "overloaded_error",
         "operation timed out",
         "timed out",
         "timeout",
@@ -735,7 +736,7 @@ pub(super) fn is_rate_limited_provider_error(text: &str) -> bool {
 /// Detect a transient HTTP 5xx status code mentioned in error text, while
 /// leaving permanent 4xx codes and rate-limit 429 non-retryable here.
 fn transient_status_code(lowered: &str) -> bool {
-    const TRANSIENT_CODES: [&str; 6] = ["500", "502", "503", "504", "522", "524"];
+    const TRANSIENT_CODES: [&str; 7] = ["500", "502", "503", "504", "522", "524", "529"];
     TRANSIENT_CODES
         .iter()
         .any(|code| contains_status_code_token(lowered, code))
