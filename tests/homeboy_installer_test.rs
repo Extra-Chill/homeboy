@@ -218,28 +218,22 @@ fn installer_creates_a_first_install_parent_before_staging_the_replacement() {
     assert!(installed.contains("0.351.3+fixture"));
 }
 
+/// Privilege is used for the atomic replacement both when the caller forces
+/// sudo and when the binary is writable but its parent directory is not.
 #[test]
 fn installer_uses_privileged_atomic_replacement() {
-    let (output, installed, events) = run_installer(ArchiveFixture::Valid, true, true, false);
+    for (force_sudo, non_writable_parent) in [(true, false), (false, true)] {
+        let (output, installed, events) =
+            run_installer(ArchiveFixture::Valid, true, force_sudo, non_writable_parent);
 
-    assert!(output.status.success(), "{output:?}");
-    assert!(installed.contains("0.351.3+fixture"));
-    assert_eq!(
-        events.lines().collect::<Vec<_>>(),
-        ["sudo:install", "sudo:mv"]
-    );
-}
-
-#[test]
-fn installer_uses_privilege_when_binary_is_writable_but_parent_is_not_replaceable() {
-    let (output, installed, events) = run_installer(ArchiveFixture::Valid, true, false, true);
-
-    assert!(output.status.success(), "{output:?}");
-    assert!(installed.contains("0.351.3+fixture"));
-    assert_eq!(
-        events.lines().collect::<Vec<_>>(),
-        ["sudo:install", "sudo:mv"]
-    );
+        assert!(output.status.success(), "{output:?}");
+        assert!(installed.contains("0.351.3+fixture"));
+        assert_eq!(
+            events.lines().collect::<Vec<_>>(),
+            ["sudo:install", "sudo:mv"],
+            "force_sudo={force_sudo} non_writable_parent={non_writable_parent}"
+        );
+    }
 }
 
 #[test]

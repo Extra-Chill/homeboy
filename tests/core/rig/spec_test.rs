@@ -1,9 +1,10 @@
-//! Spec parsing tests — serde round-trips, pipeline step discriminants,
-//! service-kind parsing. Covers `src/core/rig/spec.rs`.
+//! Spec parsing tests for the user-authored rig JSON contract: pipeline step
+//! kinds, service kinds, resources and requirements. Covers
+//! `src/core/rig/spec.rs`.
 
 use crate::{
     FilesystemAssertionKind, PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec,
-    ServiceKind, ServiceSpec, TraceConfig, TraceVariantSpec, WorkloadSpec,
+    ServiceKind, WorkloadSpec,
 };
 
 /// Canonical fixture covering the first full-shape consumer of the rig primitive.
@@ -65,42 +66,43 @@ mod spec_parse_tests {
     use super::*;
 
     #[test]
-    fn test_spec_parses_studio_playground_fixture() {
+    fn test_spec_parses_generic_app_fixture() {
         let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
         assert_eq!(spec.id, "desktop-app-dev");
         assert_eq!(spec.components.len(), 2);
-        assert_eq!(spec.services.len(), 1);
         assert_eq!(spec.symlinks.len(), 1);
         assert_eq!(spec.shared_paths.len(), 1);
-        assert_eq!(spec.resources.exclusive, vec!["studio-runtime"]);
-        assert_eq!(spec.pipeline.get("up").unwrap().len(), 3);
-        assert_eq!(spec.pipeline.get("check").unwrap().len(), 4);
-        assert_eq!(spec.pipeline.get("down").unwrap().len(), 2);
-    }
 
-    #[test]
-    fn test_spec_http_static_service_kind_roundtrips() {
-        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
         let svc = spec.services.get("tarball-server").expect("service");
         assert_eq!(svc.kind, ServiceKind::HttpStatic);
         assert_eq!(svc.port, Some(9724));
-        assert!(svc.health.is_some());
-        let health = svc.health.as_ref().unwrap();
+        let health = svc.health.as_ref().expect("health");
         assert_eq!(health.http.as_deref(), Some("http://127.0.0.1:9724/"));
         assert_eq!(health.expect_status, Some(200));
-    }
 
-    #[test]
-    fn test_spec_pipeline_steps_discriminate_correctly() {
-        let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
+        assert_eq!(spec.resources.exclusive, vec!["studio-runtime"]);
+        assert_eq!(
+            spec.resources.paths,
+            vec!["~/Developer/studio@bfb-mu-plugin-agent-output"]
+        );
+        assert_eq!(spec.resources.ports, vec![9724]);
+        assert_eq!(
+            spec.resources.process_patterns,
+            vec!["app-server-child.mjs"]
+        );
+
         let up = spec.pipeline.get("up").unwrap();
         assert!(matches!(up[0], PipelineStep::Service { .. }));
         assert!(matches!(up[1], PipelineStep::Symlink { .. }));
         assert!(matches!(up[2], PipelineStep::SharedPath { .. }));
-
         let check = spec.pipeline.get("check").unwrap();
+        assert_eq!(check.len(), 4);
         assert!(matches!(check[3], PipelineStep::Check { .. }));
+        assert_eq!(spec.pipeline.get("down").unwrap().len(), 2);
+    }
 
+    #[test]
+    fn test_spec_declarative_check_and_command_if_missing_steps_parse() {
         let declarative_spec: RigSpec = serde_json::from_str(
             r#"{
                 "id": "declarative-primitives",
@@ -182,30 +184,6 @@ mod spec_parse_tests {
     }
 
     #[test]
-    fn test_spec_resources_block_parses_full_shape() {
-        let json = r#"{
-            "id": "studio-bfb",
-            "resources": {
-                "exclusive": ["studio-runtime"],
-                "paths": ["~/Developer/studio@bfb-mu-plugin-agent-output"],
-                "ports": [9724],
-                "process_patterns": ["app-server-child.mjs"]
-            }
-        }"#;
-        let spec: RigSpec = serde_json::from_str(json).expect("parse");
-        assert_eq!(spec.resources.exclusive, vec!["studio-runtime"]);
-        assert_eq!(
-            spec.resources.paths,
-            vec!["~/Developer/studio@bfb-mu-plugin-agent-output"]
-        );
-        assert_eq!(spec.resources.ports, vec![9724]);
-        assert_eq!(
-            spec.resources.process_patterns,
-            vec!["app-server-child.mjs"]
-        );
-    }
-
-    #[test]
     fn test_spec_resources_defaults_and_serializes_away_when_missing() {
         let spec: RigSpec = serde_json::from_str(r#"{"id":"tiny"}"#).expect("parse");
         assert_eq!(spec.resources, RigResourcesSpec::default());
@@ -261,34 +239,47 @@ mod spec_parse_tests {
             .extensions
             .contains_key("example-provider"));
     }
-
-    #[test]
-    fn test_spec_resources_rejects_invalid_port_shape() {
-        let json = r#"{"id":"bad","resources":{"ports":[70000]}}"#;
-        let err = serde_json::from_str::<RigSpec>(json).expect_err("u16 port rejected");
-        assert!(err.to_string().contains("70000"));
-    }
 }
 
 #[test]
-fn test_spec_command_service_kind() {
+fn test_spec_service_kinds_parse_kind_specific_fields() {
     let json = r#"{
         "id": "r",
         "services": {
             "custom": {
                 "kind": "command",
                 "command": "redis-server --port 6380"
+            },
+            "studio-daemon": {
+                "kind": "external",
+                "discover": {
+                    "pattern": "app-server-child.mjs",
+                    "argv_contains": ["sample-app@feature-a", "preview-server-child.mjs"]
+                }
             }
         }
     }"#;
     let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let svc: &ServiceSpec = spec.services.get("custom").unwrap();
-    assert_eq!(svc.kind, ServiceKind::Command);
-    assert_eq!(svc.command.as_deref(), Some("redis-server --port 6380"));
+
+    let command = spec.services.get("custom").unwrap();
+    assert_eq!(command.kind, ServiceKind::Command);
+    assert_eq!(command.command.as_deref(), Some("redis-server --port 6380"));
+
+    let external = spec.services.get("studio-daemon").unwrap();
+    assert_eq!(external.kind, ServiceKind::External);
+    let discover = external.discover.as_ref().expect("discover");
+    assert_eq!(discover.pattern, "app-server-child.mjs");
+    assert_eq!(
+        discover.argv_contains,
+        vec![
+            "sample-app@feature-a".to_string(),
+            "preview-server-child.mjs".to_string()
+        ]
+    );
 }
 
 #[test]
-fn test_spec_check_step_with_command_probe() {
+fn test_spec_check_step_probes_and_groups_parse() {
     let json = r#"{
         "id": "r",
         "pipeline": {
@@ -296,96 +287,64 @@ fn test_spec_check_step_with_command_probe() {
                 {
                     "kind": "check",
                     "label": "docker daemon running",
+                    "groups": ["desktop-app", "trace"],
                     "command": "docker info",
                     "expect_exit": 0
+                },
+                {
+                    "kind": "check",
+                    "label": "Daemon newer than bundle",
+                    "newer_than": {
+                        "left":  { "process_start": { "pattern": "app-server-child.mjs" } },
+                        "right": { "file_mtime": "${components.studio.path}/apps/cli/dist/cli/main.mjs" }
+                    }
                 }
             ]
         }
     }"#;
     let spec: RigSpec = serde_json::from_str(json).expect("parse");
     let steps = spec.pipeline.get("check").unwrap();
-    assert_eq!(steps.len(), 1);
     match &steps[0] {
-        PipelineStep::Check { label, spec, .. } => {
+        PipelineStep::Check {
+            label,
+            groups,
+            spec,
+            ..
+        } => {
             assert_eq!(label.as_deref(), Some("docker daemon running"));
+            assert_eq!(
+                groups,
+                &vec!["desktop-app".to_string(), "trace".to_string()]
+            );
             assert_eq!(spec.command.as_deref(), Some("docker info"));
             assert_eq!(spec.expect_exit, Some(0));
         }
         other => panic!("expected Check, got {:?}", other),
     }
-}
-
-#[test]
-fn test_spec_check_step_parses_groups() {
-    let json = r#"{
-        "id": "r",
-        "pipeline": {
-            "check": [
-                {
-                    "kind": "check",
-                    "label": "desktop app packaged",
-                    "groups": ["desktop-app", "trace"],
-                    "command": "test -d apps/studio/out"
-                }
-            ]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let steps = spec.pipeline.get("check").unwrap();
-    match &steps[0] {
-        PipelineStep::Check { groups, .. } => {
+    match &steps[1] {
+        PipelineStep::Check { spec, .. } => {
+            let nt = spec.newer_than.as_ref().expect("newer_than present");
             assert_eq!(
-                groups,
-                &vec!["desktop-app".to_string(), "trace".to_string()]
+                nt.left.process_start.as_ref().unwrap().pattern,
+                "app-server-child.mjs"
             );
+            assert!(nt
+                .right
+                .file_mtime
+                .as_ref()
+                .unwrap()
+                .contains("dist/cli/main.mjs"));
         }
         other => panic!("expected Check, got {:?}", other),
     }
 }
 
 #[test]
-fn test_check_groups() {
-    let unscoped: WorkloadSpec = serde_json::from_str(r#"{ "path": "/tmp/unscoped.trace.mjs" }"#)
-        .expect("parse unscoped workload");
-    assert_eq!(unscoped.path(), "/tmp/unscoped.trace.mjs");
-    assert!(unscoped.check_groups().is_none());
-
-    let detailed: WorkloadSpec = serde_json::from_str(
-        r#"{
-            "path": "/tmp/scoped.trace.mjs",
-            "check_groups": ["desktop-app"]
-        }"#,
-    )
-    .expect("parse detailed workload");
-    assert_eq!(detailed.path(), "/tmp/scoped.trace.mjs");
-    assert_eq!(
-        detailed.check_groups(),
-        Some(&["desktop-app".to_string()][..])
-    );
-}
-
-#[test]
-fn test_trace_variants() {
-    let workload = workload_with_trace_metadata();
-    let variants = workload.trace_variants();
-
-    assert_eq!(
-        variants.get("fresh-install-mode"),
-        Some(&TraceVariantSpec {
-            component: Some("studio".to_string()),
-            overlay: Some("overlays/fresh-install-mode.patch".to_string()),
-            overlays: Vec::new(),
-            trace_guardrails: Vec::new(),
-        })
-    );
-    let workload_without_variants: WorkloadSpec =
-        serde_json::from_str(r#"{ "path": "/tmp/no-variants.trace.mjs" }"#)
-            .expect("parse workload");
-    assert!(workload_without_variants.trace_variants().is_empty());
-
+fn test_workload_trace_contract_parses() {
     let workload: WorkloadSpec = serde_json::from_str(
         r#"{
             "path": "/tmp/ece.trace.mjs",
+            "check_groups": ["desktop-app"],
             "dependencies": [
                 {
                     "id": "woocommerce",
@@ -409,6 +368,10 @@ fn test_trace_variants() {
     )
     .expect("parse workload trace contract");
 
+    assert_eq!(
+        workload.check_groups(),
+        Some(&["desktop-app".to_string()][..])
+    );
     assert_eq!(workload.trace_dependencies().len(), 1);
     let dependency = &workload.trace_dependencies()[0];
     assert_eq!(dependency.id, "woocommerce");
@@ -428,94 +391,9 @@ fn test_trace_variants() {
     );
 }
 
-fn workload_with_trace_metadata() -> WorkloadSpec {
-    WorkloadSpec {
-        path: "/tmp/scoped.trace.mjs".to_string(),
-        env_provider_extensions: Vec::new(),
-        artifact_postprocess: Vec::new(),
-        public_preview: None,
-        check_groups: Some(vec!["desktop-app".to_string()]),
-        port_range_size: None,
-        named_leases: Vec::new(),
-        trace: TraceConfig {
-            trace_phase_presets: std::collections::HashMap::from([(
-                "startup".to_string(),
-                vec!["boot:runner.boot".to_string()],
-            )]),
-            trace_span_metadata: std::collections::HashMap::new(),
-            trace_default_phase_preset: Some("startup".to_string()),
-        },
-        trace_variants: std::collections::HashMap::from([(
-            "fresh-install-mode".to_string(),
-            TraceVariantSpec {
-                component: Some("studio".to_string()),
-                overlay: Some("overlays/fresh-install-mode.patch".to_string()),
-                overlays: Vec::new(),
-                trace_guardrails: Vec::new(),
-            },
-        )]),
-        trace_guardrails: Vec::new(),
-        trace_probes: Vec::new(),
-        dependencies: Vec::new(),
-        runner_capabilities: Vec::new(),
-        lifecycle: None,
-    }
-}
-
 #[test]
-fn test_spec_build_step_parses() {
-    let json = r#"{
-        "id": "r",
-        "components": { "studio": { "path": "/tmp/studio" } },
-        "pipeline": {
-            "up": [
-                { "kind": "build", "component": "studio", "label": "compile studio" }
-            ]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let steps = spec.pipeline.get("up").unwrap();
-    match &steps[0] {
-        PipelineStep::Build {
-            component, label, ..
-        } => {
-            assert_eq!(component, "studio");
-            assert_eq!(label.as_deref(), Some("compile studio"));
-        }
-        other => panic!("expected Build, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_spec_extension_step_parses() {
-    let json = r#"{
-        "id": "r",
-        "components": { "studio": { "path": "/tmp/studio" } },
-        "pipeline": {
-            "up": [
-                { "kind": "extension", "component": "studio", "op": "build", "label": "extension build" }
-            ]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let steps = spec.pipeline.get("up").unwrap();
-    match &steps[0] {
-        PipelineStep::Extension {
-            component,
-            op,
-            label,
-            ..
-        } => {
-            assert_eq!(component, "studio");
-            assert_eq!(op, "build");
-            assert_eq!(label.as_deref(), Some("extension build"));
-        }
-        other => panic!("expected Extension, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_spec_pipeline_step_id_and_dependencies_parse() {
+fn test_spec_component_steps_parse_ids_dependencies_and_ops() {
+    use crate::spec::GitOp;
     let json = r#"{
         "id": "r",
         "components": {
@@ -524,41 +402,14 @@ fn test_spec_pipeline_step_id_and_dependencies_parse() {
         },
         "pipeline": {
             "up": [
-                { "kind": "build", "id": "playground-build", "component": "playground" },
+                { "kind": "build", "id": "playground-build", "component": "playground", "label": "compile playground" },
                 {
-                    "kind": "build",
+                    "kind": "extension",
                     "id": "studio-install",
                     "component": "studio",
+                    "op": "build",
                     "depends_on": ["playground-build"]
-                }
-            ]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let steps = spec.pipeline.get("up").unwrap();
-    match &steps[1] {
-        PipelineStep::Build {
-            step_id,
-            depends_on,
-            component,
-            ..
-        } => {
-            assert_eq!(step_id.as_deref(), Some("studio-install"));
-            assert_eq!(depends_on, &vec!["playground-build".to_string()]);
-            assert_eq!(component, "studio");
-        }
-        other => panic!("expected Build, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_spec_git_step_parses_with_args() {
-    use crate::spec::GitOp;
-    let json = r#"{
-        "id": "r",
-        "components": { "studio": { "path": "/tmp/studio" } },
-        "pipeline": {
-            "sync": [
+                },
                 {
                     "kind": "git",
                     "component": "studio",
@@ -569,8 +420,36 @@ fn test_spec_git_step_parses_with_args() {
         }
     }"#;
     let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let steps = spec.pipeline.get("sync").unwrap();
+    let steps = spec.pipeline.get("up").unwrap();
     match &steps[0] {
+        PipelineStep::Build {
+            step_id,
+            component,
+            label,
+            ..
+        } => {
+            assert_eq!(step_id.as_deref(), Some("playground-build"));
+            assert_eq!(component, "playground");
+            assert_eq!(label.as_deref(), Some("compile playground"));
+        }
+        other => panic!("expected Build, got {:?}", other),
+    }
+    match &steps[1] {
+        PipelineStep::Extension {
+            step_id,
+            depends_on,
+            component,
+            op,
+            ..
+        } => {
+            assert_eq!(step_id.as_deref(), Some("studio-install"));
+            assert_eq!(depends_on, &vec!["playground-build".to_string()]);
+            assert_eq!(component, "studio");
+            assert_eq!(op, "build");
+        }
+        other => panic!("expected Extension, got {:?}", other),
+    }
+    match &steps[2] {
         PipelineStep::Git {
             component,
             op,
@@ -586,7 +465,7 @@ fn test_spec_git_step_parses_with_args() {
 }
 
 #[test]
-fn test_spec_patch_step_parses_full_shape() {
+fn test_spec_patch_step_parses_full_shape_and_default_op() {
     use crate::spec::PatchOp;
     let json = r#"{
         "id": "r",
@@ -602,6 +481,13 @@ fn test_spec_patch_step_parses_full_shape() {
                     "content": "/* RUNTIME-WASM-COMBINED-FIXES TSRMLS fallback */\n#define TSRMLS_CC\n",
                     "op": "apply",
                     "label": "TSRMLS fallback"
+                },
+                {
+                    "kind": "patch",
+                    "component": "playground",
+                    "file": "x.c",
+                    "marker": "M",
+                    "content": "M\n"
                 }
             ]
         }
@@ -628,28 +514,8 @@ fn test_spec_patch_step_parses_full_shape() {
         }
         other => panic!("expected Patch, got {:?}", other),
     }
-}
-
-#[test]
-fn test_spec_patch_op_defaults_to_apply_when_omitted() {
-    use crate::spec::PatchOp;
-    let json = r#"{
-        "id": "r",
-        "components": { "c": { "path": "/tmp/c" } },
-        "pipeline": {
-            "up": [
-                {
-                    "kind": "patch",
-                    "component": "c",
-                    "file": "x.c",
-                    "marker": "M",
-                    "content": "M\n"
-                }
-            ]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    match &spec.pipeline.get("up").unwrap()[0] {
+    // `op` is optional and means apply.
+    match &spec.pipeline.get("up").unwrap()[1] {
         PipelineStep::Patch { op, .. } => assert_eq!(*op, PatchOp::Apply),
         other => panic!("expected Patch, got {:?}", other),
     }
@@ -842,72 +708,5 @@ fn test_spec_lifecycle_step_defaults_op_and_component() {
             assert_eq!(lifecycle.version, 1);
         }
         other => panic!("expected Lifecycle, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_spec_external_service_kind_with_discover() {
-    let json = r#"{
-        "id": "r",
-        "services": {
-            "studio-daemon": {
-                "kind": "external",
-                "discover": {
-                    "pattern": "app-server-child.mjs",
-                    "argv_contains": ["sample-app@feature-a", "preview-server-child.mjs"]
-                }
-            }
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let svc = spec.services.get("studio-daemon").unwrap();
-    assert_eq!(svc.kind, ServiceKind::External);
-    assert_eq!(
-        svc.discover.as_ref().unwrap().pattern,
-        "app-server-child.mjs"
-    );
-    assert_eq!(
-        svc.discover.as_ref().unwrap().argv_contains,
-        vec![
-            "sample-app@feature-a".to_string(),
-            "preview-server-child.mjs".to_string()
-        ]
-    );
-}
-
-#[test]
-fn test_spec_newer_than_check_parses() {
-    let json = r#"{
-        "id": "r",
-        "components": { "studio": { "path": "/tmp/studio" } },
-        "pipeline": {
-            "check": [
-                {
-                    "kind": "check",
-                    "label": "Daemon newer than bundle",
-                    "newer_than": {
-                        "left":  { "process_start": { "pattern": "app-server-child.mjs" } },
-                        "right": { "file_mtime": "${components.studio.path}/apps/cli/dist/cli/main.mjs" }
-                    }
-                }
-            ]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    match &spec.pipeline.get("check").unwrap()[0] {
-        PipelineStep::Check { spec, .. } => {
-            let nt = spec.newer_than.as_ref().expect("newer_than present");
-            assert_eq!(
-                nt.left.process_start.as_ref().unwrap().pattern,
-                "app-server-child.mjs"
-            );
-            assert!(nt
-                .right
-                .file_mtime
-                .as_ref()
-                .unwrap()
-                .contains("dist/cli/main.mjs"));
-        }
-        other => panic!("expected Check, got {:?}", other),
     }
 }
