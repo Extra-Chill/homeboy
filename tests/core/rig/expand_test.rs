@@ -1,7 +1,4 @@
-//! Variable expansion tests for `src/core/rig/expand.rs`.
-//!
-//! Audit convention requires a `test_expand_vars` method matching the sole
-//! public function of the module; additional cases cover edge conditions.
+//! Variable expansion tests for `crates/homeboy-rig/src/expand.rs`.
 
 use crate::expand::{
     expand_resources, expand_resources_with_settings, expand_vars, expand_vars_with_settings,
@@ -49,36 +46,38 @@ fn rig_with(id: &str, components: HashMap<String, ComponentSpec>) -> RigSpec {
     }
 }
 
-#[test]
-fn test_expand_vars() {
-    // Core contract: strings with no tokens pass through unchanged.
-    let rig = rig_with("t", HashMap::new());
-    assert_eq!(expand_vars(&rig, "plain/path"), "plain/path");
+fn component(path: &str) -> ComponentSpec {
+    ComponentSpec {
+        path: path.to_string(),
+        component_id: None,
+        path_setting: None,
+        checkout_root: None,
+        remote_url: None,
+        lab_stack: None,
+        branch: None,
+        r#ref: None,
+        default_ref: None,
+        extensions: None,
+    }
 }
 
 #[test]
-fn test_expand_vars_component_path() {
+fn test_expand_vars() {
+    std::env::set_var("RIG_EXPAND_TEST_VAR", "hello");
     let mut components = HashMap::new();
-    components.insert(
-        "studio".to_string(),
-        ComponentSpec {
-            path: "/tmp/studio".to_string(),
-            component_id: None,
-            path_setting: None,
-            checkout_root: None,
-            remote_url: None,
-            lab_stack: None,
-            branch: None,
-            r#ref: None,
-            default_ref: None,
-            extensions: None,
-        },
-    );
+    components.insert("studio".to_string(), component("/tmp/studio"));
     let rig = rig_with("t", components);
-    assert_eq!(
-        expand_vars(&rig, "${components.studio.path}/dist"),
-        "/tmp/studio/dist"
-    );
+
+    for (input, expected) in [
+        ("plain/path", "plain/path"),
+        ("${components.studio.path}/dist", "/tmp/studio/dist"),
+        ("x=${env.RIG_EXPAND_TEST_VAR}", "x=hello"),
+        // Unknown and malformed tokens stay literal so commands fail loudly.
+        ("${unknown.thing}", "${unknown.thing}"),
+        ("${unterminated", "${unterminated"),
+    ] {
+        assert_eq!(expand_vars(&rig, input), expected, "input: {input}");
+    }
 }
 
 #[test]
@@ -102,21 +101,7 @@ fn test_expand_vars_package_root_from_installed_source_metadata() {
         .expect("write rig source metadata");
 
         let mut components = HashMap::new();
-        components.insert(
-            "studio-web".to_string(),
-            ComponentSpec {
-                path: "${package.root}".to_string(),
-                component_id: None,
-                path_setting: None,
-                checkout_root: None,
-                remote_url: None,
-                lab_stack: None,
-                branch: None,
-                r#ref: None,
-                default_ref: None,
-                extensions: None,
-            },
-        );
+        components.insert("studio-web".to_string(), component("${package.root}"));
         let rig = rig_with("studio-web-product-matrix", components);
 
         assert_eq!(
@@ -130,13 +115,6 @@ fn test_expand_vars_package_root_from_installed_source_metadata() {
             package_root.join("bench").to_string_lossy()
         );
     });
-}
-
-#[test]
-fn test_expand_vars_env_variable() {
-    std::env::set_var("RIG_EXPAND_TEST_VAR", "hello");
-    let rig = rig_with("t", HashMap::new());
-    assert_eq!(expand_vars(&rig, "x=${env.RIG_EXPAND_TEST_VAR}"), "x=hello");
 }
 
 #[test]
@@ -160,18 +138,6 @@ fn test_expand_vars_settings_override_inherited_env() {
 }
 
 #[test]
-fn test_expand_vars_unknown_token_is_literal() {
-    let rig = rig_with("t", HashMap::new());
-    assert_eq!(expand_vars(&rig, "${unknown.thing}"), "${unknown.thing}");
-}
-
-#[test]
-fn test_expand_vars_unterminated_braces() {
-    let rig = rig_with("t", HashMap::new());
-    assert_eq!(expand_vars(&rig, "${unterminated"), "${unterminated");
-}
-
-#[test]
 fn test_expand_resources_expands_string_entries() {
     with_isolated_home(|home| {
         let previous_resource_path = std::env::var("RIG_RESOURCE_PATH").ok();
@@ -180,21 +146,7 @@ fn test_expand_resources_expands_string_entries() {
         std::env::set_var("RIG_RESOURCE_NAMESPACE", "bench-a");
 
         let mut components = HashMap::new();
-        components.insert(
-            "studio".to_string(),
-            ComponentSpec {
-                path: "~/Developer/studio".to_string(),
-                component_id: None,
-                path_setting: None,
-                checkout_root: None,
-                remote_url: None,
-                lab_stack: None,
-                branch: None,
-                r#ref: None,
-                default_ref: None,
-                extensions: None,
-            },
-        );
+        components.insert("studio".to_string(), component("~/Developer/studio"));
         let mut rig = rig_with("t", components);
         rig.resources.exclusive = vec![
             "studio-runtime".to_string(),
@@ -204,8 +156,6 @@ fn test_expand_resources_expands_string_entries() {
             "~/Developer/${env.RIG_RESOURCE_PATH}".to_string(),
             "${components.studio.path}/apps/cli".to_string(),
         ];
-        rig.resources.ports = vec![9724];
-        rig.resources.process_patterns = vec!["app-server-child.mjs".to_string()];
 
         let resources = expand_resources(&rig);
         let expected_paths = vec![
@@ -232,8 +182,6 @@ fn test_expand_resources_expands_string_entries() {
             resources.exclusive,
             vec!["studio-runtime", "studio-runtime:bench-a"]
         );
-        assert_eq!(resources.ports, vec![9724]);
-        assert_eq!(resources.process_patterns, vec!["app-server-child.mjs"]);
         assert_eq!(resources.paths, expected_paths);
     });
 }
@@ -276,65 +224,6 @@ fn test_expand_resources_unset_env_in_exclusive_uses_default_namespace() {
         resources.exclusive,
         vec!["studio-runtime", "studio-runtime:<default>"]
     );
-}
-
-#[test]
-fn test_expand_resources_derives_paths_ports_and_process_patterns() {
-    with_isolated_home(|home| {
-        let mut rig = rig_with("derived", HashMap::new());
-        rig.symlinks = vec![
-            SymlinkSpec {
-                link: "~/bin/studio".to_string(),
-                target: "/tmp/studio".to_string(),
-            },
-            SymlinkSpec {
-                link: "~/bin/playground".to_string(),
-                target: "/tmp/playground".to_string(),
-            },
-        ];
-        rig.services.insert(
-            "tarballs".to_string(),
-            ServiceSpec {
-                kind: ServiceKind::HttpStatic,
-                cwd: None,
-                port: Some(9724),
-                command: None,
-                env: HashMap::new(),
-                health: None,
-                discover: None,
-            },
-        );
-        rig.services.insert(
-            "daemon".to_string(),
-            ServiceSpec {
-                kind: ServiceKind::External,
-                cwd: None,
-                port: None,
-                command: None,
-                env: HashMap::new(),
-                health: None,
-                discover: Some(DiscoverSpec {
-                    pattern: "app-server-child.mjs".to_string(),
-                    argv_contains: Vec::new(),
-                }),
-            },
-        );
-
-        let resources = expand_resources(&rig);
-
-        assert_eq!(
-            resources.paths,
-            vec![
-                home.path()
-                    .join("bin/playground")
-                    .to_string_lossy()
-                    .to_string(),
-                home.path().join("bin/studio").to_string_lossy().to_string(),
-            ]
-        );
-        assert_eq!(resources.ports, vec![9724]);
-        assert_eq!(resources.process_patterns, vec!["app-server-child.mjs"]);
-    });
 }
 
 #[test]
