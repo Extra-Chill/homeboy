@@ -54,44 +54,38 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// Hook map keys are the manifest wire contract: every event round-trips
+    /// under its fixed label, `Display` matches that label, and an event
+    /// Homeboy never emits is rejected instead of loading as inert config.
     #[test]
-    fn hook_map_keeps_existing_wire_labels() {
-        let hooks = HashMap::from([
-            (HookEvent::PreVersionBump, vec!["pre".to_string()]),
-            (HookEvent::PostVersionBump, vec!["post".to_string()]),
-            (HookEvent::PostRelease, vec!["release".to_string()]),
-            (HookEvent::PostDeploy, vec!["deploy".to_string()]),
-            (
-                HookEvent::PostDeployProject,
-                vec!["deploy-project".to_string()],
-            ),
-        ]);
+    fn hook_map_keys_are_a_closed_set_of_fixed_wire_labels() {
+        let events = [
+            (HookEvent::PreVersionBump, "pre:version:bump"),
+            (HookEvent::PostVersionBump, "post:version:bump"),
+            (HookEvent::PostRelease, "post:release"),
+            (HookEvent::PostDeploy, "post:deploy"),
+            (HookEvent::PostDeployProject, "post:deploy:project"),
+        ];
+        let hooks: HashMap<HookEvent, Vec<String>> = events
+            .iter()
+            .map(|(event, label)| (*event, vec![label.to_string()]))
+            .collect();
         let serialized = serde_json::to_value(&hooks).expect("serialize hooks");
 
-        assert_eq!(
-            serialized,
-            serde_json::json!({
-                "pre:version:bump": ["pre"],
-                "post:version:bump": ["post"],
-                "post:release": ["release"],
-                "post:deploy": ["deploy"],
-                "post:deploy:project": ["deploy-project"]
-            })
-        );
+        for (event, label) in events {
+            assert_eq!(event.to_string(), label);
+            assert_eq!(serialized[label], serde_json::json!([label]));
+        }
         assert_eq!(
             serde_json::from_value::<HashMap<HookEvent, Vec<String>>>(serialized)
                 .expect("deserialize hooks"),
             hooks
         );
-    }
 
-    #[test]
-    fn unknown_hook_event_is_not_silently_inert() {
         let error = serde_json::from_value::<HashMap<HookEvent, Vec<String>>>(
             serde_json::json!({ "post:deply": ["wp cache flush"] }),
         )
         .expect_err("Homeboy cannot emit an unknown hook event");
-
         assert!(
             error.to_string().contains("post:deply"),
             "error should name the inert event: {error}"
