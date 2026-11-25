@@ -200,38 +200,28 @@ fn resource_guard_stop_becomes_the_cook_result_blocker() {
 }
 
 #[test]
-fn a_terminal_failure_cook_projects_retryable_failed_lifecycle() {
-    let report = report("durable_failure", CookDisposition::Terminal);
-    let lifecycle = report.lifecycle();
-    let value = serde_json::to_value(report).expect("serialize");
+fn terminality_and_retryability_follow_the_declared_disposition() {
+    // `disposition` is the authority on terminality: a Cook a durable owner
+    // still carries is neither finished nor retryable, whatever its status.
+    for (disposition, terminal, retryable) in [
+        (CookDisposition::Terminal, true, true),
+        (CookDisposition::InFlight, false, false),
+    ] {
+        let report = report("durable_failure", disposition);
+        let lifecycle = report.lifecycle();
+        assert_eq!(lifecycle.lifecycle_status, ControlPlaneState::Failed);
+        assert_eq!(lifecycle.terminal, terminal, "{disposition:?}");
+        assert_eq!(lifecycle.retryable, retryable, "{disposition:?}");
+    }
 
-    assert_eq!(value["status"], "durable_failure");
-    assert_eq!(lifecycle.lifecycle_status, ControlPlaneState::Failed);
-    assert!(lifecycle.terminal);
-    assert!(lifecycle.retryable);
-    // Unchanged fields must still be present and still be skipped when
-    // absent, exactly as the derived implementation did.
+    let value = serde_json::to_value(report("durable_failure", CookDisposition::Terminal))
+        .expect("serialize");
     assert_eq!(value["schema"], "homeboy/agent-task-cook/v1");
+    assert_eq!(value["status"], "durable_failure");
     assert_eq!(value["disposition"], "terminal");
     assert!(value.get("latest_run_id").is_none());
     assert!(value.get("history_run_ids").is_none());
     assert!(value.get("failure_context").is_none());
-}
-
-/// `disposition` is the authority on terminality. A Cook a durable owner is
-/// still carrying must not be advertised as finished, or as retryable,
-/// however its status string reads.
-#[test]
-fn terminality_follows_the_declared_disposition_not_the_status_string() {
-    let report = report("durable_failure", CookDisposition::InFlight);
-    let lifecycle = report.lifecycle();
-
-    assert_eq!(lifecycle.lifecycle_status, ControlPlaneState::Failed);
-    assert!(!lifecycle.terminal);
-    assert_eq!(
-        lifecycle.retryable, false,
-        "a Cook a durable owner still carries must never be treated as retryable"
-    );
 }
 
 #[test]
@@ -255,43 +245,35 @@ fn candidate_without_canonical_finalization_evidence_is_not_recoverable() {
 }
 
 #[test]
-fn finalized_pr_requires_a_durable_pr_identity() {
-    let mut candidate = report("review_ready", CookDisposition::Terminal);
-    candidate.selected_candidate = Some(serde_json::json!({
-        "run_id": "cook-projection-attempt-1",
-        "incomplete": false,
-        "selected_task_id": "task-1",
-        "selected_candidate_sha": "patch-1",
-    }));
-    candidate.finalization = Some(serde_json::json!({
-        "status": "review_ready",
-        "pr_number": 12162,
-    }));
-
-    let completion = candidate.completion().expect("candidate completion");
-    assert_eq!(completion.state, "pr_finalized");
-    assert!(completion.pr_finalized);
-    assert!(completion.next_action.is_none());
-}
-
-#[test]
-fn finalization_status_without_pr_identity_is_not_cook_completion() {
-    let mut candidate = report("review_ready", CookDisposition::Terminal);
-    candidate.selected_candidate = Some(serde_json::json!({
-        "run_id": "cook-projection-attempt-1",
-        "incomplete": false,
-        "selected_task_id": "task-1",
-        "selected_candidate_sha": "patch-1",
-    }));
+fn only_a_finalization_receipt_with_a_pr_identity_finalizes_the_cook() {
     // Legacy receipts can establish that finalization was attempted, but
     // cannot establish publication without the PR identity.
-    candidate.finalization = Some(serde_json::json!({
-        "status": "review_ready",
-    }));
+    for (finalization, state, pr_finalized) in [
+        (
+            serde_json::json!({"status": "review_ready", "pr_number": 12162}),
+            "pr_finalized",
+            true,
+        ),
+        (
+            serde_json::json!({"status": "review_ready"}),
+            "candidate_produced",
+            false,
+        ),
+    ] {
+        let mut candidate = report("review_ready", CookDisposition::Terminal);
+        candidate.selected_candidate = Some(serde_json::json!({
+            "run_id": "cook-projection-attempt-1",
+            "incomplete": false,
+            "selected_task_id": "task-1",
+            "selected_candidate_sha": "patch-1",
+        }));
+        candidate.finalization = Some(finalization);
 
-    let completion = candidate.completion().expect("candidate completion");
-    assert_eq!(completion.state, "candidate_produced");
-    assert!(!completion.pr_finalized);
+        let completion = candidate.completion().expect("candidate completion");
+        assert_eq!(completion.state, state);
+        assert_eq!(completion.pr_finalized, pr_finalized);
+        assert!(completion.next_action.is_none());
+    }
 }
 
 #[test]
@@ -309,45 +291,7 @@ fn empty_unknown_and_conflicting_selections_never_produce_candidates() {
 }
 
 #[test]
-fn canonical_candidate_without_green_finalization_evidence_has_no_recovery_action() {
-    let candidate = serde_json::json!({
-        "run_id": "failed-provider-run",
-        "incomplete": false,
-        "selected_task_id": "task",
-        "selected_candidate_sha": "patch",
-    });
-
-    let completion = cook_completion(Some(&candidate), true, None, None)
-        .expect("canonical candidate is reported without treating it as publishable");
-
-    assert_eq!(completion.state, "candidate_produced");
-    assert!(completion.next_action.is_none());
-}
-
-#[test]
-fn canonical_selection_rejects_a_newer_attempt_receipt() {
-    let candidate = serde_json::json!({
-        "cook_id": "cook",
-        "run_id": "older-canonical-run",
-        "incomplete": false,
-        "selected_task_id": "task",
-        "selected_candidate_sha": "patch",
-    });
-    let newer_receipt = serde_json::json!({"status": "review_ready", "pr_number": 12291});
-
-    assert!(
-        canonical_candidate_finalization(
-            Some(&candidate),
-            Some(&newer_receipt),
-            Some("newer-non-substantive-run"),
-        )
-        .is_none(),
-        "a receipt on an exact newer non-substantive attempt cannot finalize the older candidate"
-    );
-}
-
-#[test]
-fn canonical_selection_uses_its_own_inspected_receipt() {
+fn canonical_selection_only_uses_the_receipt_of_its_own_attempt() {
     let candidate = serde_json::json!({
         "cook_id": "cook",
         "run_id": "canonical-run",
@@ -359,22 +303,21 @@ fn canonical_selection_uses_its_own_inspected_receipt() {
 
     assert_eq!(
         canonical_candidate_finalization(Some(&candidate), Some(&receipt), Some("canonical-run")),
-        Some(receipt)
+        Some(receipt.clone())
+    );
+    assert!(
+        canonical_candidate_finalization(
+            Some(&candidate),
+            Some(&receipt),
+            Some("newer-non-substantive-run"),
+        )
+        .is_none(),
+        "a receipt on an exact newer non-substantive attempt cannot finalize the older candidate"
     );
 }
 
 #[test]
-fn finalized_canonical_candidate_does_not_reopen_finalization_recovery() {
-    let receipt = serde_json::json!({"status": "review_ready", "pr_number": 12291});
-    let completion = cook_completion(None, true, Some(&receipt), None)
-        .expect("receipt produces terminal completion");
-
-    assert_eq!(completion.state, "pr_finalized");
-    assert!(completion.next_action.is_none());
-}
-
-#[test]
-fn a_pr_receipt_remains_completed_without_reloading_candidate_evidence() {
+fn a_pr_receipt_completes_the_cook_without_reopening_finalization_recovery() {
     let completion = cook_completion(
         None,
         true,

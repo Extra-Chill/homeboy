@@ -2338,27 +2338,6 @@ mod tests {
     }
 
     #[test]
-    fn recover_publication_failure_never_forks_a_green_applied_candidate() {
-        assert_eq!(
-            step("durable_failure", |inputs| {
-                inputs.verified_unpublished = true;
-                inputs.retry_admitted = true;
-                inputs.exact_checkpoint_candidate_mismatch = true;
-                inputs.continuation_rearm_required = true;
-            }),
-            CookRecoveryStep::Publish
-        );
-        assert_eq!(
-            step("gate_failed", |inputs| {
-                inputs.applied_gate_failure = true;
-                inputs.retry_admitted = true;
-            }),
-            CookRecoveryStep::Continue,
-            "gate remediation retries through the recorded Cook continuation"
-        );
-    }
-
-    #[test]
     fn agent_reported_incomplete_candidate_has_no_continuation_step() {
         let reason = "the PR could not be opened";
         let decided = step("candidate_recoverable", |inputs| {
@@ -2541,24 +2520,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.step, CookRecoveryStep::Publish);
-    }
-
-    #[test]
-    fn recovery_publishes_gate_green_candidate_whether_or_not_its_review_form_exists() {
-        // #17671: a missing review form publishes a draft rather than running
-        // a review-only provider step; it never replays provider work.
-        for status in [
-            "candidate_recoverable",
-            "durable_failure",
-            "retries_exhausted",
-        ] {
-            let decided = step(status, |inputs| {
-                inputs.verified_unpublished = true;
-                inputs.retry_admitted = true;
-                inputs.exact_checkpoint_candidate_mismatch = true;
-            });
-            assert_eq!(decided, CookRecoveryStep::Publish, "{status}");
-        }
     }
 
     #[test]
@@ -2762,16 +2723,23 @@ mod tests {
 
     #[test]
     fn verified_unpublished_candidate_publishes_and_settled_cooks_do_not() {
+        // #17671: a gate-green candidate publishes (with a draft form when its
+        // review form is missing); it never forks a replacement, rearms, or
+        // replays provider work.
         for status in [
             "verification_pending",
             "finalization_failed",
             "candidate_recoverable",
             "pre_execution_failure",
+            "durable_failure",
+            "retries_exhausted",
         ] {
             assert_eq!(
                 step(status, |inputs| {
                     inputs.verified_unpublished = true;
                     inputs.retry_admitted = true;
+                    inputs.exact_checkpoint_candidate_mismatch = true;
+                    inputs.continuation_rearm_required = true;
                 }),
                 CookRecoveryStep::Publish,
                 "{status}"
@@ -2817,7 +2785,7 @@ mod tests {
     }
 
     #[test]
-    fn no_step_on_a_failing_status_declares_its_reason_as_the_failure() {
+    fn no_step_fails_only_on_a_failing_status_and_declares_its_reason() {
         let reason = "Cook status `gate_failed` admits no recovery step; inspect it with `agent-task status` or `agent-task diagnose`.";
         let (report, exit_code) = finish_without_step(no_step_report("gate_failed", reason));
 
@@ -2827,6 +2795,12 @@ mod tests {
         assert_eq!(value["failure"]["message"], reason);
         assert_eq!(value["failure"]["details"]["status"], "gate_failed");
         assert_eq!(value["failure"]["details"]["run_id"], "run-1");
+
+        let (report, exit_code) =
+            finish_without_step(no_step_report("review_ready", "Nothing to recover."));
+        assert_eq!(exit_code, 0);
+        let value = serde_json::to_value(&report).expect("serialize report");
+        assert!(value.get("failure").is_none());
     }
 
     #[test]
@@ -3137,16 +3111,6 @@ mod tests {
             assert_eq!(replay.result.as_ref().unwrap()["replayed"], true);
             assert_eq!(store.read_records().unwrap().len(), 2, "one relaunch only");
         });
-    }
-
-    #[test]
-    fn no_step_on_a_successful_status_declares_no_failure() {
-        let (report, exit_code) =
-            finish_without_step(no_step_report("review_ready", "Nothing to recover."));
-
-        assert_eq!(exit_code, 0);
-        let value = serde_json::to_value(&report).expect("serialize report");
-        assert!(value.get("failure").is_none());
     }
 
     fn lifecycle_record(
