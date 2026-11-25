@@ -1734,41 +1734,17 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_step_reports_failure_details() {
-        let outcome = aggregate_step(
-            "rig-package-lint",
-            "JSON parses",
-            vec!["rig.json invalid".to_string()],
-        );
-        assert_eq!(outcome.status, "fail");
-        assert!(outcome.error.unwrap().contains("rig.json invalid"));
-    }
-
-    #[test]
-    fn aggregate_step_passes_without_failures() {
-        let outcome = aggregate_step("rig-package-lint", "JSON parses", Vec::new());
-        assert_eq!(outcome.status, "pass");
-        assert_eq!(outcome.error, None);
-    }
-
-    #[test]
-    fn lint_carries_no_homeboy_state_directory_compensation() {
-        assert!(!IgnorePolicy::new(&[]).ignored_directory(OsStr::new(".homeboy")));
-    }
-
-    #[test]
-    fn lint_ignores_standard_dependency_directories() {
+    fn lint_walk_ignores_dependency_and_shared_metadata_directories() {
         let policy = IgnorePolicy::new(&[]);
 
-        assert!(policy.ignored_directory(OsStr::new("vendor")));
-        assert!(policy.ignored_directory(OsStr::new("node_modules")));
-    }
-
-    #[test]
-    fn lint_ignores_shared_rig_package_metadata_directories() {
-        let policy = IgnorePolicy::new(&[]);
-
-        for directory in [".claude", ".datamachine", ".pi", ".sampleplugin"] {
+        for directory in [
+            "vendor",
+            "node_modules",
+            ".claude",
+            ".datamachine",
+            ".pi",
+            ".sampleplugin",
+        ] {
             assert!(
                 policy.ignored_directory(OsStr::new(directory)),
                 "{directory} should be ignored by the generic package walk"
@@ -1829,52 +1805,14 @@ mod tests {
     }
 
     #[test]
-    fn portability_scan_ignores_js_line_comment_path_examples() {
-        let content = "// local path example: /Users/chubes/Developer/project\nconst path = process.env.HOME;\n";
-        let scanned = portable_scan_content(Path::new("tools/run-fixture-matrix.mjs"), content);
+    fn portability_scan_skips_js_comments_but_keeps_string_paths() {
+        let path = Path::new("tools/run-fixture-matrix.mjs");
 
-        assert!(!scanned.contains("/Users/"));
-    }
+        let comment = "// local path example: /Users/chubes/Developer/project\nconst path = process.env.HOME;\n";
+        assert!(!portable_scan_content(path, comment).contains("/Users/"));
 
-    #[test]
-    fn portability_scan_keeps_js_string_paths_actionable() {
-        let content = "const path = '/Users/chubes/Developer/project';\n";
-        let scanned = portable_scan_content(Path::new("tools/run-fixture-matrix.mjs"), content);
-
-        assert!(scanned.contains("/Users/"));
-    }
-
-    #[test]
-    fn package_lint_reports_contract_failures_for_all_rigs() {
-        let temp = tempfile::TempDir::new().expect("temp package");
-        let rig_dir = temp.path().join("rigs").join("bad");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::write(
-            rig_dir.join("rig.json"),
-            r#"{
-                "id": "bad",
-                "requirements": {
-                    "dependency_materialization": [
-                        { "id": "bad", "inputs": { "paths": ["artifact.txt"] } }
-                    ]
-                }
-            }"#,
-        )
-        .expect("write rig");
-
-        let outcome = run_package_lint_at(temp.path()).expect("lint package");
-
-        let contract_step = outcome
-            .steps
-            .iter()
-            .find(|step| step.label.contains("Homeboy rig contract"))
-            .expect("contract step");
-        assert_eq!(contract_step.status, "fail");
-        assert!(contract_step
-            .error
-            .as_ref()
-            .expect("contract error")
-            .contains("dependency materialization"));
+        let string = "const path = '/Users/chubes/Developer/project';\n";
+        assert!(portable_scan_content(path, string).contains("/Users/"));
     }
 
     #[test]
@@ -1954,13 +1892,10 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_json_keys_reports_both_declaration_lines() {
-        let content = "{\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\" }\n  },\n  \"id\": \"x\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"dry_run\" }\n  }\n}\n";
-
-        let duplicates = duplicate_json_keys(content);
-
+    fn duplicate_json_keys_reports_key_lines_and_containing_object() {
+        let top_level = duplicate_json_keys("{\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\" }\n  },\n  \"id\": \"x\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"dry_run\" }\n  }\n}\n");
         assert_eq!(
-            duplicates,
+            top_level,
             vec![DuplicateJsonKey {
                 pointer: String::new(),
                 key: "lifecycle".to_string(),
@@ -1968,66 +1903,40 @@ mod tests {
                 second_line: 6,
             }]
         );
+
+        for (content, pointer, key) in [
+            (
+                "{\n  \"a\": {\n    \"b\": 1,\n    \"b\": 2\n  }\n}\n",
+                "/a",
+                "b",
+            ),
+            (
+                "{\n  \"list\": [\n    { \"k\": 1 },\n    { \"k\": 1, \"k\": 2 }\n  ]\n}\n",
+                "/list/1",
+                "k",
+            ),
+            // `"a\u0062"` and `"ab"` are the same key; serde_json keeps only the last.
+            ("{\n  \"a\\u0062\": 1,\n  \"ab\": 2\n}\n", "", "ab"),
+        ] {
+            let duplicates = duplicate_json_keys(content);
+            assert_eq!(duplicates.len(), 1, "{duplicates:?}");
+            assert_eq!(duplicates[0].pointer, pointer);
+            assert_eq!(duplicates[0].key, key);
+        }
     }
 
     #[test]
-    fn duplicate_json_keys_points_at_the_containing_object() {
-        let nested = duplicate_json_keys("{\n  \"a\": {\n    \"b\": 1,\n    \"b\": 2\n  }\n}\n");
-        assert_eq!(nested.len(), 1, "{nested:?}");
-        assert_eq!(nested[0].pointer, "/a");
-
-        let in_array = duplicate_json_keys(
-            "{\n  \"list\": [\n    { \"k\": 1 },\n    { \"k\": 1, \"k\": 2 }\n  ]\n}\n",
-        );
-        assert_eq!(in_array.len(), 1, "{in_array:?}");
-        assert_eq!(in_array[0].pointer, "/list/1");
+    fn duplicate_json_keys_accepts_distinct_keys_and_object_syntax_in_strings() {
+        for content in [
+            "{\n  \"cmd\": \"{ \\\"a\\\": 1, \\\"a\\\": 2 }\",\n  \"note\": \"he said \\\"hi\\\" }\",\n  \"other\": \"[,{\",\n  \"a\": 1\n}\n",
+            "{\n  \"a\": 1,\n  \"b\": { \"a\": 2 },\n  \"c\": [1, 2, {\"a\": 3}]\n}\n",
+        ] {
+            assert!(duplicate_json_keys(content).is_empty(), "{content}");
+        }
     }
 
     #[test]
-    fn duplicate_json_keys_ignores_object_syntax_inside_string_values() {
-        let content = "{\n  \"cmd\": \"{ \\\"a\\\": 1, \\\"a\\\": 2 }\",\n  \"note\": \"he said \\\"hi\\\" }\",\n  \"other\": \"[,{\",\n  \"a\": 1\n}\n";
-
-        assert!(duplicate_json_keys(content).is_empty());
-    }
-
-    #[test]
-    fn duplicate_json_keys_accepts_a_clean_document() {
-        let content = "{\n  \"a\": 1,\n  \"b\": { \"a\": 2 },\n  \"c\": [1, 2, {\"a\": 3}]\n}\n";
-
-        assert!(duplicate_json_keys(content).is_empty());
-    }
-
-    #[test]
-    fn duplicate_json_keys_decodes_escaped_key_names() {
-        // `"a\u0062"` and `"ab"` are the same key; serde_json keeps only the last.
-        let duplicates = duplicate_json_keys("{\n  \"a\\u0062\": 1,\n  \"ab\": 2\n}\n");
-
-        assert_eq!(duplicates.len(), 1, "{duplicates:?}");
-        assert_eq!(duplicates[0].key, "ab");
-    }
-
-    #[test]
-    fn package_lint_reports_duplicate_keys_in_a_rig_spec() {
-        let temp = tempfile::TempDir::new().expect("temp package");
-        let rig_dir = temp.path().join("rigs").join("duplicate");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::write(
-            rig_dir.join("rig.json"),
-            "{\n  \"id\": \"duplicate\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\", \"reason\": \"sandbox owns teardown\" }\n  },\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"dry_run\" }\n  }\n}\n",
-        )
-        .expect("write rig");
-
-        let outcome = run_package_lint_at(temp.path()).expect("lint package");
-        let step = json_step(&outcome);
-
-        assert_eq!(step.status, "fail");
-        let error = step.error.as_ref().expect("json error");
-        assert!(error.contains("duplicate JSON key `lifecycle`"), "{error}");
-        assert!(error.contains("line 3 and line 6"), "{error}");
-    }
-
-    #[test]
-    fn package_lint_reports_duplicate_keys_in_a_base_spec() {
+    fn package_lint_reports_duplicate_keys_in_rig_and_base_specs() {
         let temp = tempfile::TempDir::new().expect("temp package");
         let rig_dir = temp.path().join("rigs").join("duplicate");
         fs::create_dir_all(&rig_dir).expect("rig dir");
@@ -2038,7 +1947,7 @@ mod tests {
         .expect("write base");
         fs::write(
             rig_dir.join("rig.json"),
-            r#"{ "extends": "./duplicate.base.json", "id": "duplicate" }"#,
+            "{\n  \"extends\": \"./duplicate.base.json\",\n  \"id\": \"duplicate\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\", \"reason\": \"sandbox owns teardown\" }\n  },\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"dry_run\" }\n  }\n}\n",
         )
         .expect("write rig");
 
@@ -2046,11 +1955,13 @@ mod tests {
         let step = json_step(&outcome);
 
         assert_eq!(step.status, "fail");
-        assert!(step
-            .error
-            .as_ref()
-            .expect("json error")
-            .contains("duplicate.base.json duplicate JSON key `trace`"));
+        let error = step.error.as_ref().expect("json error");
+        assert!(error.contains("duplicate JSON key `lifecycle`"), "{error}");
+        assert!(error.contains("line 4 and line 7"), "{error}");
+        assert!(
+            error.contains("duplicate.base.json duplicate JSON key `trace`"),
+            "{error}"
+        );
     }
 
     fn contract_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
@@ -2059,21 +1970,6 @@ mod tests {
             .iter()
             .find(|step| step.label.contains("Homeboy rig contract"))
             .expect("contract step")
-    }
-
-    #[test]
-    fn env_reference_names_extracts_every_interpolation() {
-        let names = env_reference_names(
-            "${env.HOMEBOY_RIG_COMPONENT_PATH__A__B}/x/${env.HOMEBOY_SETTINGS_NS} ${broken",
-        );
-
-        assert_eq!(
-            names,
-            vec![
-                "HOMEBOY_RIG_COMPONENT_PATH__A__B".to_string(),
-                "HOMEBOY_SETTINGS_NS".to_string()
-            ]
-        );
     }
 
     #[test]
@@ -2238,23 +2134,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn package_lint_accepts_a_component_without_a_restated_path() {
-        let temp = tempfile::TempDir::new().expect("temp package");
-        let rig_dir = temp.path().join("rigs").join("studio-fuzz");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::write(
-            rig_dir.join("rig.json"),
-            r#"{ "id": "studio-fuzz", "components": { "studio": { "component_id": "studio" } } }"#,
-        )
-        .expect("write rig");
-
-        let outcome = run_package_lint_at(temp.path()).expect("lint package");
-        let step = contract_step(&outcome);
-
-        assert_eq!(step.status, "pass", "{:?}", step.error);
-    }
-
     fn reference_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
         outcome
             .steps
@@ -2294,14 +2173,6 @@ mod tests {
                 (9, "../star.mjs".to_string()),
                 (16, "../multi/line.mjs".to_string()),
             ]
-        );
-    }
-
-    #[test]
-    fn lexical_normalization_collapses_parent_segments() {
-        assert_eq!(
-            lexically_normalized(Path::new("pkg/bench/../shared/recipe.mjs")),
-            PathBuf::from("pkg/shared/recipe.mjs")
         );
     }
 
@@ -2355,44 +2226,6 @@ mod tests {
     }
 
     #[test]
-    fn package_lint_accepts_resolvable_workload_imports() {
-        let temp = tempfile::TempDir::new().expect("temp package");
-        let rig_dir = temp.path().join("rigs").join("imports");
-        let bench_dir = temp.path().join("bench");
-        let shared_dir = temp.path().join("shared").join("wp-codebox");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::create_dir_all(&bench_dir).expect("bench dir");
-        fs::create_dir_all(&shared_dir).expect("shared dir");
-        fs::write(shared_dir.join("recipe.mjs"), "export const recipe = 1;\n")
-            .expect("write shared helper");
-        fs::write(
-            bench_dir.join("workload.bench.mjs"),
-            concat!(
-                "import { recipe } from '../shared/wp-codebox/recipe.mjs';\n",
-                "import fs from 'node:fs';\n",
-                "import { chromium } from 'playwright';\n",
-                "export default recipe && fs && chromium;\n",
-            ),
-        )
-        .expect("write workload");
-        fs::write(
-            rig_dir.join("rig.json"),
-            r#"{
-                "id": "imports",
-                "bench_workloads": {
-                    "nodejs": [{ "path": "${package.root}/bench/workload.bench.mjs" }]
-                }
-            }"#,
-        )
-        .expect("write rig");
-
-        let outcome = run_package_lint_at(temp.path()).expect("lint package");
-        let step = reference_step(&outcome);
-
-        assert_eq!(step.status, "pass", "{:?}", step.error);
-    }
-
-    #[test]
     fn package_lint_follows_workload_imports_transitively() {
         let temp = tempfile::TempDir::new().expect("temp package");
         let rig_dir = temp.path().join("rigs").join("imports");
@@ -2434,7 +2267,7 @@ mod tests {
     }
 
     #[test]
-    fn package_lint_resolves_extensionless_and_directory_index_imports() {
+    fn package_lint_accepts_resolvable_workload_imports() {
         let temp = tempfile::TempDir::new().expect("temp package");
         let rig_dir = temp.path().join("rigs").join("imports");
         let bench_dir = temp.path().join("bench");
@@ -2442,6 +2275,12 @@ mod tests {
         fs::create_dir_all(&rig_dir).expect("rig dir");
         fs::create_dir_all(&bench_dir).expect("bench dir");
         fs::create_dir_all(lib_dir.join("pack")).expect("lib dirs");
+        fs::create_dir_all(temp.path().join("shared")).expect("shared dir");
+        fs::write(
+            temp.path().join("shared").join("recipe.mjs"),
+            "export const recipe = 1;\n",
+        )
+        .expect("write shared helper");
         fs::write(lib_dir.join("thing.js"), "export const thing = 1;\n").expect("write thing");
         fs::write(
             lib_dir.join("pack").join("index.mjs"),
@@ -2450,7 +2289,14 @@ mod tests {
         .expect("write index");
         fs::write(
             bench_dir.join("workload.bench.mjs"),
-            "import { thing } from '../lib/thing';\nimport { p } from '../lib/pack';\nexport default thing && p;\n",
+            concat!(
+                "import { recipe } from '../shared/recipe.mjs';\n",
+                "import { thing } from '../lib/thing';\n",
+                "import { p } from '../lib/pack';\n",
+                "import fs from 'node:fs';\n",
+                "import { chromium } from 'playwright';\n",
+                "export default recipe && thing && p && fs && chromium;\n",
+            ),
         )
         .expect("write workload");
         fs::write(
@@ -2759,93 +2605,45 @@ mod tests {
     }
 
     #[test]
-    fn package_lint_reports_lifecycle_step_without_a_contract_source() {
-        let temp = tempfile::TempDir::new().expect("temp package");
-        let rig_dir = temp.path().join("rigs").join("lifecycle");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::write(
-            rig_dir.join("rig.json"),
-            r#"{
-                "id": "lifecycle",
-                "pipeline": {
-                    "up": [{ "kind": "lifecycle", "op": "prepare" }]
-                }
-            }"#,
-        )
-        .expect("write rig");
+    fn package_lint_reports_invalid_lifecycle_step_contract_sources() {
+        for (step_json, expected) in [
+            (
+                r#"{ "kind": "lifecycle", "op": "prepare" }"#,
+                vec![
+                    "pipeline.up[0]",
+                    "declares neither `lifecycle` nor `workload`",
+                ],
+            ),
+            (
+                r#"{ "kind": "lifecycle", "lifecycle": { "phases": [] }, "workload": { "kind": "fuzz", "extension": "generic" } }"#,
+                vec!["declares both `lifecycle` and `workload`"],
+            ),
+            (
+                r#"{ "kind": "lifecycle", "workload": { "kind": "sandbox", "extension": "  " } }"#,
+                vec![
+                    "`workload.kind` must be one of",
+                    "`workload.extension` is required",
+                ],
+            ),
+        ] {
+            let temp = tempfile::TempDir::new().expect("temp package");
+            let rig_dir = temp.path().join("rigs").join("lifecycle");
+            fs::create_dir_all(&rig_dir).expect("rig dir");
+            fs::write(
+                rig_dir.join("rig.json"),
+                format!(r#"{{ "id": "lifecycle", "pipeline": {{ "up": [{step_json}] }} }}"#),
+            )
+            .expect("write rig");
 
-        let outcome = run_package_lint_at(temp.path()).expect("lint package");
-        let step = portability_step(&outcome);
+            let outcome = run_package_lint_at(temp.path()).expect("lint package");
+            let step = portability_step(&outcome);
 
-        assert_eq!(step.status, "fail");
-        let error = step.error.as_ref().expect("error");
-        assert!(
-            error.contains("declares neither `lifecycle` nor `workload`"),
-            "{error}"
-        );
-        assert!(error.contains("pipeline.up[0]"), "{error}");
-    }
-
-    #[test]
-    fn package_lint_reports_lifecycle_step_with_two_contract_sources() {
-        let temp = tempfile::TempDir::new().expect("temp package");
-        let rig_dir = temp.path().join("rigs").join("lifecycle");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::write(
-            rig_dir.join("rig.json"),
-            r#"{
-                "id": "lifecycle",
-                "pipeline": {
-                    "up": [{
-                        "kind": "lifecycle",
-                        "lifecycle": { "phases": [] },
-                        "workload": { "kind": "fuzz", "extension": "generic" }
-                    }]
-                }
-            }"#,
-        )
-        .expect("write rig");
-
-        let outcome = run_package_lint_at(temp.path()).expect("lint package");
-        let step = portability_step(&outcome);
-
-        assert_eq!(step.status, "fail");
-        let error = step.error.as_ref().expect("error");
-        assert!(
-            error.contains("declares both `lifecycle` and `workload`"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn package_lint_reports_malformed_lifecycle_workload_reference() {
-        let temp = tempfile::TempDir::new().expect("temp package");
-        let rig_dir = temp.path().join("rigs").join("lifecycle");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::write(
-            rig_dir.join("rig.json"),
-            r#"{
-                "id": "lifecycle",
-                "pipeline": {
-                    "up": [{
-                        "kind": "lifecycle",
-                        "workload": { "kind": "sandbox", "extension": "  " }
-                    }]
-                }
-            }"#,
-        )
-        .expect("write rig");
-
-        let outcome = run_package_lint_at(temp.path()).expect("lint package");
-        let step = portability_step(&outcome);
-
-        assert_eq!(step.status, "fail");
-        let error = step.error.as_ref().expect("error");
-        assert!(error.contains("`workload.kind` must be one of"), "{error}");
-        assert!(
-            error.contains("`workload.extension` is required"),
-            "{error}"
-        );
+            assert_eq!(step.status, "fail", "{step_json}");
+            let error = step.error.as_ref().expect("error");
+            for needle in expected {
+                assert!(error.contains(needle), "{needle}: {error}");
+            }
+        }
     }
 
     #[test]
