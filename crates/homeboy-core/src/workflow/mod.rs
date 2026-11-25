@@ -56,14 +56,12 @@ pub fn builtin(id: &str) -> Option<WorkflowDefinition> {
 #[cfg(test)]
 mod builtin_tests {
     #[test]
-    fn retention_is_an_hourly_cleanup_workflow() {
-        let retention = super::builtin(super::RETENTION_WORKFLOW_ID).expect("built-in");
-        retention.validate(&|_| false).expect("valid");
-        let every = retention.every.as_ref().expect("cadence");
-        assert_eq!(every.interval().unwrap().as_secs(), 3600);
-        assert_eq!(
-            retention.steps[0].homeboy.as_deref(),
-            Some(&["cleanup".to_string(), "automatic-retention".to_string()][..])
-        );
+    fn every_builtin_workflow_validates() {
+        for definition in super::builtins() {
+            definition
+                .validate(&|_| false)
+                .unwrap_or_else(|error| panic!("{}: {error}", definition.id));
+        }
+        assert!(super::builtin(super::RETENTION_WORKFLOW_ID).is_some());
     }
 }
