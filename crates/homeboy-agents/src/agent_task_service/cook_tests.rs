@@ -10135,6 +10135,84 @@ fn persist_deferred_fixture(run_id: &str) {
         .unwrap();
 }
 
+/// #19108: while the promoted candidate's gates still run under a live,
+/// heartbeating owner, recovery plans no step and `recover --regate` refuses
+/// with a pointer to the live gate instead of starting a second gate run.
+/// Once the gate phase ends, the candidate is recoverable again.
+#[test]
+fn live_gate_owner_refuses_regate_and_plans_no_recovery() {
+    with_corrected_gate_failure(false, |options, _| {
+        let run = &options.identity.initial_run_id;
+        let cook = &options.identity.cook_id;
+        let store = test_lifecycle_store();
+        let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        promotion.status = AgentTaskPromotionStatus::VerificationPending;
+        store
+            .record_promotion(run, serde_json::to_value(promotion).unwrap())
+            .unwrap();
+        agent_task_lifecycle::record_promotion_progress_in_store(
+            &store,
+            run,
+            "gate",
+            Some("cargo check"),
+            Some("gate process started"),
+            None,
+        )
+        .unwrap();
+        let record = store.read_record(run).unwrap();
+        assert!(agent_task_lifecycle::live_gate_owner(&record).is_some());
+
+        let plan = crate::agent_task_service::plan_cook_recovery(run).unwrap();
+        match &plan.step {
+            crate::agent_task_service::CookRecoveryStep::None { reason } => {
+                assert!(
+                    reason.starts_with("gating: gate `cargo check` running"),
+                    "{reason}"
+                );
+                assert!(reason.contains("--watch"), "{reason}");
+            }
+            step => panic!("a live gate plans no recovery, got {step:?}"),
+        }
+        let regate = || {
+            crate::agent_task_service::recover_cook(
+                cook,
+                crate::agent_task_service::CookRecoveryRequest {
+                    regate: true,
+                    ..Default::default()
+                },
+                &ReplacementOnlyRecoveryPerformer,
+            )
+        };
+        let refused = regate().expect_err("regate over a live gate");
+        assert!(
+            refused.message.contains("gates are still running"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.details["live_gate"]["run_id"], run.as_str());
+        assert!(refused.details["live_gate"]["status_command"]
+            .as_str()
+            .is_some_and(|command| command.ends_with("--watch")));
+
+        // The gate phase ends: nothing is gating any more.
+        agent_task_lifecycle::record_promotion_progress_in_store(
+            &store, run, "terminal", None, None, None,
+        )
+        .unwrap();
+        let record = store.read_record(run).unwrap();
+        assert!(agent_task_lifecycle::live_gate_owner(&record).is_none());
+        let plan = crate::agent_task_service::plan_cook_recovery(run).unwrap();
+        assert!(
+            !matches!(
+                &plan.step,
+                crate::agent_task_service::CookRecoveryStep::None { reason }
+                    if reason.starts_with("gating")
+            ),
+            "{plan:?}"
+        );
+    });
+}
+
 #[test]
 fn recover_selects_regate_only_for_unjudged_complete_candidates() {
     use crate::agent_task_gate::AgentTaskGateStatus as Gate;

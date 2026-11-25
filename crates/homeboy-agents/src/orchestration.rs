@@ -4222,16 +4222,37 @@ pub const LIVE_GATE_VERIFYING_PHASE: &str = "verifying";
 /// as running in the `verifying` phase, with no recovery step. The durable
 /// run state is unchanged; this is a projection only.
 fn project_live_gate_verification(resource: &mut ControlPlaneRun, record: &AgentTaskRunRecord) {
-    if record.metadata.get("cook_id").is_some() {
+    if !awaits_gate_verification(record) {
         return;
     }
-    if !awaits_gate_verification(record) {
+    // A live, heartbeating gate owner is verifying the candidate whoever
+    // drives the Cook (#19108).
+    if let Some(gate) = crate::agent_task_lifecycle::live_gate_owner(record) {
+        project_live_gate_owner(resource, record, &gate);
+        return;
+    }
+    if record.metadata.get("cook_id").is_some() {
         return;
     }
     let Ok(store) = crate::agent_task_service::CookRecipeStore::from_current_data_root() else {
         return;
     };
     project_live_gate_verification_in(resource, record, &store);
+}
+
+fn project_live_gate_owner(
+    resource: &mut ControlPlaneRun,
+    record: &AgentTaskRunRecord,
+    gate: &crate::agent_task_lifecycle::LiveGateOwner,
+) {
+    resource.state = ControlPlaneState::Running;
+    resource.phase = Some(LIVE_GATE_VERIFYING_PHASE.to_string());
+    resource.blocker = None;
+    resource.finished_at = None;
+    if resource.progress.is_none() {
+        resource.progress = promotion_progress_line(record, Utc::now())
+            .or_else(|| Some(redacted_bounded(&gate.describe(), MESSAGE_BOUND)));
+    }
 }
 
 fn awaits_gate_verification(record: &AgentTaskRunRecord) -> bool {
@@ -5409,6 +5430,11 @@ fn live_promotion_progress(record: &AgentTaskRunRecord, now: DateTime<Utc>) -> O
     if !record.owner_process_is_running() {
         return None;
     }
+    promotion_progress_line(record, now)
+}
+
+/// The recorded promotion progress as one line, without checking its owner.
+fn promotion_progress_line(record: &AgentTaskRunRecord, now: DateTime<Utc>) -> Option<String> {
     let progress = record.metadata.get("promotion_progress")?;
     if progress.get("active").and_then(Value::as_bool) != Some(true) {
         return None;
@@ -6919,6 +6945,46 @@ mod tests {
         assert!(projected.recovery.is_none());
         // The durable latch is untouched.
         assert_eq!(record.state(), RunExecutionState::CandidateRecoverable);
+    }
+
+    /// #19108: a Cook attempt whose gates a live owner is still running
+    /// projects as verifying with its gate progress, not as a finished
+    /// recoverable candidate, whoever holds the Cook driver.
+    #[test]
+    fn live_gate_owner_projects_a_gating_cook_attempt_as_verifying() {
+        let mut record = live_gate_driver_candidate();
+        let now = chrono::Utc::now();
+        record.metadata["cook_id"] = json!(AGENT_TASK_COOK);
+        record.metadata["promotion_progress"] = json!({
+            "active": true,
+            "phase": "gate",
+            "gate": "cargo check",
+            "detail": "gate elapsed=204000ms last-progress=100ms",
+            "started_at": (now - chrono::Duration::seconds(204)).to_rfc3339(),
+            "updated_at": now.to_rfc3339(),
+            "owner_pid": std::process::id(),
+        });
+        let projected = project_record(&record, None, None).expect("project run");
+        assert_eq!(projected.state, ControlPlaneState::Running);
+        assert_eq!(
+            projected.phase.as_deref(),
+            Some(super::LIVE_GATE_VERIFYING_PHASE)
+        );
+        assert!(projected.blocker.is_none());
+        let progress = projected.progress.expect("gate progress");
+        assert!(progress.starts_with("cargo check: "), "{progress}");
+        assert_ne!(
+            projected
+                .recovery
+                .as_ref()
+                .map(|recovery| recovery.step.as_str()),
+            Some("regate")
+        );
+
+        // The owner stopped heartbeating: the latch is the verdict again.
+        record.metadata["promotion_progress"]["owner_pid"] = json!(99_999_999u32);
+        let projected = project_record(&record, None, None).expect("project run");
+        assert_eq!(projected.state, ControlPlaneState::CandidateRecoverable);
     }
 
     #[test]
