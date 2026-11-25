@@ -263,15 +263,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_bulk_ids_accepts_json_array() {
-        let parsed = parse_bulk_ids(r#"["api","web"]"#).unwrap();
-        assert_eq!(parsed.component_ids, vec!["api", "web"]);
-    }
-
-    #[test]
-    fn parse_bulk_ids_accepts_json_object() {
-        let parsed = parse_bulk_ids(r#"{"component_ids":["api","web"]}"#).unwrap();
-        assert_eq!(parsed.component_ids, vec!["api", "web"]);
+    fn parse_bulk_ids_accepts_json_array_and_object() {
+        for spec in [r#"["api","web"]"#, r#"{"component_ids":["api","web"]}"#] {
+            let parsed = parse_bulk_ids(spec).unwrap();
+            assert_eq!(parsed.component_ids, vec!["api", "web"], "{spec}");
+        }
     }
 
     #[test]
