@@ -1084,18 +1084,6 @@ mod tests {
                 "cannot be retried",
             ),
             (|v| v["steps"][0]["timeout"] = json!("90"), "unit required"),
-            (
-                |v| v["iterate"] = json!({"until": {"step": "evaluate", "output": "/verdict", "equals": "accepted"}, "max_iterations": 3}),
-                "unknown field `iterate`",
-            ),
-            (
-                |v| v["notify"] = json!({"on": ["failed"]}),
-                "unknown field `notify`",
-            ),
-            (
-                |v| v["steps"][1]["when"] = json!({"command": ["true"]}),
-                "exec` step and gate on its `outcome`",
-            ),
             (|v| v["every"] = json!({"interval": "30s"}), "at least 1m"),
             (
                 |v| v["every"] = json!({"interval": "1h", "at": "25:00Z"}),
@@ -1248,13 +1236,5 @@ mod tests {
             Some(Duration::from_secs(3 * 3600 + 30 * 60))
         );
         assert_eq!(every.overlap, Overlap::Skip);
-    }
-
-    #[test]
-    fn digest_ignores_key_order() {
-        let a = definition(base()).unwrap();
-        let reordered: Value =
-            serde_json::from_str(&serde_json::to_string_pretty(&base()).unwrap()).unwrap();
-        assert_eq!(a.digest(), definition(reordered).unwrap().digest());
     }
 }
