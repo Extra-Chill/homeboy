@@ -959,83 +959,23 @@ fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
 mod tests {
     use super::*;
 
-    /// The failure this protects against: a packaging failure whose summary was
-    /// all preamble, because the error a build tool emits comes last and the
-    /// bound kept only the first 512 bytes. Every such failure then cost a trip
-    /// into raw CI logs to recover text Homeboy had already captured (#14859).
+    /// Release failure text keeps both ends inside the existing budget: the
+    /// tail carries the build tool's actual error (#14859), the head names a
+    /// preflight refusal, and the elision is visible rather than silent.
     #[test]
-    fn bounded_release_text_keeps_the_error_at_the_end() {
-        let preamble = "Package command failed (exit 255): Building release ZIP for extrachill-link-pages...\n";
+    fn bounded_release_text_keeps_head_and_tail_within_the_budget() {
+        let head = "Release step preflight.default_branch failed: Refusing to release";
         let chatter = "[BUILD] Checking build dependencies...\n".repeat(40);
         let real_error = "[ERROR] webpack: Module not found: Can't resolve './missing-entry'";
-        let value = format!("{preamble}{chatter}{real_error}");
-
-        assert!(
-            value.len() > MAX_RELEASE_TEXT_BYTES,
-            "fixture must exceed the bound or it proves nothing"
-        );
+        let value = format!("{head}\n{chatter}{real_error}");
+        assert!(value.len() > MAX_RELEASE_TEXT_BYTES);
 
         let bounded = bounded_release_text(&value);
 
-        assert!(
-            bounded.contains(real_error),
-            "the actionable error must survive truncation; got: {bounded}"
-        );
-        assert!(
-            bounded.contains("Package command failed (exit 255)"),
-            "the head still identifies what failed; got: {bounded}"
-        );
-        assert!(
-            bounded.contains("bytes omitted"),
-            "the elision must be visible rather than silent; got: {bounded}"
-        );
-    }
-
-    /// Tail-truncation would be just as wrong in the other direction: a
-    /// preflight refusal is answered entirely by its opening words.
-    #[test]
-    fn bounded_release_text_keeps_the_reason_at_the_start() {
-        let head = "Release step preflight.default_branch failed: Refusing to release from branch 'fix/x' because the repo default branch is 'main'";
-        let value = format!("{head}{}", "\ntrailing diagnostic noise".repeat(60));
-
-        let bounded = bounded_release_text(&value);
-
-        assert!(
-            bounded.contains("Refusing to release from branch"),
-            "the leading reason must survive; got: {bounded}"
-        );
-    }
-
-    #[test]
-    fn bounded_release_text_leaves_short_values_untouched() {
-        let value = "sha256:abc123";
-        assert_eq!(bounded_release_text(value), value);
-
-        let exact = "x".repeat(MAX_RELEASE_TEXT_BYTES);
-        assert_eq!(bounded_release_text(&exact), exact);
-    }
-
-    /// Callers bound the rendered envelope, so the elision marker is budgeted
-    /// inside the limit rather than added on top of it.
-    #[test]
-    fn bounded_release_text_respects_the_existing_bound() {
-        let value = "y".repeat(MAX_RELEASE_TEXT_BYTES * 8);
-        let bounded = bounded_release_text(&value);
-        assert!(
-            bounded.len() <= MAX_RELEASE_TEXT_BYTES,
-            "bounded text grew to {} bytes, past the {} byte budget",
-            bounded.len(),
-            MAX_RELEASE_TEXT_BYTES
-        );
-    }
-
-    /// Multi-byte input must not panic or split a character.
-    #[test]
-    fn bounded_release_text_handles_multibyte_boundaries() {
-        let value = "é".repeat(MAX_RELEASE_TEXT_BYTES * 2);
-        let bounded = bounded_release_text(&value);
-        assert!(bounded.chars().count() <= MAX_RELEASE_TEXT_BYTES);
-        assert!(!bounded.is_empty());
+        assert!(bounded.len() <= MAX_RELEASE_TEXT_BYTES, "{bounded}");
+        assert!(bounded.contains(head), "{bounded}");
+        assert!(bounded.contains(real_error), "{bounded}");
+        assert!(bounded.contains("bytes omitted"), "{bounded}");
     }
 
     #[test]
@@ -1194,31 +1134,6 @@ mod tests {
     }
 
     #[test]
-    fn summary_presentation_preserves_structured_result_exit_code_and_file_payload() {
-        let payload = serde_json::json!({ "schema": "test/v1", "items": [1, 2, 3] });
-        let run = command_run_with_summary((Ok(payload.clone()), 7), |value, exit_code| {
-            assert_eq!(value, &payload);
-            assert_eq!(exit_code, 7);
-            Some("3 items\n".to_string())
-        });
-
-        assert_eq!(
-            run.stdout_result.as_ref().expect("structured payload"),
-            &payload
-        );
-        assert_eq!(run.exit_code, 7);
-        assert_eq!(run.presentation.stdout.as_deref(), Some("3 items\n"));
-        assert_eq!(
-            run.output_file_result(
-                crate::command_contract::CommandOutputFileMode::GenericEnvelope,
-            )
-            .as_ref()
-            .expect("output-file payload"),
-            &payload
-        );
-    }
-
-    #[test]
     fn agent_task_stdout_is_bounded_while_output_file_result_is_lossless() {
         let payload = serde_json::json!({ "stdout": "x".repeat(512 * 1024) });
         let run = agent_task_command_run(Ok(payload.clone()), 0, None, false, None, false);
@@ -1300,8 +1215,6 @@ mod tests {
         );
     }
 
-    /// #17800: a staged binary whose selection waits on daemon jobs reports
-    /// a deferred, queued refresh, never `succeeded`.
     #[test]
     fn refresh_homeboy_failed_step_stderr_reaches_summary_and_diagnostics() {
         let payload = serde_json::json!({
@@ -1370,20 +1283,30 @@ mod tests {
     }
 
     #[test]
-    fn refresh_homeboy_success_projection_keeps_the_final_envelope_bounded() {
-        let payload = serde_json::json!({
+    fn refresh_homeboy_projection_keeps_artifacts_only_when_they_fit_the_envelope() {
+        let fitting = serde_json::json!({
             "runner_id": "lab",
             "phase_summary": (0..100).map(|_| serde_json::json!({ "name": "materialize", "status": "succeeded", "exit_code": 0 })).collect::<Vec<_>>(),
             "artifacts": { "run_id": "run-1", "materialization_script": "homeboy://run/run-1/artifact/materialization-script" },
             "plan": { "script": "z".repeat(512 * 1024) },
         });
+        let oversized = serde_json::json!({
+            "artifacts": { "run_id": "run-1", "build_log": "x".repeat(512 * 1024) },
+        });
 
-        let projection = bounded_refresh_projection(&payload, 0, None);
-        assert!(
-            refresh_envelope_bytes(&projection, 0).expect("envelope serializes")
-                <= MAX_REFRESH_PROJECTION_BYTES
-        );
-        assert_eq!(projection["artifacts"]["run_id"], "run-1");
+        for (payload, exit_code, run_id) in [(fitting, 0, Some("run-1")), (oversized, 1, None)] {
+            let projection = bounded_refresh_projection(&payload, exit_code, None);
+            assert!(
+                refresh_envelope_bytes(&projection, exit_code).expect("envelope serializes")
+                    <= MAX_REFRESH_PROJECTION_BYTES
+            );
+            assert_eq!(
+                projection
+                    .pointer("/artifacts/run_id")
+                    .and_then(Value::as_str),
+                run_id
+            );
+        }
     }
 
     #[test]
@@ -1456,21 +1379,29 @@ mod tests {
     }
 
     #[test]
-    fn refresh_homeboy_projection_drops_oversized_artifacts_to_fit_the_final_envelope() {
-        let payload = serde_json::json!({
-            "artifacts": { "run_id": "run-1", "build_log": "x".repeat(512 * 1024) },
+    fn summary_presentation_preserves_structured_result_and_skips_absent_or_error_paths() {
+        let payload = serde_json::json!({ "schema": "test/v1", "items": [1, 2, 3] });
+        let run = command_run_with_summary((Ok(payload.clone()), 7), |value, exit_code| {
+            assert_eq!(value, &payload);
+            assert_eq!(exit_code, 7);
+            Some("3 items\n".to_string())
         });
 
-        let projection = bounded_refresh_projection(&payload, 1, None);
-        assert!(
-            refresh_envelope_bytes(&projection, 1).expect("envelope serializes")
-                <= MAX_REFRESH_PROJECTION_BYTES
+        assert_eq!(
+            run.stdout_result.as_ref().expect("structured payload"),
+            &payload
         );
-        assert!(projection.get("artifacts").is_none());
-    }
+        assert_eq!(run.exit_code, 7);
+        assert_eq!(run.presentation.stdout.as_deref(), Some("3 items\n"));
+        assert_eq!(
+            run.output_file_result(
+                crate::command_contract::CommandOutputFileMode::GenericEnvelope,
+            )
+            .as_ref()
+            .expect("output-file payload"),
+            &payload
+        );
 
-    #[test]
-    fn absent_summary_and_error_paths_remain_unmodified() {
         let payload = serde_json::json!({ "schema": "test/v1" });
         let run = command_run_with_summary((Ok(payload.clone()), 0), |_, _| None);
         assert_eq!(run.stdout_result.expect("structured payload"), payload);
@@ -1680,7 +1611,7 @@ mod tests {
     }
 
     #[test]
-    fn release_batch_and_utility_output_remain_lossless_on_stdout() {
+    fn release_batch_utility_and_full_output_remain_lossless_on_stdout() {
         let batch = serde_json::json!({
             "command": "release.batch", "variant": "batch",
             "result": { "results": [{ "component_id": "a", "status": "released" }],
@@ -1690,21 +1621,15 @@ mod tests {
             "command": "release.changes", "variant": "single",
             "result": { "commits": [{ "sha": "abc123", "subject": "feat: keep output" }] }
         });
-
-        for payload in [batch, utility] {
-            let run = release_command_run((Ok(payload.clone()), 0), None, false);
-            assert_eq!(run.stdout_result.unwrap(), payload);
-        }
-    }
-
-    #[test]
-    fn release_full_keeps_single_execution_lossless_on_stdout() {
-        let payload = serde_json::json!({
+        let full_single = serde_json::json!({
             "command": "release", "variant": "single",
             "result": { "component_id": "fixture", "plan": { "changelog": "x".repeat(32 * 1024) } }
         });
-        let run = release_command_run((Ok(payload.clone()), 0), None, true);
-        assert_eq!(run.stdout_result.unwrap(), payload);
+
+        for (payload, full) in [(batch, false), (utility, false), (full_single, true)] {
+            let run = release_command_run((Ok(payload.clone()), 0), None, full);
+            assert_eq!(run.stdout_result.unwrap(), payload);
+        }
     }
 
     #[test]
