@@ -698,10 +698,15 @@ mod tests {
             let first =
                 prepare_with_cache(&component, &source, &excludes(), counting_build(&counter))
                     .expect("first prepare");
+            fs::write(first.path.join("evidence.json"), "{}").expect("consumer write");
             let second =
                 prepare_with_cache(&component, &source, &excludes(), counting_build(&counter))
                     .expect("second prepare");
 
+            assert!(
+                !second.path.join("evidence.json").exists(),
+                "consumer writes do not leak into the cache entry"
+            );
             assert_eq!(counter.load(Ordering::SeqCst), 1);
             assert_eq!(first.outcome, CacheOutcome::Miss);
             assert_eq!(second.outcome, CacheOutcome::Hit);
@@ -716,25 +721,6 @@ mod tests {
             }
             assert!(!source.join("built.txt").exists(), "source stays clean");
             assert!(cache_root().unwrap().starts_with(home.path()));
-        });
-    }
-
-    #[test]
-    fn consumer_writes_do_not_leak_into_the_cache_entry() {
-        crate::test_support::with_isolated_home(|_| {
-            let parent = tempfile::tempdir().expect("parent");
-            let (source, component) = checkout(parent.path(), "shared-runtime");
-            let counter = Arc::new(AtomicUsize::new(0));
-
-            let first =
-                prepare_with_cache(&component, &source, &excludes(), counting_build(&counter))
-                    .expect("first prepare");
-            fs::write(first.path.join("evidence.json"), "{}").expect("consumer write");
-            let second =
-                prepare_with_cache(&component, &source, &excludes(), counting_build(&counter))
-                    .expect("second prepare");
-
-            assert!(!second.path.join("evidence.json").exists());
         });
     }
 

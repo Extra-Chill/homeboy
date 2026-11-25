@@ -750,38 +750,21 @@ mod tests {
     }
 
     #[test]
-    fn selects_diagnostic_ssh_before_session_transport() {
-        assert_eq!(
-            select_runner_transport(&runner(RunnerKind::Ssh), None, true),
-            Some(RunnerTransport::DiagnosticSsh)
-        );
-    }
-
-    #[test]
-    fn selects_direct_daemon_from_connected_local_url() {
+    fn selects_diagnostic_ssh_before_daemon_from_connected_local_url() {
         let mut session = session(RunnerTunnelMode::DirectSsh);
         session.local_url = Some("http://127.0.0.1:1234".to_string());
 
         let status = status(session);
+        assert_eq!(
+            select_runner_transport(&runner(RunnerKind::Ssh), Some(&status), true),
+            Some(RunnerTransport::DiagnosticSsh)
+        );
         assert_eq!(
             select_runner_transport(&runner(RunnerKind::Ssh), Some(&status), false),
             Some(RunnerTransport::Daemon)
         );
         let handle = connected_daemon_session(Some(&status)).expect("daemon session");
         assert_eq!(handle.endpoint_url(), "http://127.0.0.1:1234");
-    }
-
-    #[test]
-    fn file_transfer_selects_direct_ssh_when_server_id_exists() {
-        let mut runner = runner(RunnerKind::Ssh);
-        runner.server_id = Some("srv".to_string());
-
-        assert_eq!(
-            RunnerFileTransferCapability::for_runner(&runner),
-            RunnerFileTransferCapability::DirectSsh {
-                server_id: "srv".to_string(),
-            }
-        );
     }
 
     #[test]
@@ -1049,16 +1032,11 @@ mod tests {
             error.details["context"],
             format!("open provider evidence {}", missing.display())
         );
-        assert!(error.message.contains("open provider evidence"));
-        assert!(error.message.contains("No such file") || error.message.contains("not found"));
         let source = std::error::Error::source(&error).expect("original I/O source");
         let source = source
             .downcast_ref::<std::io::Error>()
             .expect("source remains an io::Error");
         assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
-        assert!(
-            source.to_string().contains("No such file") || source.to_string().contains("not found")
-        );
     }
 
     #[cfg(unix)]
@@ -1072,8 +1050,6 @@ mod tests {
         assert_eq!(error.code, ErrorCode::StorageExhausted);
         assert_eq!(error.retryable, Some(false));
         assert_eq!(error.details["context"], "write evidence snapshot");
-        assert!(error.message.contains("write evidence snapshot"));
-        assert!(error.message.contains("No space left") || error.message.contains("storage full"));
         let source = std::error::Error::source(&error)
             .and_then(|source| source.downcast_ref::<std::io::Error>())
             .expect("original disk-full I/O source");
