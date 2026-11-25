@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.20] - 2026-11-25
+
+### Changed
+- prune and fold homeboy-lab-runner connection tests file by file
+- prune homeboy-agents agent_task tests file-by-file (9/15)
+- prune agent_task_provider tests file-by-file (8/15)
+- prune homeboy-agents scratch and orchestration tests file by file
+- prune redundant tests in homeboy-lab-runner slice 3/12
+
 ## [0.497.19] - 2026-11-25
 
 ### Changed
