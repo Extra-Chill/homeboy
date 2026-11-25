@@ -103,8 +103,8 @@ fn managed_prefix_resolves_through_configured_root() {
 
 #[test]
 fn managed_prefix_without_configured_root_falls_back_to_base_path() {
-    // Projects that never configured a wp_content root keep the legacy
-    // base_path-joined behavior — no surprise breakage.
+    // Projects that never configured a wp_content root resolve against
+    // base_path.
     with_isolated_home(|_| {
         install_wordpress_extension();
         let project = wp_project("/srv/site", None);

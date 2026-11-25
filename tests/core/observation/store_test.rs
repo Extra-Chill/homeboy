@@ -1654,8 +1654,8 @@ mod referential_integrity_tests {
     }
 
     /// Retention deletes children first and the parent last. With enforcement
-    /// on, getting that order wrong is no longer a latent orphan -- it is an
-    /// error -- so the happy path is worth pinning.
+    /// on, getting that order wrong is an error rather than a latent orphan,
+    /// so the happy path is worth pinning.
     #[test]
     fn terminal_retention_deletes_a_run_and_its_children_in_a_safe_order() {
         let context = HermeticTestContext::new();
