@@ -117,6 +117,27 @@ fn publication_credential(
 pub struct RealAgentTaskPrFinalizationBackend;
 
 impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
+    fn added_candidate_paths(&mut self, path: &str, base: &str, tree: &str) -> Result<Vec<String>> {
+        let output = run_git(
+            Path::new(path),
+            &[
+                "diff",
+                "--no-renames",
+                "--diff-filter=A",
+                "--name-only",
+                "-z",
+                base,
+                tree,
+                "--",
+            ],
+            "inspect added candidate paths for publication",
+        )?;
+        Ok(output
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
     fn publication_route(
         &mut self,
         path: &str,

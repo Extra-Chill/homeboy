@@ -305,7 +305,7 @@ pub fn review_form_output_declaration(
                     }
                 } },
                 "used_for": { "type": "string" },
-                "evidence": { "type": "array", "items": {
+                "evidence": { "type": "array", "description": "Put verification evidence in these review-form fields; Homeboy renders it in the PR body. Do not commit per-task evidence notes under evidence/ or docs/evidence/ (or elsewhere in the repository). Durable documentation belongs in the relevant docs page.", "items": {
                     "type": "object", "required": ["summary"], "properties": {
                         "summary": { "type": "string" }, "url": { "type": "string" }
                     }
@@ -2805,6 +2805,17 @@ mod tests {
             "operator_notification": { "status": "completed", "message": "fixture" }
         }))
         .expect("fixture promotion")
+    }
+
+    #[test]
+    fn review_form_guides_providers_to_pr_evidence_not_repository_notes() {
+        let declaration = review_form_output_declaration(PrTitlePolicy::ConventionalCommit);
+        let guidance = declaration.structural_schema["properties"]["evidence"]["description"]
+            .as_str()
+            .expect("provider-facing evidence guidance");
+        assert!(guidance.contains("PR body"));
+        assert!(guidance.contains("Do not commit"));
+        assert!(guidance.contains("docs/evidence/"));
     }
 
     #[test]

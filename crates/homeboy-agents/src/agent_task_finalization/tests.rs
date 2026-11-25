@@ -52,6 +52,7 @@ fn ambient_store() -> Result<crate::agent_task_lifecycle::AgentTaskLifecycleStor
 pub(super) struct MockBackend {
     pub(super) branch: String,
     changed_files: Vec<String>,
+    added_paths: Vec<String>,
     resolved_base: Option<AgentTaskPrResolvedBase>,
     publication_base_sha: Option<String>,
     publication_base_behind_by: Option<u64>,
@@ -95,6 +96,14 @@ pub(super) struct MockBackend {
 }
 
 impl AgentTaskPrFinalizationBackend for MockBackend {
+    fn added_candidate_paths(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _tree: &str,
+    ) -> Result<Vec<String>> {
+        Ok(self.added_paths.clone())
+    }
     fn prepare_manual_candidate(
         &mut self,
         _path: &str,
@@ -430,6 +439,48 @@ fn publishes_with_accepted_inherited_gate_without_policy_opt_in() {
         HomeboyGateStatus::AcceptedInheritedFailure
     );
     assert_eq!(inherited.name, "cargo test baseline_check");
+}
+
+#[test]
+fn committed_evidence_is_flagged_in_published_body_without_losing_form_evidence() {
+    let mut backend = MockBackend {
+        changed_files: vec!["evidence/x.md".into(), "docs/evidence/y.md".into()],
+        added_paths: vec!["evidence/x.md".into(), "docs/evidence/y.md".into()],
+        ..Default::default()
+    };
+    let mut options = options();
+    options.review_dossier.evidence.push(
+        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: "Observed the expected behavior in the focused fixture.".into(),
+            url: None,
+        },
+    );
+    finalize_pr_with_backend(options, &mut backend).expect("flagged candidate remains publishable");
+    assert!(backend.last_body.contains("## Evidence"));
+    assert!(backend
+        .last_body
+        .contains("Warning: candidate adds repository evidence notes:"));
+    assert!(backend.last_body.contains("evidence/x.md"));
+    assert!(backend.last_body.contains("docs/evidence/y.md"));
+    assert!(backend
+        .last_body
+        .contains("Observed the expected behavior in the focused fixture."));
+}
+
+#[test]
+fn deleting_evidence_or_adding_unrelated_paths_is_not_flagged() {
+    let mut backend = MockBackend {
+        changed_files: vec!["evidence/old.md".into(), "src/evidence/new.rs".into()],
+        added_paths: vec![
+            "src/evidence/new.rs".into(),
+            "docs/evidence-policy.md".into(),
+        ],
+        ..Default::default()
+    };
+    finalize_pr_with_backend(options(), &mut backend).expect("cleanup publishes");
+    assert!(!backend
+        .last_body
+        .contains("Warning: candidate adds repository evidence notes:"));
 }
 
 #[test]
@@ -2050,6 +2101,35 @@ fn real_git_repo() -> tempfile::TempDir {
         .unwrap()
         .success());
     dir
+}
+
+#[test]
+fn evidence_additions_use_real_candidate_tree_not_worktree_or_deletions() {
+    let repo = real_git_repo();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    std::fs::create_dir(repo.path().join("evidence")).unwrap();
+    std::fs::write(repo.path().join("evidence/old.md"), "old").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "old evidence"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::remove_file(repo.path().join("evidence/old.md")).unwrap();
+    std::fs::write(repo.path().join("evidence/x.md"), "new").unwrap();
+    git(&["add", "-A"]);
+    let tree = git(&["write-tree"]);
+    // Untracked notes are not part of the candidate being published.
+    std::fs::write(repo.path().join("evidence/untracked.md"), "ignored").unwrap();
+    let added = RealAgentTaskPrFinalizationBackend
+        .added_candidate_paths(repo.path().to_str().unwrap(), &base, &tree)
+        .unwrap();
+    assert_eq!(added, vec!["evidence/x.md"]);
 }
 
 #[test]
