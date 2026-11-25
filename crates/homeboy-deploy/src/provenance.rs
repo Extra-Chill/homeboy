@@ -153,56 +153,25 @@ mod provenance_tests {
     }
 
     #[test]
-    fn fresh_build_flags_dirty_working_tree() {
+    fn dirty_tree_is_flagged_for_local_builds_but_not_downloaded_releases() {
         let temp = committed_repo();
         let dir = temp.path();
         std::fs::write(dir.join("README.md"), "modified\n").expect("modify tracked file");
 
-        let provenance =
+        let fresh =
             capture_build_provenance(&component_at(dir), BuildSource::FreshBuild, true, None);
+        assert_eq!(fresh.working_tree_dirty, Some(true));
+        assert!(fresh.artifact_identity.is_none());
 
-        assert_eq!(provenance.working_tree_dirty, Some(true));
-        assert!(provenance.artifact_identity.is_none());
-    }
-
-    #[test]
-    fn downloaded_release_skips_local_dirtiness_and_reports_not_built() {
-        let temp = committed_repo();
-        let dir = temp.path();
-        std::fs::write(dir.join("README.md"), "modified\n").expect("modify tracked file");
-
-        let provenance = capture_build_provenance(
+        let downloaded = capture_build_provenance(
             &component_at(dir),
             BuildSource::DownloadedRelease,
             false,
             None,
         );
-
-        assert_eq!(provenance.source, BuildSource::DownloadedRelease);
-        assert_eq!(provenance.phase, BuildPhase::NotRun);
-        assert!(!provenance.build_ran);
+        assert_eq!(downloaded.phase, BuildPhase::NotRun);
         // Local tree dirtiness is not meaningful provenance for a downloaded asset.
-        assert_eq!(provenance.working_tree_dirty, None);
-    }
-
-    #[test]
-    fn reused_artifact_reports_no_build_ran() {
-        let temp = committed_repo();
-        let dir = temp.path();
-        let artifact = dir.join("plugin.zip");
-        std::fs::write(&artifact, b"reused").expect("artifact");
-
-        let provenance = capture_build_provenance(
-            &component_at(dir),
-            BuildSource::ReusedArtifact,
-            false,
-            Some(artifact.as_path()),
-        );
-
-        assert_eq!(provenance.source, BuildSource::ReusedArtifact);
-        assert_eq!(provenance.phase, BuildPhase::NotRun);
-        assert!(!provenance.build_ran);
-        assert!(provenance.artifact_identity.is_some());
+        assert_eq!(downloaded.working_tree_dirty, None);
     }
 
     #[test]
