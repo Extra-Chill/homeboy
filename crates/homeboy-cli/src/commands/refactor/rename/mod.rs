@@ -28,11 +28,9 @@ pub use types::{RenameContext, RenameScope, RenameSpec, RenameTargeting};
 // Internal items pulled into scope for the test module (`tests.rs` uses
 // `super::*`).
 #[cfg(test)]
-use casing::{capitalize, pluralize, split_words};
+use casing::{pluralize, split_words};
 #[cfg(test)]
 use engine::{find_references, find_references_with_targeting, generate_renames};
-#[cfg(test)]
-use matching::{find_boundary_matches, find_literal_matches};
 #[cfg(test)]
 use safety::{detect_collisions, detect_duplicate_identifiers, extract_field_identifier};
 #[cfg(test)]

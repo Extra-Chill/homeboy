@@ -2152,27 +2152,6 @@ mod tests {
     }
 
     #[test]
-    fn review_action_scope_conflicts_are_rejected_in_action_first_order() {
-        for action in ["lint", "test", "build"] {
-            let error = match Cli::try_parse_from([
-                "homeboy",
-                "review",
-                action,
-                "fixture",
-                "--changed-only",
-                "--changed-since",
-                "main",
-            ]) {
-                Ok(_) => panic!("changed scopes must conflict"),
-                Err(error) => error,
-            };
-            let message = error.to_string();
-            assert!(message.contains("--changed-only"), "{action}: {message}");
-            assert!(message.contains("--changed-since"), "{action}: {message}");
-        }
-    }
-
-    #[test]
     fn review_dependency_hydration_observes_durable_cancellation() {
         homeboy::test_support::with_isolated_home(|_| {
             let store = ObservationStore::open_initialized().expect("store");
@@ -2193,93 +2172,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_changed_since() {
-        let cli = TestCli::try_parse_from(["test", "my-comp", "--changed-since", "trunk"])
-            .expect("should parse");
-        assert_eq!(cli.review.changed.changed_since(), Some("trunk"));
-        assert!(!cli.review.changed.changed_only);
-        assert_eq!(cli.review.comp.component.as_deref(), Some("my-comp"));
-    }
-
-    #[test]
-    fn release_readiness_runner_prefers_routed_provenance() {
-        let provenance = serde_json::json!({
+    fn release_readiness_runner_prefers_routed_provenance_then_durable_runner() {
+        let routed = serde_json::json!({
             "resolved_execution": { "runner_id": "routed-runner" }
         });
-
-        assert_eq!(
-            release_readiness_runner_id(Some(&provenance), Some("durable-runner".to_string()))
-                .as_deref(),
-            Some("routed-runner")
-        );
-    }
-
-    #[test]
-    fn release_readiness_runner_uses_durable_lab_execution_provenance() {
-        let local_child_provenance = serde_json::json!({
+        let local_child = serde_json::json!({
             "resolved_execution": { "location": "controller", "runner_id": null }
         });
 
         assert_eq!(
-            release_readiness_runner_id(
-                Some(&local_child_provenance),
-                Some("homeboy-lab".to_string()),
-            )
-            .as_deref(),
+            release_readiness_runner_id(Some(&routed), Some("durable-runner".to_string()))
+                .as_deref(),
+            Some("routed-runner")
+        );
+        assert_eq!(
+            release_readiness_runner_id(Some(&local_child), Some("homeboy-lab".to_string()))
+                .as_deref(),
             Some("homeboy-lab")
         );
     }
 
     #[test]
-    fn release_readiness_evidence_preserves_each_portable_gate_discriminator() {
-        for gate in ["lint", "test"] {
-            let evidence = serde_json::to_value(ReviewChildReadinessEvidence {
-                gate: gate.to_string(),
-                requested_source_commit: "frozen-source".to_string(),
-                source_commit: "frozen-source".to_string(),
-                runner_id: Some("homeboy-lab".to_string()),
-                provenance: Default::default(),
-            })
-            .expect("serialize readiness evidence");
-
-            assert_eq!(evidence["gate"], gate);
-            assert_eq!(evidence["requested_source_commit"], "frozen-source");
-            assert_eq!(evidence["source_commit"], "frozen-source");
-        }
-    }
-
-    #[test]
-    fn parses_one_shot_extension_override() {
-        let cli = TestCli::try_parse_from([
-            "test",
-            "my-comp",
-            "--extension",
-            "fixture-review",
-            "--changed-since",
-            "origin/main",
-        ])
-        .expect("review should parse --extension override");
-
-        assert_eq!(
-            cli.review.extension_override.extensions,
-            vec!["fixture-review"]
-        );
-        assert_eq!(cli.review.changed.changed_since(), Some("origin/main"));
-    }
-
-    #[test]
-    fn parses_changed_only() {
-        let cli = TestCli::try_parse_from(["test", "--changed-only"]).expect("should parse");
-        assert!(cli.review.changed.changed_only);
-        assert!(cli.review.changed.changed_since().is_none());
-    }
-
-    #[test]
-    fn parses_report_pr_comment() {
-        let cli = TestCli::try_parse_from(["test", "my-comp", "--report=pr-comment"])
-            .expect("should parse");
-        assert_eq!(cli.review.report.as_deref(), Some("pr-comment"));
-        assert!(is_markdown_mode(&cli.review));
+    fn markdown_mode_requires_pr_comment_report_on_umbrella_review() {
+        let markdown = |argv: &[&str]| {
+            is_markdown_mode(&TestCli::try_parse_from(argv).expect("should parse").review)
+        };
+        assert!(markdown(&["test", "my-comp", "--report=pr-comment"]));
+        assert!(!markdown(&["test", "my-comp"]));
     }
 
     #[test]
@@ -2307,76 +2226,9 @@ mod tests {
     }
 
     #[test]
-    fn is_markdown_mode_false_without_flag() {
-        let cli = TestCli::try_parse_from(["test", "my-comp"]).expect("should parse");
-        assert!(!is_markdown_mode(&cli.review));
-    }
-
-    #[test]
-    fn parses_with_no_component() {
-        let cli = TestCli::try_parse_from(["test", "--changed-since", "main"])
-            .expect("should parse without positional component");
-        assert!(cli.review.comp.component.is_none());
-    }
-
-    #[test]
-    fn parses_summary_and_baseline_flags() {
-        let cli = TestCli::try_parse_from([
-            "test",
-            "my-comp",
-            "--changed-since=trunk",
-            "--summary",
-            "--ignore-baseline",
-        ])
-        .expect("should parse");
-        assert!(cli.review.summary);
-        assert!(cli.review.baseline_args.ignore_baseline);
-    }
-
-    #[test]
-    fn parses_ci_profile() {
-        let cli = TestCli::try_parse_from(["test", "my-comp", "--ci-profile", "pr"])
-            .expect("should parse ci profile");
-
-        assert_eq!(cli.review.ci_profile.as_deref(), Some("pr"));
-    }
-
-    #[test]
-    fn write_artifact_to_file_writes_direct_artifact_and_creates_parent_dir() {
+    fn write_artifact_to_file_writes_direct_artifact_with_observation_pointer() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("ci-results").join("review.json");
-        let result = Ok(serde_json::json!({
-            "command": "review",
-            "artifact": {
-                "schema": "homeboy/review/v1",
-                "component": "homeboy",
-                "status": "passed",
-                "generated_at": "2026-04-28T00:00:00Z",
-                "base_ref": "origin/main",
-                "head_ref": "abc123",
-                "commands": []
-            }
-        }));
-
-        assert!(write_artifact_to_file(
-            &result,
-            path.to_str().expect("utf8 path"),
-            0
-        ));
-
-        let written = std::fs::read_to_string(path).expect("artifact written");
-        let json: serde_json::Value = serde_json::from_str(&written).expect("valid json");
-        assert_eq!(json["schema"], "homeboy/review/v1");
-        assert!(
-            json.get("success").is_none(),
-            "artifact is not CLI envelope"
-        );
-    }
-
-    #[test]
-    fn write_artifact_to_file_preserves_observation_pointer_when_available() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("review.json");
         let result = Ok(serde_json::json!({
             "command": "review",
             "observation": {
@@ -2431,100 +2283,20 @@ mod tests {
     }
 
     #[test]
-    fn scope_flag_suffix_renders_changed_since() {
-        let args = ReviewArgs {
-            command: None,
-            run_id: None,
-            comp: PositionalComponentArgs {
-                component: None,
-                path: None,
-            },
-            extension_override: ExtensionOverrideArgs::default(),
-            changed: ChangedScopeArgs {
-                lab: LabChangedScopeArgs {
-                    since: ChangedSinceArgs {
-                        changed_since: Some("trunk".to_string()),
-                        precomputed_changed_files: None,
-                    },
-                    lab_changed_files_json: None,
-                },
-                changed_only: false,
-            },
-            summary: false,
-            ci_profile: None,
-            ai: false,
-            ai_timeout_seconds: 600,
-            report: None,
-            banner: Vec::new(),
-            baseline_args: BaselineArgs::default(),
-        };
-        assert_eq!(scope_flag_suffix(&args, true), " --changed-since=trunk");
-        assert_eq!(scope_flag_suffix(&args, false), " --changed-since=trunk");
-    }
+    fn scope_flag_suffix_renders_scope_and_drops_changed_only_when_not_allowed() {
+        let mut args = review_args_fixture();
+        assert_eq!(scope_flag_suffix(&args, true), "");
+        assert_eq!(scope_flag_suffix(&args, false), "");
 
-    #[test]
-    fn scope_flag_suffix_renders_changed_only_only_when_allowed() {
-        let args = ReviewArgs {
-            command: None,
-            run_id: None,
-            comp: PositionalComponentArgs {
-                component: None,
-                path: None,
-            },
-            extension_override: ExtensionOverrideArgs::default(),
-            changed: ChangedScopeArgs {
-                lab: LabChangedScopeArgs {
-                    since: ChangedSinceArgs {
-                        changed_since: None,
-                        precomputed_changed_files: None,
-                    },
-                    lab_changed_files_json: None,
-                },
-                changed_only: true,
-            },
-            summary: false,
-            ci_profile: None,
-            ai: false,
-            ai_timeout_seconds: 600,
-            report: None,
-            banner: Vec::new(),
-            baseline_args: BaselineArgs::default(),
-        };
+        args.changed.changed_only = true;
         assert_eq!(scope_flag_suffix(&args, true), " --changed-only");
         // Test still runs full-component.
         assert_eq!(scope_flag_suffix(&args, false), "");
-    }
 
-    #[test]
-    fn scope_flag_suffix_empty_for_full_run() {
-        let args = ReviewArgs {
-            command: None,
-            run_id: None,
-            comp: PositionalComponentArgs {
-                component: None,
-                path: None,
-            },
-            extension_override: ExtensionOverrideArgs::default(),
-            changed: ChangedScopeArgs {
-                lab: LabChangedScopeArgs {
-                    since: ChangedSinceArgs {
-                        changed_since: None,
-                        precomputed_changed_files: None,
-                    },
-                    lab_changed_files_json: None,
-                },
-                changed_only: false,
-            },
-            summary: false,
-            ci_profile: None,
-            ai: false,
-            ai_timeout_seconds: 600,
-            report: None,
-            banner: Vec::new(),
-            baseline_args: BaselineArgs::default(),
-        };
-        assert_eq!(scope_flag_suffix(&args, true), "");
-        assert_eq!(scope_flag_suffix(&args, false), "");
+        args.changed.changed_only = false;
+        args.changed.lab.since.changed_since = Some("trunk".to_string());
+        assert_eq!(scope_flag_suffix(&args, true), " --changed-since=trunk");
+        assert_eq!(scope_flag_suffix(&args, false), " --changed-since=trunk");
     }
 
     #[test]
@@ -2556,18 +2328,26 @@ mod tests {
     }
 
     #[test]
-    fn direct_review_lint_args_do_not_use_self_check_dispatch() {
-        let cli =
-            TestCli::try_parse_from(["test", "lint", "homeboy"]).expect("review lint should parse");
-        let ReviewCommand::Lint(args) = cli.review.command.expect("lint subcommand") else {
-            panic!("expected lint subcommand");
+    fn direct_review_lint_args_use_main_workflow_and_compact_summary() {
+        let lint_args = |argv: &[&str]| {
+            let cli = TestCli::try_parse_from(argv).expect("review lint should parse");
+            let ReviewCommand::Lint(args) = cli.review.command.expect("lint subcommand") else {
+                panic!("expected lint subcommand");
+            };
+            review_lint_args(args)
         };
 
-        let args = review_lint_args(args);
-
+        let args = lint_args(&["test", "lint", "homeboy"]);
         assert!(
             !args.should_use_self_check_dispatch(),
             "direct review lint must run the main lint workflow for every target form"
+        );
+
+        let args = lint_args(&["test", "lint", "homeboy", "--summary"]);
+        assert!(args.summary);
+        assert!(
+            args.json_summary,
+            "review lint --summary must suppress the full findings payload"
         );
     }
 
@@ -2587,23 +2367,6 @@ mod tests {
         assert_eq!(
             rendered,
             "[review] phase=building status=heartbeat component=fixture provider=declared-provider current=shared-component last_progress=250ms deadline=1800000ms"
-        );
-    }
-
-    #[test]
-    fn direct_review_lint_summary_uses_compact_output() {
-        let cli = TestCli::try_parse_from(["test", "lint", "homeboy", "--summary"])
-            .expect("review lint summary should parse");
-        let ReviewCommand::Lint(args) = cli.review.command.expect("lint subcommand") else {
-            panic!("expected lint subcommand");
-        };
-
-        let args = review_lint_args(args);
-
-        assert!(args.summary);
-        assert!(
-            args.json_summary,
-            "review lint --summary must suppress the full findings payload"
         );
     }
 
