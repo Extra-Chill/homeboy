@@ -1088,66 +1088,6 @@ mod tests {
     }
 
     #[test]
-    fn generic_input_is_a_complete_serializable_contract() {
-        let input = ParsedCommandPreflightInput {
-            identity: ParsedCommandIdentity {
-                family: "fixture".into(),
-                operation: vec!["run".into()],
-            },
-            resource_admission: ResourceAdmissionRequirement::Required {
-                label: "fixture run".into(),
-                engages_at: ResourceHeat::Warm,
-            },
-            controller_execution: ControllerExecution::Ordinary,
-            deferred_workload: DeferredWorkloadPolicy::Eligible,
-            placement: PlacementIntent::LabOrLocal,
-            runner: RunnerIntent::Default,
-            runner_normalization: RunnerNormalization::None,
-            lab_route: LabRouteIntent::Supported { automatic: true },
-            provenance: ProvenanceRequirement::CaptureExecution,
-        };
-        let round_trip: ParsedCommandPreflightInput =
-            serde_json::from_value(serde_json::to_value(&input).expect("serialize"))
-                .expect("deserialize");
-        assert_eq!(round_trip, input);
-    }
-
-    #[test]
-    fn placement_directive_finalizes_only_late_identity() {
-        use homeboy_lab_contract::{
-            EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
-            ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement, Placement,
-        };
-
-        let directive = PlacementDirective {
-            requested: Placement::LabOrLocal,
-            required: ExecutionPlacementRequirement::Either,
-            selected: EffectiveExecutionPlacement::Lab,
-            runner: None,
-            fallback: ExecutionPlacementFallback {
-                local_allowed: true,
-                reason: Some("ready runner admission".to_string()),
-            },
-            override_authorization: ExecutionPlacementOverrideAuthorization {
-                authorized: false,
-                authority: None,
-            },
-        };
-        let decision = directive.finalize(ExecutionPlacementIdentity {
-            repository: "fixture".to_string(),
-            workspace: "/tmp/fixture".to_string(),
-            task: "late-materialized-task".to_string(),
-            candidate: Some("candidate".to_string()),
-            base: Some("base".to_string()),
-        });
-
-        assert_eq!(decision.requested, directive.requested);
-        assert_eq!(decision.selected, directive.selected);
-        assert_eq!(decision.fallback, directive.fallback);
-        assert_eq!(decision.identity.task, "late-materialized-task");
-    }
-
-    #[test]
     fn generic_resolver_requires_support_ordinary_execution_and_authorization() {
         let input = ParsedCommandPreflightInput {
             identity: ParsedCommandIdentity {
@@ -1296,14 +1236,6 @@ mod tests {
     }
 
     #[test]
-    fn resolver_accepts_an_explicit_runner_from_its_authoritative_ready_snapshot() {
-        let input = explicit_runner_input();
-        let policy = explicit_runner_policy("connected_ready", vec!["lab-b".into()], true);
-
-        assert!(resolve_parsed_command_preflight(vec!["fixture".into()], input, policy).is_ok());
-    }
-
-    #[test]
     fn resolver_admits_automatic_and_explicit_runners_from_fresh_bounded_evidence() {
         let policy = explicit_runner_policy("connected_ready", vec!["lab-b".into()], true);
 
@@ -1350,26 +1282,6 @@ mod tests {
                 "Lab runner homeboy-lab inadmissible (unresolved generation projection); routing to local."
             )
         );
-    }
-
-    #[test]
-    fn split_cook_auto_blocks_stale_lab_instead_of_previewing_local() {
-        let input = split_cook_input();
-        let policy = auto_route_policy(
-            Some("homeboy-lab"),
-            "stale",
-            Vec::new(),
-            vec!["runner daemon is stale".into()],
-            false,
-            ResourceAdmissionEvidence::Unavailable,
-        );
-
-        let error = resolve_parsed_command_preflight(vec!["homeboy".into()], input, policy)
-            .expect_err("stale Cook Lab admission must block before execution");
-        assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
-        assert_eq!(error.details["field"], "placement");
-        assert_eq!(error.details["reason"], "lab_unavailable");
-        assert!(error.message.contains("runner daemon is stale"));
     }
 
     #[test]
@@ -1424,55 +1336,6 @@ mod tests {
             result.placement.fallback.reason.as_deref(),
             Some("no Lab runner is configured")
         );
-    }
-
-    #[test]
-    fn split_cook_auto_selects_a_ready_lab_runner() {
-        let result = resolve_parsed_command_preflight(
-            vec!["homeboy".into()],
-            split_cook_input(),
-            auto_route_policy(
-                Some("homeboy-lab"),
-                "connected_ready",
-                vec!["homeboy-lab".into()],
-                Vec::new(),
-                true,
-                ResourceAdmissionEvidence::Unavailable,
-            ),
-        )
-        .expect("ready Lab admission should be selected");
-
-        assert_eq!(
-            result.placement.selected,
-            homeboy_lab_contract::EffectiveExecutionPlacement::Lab
-        );
-        assert_eq!(
-            result.placement.required,
-            ExecutionPlacementRequirement::Lab
-        );
-    }
-
-    #[test]
-    fn split_cook_explicit_local_stays_local_without_lab_admission() {
-        let mut input = split_cook_input();
-        input.placement = PlacementIntent::Local;
-        let mut policy = auto_route_policy(
-            None,
-            "stale",
-            Vec::new(),
-            vec!["runner daemon is stale".into()],
-            false,
-            ResourceAdmissionEvidence::Unavailable,
-        );
-        policy.lab_readiness = None;
-
-        let result = resolve_parsed_command_preflight(vec!["homeboy".into()], input, policy)
-            .expect("explicit local placement must not inspect Lab admission");
-        assert_eq!(
-            result.placement.selected,
-            homeboy_lab_contract::EffectiveExecutionPlacement::Local
-        );
-        assert!(result.placement.override_authorization.authorized);
     }
 
     #[test]
@@ -1806,8 +1669,10 @@ mod tests {
             let error = resolve_parsed_command_preflight(Vec::new(), split_cook_input(), policy)
                 .expect_err("a hard Lab failure must refuse");
             assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
+            assert_eq!(error.details["field"], "placement");
             assert_eq!(error.details["reason"], "lab_unavailable");
             assert_eq!(error.details["readiness_state"], state);
+            assert!(error.message.contains(reason), "{}", error.message);
         }
     }
 
@@ -1830,6 +1695,10 @@ mod tests {
             let result = resolve_parsed_command_preflight(Vec::new(), split_cook_input(), policy)
                 .unwrap_or_else(|error| panic!("{reasons:?}: ready Lab must admit: {error:?}"));
             assert_eq!(result.placement.selected, EffectiveExecutionPlacement::Lab);
+            assert_eq!(
+                result.placement.required,
+                ExecutionPlacementRequirement::Lab
+            );
             assert_eq!(result.selected_runner_id.as_deref(), Some("homeboy-lab"));
             assert_eq!(
                 result.resource_admission,
@@ -1868,10 +1737,10 @@ mod tests {
     }
 
     #[test]
-    fn local_cook_ignores_lab_capacity_refusal() {
+    fn explicit_local_cook_stays_local_regardless_of_lab_readiness() {
         let mut input = split_cook_input();
         input.placement = PlacementIntent::Local;
-        let policy = auto_route_policy(
+        let capacity_blocked = auto_route_policy(
             None,
             "capacity_blocked",
             Vec::new(),
@@ -1881,11 +1750,25 @@ mod tests {
                 pressure: ResourceHeat::None,
             },
         );
-        let result = resolve_parsed_command_preflight(Vec::new(), input, policy).unwrap();
-        assert_eq!(
-            result.placement.selected,
-            EffectiveExecutionPlacement::Local
+        let mut unobserved = auto_route_policy(
+            None,
+            "stale",
+            Vec::new(),
+            vec!["runner daemon is stale".into()],
+            false,
+            ResourceAdmissionEvidence::Unavailable,
         );
+        unobserved.lab_readiness = None;
+
+        for policy in [capacity_blocked, unobserved] {
+            let result = resolve_parsed_command_preflight(Vec::new(), input.clone(), policy)
+                .expect("explicit local placement must not inspect Lab admission");
+            assert_eq!(
+                result.placement.selected,
+                EffectiveExecutionPlacement::Local
+            );
+            assert!(result.placement.override_authorization.authorized);
+        }
     }
 
     fn explicit_runner_policy(

@@ -51,14 +51,6 @@ fn canonical_or_normalized_local_path_resolves_the_var_alias() {
 }
 
 #[test]
-fn join_remote_path_allows_absolute_paths_without_base() {
-    assert_eq!(
-        join_remote_path(None, "/var/log/syslog").unwrap(),
-        "/var/log/syslog"
-    );
-}
-
-#[test]
 fn artifact_root_defaults_under_homeboy_data() {
     with_isolated_home(|home| {
         // `with_isolated_home` sets `HOMEBOY_DATA_DIR` to `<home>/data`, and
@@ -105,79 +97,59 @@ fn expand_tilde_path_uses_home_and_preserves_other_paths() {
 }
 
 #[test]
-fn artifact_root_uses_configured_value() {
+fn artifact_root_precedence_is_override_then_env_then_config() {
     with_isolated_home(|home| {
         // Mirror production startup wiring: register the config resolver so
         // artifact_root() can read the config-level override.
         set_config_artifact_root_resolver(|| crate::defaults::load_config().artifact_root);
-        let configured = home.path().join("custom-artifacts");
-        crate::defaults::save_config(&crate::defaults::HomeboyConfig {
-            artifact_root: Some(configured.to_string_lossy().to_string()),
-            ..crate::defaults::HomeboyConfig::default()
-        })
-        .expect("save config");
-
-        assert_eq!(artifact_root().expect("artifact root"), configured);
-    });
-}
-
-#[test]
-fn artifact_root_prefers_env_over_config() {
-    with_isolated_home(|home| {
-        set_config_artifact_root_resolver(|| crate::defaults::load_config().artifact_root);
         let configured = home.path().join("config-artifacts");
-        let env_root = home.path().join("env-artifacts");
         crate::defaults::save_config(&crate::defaults::HomeboyConfig {
             artifact_root: Some(configured.to_string_lossy().to_string()),
             ..crate::defaults::HomeboyConfig::default()
         })
         .expect("save config");
-        std::env::set_var("HOMEBOY_ARTIFACT_ROOT", &env_root);
+        assert_eq!(artifact_root().expect("artifact root"), configured);
 
-        assert_eq!(artifact_root().expect("artifact root"), env_root);
-    });
-}
-
-#[test]
-fn test_set_artifact_root_override() {
-    with_isolated_home(|home| {
         let env_root = home.path().join("env-artifacts");
-        let override_root = home.path().join("override-artifacts");
         std::env::set_var("HOMEBOY_ARTIFACT_ROOT", &env_root);
-        set_artifact_root_override(Some(override_root.clone()));
+        assert_eq!(artifact_root().expect("artifact root"), env_root);
 
+        let override_root = home.path().join("override-artifacts");
+        set_artifact_root_override(Some(override_root.clone()));
         assert_eq!(artifact_root().expect("artifact root"), override_root);
     });
 }
 
 #[test]
-fn join_remote_path_rejects_relative_paths_without_base() {
+fn remote_path_joining_anchors_relative_paths_and_keeps_absolute_ones() {
+    for (base, path, expected) in [
+        (None, "/var/log/syslog", "/var/log/syslog"),
+        (
+            Some("/var/www/site"),
+            "file.json",
+            "/var/www/site/file.json",
+        ),
+        (
+            Some("/var/www/site/"),
+            "file.json",
+            "/var/www/site/file.json",
+        ),
+    ] {
+        assert_eq!(join_remote_path(base, path).unwrap(), expected, "{path}");
+    }
     assert!(join_remote_path(None, "file.json").is_err());
-}
 
-#[test]
-fn join_remote_path_joins_relative_paths() {
-    assert_eq!(
-        join_remote_path(Some("/var/www/site"), "file.json").unwrap(),
-        "/var/www/site/file.json"
-    );
-
-    assert_eq!(
-        join_remote_path(Some("/var/www/site/"), "file.json").unwrap(),
-        "/var/www/site/file.json"
-    );
-}
-
-#[test]
-fn join_remote_child_appends_child() {
     assert_eq!(
         join_remote_child(Some("/var/www/site"), "logs", "error.log").unwrap(),
         "/var/www/site/logs/error.log"
     );
-
     assert_eq!(
         join_remote_child(Some("/var/www/site"), "/var/log", "syslog").unwrap(),
         "/var/log/syslog"
+    );
+    assert_eq!(
+        resolve_path_string("/base", "relative/path"),
+        "/base/relative/path"
     );
 }
 
@@ -255,36 +227,19 @@ fn local_path_containment_is_component_aware() {
 }
 
 #[test]
-fn resolve_contained_local_path_resolves_relative_paths_under_root() {
+fn resolve_contained_local_path_resolves_under_root_and_rejects_parent_escape() {
     assert_eq!(
         resolve_contained_local_path("/repo", "dir/../manifest.txt", "cwd").unwrap(),
         PathBuf::from("/repo/manifest.txt")
     );
-}
 
-#[test]
-fn resolve_contained_local_path_rejects_parent_escape() {
     let err = resolve_contained_local_path("/repo/worktree", "../secrets", "cwd")
         .expect_err("parent escape should fail");
-
     assert!(err.to_string().contains("escapes root '/repo/worktree'"));
 }
 
 #[test]
-fn resolve_path_handles_relative() {
-    let result = resolve_path_string("/base", "relative/path");
-    assert_eq!(result, "/base/relative/path");
-}
-
-#[test]
-fn test_runner_sessions_dir_under_homeboy_dir() {
-    let path = runner_sessions_dir().expect("runner_sessions_dir resolves");
-    assert!(path.ends_with("runner-sessions"), "got {}", path.display());
-    assert!(path.parent().expect("parent").ends_with("homeboy"));
-}
-
-#[test]
-fn test_runner_session_file_uses_id_filename() {
+fn runner_session_file_is_named_by_id_under_runner_sessions() {
     let path = runner_session_file("lab-box").expect("runner_session_file resolves");
     assert_eq!(
         path.file_name().and_then(|s| s.to_str()),
@@ -295,5 +250,9 @@ fn test_runner_session_file_uses_id_filename() {
             .and_then(|p| p.file_name())
             .and_then(|s| s.to_str()),
         Some("runner-sessions")
+    );
+    assert_eq!(
+        path.parent(),
+        Some(runner_sessions_dir().unwrap().as_path())
     );
 }
