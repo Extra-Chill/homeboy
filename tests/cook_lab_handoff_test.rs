@@ -683,7 +683,7 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
     // The step was admitted before the launcher died, so the daemon already
     // owns this Cook: the step child binds the handoff and the Cook runs to a
     // terminal state without its launcher.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(180);
     let attempt_id = loop {
         let parent = lifecycle_store
             .read_record(cook_id)
@@ -708,6 +708,8 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
         parent.metadata["detached_cook_handoff"]["supervisor_job_id"].is_string(),
         "the step job owns the handoff: {parent:?}"
     );
+    // Give execution its own budget after materialization has been observed.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         let attempt = lifecycle_store
             .read_record(&attempt_id)

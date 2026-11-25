@@ -24,7 +24,7 @@ static CLEANUP_SIGNALS_INSTALLED: std::sync::Once = std::sync::Once::new();
 
 #[cfg(unix)]
 pub(crate) fn configure_process_group_cleanup(cmd: &mut Command) {
-    install_process_cleanup_signal_handlers();
+    prepare_cleanup_signals();
     use std::os::unix::process::CommandExt;
     unsafe {
         cmd.pre_exec(|| {
@@ -41,7 +41,7 @@ pub(crate) fn configure_process_group_cleanup(cmd: &mut Command) {
 pub(crate) fn prepare_process_scope_cleanup(
     cmd: &mut Command,
 ) -> crate::error::Result<crate::process::ProcessContainment> {
-    install_process_cleanup_signal_handlers();
+    prepare_cleanup_signals();
     crate::process::ProcessContainment::prepare(cmd)
 }
 
@@ -65,7 +65,6 @@ impl ProcessGroupCleanupGuard {
         #[cfg(unix)]
         {
             let pgid = Some(root_pid as libc::pid_t);
-            ACTIVE_CLEANUP_SIGNAL.store(0, Ordering::SeqCst);
             Self {
                 pgid,
                 #[cfg(target_os = "linux")]
@@ -85,7 +84,6 @@ impl ProcessGroupCleanupGuard {
         root_pid: u32,
         containment: crate::process::ProcessContainment,
     ) -> Self {
-        ACTIVE_CLEANUP_SIGNAL.store(0, Ordering::SeqCst);
         Self {
             pgid: Some(root_pid as libc::pid_t),
             containment: Some(containment),
@@ -143,6 +141,15 @@ static PREVIOUS_SIGINT: crate::signal_chain::ChainedSignal =
 #[cfg(unix)]
 static PREVIOUS_SIGTERM: crate::signal_chain::ChainedSignal =
     crate::signal_chain::ChainedSignal::new();
+
+// Reset before spawn, never after: a child can publish readiness and the
+// caller can receive SIGTERM before containment attachment finishes. Clearing
+// the signal in the guard constructor silently lost that interruption.
+#[cfg(unix)]
+fn prepare_cleanup_signals() {
+    install_process_cleanup_signal_handlers();
+    ACTIVE_CLEANUP_SIGNAL.store(0, Ordering::SeqCst);
+}
 
 /// Record SIGINT/SIGTERM for child cleanup while chaining to any handler that
 /// was already installed (the daemon's drain handlers, #18468), so spawning a
@@ -376,14 +383,24 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn containment_guard_clears_a_stale_cleanup_signal() {
+    fn containment_guard_preserves_a_signal_received_after_spawn_preparation() {
+        let _signals = SIGNAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         ACTIVE_CLEANUP_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
         let mut command = Command::new("sh");
-        let containment =
-            crate::process::ProcessContainment::prepare(&mut command).expect("prepare containment");
-        let mut guard = ProcessGroupCleanupGuard::with_containment(0, containment);
+        let containment = prepare_process_scope_cleanup(&mut command).expect("prepare containment");
+        assert_eq!(
+            active_cleanup_signal(),
+            None,
+            "preparation clears stale signals"
+        );
 
-        assert_eq!(active_cleanup_signal(), None);
+        // Model SIGTERM arriving after the child announces readiness but before
+        // its containment guard has been constructed.
+        ACTIVE_CLEANUP_SIGNAL.store(libc::SIGTERM, Ordering::SeqCst);
+        let mut guard = ProcessGroupCleanupGuard::with_containment(0, containment);
+        assert_eq!(active_cleanup_signal(), Some(libc::SIGTERM));
 
         // This is a construction-only test; avoid signaling a process group on drop.
         guard.pgid = None;

@@ -404,6 +404,14 @@ fn intercept_local_detached_cook_once(
             .and_then(|submission| controller_client.submit_with_disposition(submission)),
     )?;
     let job_id = submission.job.id.to_string();
+    // Transfer custody before start: a slow step must not lose its admission
+    // when the launcher exits before the child can project its own identity.
+    agent_task_lifecycle::record_claimed_detached_cook_step_admission_in_store(
+        &admission.store,
+        &cook_id,
+        &admission.launcher_id,
+        &job_id,
+    )?;
     // A draining daemon persists the step in `pending_resource_admission`; the
     // replacement daemon starts it, and its child binds this handoff (#17707).
     if let Some(reason) = submission.pending_admission {
