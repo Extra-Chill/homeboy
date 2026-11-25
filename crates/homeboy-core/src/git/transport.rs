@@ -634,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_host_reuses_proxy_and_env_without_gh_host() {
+    fn configured_host_route_applies_only_to_matching_host_without_gh_host() {
         with_isolated_home(|_| {
             let mut hosts = HashMap::new();
             hosts.insert(
@@ -679,39 +679,13 @@ mod tests {
                 "url.https://git-proxy.example.test/.insteadOf".to_string()
             )));
             assert!(!env.iter().any(|(key, _)| key == "GH_HOST"));
-        });
-    }
 
-    #[test]
-    fn unrelated_host_does_not_receive_another_hosts_route() {
-        with_isolated_home(|_| {
-            let mut hosts = HashMap::new();
-            hosts.insert(
-                "git.example.test".to_string(),
-                GithubHostConfig {
-                    proxy: Some("socks5://127.0.0.1:8080".to_string()),
-                    env: HashMap::from([(
-                        "GIT_CONFIG_KEY_0".to_string(),
-                        "url.https://git-proxy.example.test/.insteadOf".to_string(),
-                    )]),
-                },
-            );
-            save_config(&HomeboyConfig {
-                github_hosts: hosts,
-                ..HomeboyConfig::default()
-            })
-            .expect("save host transport");
-
-            let env = git_transport_env("other.example.test", &GithubConfig::default());
-
-            assert!(!env.contains(&(
-                "HTTPS_PROXY".to_string(),
-                "socks5://127.0.0.1:8080".to_string()
-            )));
-            assert!(!env
+            let unrelated = git_transport_env("other.example.test", &GithubConfig::default());
+            assert!(!unrelated
                 .iter()
-                .any(|(_, value)| value.contains("git-proxy.example.test")));
-            assert!(!env.iter().any(|(key, _)| key == "GH_HOST"));
+                .any(|(_, value)| value.contains("127.0.0.1:8080")
+                    || value.contains("git-proxy.example.test")));
+            assert!(!unrelated.iter().any(|(key, _)| key == "GH_HOST"));
         });
     }
 

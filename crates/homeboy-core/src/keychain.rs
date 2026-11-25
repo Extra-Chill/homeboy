@@ -316,77 +316,42 @@ mod macos {
 mod tests {
     use super::*;
 
+    /// Stored secrets are addressed by this account key; changing it orphans
+    /// every secret already in users' keychains.
     #[test]
     fn account_key_uses_project_and_variable() {
         assert_eq!(account_key("wpcloud-api", "token"), "wpcloud-api:token");
     }
 
     #[test]
-    fn detects_dark_wake_secure_storage_failure() {
+    fn secure_storage_unavailable_only_for_dark_wake_platform_failure() {
         let boxed: Box<dyn std::error::Error + Send + Sync> = "In dark wake, no UI possible".into();
         let error = keyring_error(keyring::Error::PlatformFailure(boxed));
         assert!(is_secure_storage_unavailable(&error));
-    }
 
-    #[test]
-    fn does_not_flag_ordinary_keychain_errors() {
         let error = Error::validation_invalid_argument("token", "not set", None, None);
         assert!(!is_secure_storage_unavailable(&error));
     }
 
     #[test]
     #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
-    fn test_get() {
-        let project_id = "homeboy-keychain-test-get";
-        let variable_name = "token";
+    fn live_keychain_set_get_exists_and_remove_round_trip() {
+        let project_id = "homeboy-keychain-test-round-trip";
+        let variables = vec!["token".to_string(), "refresh".to_string()];
 
-        remove(project_id, variable_name).expect("clean old value");
+        remove_many(project_id, &variables).expect("clean old values");
+        assert_eq!(get(project_id, "token").expect("read missing value"), None);
+        assert!(!exists(project_id, "token"));
+
+        set(project_id, "token", "secret-value").expect("store token");
         assert_eq!(
-            get(project_id, variable_name).expect("read missing value"),
-            None
-        );
-        set(project_id, variable_name, "secret-value").expect("store value");
-        assert_eq!(
-            get(project_id, variable_name)
-                .expect("read value")
-                .as_deref(),
+            get(project_id, "token").expect("read value").as_deref(),
             Some("secret-value")
         );
-        remove(project_id, variable_name).expect("cleanup value");
-    }
+        assert!(exists(project_id, "token"));
 
-    #[test]
-    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
-    fn test_remove() {
-        let project_id = "homeboy-keychain-test-remove";
-        let variable_name = "token";
-
-        set(project_id, variable_name, "secret-value").expect("store value");
-        remove(project_id, variable_name).expect("remove value");
-        assert_eq!(
-            get(project_id, variable_name).expect("read missing value"),
-            None
-        );
-    }
-
-    #[test]
-    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
-    fn test_exists() {
-        let project_id = "homeboy-keychain-test-exists";
-        let variable_name = "token";
-
-        remove(project_id, variable_name).expect("clean old value");
-        assert!(!exists(project_id, variable_name));
-        set(project_id, variable_name, "secret-value").expect("store value");
-        assert!(exists(project_id, variable_name));
-        remove(project_id, variable_name).expect("cleanup value");
-    }
-
-    #[test]
-    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
-    fn test_remove_many() {
-        let project_id = "homeboy-keychain-test-remove-many";
-        let variables = vec!["token".to_string(), "refresh".to_string()];
+        remove(project_id, "token").expect("remove value");
+        assert!(!exists(project_id, "token"));
 
         set(project_id, "token", "secret-value").expect("store token");
         set(project_id, "refresh", "refresh-value").expect("store refresh");
