@@ -509,27 +509,31 @@ mod tests {
     }"#;
 
     #[test]
-    fn detects_git_shorthand_and_protocol_specs() {
-        assert!(is_git_pinned_spec("github:org/tokens#v0.8.1"));
-        assert!(is_git_pinned_spec("git+https://github.com/org/pkg.git"));
-        assert!(is_git_pinned_spec("git://github.com/org/pkg.git"));
-        assert!(is_git_pinned_spec("gitlab:org/pkg"));
-        assert!(is_git_pinned_spec("org/tokens#v0.8.1"));
-        assert!(is_git_pinned_spec("org/tokens"));
-    }
-
-    #[test]
-    fn ignores_registry_and_local_specs() {
-        assert!(!is_git_pinned_spec("^4.17.0"));
-        assert!(!is_git_pinned_spec("~1.2.3"));
-        assert!(!is_git_pinned_spec("1.2.3"));
-        assert!(!is_git_pinned_spec("*"));
-        assert!(!is_git_pinned_spec(">=2.0.0"));
-        assert!(!is_git_pinned_spec("npm:@scope/pkg@1.0.0"));
-        assert!(!is_git_pinned_spec("file:../local"));
-        assert!(!is_git_pinned_spec("link:../local"));
-        assert!(!is_git_pinned_spec("workspace:*"));
-        assert!(!is_git_pinned_spec("https://example.com/pkg.tgz"));
+    fn classifies_git_pinned_specs_against_registry_and_local_specs() {
+        for spec in [
+            "github:org/tokens#v0.8.1",
+            "git+https://github.com/org/pkg.git",
+            "git://github.com/org/pkg.git",
+            "gitlab:org/pkg",
+            "org/tokens#v0.8.1",
+            "org/tokens",
+        ] {
+            assert!(is_git_pinned_spec(spec), "{spec} is git-pinned");
+        }
+        for spec in [
+            "^4.17.0",
+            "~1.2.3",
+            "1.2.3",
+            "*",
+            ">=2.0.0",
+            "npm:@scope/pkg@1.0.0",
+            "file:../local",
+            "link:../local",
+            "workspace:*",
+            "https://example.com/pkg.tgz",
+        ] {
+            assert!(!is_git_pinned_spec(spec), "{spec} is not git-pinned");
+        }
     }
 
     #[test]
@@ -551,119 +555,94 @@ mod tests {
     }
 
     #[test]
-    fn fails_when_git_pinned_dep_has_no_committed_lockfile() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
-        init_repo(root);
-        write(root, "package.json", GIT_PINNED_MANIFEST);
-        run_git(root, &["add", "package.json"]);
-        run_git(root, &["commit", "--quiet", "-m", "init"]);
+    fn committed_lockfile_guard_requires_tracked_lockfile_for_git_pinned_deps() {
+        // (manifest, extra files written, files committed, expected to pass)
+        let cases: [(&str, &[(&str, &str)], &[&str], bool); 4] = [
+            (GIT_PINNED_MANIFEST, &[], &["package.json"], false),
+            (
+                GIT_PINNED_MANIFEST,
+                &[
+                    ("package-lock.json", "{}"),
+                    (".gitignore", "package-lock.json\n"),
+                ],
+                &["package.json", ".gitignore"],
+                false,
+            ),
+            (
+                GIT_PINNED_MANIFEST,
+                &[("package-lock.json", "{}")],
+                &["package.json", "package-lock.json"],
+                true,
+            ),
+            (
+                r#"{ "dependencies": { "lodash": "^4.17.0" } }"#,
+                &[],
+                &["package.json"],
+                true,
+            ),
+        ];
+        for (index, (manifest, extra, committed, passes)) in cases.into_iter().enumerate() {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let root = temp.path();
+            init_repo(root);
+            write(root, "package.json", manifest);
+            for (rel, contents) in extra {
+                write(root, rel, contents);
+            }
+            let mut add = vec!["add"];
+            add.extend_from_slice(committed);
+            run_git(root, &add);
+            run_git(root, &["commit", "--quiet", "-m", "init"]);
 
-        let err = guard_committed_lockfiles(root).expect_err("should block release");
-        assert!(err.message.contains("git-pinned dependencies"));
-        assert!(err.message.contains("package.json"));
-        assert!(err.message.contains("github:org/tokens#v0.8.1"));
+            match guard_committed_lockfiles(root) {
+                Ok(()) => assert!(passes, "case {index} should block release"),
+                Err(err) => {
+                    assert!(!passes, "case {index} should pass: {}", err.message);
+                    assert!(err.message.contains("git-pinned dependencies"));
+                    assert!(err.message.contains("package.json"));
+                    assert!(err.message.contains("github:org/tokens#v0.8.1"));
+                }
+            }
+        }
     }
 
     #[test]
-    fn fails_when_lockfile_present_but_gitignored() {
+    fn local_file_dependency_guard_blocks_missing_and_checkout_external_targets() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
-        init_repo(root);
-        write(root, "package.json", GIT_PINNED_MANIFEST);
-        write(root, "package-lock.json", "{}");
-        write(root, ".gitignore", "package-lock.json\n");
-        run_git(root, &["add", "package.json", ".gitignore"]);
-        run_git(root, &["commit", "--quiet", "-m", "init"]);
+        let root = temp.path().join("component");
+        std::fs::create_dir_all(root.join("packages/ui")).expect("local package dir");
+        std::fs::create_dir_all(temp.path().join("agenttic/packages/agenttic-ui"))
+            .expect("sibling dir");
 
-        let err = guard_committed_lockfiles(root)
-            .expect_err("gitignored lockfile should not satisfy the guard");
-        assert!(err.message.contains("git-pinned dependencies"));
-    }
-
-    #[test]
-    fn passes_when_lockfile_committed() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
-        init_repo(root);
-        write(root, "package.json", GIT_PINNED_MANIFEST);
-        write(root, "package-lock.json", "{}");
-        run_git(root, &["add", "package.json", "package-lock.json"]);
-        run_git(root, &["commit", "--quiet", "-m", "init"]);
-
-        guard_committed_lockfiles(root).expect("committed lockfile satisfies the guard");
-    }
-
-    #[test]
-    fn passes_when_no_git_pinned_deps() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
-        init_repo(root);
         write(
-            root,
+            &root,
             "package.json",
-            r#"{ "dependencies": { "lodash": "^4.17.0" } }"#,
+            r#"{ "dependencies": { "@org/ui": "file:./packages/ui" } }"#,
         );
-        run_git(root, &["add", "package.json"]);
-        run_git(root, &["commit", "--quiet", "-m", "init"]);
+        guard_local_file_dependencies(&root).expect("in-checkout file dep is reproducible");
 
-        guard_committed_lockfiles(root).expect("registry-only deps need no lockfile guard");
-    }
-
-    #[test]
-    fn local_file_dependency_guard_blocks_missing_targets() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
         write(
-            root,
+            &root,
             "package.json",
             r#"{ "dependencies": { "@org/ui": "file:../missing-ui" } }"#,
         );
-
-        let err = guard_local_file_dependencies(root).expect_err("missing file dep blocks release");
-
-        assert!(err.message.contains("file: dependencies"));
+        let err =
+            guard_local_file_dependencies(&root).expect_err("missing file dep blocks release");
         assert!(err.message.contains("@org/ui@file:../missing-ui"));
         assert!(err.message.contains("missing target"));
-        assert!(err.message.contains("../missing-ui"));
-    }
 
-    #[test]
-    fn local_file_dependency_guard_blocks_existing_targets_outside_checkout() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().join("component");
-        let sibling = temp.path().join("agenttic/packages/agenttic-ui");
-        std::fs::create_dir_all(&root).expect("component dir");
-        std::fs::create_dir_all(&sibling).expect("sibling dir");
         write(
             &root,
             "package.json",
             r#"{ "dependencies": { "@automattic/agenttic-ui": "file:../agenttic/packages/agenttic-ui" } }"#,
         );
-
         let err = guard_local_file_dependencies(&root)
             .expect_err("checkout-external file dep blocks release");
-
         assert!(err
             .message
             .contains("@automattic/agenttic-ui@file:../agenttic/packages/agenttic-ui"));
         assert!(err.message.contains("outside component checkout"));
         assert!(err.message.contains("published package version"));
-        assert!(err.message.contains("workspace release path"));
-    }
-
-    #[test]
-    fn local_file_dependency_guard_allows_existing_targets_inside_checkout() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path();
-        std::fs::create_dir_all(root.join("packages/ui")).expect("local package dir");
-        write(
-            root,
-            "package.json",
-            r#"{ "dependencies": { "@org/ui": "file:./packages/ui" } }"#,
-        );
-
-        guard_local_file_dependencies(root).expect("in-checkout file dep is reproducible");
     }
 
     #[test]

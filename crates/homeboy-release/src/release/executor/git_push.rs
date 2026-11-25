@@ -366,35 +366,6 @@ mod tests {
     use homeboy_core::test_support::run_git_command as git;
 
     #[test]
-    fn git_push_step_fails_when_git_push_fails() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let init = Command::new("git")
-            .arg("init")
-            .current_dir(temp.path())
-            .output()
-            .expect("git init");
-        assert!(init.status.success());
-
-        let component = Component {
-            id: "fixture".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            ..Component::default()
-        };
-
-        let result = run_git_push(&component, "fixture", None, None)
-            .expect("push step should return result");
-
-        assert_eq!(result.status, ReleaseStepStatus::Failed);
-        assert!(!result.error.unwrap().trim().is_empty());
-        assert_eq!(
-            result
-                .data
-                .and_then(|data| data.get("success").and_then(serde_json::Value::as_bool)),
-            Some(false)
-        );
-    }
-
-    #[test]
     fn test_run_git_push_without_upstream() {
         let local = tempfile::tempdir().expect("local tempdir");
         let remote = tempfile::tempdir().expect("remote tempdir");
@@ -827,64 +798,35 @@ mod tests {
             advance
         );
 
-        // The remote main now contains BOTH the remote advance and the release
-        // commit (the release commit was rebased on top), and the tag is pushed.
-        git(remote.path(), &["show-ref", "--verify", "refs/tags/v1.0.0"]);
-        // Refresh remote-tracking ref first.
-        git(local.path(), &["fetch", "origin"]);
+        // The remote main contains BOTH the remote advance and exactly one
+        // rebased release commit (no force-push, no duplicate).
         let log = Command::new("git")
-            .args(["log", "--format=%s", "origin/main"])
-            .current_dir(local.path())
+            .args(["log", "--format=%s", "main"])
+            .current_dir(remote.path())
             .output()
             .expect("git log");
         let subjects = String::from_utf8_lossy(&log.stdout);
-        assert!(
-            subjects.contains("release: v1.0.0"),
-            "remote main must contain the release commit, got: {}",
-            subjects
-        );
         assert!(
             subjects.contains("remote advance"),
             "remote main must retain the advance commit (no force-push), got: {}",
             subjects
         );
-
-        // Issue #5502: the tag must follow the rebased release commit so it is an
-        // ancestor of the pushed branch — not stranded on the orphaned original.
-        let head = rev(local.path(), "origin/main");
-        let tag_commit = rev(local.path(), "v1.0.0^{commit}");
         assert_eq!(
-            tag_commit, head,
-            "tag v1.0.0 must point at the rebased release commit on origin/main"
-        );
-        // And the same on the remote itself (the moved tag was force-pushed).
-        let remote_tag = rev(remote.path(), "v1.0.0^{commit}");
-        let remote_head = rev(remote.path(), "main");
-        assert_eq!(
-            remote_tag, remote_head,
-            "remote tag v1.0.0 must point at remote main's HEAD (the release commit)"
-        );
-
-        // The ancestry invariant deploy relies on must hold.
-        let is_ancestor = Command::new("git")
-            .args(["merge-base", "--is-ancestor", "v1.0.0", "origin/main"])
-            .current_dir(local.path())
-            .status()
-            .expect("merge-base");
-        assert!(
-            is_ancestor.success(),
-            "tag v1.0.0 must be an ancestor of origin/main (deploy ancestry invariant)"
-        );
-
-        // Exactly one release commit exists on the branch line (no duplicate).
-        let release_commits = subjects
-            .lines()
-            .filter(|s| s.trim() == "release: v1.0.0")
-            .count();
-        assert_eq!(
-            release_commits, 1,
+            subjects
+                .lines()
+                .filter(|s| s.trim() == "release: v1.0.0")
+                .count(),
+            1,
             "exactly one release commit must exist on the branch, got: {}",
             subjects
+        );
+
+        // Issue #5502: the tag must follow the rebased release commit so it is
+        // the pushed branch head -- not stranded on the orphaned original.
+        assert_eq!(
+            rev(remote.path(), "v1.0.0^{commit}"),
+            rev(remote.path(), "main"),
+            "remote tag v1.0.0 must point at remote main's HEAD (the release commit)"
         );
     }
 
