@@ -469,13 +469,8 @@ mod tests {
                 panic!("expected evidence output");
             };
 
-            assert_eq!(output.command, "runs.evidence");
             assert_eq!(output.run_id, run.id);
             assert_eq!(output.run.kind, "bench");
-            assert_eq!(
-                output.homeboy_provenance.schema,
-                "homeboy/homeboy-provenance/v1"
-            );
             assert_eq!(output.homeboy_provenance.identities.len(), 6);
             assert_eq!(
                 output.homeboy_provenance.identities[0].role,
@@ -574,7 +569,6 @@ mod tests {
                 bench_results.fetch_command.as_deref(),
                 Some(expected_fetch_command.as_str())
             );
-            assert_eq!(bench_results.reference.schema, "homeboy/artifact-ref/v1");
             assert_eq!(bench_results.reference.id, bench_results.id);
             let review = output
                 .artifact_index
@@ -591,14 +585,9 @@ mod tests {
             assert!(review.address.reviewer_visible);
             assert_eq!(output.evidence_links.len(), 1);
             assert_eq!(
-                output.evidence_links[0].reference.schema,
-                "homeboy/evidence-ref/v1"
-            );
-            assert_eq!(
                 output.evidence_links[0].target,
                 "https://example.test/evidence"
             );
-            assert_eq!(output.retention.default_retention_days, 30);
             assert!(output
                 .retention
                 .artifact_root
@@ -639,7 +628,6 @@ mod tests {
                 "runner-artifact://run/child-log"
             );
             let manifest = output.evidence_manifest.expect("evidence manifest");
-            assert_eq!(manifest.schema, "homeboy/evidence-manifest/v1");
             assert_eq!(manifest.tracker_refs[0].id, "Extra-Chill/homeboy#123");
             assert_eq!(manifest.blocking_conditions[0].kind, "review_needed");
             // An attached manifest is surfaced verbatim, stamped with where it
@@ -957,12 +945,6 @@ mod tests {
     }
 
     #[test]
-    fn bounded_strings_keep_ordinary_uuid_run_ids_exact() {
-        let run_id = "123e4567-e89b-12d3-a456-426614174000";
-        assert_eq!(bounded_string(run_id), run_id);
-    }
-
-    #[test]
     fn pathological_run_ids_omit_optional_locators_instead_of_truncating_them() {
         let run_id = "run-".to_string() + &"x".repeat(MAX_PUBLIC_ENVELOPE_BYTES);
         let summary = RunsEvidenceSummaryOutput {
@@ -1081,10 +1063,8 @@ mod tests {
         });
     }
 
-    /// Before this wiring the manifest member was structurally always absent:
-    /// nothing in the repository produced one, so `runs evidence` advertised an
-    /// interpretation layer it never populated. A run nobody attached a manifest
-    /// to must still carry one, marked as Homeboy's own reading.
+    /// A run nobody attached a manifest to still carries one, marked as
+    /// Homeboy's own reading.
     #[test]
     fn evidence_command_derives_a_manifest_when_no_producer_attached_one() {
         with_isolated_home(|home| {

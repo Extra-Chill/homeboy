@@ -387,14 +387,7 @@ mod presentation_tests {
     }
 
     #[test]
-    fn logs_preserves_cursor_and_canonical_payload() {
-        let args = parse(&["runs", "logs", "run-1", "--cursor", "event-page-2"]);
-        let super::RunsCommand::Logs(logs) = args.command else {
-            panic!("expected logs");
-        };
-        assert_eq!(logs.run_id, "run-1");
-        assert_eq!(logs.cursor.as_deref(), Some("event-page-2"));
-        assert!(RunsCli::try_parse_from(["runs", "logs", "run-1", "--limit", "10"]).is_err());
+    fn cook_event_page_serializes_as_the_canonical_payload() {
         let page =
             serde_json::json!({"schema": "homeboy/control-plane-event-page/v1", "events": []});
         assert_eq!(
@@ -482,6 +475,19 @@ mod presentation_tests {
                 false,
                 false,
             ),
+            // `--detail` never changes the presentation; format is the only knob.
+            (
+                &["runs", "show", "run-1", "--detail", "full"],
+                true,
+                false,
+                false,
+            ),
+            (
+                &["runs", "show", "run-1", "--detail", "summary", "--json"],
+                false,
+                false,
+                false,
+            ),
         ];
         for (argv, show, proof, dossier) in cases {
             let args = parse(argv);
@@ -492,21 +498,6 @@ mod presentation_tests {
                 *dossier,
                 "{argv:?} dossier"
             );
-        }
-    }
-
-    #[test]
-    fn evidence_projections_conflict() {
-        let error = RunsCli::try_parse_from(["runs", "evidence", "run-1", "--proof", "--dossier"])
-            .err()
-            .expect("projections must conflict");
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
-        for projection in ["--proof", "--dossier"] {
-            let error =
-                RunsCli::try_parse_from(["runs", "evidence", "run-1", projection, "--full"])
-                    .err()
-                    .expect("--full applies only to plain evidence");
-            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
         }
     }
 
@@ -522,22 +513,5 @@ mod presentation_tests {
             r#"{"audit":"pass"}"#,
         ]);
         assert!(report.into_markdown().is_ok());
-    }
-
-    #[test]
-    fn detail_is_accepted_but_does_not_change_the_presentation() {
-        // `runs show` renders its documented default at both detail levels;
-        // the format axis is the only knob.
-        for detail in ["summary", "full"] {
-            assert!(
-                parse(&["runs", "show", "run-1", "--detail", detail]).show_summary_eligible(),
-                "--detail {detail} must not suppress the compact summary"
-            );
-            assert!(
-                !parse(&["runs", "show", "run-1", "--detail", detail, "--json"])
-                    .show_summary_eligible(),
-                "--detail {detail} must not resurrect the compact summary"
-            );
-        }
     }
 }

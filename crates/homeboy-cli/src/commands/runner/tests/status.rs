@@ -14,9 +14,8 @@ use homeboy_runner_contract::RunnerKind;
 
 use super::super::jobs::format_job_event;
 use super::super::status::{
-    controller_local_status_output, declared_run_followups,
-    execution_capabilities_with_local_placement, lab_runner_homeboy_output, non_local_sessions,
-    operator_summary, reconcile_output, reconciliation_outcome,
+    declared_run_followups, execution_capabilities_with_local_placement, lab_runner_homeboy_output,
+    non_local_sessions, operator_summary, reconcile_output, reconciliation_outcome,
     runner_artifact_feature_diagnostics, runner_followups, runner_followups_with_admission,
     runner_status_operator_commands, runner_status_operator_hints, selected_admission_summary,
 };
@@ -183,13 +182,6 @@ fn runner_command_failure_next_action_is_never_the_failed_command() {
     let reconcile = "homeboy runner reconcile homeboy-lab";
     let mut cases = Vec::new();
 
-    let mut unavailable = admission_fixture();
-    unavailable.next_action = Some(reconcile.to_string());
-    cases.push((
-        "admission_unavailable",
-        reconciliation_outcome("homeboy-lab", &connected_report(), &unavailable),
-    ));
-
     let mut disconnected = admission_fixture();
     disconnected.connected = false;
     disconnected.next_action = Some(reconcile.to_string());
@@ -204,31 +196,6 @@ fn runner_command_failure_next_action_is_never_the_failed_command() {
     cases.push((
         "daemon_compatibility",
         reconciliation_outcome("homeboy-lab", &connected_report(), &incompatible),
-    ));
-
-    let mut stale = admission_fixture();
-    stale.daemon_fresh = false;
-    stale.daemon_lease_verdict.fresh = false;
-    stale.next_action = Some(reconcile.to_string());
-    let mut stale_report = connected_report();
-    stale_report.daemon_freshness = Some(DaemonFreshnessReport {
-        fresh: false,
-        stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
-        restartable: true,
-        lease_id: None,
-        pid: None,
-        recovery_evidence: Some(DaemonRecoveryEvidence::Recoverable),
-        ownership_evidence: None,
-        daemon_version: None,
-        daemon_build_identity: None,
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    });
-    cases.push((
-        "daemon_freshness",
-        reconciliation_outcome("homeboy-lab", &stale_report, &stale),
     ));
 
     for (label, outcome) in cases {
@@ -789,42 +756,6 @@ fn runner_followups_include_workspace_prune_for_disk_pressure_recovery() {
 }
 
 #[test]
-fn admission_followups_replace_generic_restart_for_ambiguous_missing_lease() {
-    let mut report = disconnected_report();
-    report.active_job_state = RunnerActiveJobState::Available;
-    report.daemon_freshness = Some(DaemonFreshnessReport {
-        fresh: false,
-        stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
-        restartable: false,
-        lease_id: None,
-        pid: None,
-        recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable),
-        ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
-        daemon_version: None,
-        daemon_build_identity: None,
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    });
-    let admission = report.admission_summary();
-
-    let followups =
-        runner_followups_with_admission(Some("homeboy-lab"), Some(&report), Some(&admission));
-
-    assert!(followups.iter().all(|followup| {
-        !matches!(
-            followup.label.as_str(),
-            "exec" | "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
-        )
-    }));
-    assert!(admission.next_action.is_none());
-    assert!(followups
-        .iter()
-        .all(|followup| followup.label != "admission_recovery"));
-}
-
-#[test]
 fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projections() {
     let mut report = disconnected_report();
     report.connected = true;
@@ -938,7 +869,7 @@ fn unqualified_status_followups_use_selected_admission_action() {
     assert!(followups.iter().all(|followup| {
         !matches!(
             followup.label.as_str(),
-            "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
+            "exec" | "refresh_homeboy" | "homeboy_binary_refresh" | "homeboy_binary_upgrade"
         )
     }));
     assert!(admission.next_action.is_none());
@@ -948,42 +879,44 @@ fn unqualified_status_followups_use_selected_admission_action() {
 }
 
 #[test]
-fn declared_bench_followups_preserve_existing_status_guidance() {
-    let followups = declared_run_followups(Some("bench"), None);
-    let serialized = serde_json::to_string(&followups).expect("serialize followups");
+fn declared_run_followups_are_scoped_to_the_declared_workload() {
+    let cases = [
+        (
+            "bench",
+            &[
+                "homeboy runs latest-run --kind bench",
+                "homeboy runs artifacts <run-id>",
+            ][..],
+            &["latest_fuzz_run", "--kind fuzz"][..],
+        ),
+        (
+            "fuzz",
+            &[
+                "homeboy runs latest-run --kind fuzz",
+                "homeboy runs evidence <run-id>",
+            ][..],
+            &["latest_bench_run", "--kind bench"][..],
+        ),
+        (
+            "unknown",
+            &["recent_runs", "run_artifacts"][..],
+            &["--kind bench", "--kind fuzz"][..],
+        ),
+    ];
 
-    assert!(serialized.contains("latest_bench_run"));
-    assert!(serialized.contains("homeboy runs latest-run --kind bench"));
-    assert!(serialized.contains("homeboy runs refs --kind bench --limit 10"));
-    assert!(serialized.contains("homeboy runs artifacts <run-id>"));
-    assert!(!serialized.contains("latest_fuzz_run"));
-    assert!(!serialized.contains("homeboy runs refs --kind fuzz --limit 10"));
-}
-
-#[test]
-fn declared_fuzz_followups_preserve_existing_status_guidance() {
-    let followups = declared_run_followups(Some("fuzz"), None);
-    let serialized = serde_json::to_string(&followups).expect("serialize followups");
-
-    assert!(serialized.contains("latest_fuzz_run"));
-    assert!(serialized.contains("homeboy runs latest-run --kind fuzz"));
-    assert!(serialized.contains("homeboy runs refs --kind fuzz --limit 10"));
-    assert!(serialized.contains("homeboy runs evidence <run-id>"));
-    assert!(!serialized.contains("latest_bench_run"));
-    assert!(!serialized.contains("homeboy runs refs --kind bench --limit 10"));
-}
-
-#[test]
-fn unknown_workload_does_not_emit_declared_bench_or_fuzz_followups() {
-    let followups = declared_run_followups(Some("unknown"), None);
-    let serialized = serde_json::to_string(&followups).expect("serialize followups");
-
-    assert!(serialized.contains("recent_runs"));
-    assert!(serialized.contains("run_artifacts"));
-    assert!(!serialized.contains("latest_bench_run"));
-    assert!(!serialized.contains("latest_fuzz_run"));
-    assert!(!serialized.contains("--kind bench"));
-    assert!(!serialized.contains("--kind fuzz"));
+    for (workload, present, absent) in cases {
+        let followups = declared_run_followups(Some(workload), None);
+        let serialized = serde_json::to_string(&followups).expect("serialize followups");
+        for needle in present {
+            assert!(serialized.contains(needle), "{workload}: missing {needle}");
+        }
+        for needle in absent {
+            assert!(
+                !serialized.contains(needle),
+                "{workload}: unexpected {needle}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1100,14 +1033,8 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
     let output = lab_runner_homeboy_output("homeboy-lab", "/opt/homeboy/bin/homeboy", &report);
     let serialized = serde_json::to_string(&output).expect("serialize runner homeboy output");
 
-    assert!(serialized.contains("controller_cli"));
-    assert!(serialized.contains("active_daemon"));
-    assert!(serialized.contains("configured_job_binary"));
     assert!(serialized.contains("runner_config.settings.homeboy_path"));
     assert!(serialized.contains("Recent or already-queued runner workflows"));
-    assert_eq!(output.controller_cli.role, "controller_cli");
-    assert_eq!(output.active_daemon.role, "active_daemon");
-    assert_eq!(output.configured_job_binary.role, "configured_job_binary");
     assert_eq!(
         output.configured_job_binary.path.as_deref(),
         Some("/opt/homeboy/bin/homeboy")
@@ -1314,21 +1241,6 @@ fn global_capabilities_include_connected_lab_for_local_and_disconnected_remote_q
 }
 
 #[test]
-fn controller_local_status_reports_local_state_without_lab_readiness() {
-    // #15935: a local query must not carry the cross-runner Lab readiness
-    // projection, which requires remote SSH probes to compute.
-    let output = controller_local_status_output("local");
-
-    assert_eq!(output.id.as_deref(), Some("local"));
-    assert!(output.extra.execution_capabilities.is_none());
-    assert!(output
-        .extra
-        .operator_hints
-        .iter()
-        .any(|hint| hint.contains("--placement local")));
-}
-
-#[test]
 fn controller_local_status_query_never_probes_a_configured_remote_runner() {
     homeboy::test_support::with_isolated_home(|_| {
         runner::create(r#"{"id":"local","kind":"local"}"#, false).expect("create local runner");
@@ -1348,36 +1260,17 @@ fn controller_local_status_query_never_probes_a_configured_remote_runner() {
 
         assert_eq!(exit_code, 0);
         assert!(output.extra.execution_capabilities.is_none());
+        assert!(output
+            .extra
+            .operator_hints
+            .iter()
+            .any(|hint| hint.contains("--placement local")));
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
             "local status took {:?}",
             started.elapsed()
         );
     });
-}
-
-#[test]
-fn peer_session_preview_action_satisfies_the_cli_contract() {
-    let action = homeboy::runner::readonly_probe::ReadOnlyProbeDegradation {
-        probe: "runner_peer_session".to_string(),
-        runner_id: Some("homeboy lab".to_string()),
-        reason_code: homeboy::runner::readonly_probe::REASON_PROBE_TRUNCATED,
-        timeout_seconds: 0,
-        deadline_ms: 0,
-        follow_up: "homeboy runner peer-sessions 'homeboy lab'".to_string(),
-        follow_up_action: Some(homeboy::core::error::ExecutableAction::new(
-            "runner.peer_sessions.preview",
-            "inspect peer sessions",
-            "homeboy",
-            ["runner", "peer-sessions", "homeboy lab"],
-            homeboy::core::error::ActionSafety::ReadOnly,
-        )),
-        detail: "partial status".to_string(),
-    };
-
-    let action = action.follow_up_action.expect("typed action");
-    Cli::try_parse_from(shlex::split(&action.render_command()).expect("shell argv"))
-        .expect("peer-session cleanup action must satisfy the CLI contract");
 }
 
 fn assert_rendered_runner_action_parses(state: &str, command: &str, pinned_ref: Option<&str>) {

@@ -250,30 +250,23 @@ mod tests {
     }
 
     #[test]
-    fn build_proof_marks_running_run_pending_with_no_signals() {
-        let run = run_with("running", json!({ "phase": "warmup" }));
-        let proof = build_proof(&run).expect("valid proof");
-        assert_eq!(proof.passed, None);
-        assert!(proof.gate_failures.is_empty());
-        assert!(proof.signals.is_empty());
+    fn build_proof_derives_pass_state_from_run_status() {
+        for (status, metadata, passed) in [
+            ("running", json!({ "phase": "warmup" }), None),
+            ("pass", json!({ "success": true }), Some(true)),
+        ] {
+            let proof = build_proof(&run_with(status, metadata)).expect("valid proof");
+            assert_eq!(proof.passed, passed, "{status}");
+            assert!(proof.gate_failures.is_empty(), "{status}");
+            // Non-fuzz runs carry no fuzz projection.
+            assert!(proof.fuzz.is_none(), "{status}");
+        }
+        let running =
+            build_proof(&run_with("running", json!({ "phase": "warmup" }))).expect("valid proof");
+        assert!(running.signals.is_empty());
     }
 
-    #[test]
-    fn build_proof_marks_pass() {
-        let run = run_with("pass", json!({ "scenario_metrics": [] }));
-        let proof = build_proof(&run).expect("valid proof");
-        assert_eq!(proof.passed, Some(true));
-    }
-
-    #[test]
-    fn build_proof_leaves_non_fuzz_runs_without_a_fuzz_projection() {
-        let run = run_with("pass", json!({ "success": true }));
-        assert!(build_proof(&run).expect("non-fuzz proof").fuzz.is_none());
-    }
-
-    /// #10514: the reviewer-facing read command returned only
-    /// `{"kind":"fuzz","passed":true,"signals":{"success":true},"status":"pass"}`
-    /// for a run that already knew its exact revisions, cases, and gates.
+    /// Fuzz runs project their exact revisions, cases, and gates for reviewers.
     #[test]
     fn build_proof_projects_the_reviewer_facing_fuzz_proof() {
         let mut run = run_with(
