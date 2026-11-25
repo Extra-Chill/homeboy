@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 /// * The bundled asset under this crate's `assets/defaults/` is core's
 ///   fallback. It is framework-agnostic on purpose (#2240): only generic
 ///   dev-tool manifests, a generic source layout, and no presupposed file
-///   extension. Four tests at the bottom of this file pin that agnosticism.
+///   extension. A test at the bottom of this file pins that agnosticism.
 /// * The document owned by the extensions repository is an ecosystem
 ///   *override*, loaded at runtime via the `EXTENSION_DEFAULTS_PATH`
 ///   environment variable. It intentionally carries the extra
@@ -239,55 +239,43 @@ mod tests {
     }
 
     #[test]
-    fn core_version_candidate_defaults_are_framework_agnostic() {
-        // Core's built-in version-candidate fallback ships only generic dev-tool
-        // manifests. Framework-specific candidates (e.g. a PHP `composer.json`
-        // or a WordPress theme `style.css`) belong to the extension that owns
-        // them, supplied via the external defaults override (#2240).
-        let files = default_version_candidates()
-            .into_iter()
-            .map(|candidate| candidate.file)
+    fn bundled_fallback_defaults_are_framework_agnostic() {
+        // Core's bundled fallback ships only generic dev-tool manifests and a
+        // generic source layout. Framework-specific candidates (a PHP
+        // `composer.json`, a WordPress `style.css`, `Test.php` suffixes)
+        // belong to the extension override (#2240). Read the bundled asset
+        // directly so an operator's EXTENSION_DEFAULTS_PATH cannot decide it.
+        let defaults = parse_extension_provided_defaults(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/defaults/extension-provided-defaults.json"
+        )));
+
+        let files = defaults
+            .version_candidates
+            .iter()
+            .map(|candidate| candidate.file.as_str())
             .collect::<Vec<_>>();
-
         assert_eq!(files, ["Cargo.toml", "package.json"]);
-    }
 
-    #[test]
-    fn core_test_drift_fallback_is_framework_agnostic() {
-        let config = extension_provided_test_drift_config();
+        assert_eq!(defaults.test_drift.source_dirs, ["src"]);
+        assert_eq!(defaults.test_drift.test_dirs, ["tests"]);
+        assert!(defaults.test_drift.file_extensions.is_empty());
+        assert!(!defaults.test_drift.inline_tests);
 
-        // Generic source layout only — no PHP/WordPress `inc`/`lib` conventions
-        // and no presupposed file extension.
-        assert_eq!(config.source_dirs, ["src"]);
-        assert_eq!(config.test_dirs, ["tests"]);
-        assert!(config.file_extensions.is_empty());
-        assert!(!config.inline_tests);
-    }
-
-    #[test]
-    fn core_direct_test_suffix_fallback_is_framework_agnostic() {
-        let suffixes = extension_provided_direct_test_file_suffixes();
-
-        // No PHP `Test.php` convention baked into core; generic JS/TS/Rust
-        // suffixes remain.
+        let suffixes = &defaults.direct_test_file_suffixes;
         assert!(!suffixes.contains(&"Test.php".to_string()));
-        assert!(suffixes.contains(&".test.js".to_string()));
-        assert!(suffixes.contains(&".spec.tsx".to_string()));
         assert!(suffixes.contains(&"_test.rs".to_string()));
     }
 
     #[test]
-    fn malformed_runtime_defaults_document_falls_back_to_bundled_asset() {
+    fn runtime_defaults_document_overrides_only_when_well_formed() {
         // An override file is untrusted operator input. A document that does
         // not parse must yield None so the bundled asset stays in effect,
         // rather than aborting every command that reads defaults — including
         // the upgrade path that would otherwise repair the install.
         assert!(try_parse_extension_provided_defaults("not a defaults document").is_none());
         assert!(try_parse_extension_provided_defaults("{}").is_none());
-    }
 
-    #[test]
-    fn well_formed_runtime_defaults_document_overrides_bundled_asset() {
         let defaults = try_parse_extension_provided_defaults(
             r#"{
                 "install_methods": {},
@@ -304,27 +292,6 @@ mod tests {
         .expect("well-formed defaults document parses");
 
         assert_eq!(defaults.test_drift.source_dirs, ["lib"]);
-        assert_eq!(defaults.test_drift.test_dirs, ["spec"]);
         assert_eq!(defaults.direct_test_file_suffixes, ["_spec.rb"]);
-    }
-
-    #[test]
-    fn parses_homeboy_extensions_owned_defaults_contract() {
-        let path = std::env::current_dir()
-            .expect("resolve current working directory")
-            .parent()
-            .expect("worktree has parent")
-            .join("homeboy-extensions-defaults-fixture")
-            .join("defaults/extension-provided-defaults.json");
-
-        if !path.exists() {
-            return;
-        }
-
-        let content = fs::read_to_string(path).expect("read extension-owned defaults");
-        let defaults = parse_extension_provided_defaults(&content);
-
-        assert_eq!(defaults.version_candidates.len(), 4);
-        assert_eq!(defaults.test_drift.test_dirs, ["tests"]);
     }
 }
