@@ -1812,52 +1812,35 @@ mod tests {
     }
 
     #[test]
-    fn drift_options_use_extension_drift_config() {
+    fn drift_options_anchor_configured_dirs_at_root_and_any_depth() {
         let dir = TempDir::new().expect("temp dir should be created");
-        let config = TestDriftConfig {
-            source_dirs: vec!["src".to_string(), "inc".to_string()],
-            test_dirs: vec!["tests".to_string()],
-            file_extensions: vec!["php".to_string()],
-            inline_tests: false,
-        };
+        // (declared file_extensions, expected extension); an empty declaration
+        // falls back to the extension's own file extensions.
+        for (file_extensions, ext) in [(vec!["php".to_string()], "php"), (Vec::new(), "rs")] {
+            let config = TestDriftConfig {
+                source_dirs: vec!["src".to_string(), "inc".to_string()],
+                test_dirs: vec!["tests".to_string()],
+                file_extensions,
+                inline_tests: false,
+            };
 
-        let opts = DriftOptions::from_config(dir.path(), "HEAD~1", &config, &["rs".to_string()]);
+            let opts =
+                DriftOptions::from_config(dir.path(), "HEAD~1", &config, &["rs".to_string()]);
 
-        // Each configured directory contributes a root-anchored pattern and an
-        // any-depth pattern so monorepo members (`packages/<pkg>/src`, ...) are
-        // recognized as source instead of silently reading as non-source.
-        assert_eq!(
-            opts.source_patterns,
-            vec![
-                "src/**/*.php",
-                "**/src/**/*.php",
-                "inc/**/*.php",
-                "**/inc/**/*.php"
-            ]
-        );
-        assert_eq!(
-            opts.test_patterns,
-            vec!["tests/**/*.php", "**/tests/**/*.php"]
-        );
-    }
-
-    #[test]
-    fn drift_options_fall_back_to_extension_file_extensions() {
-        let dir = TempDir::new().expect("temp dir should be created");
-        let config = TestDriftConfig {
-            source_dirs: vec!["src".to_string()],
-            test_dirs: vec!["tests".to_string()],
-            file_extensions: Vec::new(),
-            inline_tests: true,
-        };
-
-        let opts = DriftOptions::from_config(dir.path(), "HEAD~1", &config, &["rs".to_string()]);
-
-        assert_eq!(opts.source_patterns, vec!["src/**/*.rs", "**/src/**/*.rs"]);
-        assert_eq!(
-            opts.test_patterns,
-            vec!["tests/**/*.rs", "**/tests/**/*.rs"]
-        );
+            assert_eq!(
+                opts.source_patterns,
+                vec![
+                    format!("src/**/*.{ext}"),
+                    format!("**/src/**/*.{ext}"),
+                    format!("inc/**/*.{ext}"),
+                    format!("**/inc/**/*.{ext}"),
+                ]
+            );
+            assert_eq!(
+                opts.test_patterns,
+                vec![format!("tests/**/*.{ext}"), format!("**/tests/**/*.{ext}")]
+            );
+        }
     }
 
     #[test]
@@ -1986,25 +1969,51 @@ mod tests {
     }
 
     #[test]
-    fn rust_cargo_changed_routing_emits_inline_filter() {
-        let dir = TempDir::new().expect("temp dir should be created");
-        std::fs::create_dir_all(dir.path().join("src/core")).expect("source directory");
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("manifest");
-        std::fs::write(dir.path().join("src/lib.rs"), "mod core;").expect("lib target");
-        let component = Component::new(
-            "fixture-component".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
+    fn rust_cargo_changed_production_source_routes_to_the_whole_lib_target() {
+        // (owning module contents, changed source contents): whether the
+        // changed module has inline tests, a sibling `tests.rs`, or no
+        // determinable test module, production source runs the lib target.
+        for (owner, source, sibling_tests) in [
+            ("mod changed;\n", "pub fn trim() {}\n", false),
+            (
+                "mod changed;\n\n#[cfg(test)]\nmod tests;\n",
+                "pub fn cleanup() {}\n",
+                true,
+            ),
+            (
+                "mod changed;\n\n#[cfg(test)]\nmod tests;\n",
+                "pub fn reap() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn reaps() {}\n}\n",
+                true,
+            ),
+        ] {
+            let dir = TempDir::new().expect("temp dir should be created");
+            fs::create_dir_all(dir.path().join("src/core")).expect("source directory");
+            fs::write(
+                dir.path().join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            )
+            .expect("manifest");
+            fs::write(dir.path().join("src/lib.rs"), "mod core;").expect("lib target");
+            fs::write(dir.path().join("src/core/mod.rs"), owner).expect("owning module");
+            fs::write(dir.path().join("src/core/changed.rs"), source).expect("changed source");
+            if sibling_tests {
+                fs::write(
+                    dir.path().join("src/core/tests.rs"),
+                    "#[test]\nfn sibling() {}\n",
+                )
+                .expect("sibling test module");
+            }
+            let component = Component::new(
+                "fixture-component".to_string(),
+                dir.path().to_string_lossy().to_string(),
+                "/tmp/remote".to_string(),
+                None,
+            );
 
-        let env = rust_cargo_changed_test_env(&component, &["src/core/daemon.rs".to_string()]);
+            let env = rust_cargo_changed_test_env(&component, &["src/core/changed.rs".to_string()]);
 
-        assert_union_candidates(&env, &["fixture::lib::fixture::"]);
+            assert_union_candidates(&env, &["fixture::lib::fixture::"]);
+        }
     }
 
     #[test]
@@ -2059,262 +2068,6 @@ mod tests {
                 "alpha-pkg::test::api::",
                 "beta-pkg::lib::beta_pkg::",
             ],
-        );
-    }
-
-    #[test]
-    fn rust_cargo_changed_routing_maps_repository_relative_inline_test_to_owning_package() {
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("homeboy-core should live in the workspace crates directory");
-        let component = Component::new(
-            "fixture-component".to_string(),
-            workspace_root.to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
-
-        let env = rust_cargo_changed_test_env(
-            &component,
-            &["crates/homeboy-lab-runner/src/workspace/tests/snapshot.rs".to_string()],
-        );
-
-        assert_union_candidates(
-            &env,
-            &["homeboy-lab-runner::lib::homeboy_lab_runner::workspace::tests::snapshot"],
-        );
-    }
-
-    /// End-to-end proof for #10465: a changed workspace-member source that
-    /// carries its own `#[cfg(test)] mod tests` must route to that crate's lib
-    /// target, filtered to the changed module.
-    ///
-    /// This is the exact shape of `76c8c99a8`, whose two covering unit tests
-    /// lived inside the changed crate and never ran.
-    #[test]
-    fn changed_inline_test_source_routes_to_its_owning_crate_lib() {
-        let dir = TempDir::new().expect("temp dir should be created");
-        let workspace_root = dir.path();
-        fs::write(
-            workspace_root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"crates/*\"]\n",
-        )
-        .expect("workspace manifest");
-        let member = workspace_root.join("crates/homeboy-lab-runner");
-        fs::create_dir_all(member.join("src/lab/offload")).expect("member dirs");
-        fs::write(
-            member.join("Cargo.toml"),
-            "[package]\nname = \"homeboy-lab-runner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .expect("member manifest");
-        fs::write(member.join("src/lib.rs"), "pub mod lab;").expect("member lib target");
-        fs::write(
-            member.join("src/lab/offload/hydration.rs"),
-            "pub fn hydrate() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn hydrates() {}\n}\n",
-        )
-        .expect("changed source with inline tests");
-
-        let component = Component::new(
-            "homeboy".to_string(),
-            workspace_root.to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
-
-        let env = rust_cargo_changed_test_env(
-            &component,
-            &["crates/homeboy-lab-runner/src/lab/offload/hydration.rs".to_string()],
-        );
-
-        assert_union_candidates(&env, &["homeboy-lab-runner::lib::homeboy_lab_runner::"]);
-    }
-
-    /// Regression for #14867: `worktree/store_ops.rs` declares no tests of
-    /// its own; they live in the sibling `worktree/tests.rs`, mounted as
-    /// `mod tests` by `worktree/mod.rs`. Filtering to `worktree::store_ops`
-    /// would match zero tests and fail the runner closed on "ran 0 tests".
-    /// The filter must route to the sibling `worktree::tests` module, which
-    /// actually runs tests, instead. Without the fix this test fails because
-    /// the routing keeps `worktree::store_ops` as the module filter, which
-    /// selects nothing.
-    #[test]
-    fn rust_cargo_changed_routing_routes_to_sibling_tests_module_when_source_has_no_own_tests() {
-        let dir = TempDir::new().expect("temp dir should be created");
-        std::fs::create_dir_all(dir.path().join("src/worktree")).expect("source directory");
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("manifest");
-        std::fs::write(dir.path().join("src/lib.rs"), "mod worktree;").expect("lib target");
-        std::fs::write(
-            dir.path().join("src/worktree/mod.rs"),
-            "mod store_ops;\n\n#[cfg(test)]\nmod tests;\n",
-        )
-        .expect("owning module declares the sibling test module");
-        std::fs::write(
-            dir.path().join("src/worktree/store_ops.rs"),
-            "pub fn cleanup() {}\n",
-        )
-        .expect("source module with no tests of its own");
-        std::fs::write(
-            dir.path().join("src/worktree/tests.rs"),
-            "#[test]\nfn cleanup_removes_entries() { assert!(true); }\n",
-        )
-        .expect("sibling test module");
-
-        let component = Component::new(
-            "fixture-component".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
-
-        let env =
-            rust_cargo_changed_test_env(&component, &["src/worktree/store_ops.rs".to_string()]);
-
-        assert_union_candidates(&env, &["fixture::lib::fixture::"]);
-    }
-
-    /// A changed source module that declares its own inline
-    /// `#[cfg(test)] mod tests` must keep selecting its own module, even when
-    /// a sibling `tests.rs` also exists in the same directory for a different
-    /// module. The source module's own tests are known to exist, so no
-    /// redirection is warranted.
-    #[test]
-    fn rust_cargo_changed_routing_keeps_own_module_despite_sibling_tests_file() {
-        let dir = TempDir::new().expect("temp dir should be created");
-        std::fs::create_dir_all(dir.path().join("src/worktree")).expect("source directory");
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("manifest");
-        std::fs::write(dir.path().join("src/lib.rs"), "mod worktree;").expect("lib target");
-        std::fs::write(
-            dir.path().join("src/worktree/mod.rs"),
-            "mod reaping;\n\n#[cfg(test)]\nmod tests;\n",
-        )
-        .expect("owning module declares the sibling test module");
-        std::fs::write(
-            dir.path().join("src/worktree/reaping.rs"),
-            "pub fn reap() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn reaps() {}\n}\n",
-        )
-        .expect("source module with its own inline tests");
-        std::fs::write(
-            dir.path().join("src/worktree/tests.rs"),
-            "#[test]\nfn unrelated() { assert!(true); }\n",
-        )
-        .expect("sibling test module for a different source file");
-
-        let component = Component::new(
-            "fixture-component".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
-
-        let env = rust_cargo_changed_test_env(&component, &["src/worktree/reaping.rs".to_string()]);
-
-        assert_union_candidates(&env, &["fixture::lib::fixture::"]);
-    }
-
-    /// A changed source module with no tests of its own and no determinable
-    /// owning test module (no sibling `tests.rs`, and nothing declares one)
-    /// must fall back to the full suite rather than emit a filter known to
-    /// match zero tests.
-    #[test]
-    fn rust_cargo_changed_routing_falls_back_when_no_owning_test_module_is_determinable() {
-        let dir = TempDir::new().expect("temp dir should be created");
-        std::fs::create_dir_all(dir.path().join("src/util")).expect("source directory");
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("manifest");
-        std::fs::write(dir.path().join("src/lib.rs"), "mod util;").expect("lib target");
-        std::fs::write(dir.path().join("src/util/mod.rs"), "mod strings;\n")
-            .expect("owning module with no test module declared");
-        std::fs::write(
-            dir.path().join("src/util/strings.rs"),
-            "pub fn trim(value: &str) -> &str { value.trim() }\n",
-        )
-        .expect("source module with no tests of its own and no sibling tests module");
-
-        let component = Component::new(
-            "fixture-component".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
-
-        let env = rust_cargo_changed_test_env(&component, &["src/util/strings.rs".to_string()]);
-        assert_union_candidates(&env, &["fixture::lib::fixture::"]);
-    }
-
-    /// A changed integration test under `tests/` is unaffected by the
-    /// sibling-module routing added for #14867: integration tests are routed
-    /// before the `src/**` module-filter path is ever reached.
-    #[test]
-    fn rust_cargo_changed_routing_leaves_integration_tests_unaffected_by_sibling_routing() {
-        let dir = TempDir::new().expect("temp dir should be created");
-        std::fs::create_dir_all(dir.path().join("tests")).expect("test directory");
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("manifest");
-        std::fs::write(
-            dir.path().join("tests/worktree_scope.rs"),
-            "#[test]\nfn runs() {}\n",
-        )
-        .expect("integration test");
-
-        let component = Component::new(
-            "fixture-component".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
-
-        let env = rust_cargo_changed_test_env(&component, &["tests/worktree_scope.rs".to_string()]);
-
-        assert_union_candidates(&env, &["fixture::test::worktree_scope::"]);
-    }
-
-    #[test]
-    fn rust_cargo_changed_routing_keeps_component_root_crate_filter_unscoped() {
-        // When the component *is* the crate (its root Cargo.toml is a
-        // `[package]`), a bare module filter already runs against that package;
-        // no `-p` selector should be emitted. (#8758)
-        let dir = TempDir::new().expect("temp dir should be created");
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .expect("write component Cargo.toml");
-        std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
-        std::fs::write(dir.path().join("src/lib.rs"), "pub fn fixture() {}").expect("lib target");
-        let test_rel = "src/core/tests/scope.rs";
-        let test_path = dir.path().join(test_rel);
-        std::fs::create_dir_all(test_path.parent().expect("parent dir"))
-            .expect("create test module dirs");
-        std::fs::write(&test_path, "#[test]\nfn runs() { assert!(true); }\n")
-            .expect("write inline test module");
-
-        let component = Component::new(
-            "fixture-component".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
-
-        let env = rust_cargo_changed_test_env(&component, &[test_rel.to_string()]);
-
-        assert_union_candidates(
-            &env,
-            &["fixture-crate::lib::fixture_crate::core::tests::scope"],
         );
     }
 
@@ -2593,35 +2346,6 @@ mod tests {
     }
 
     #[test]
-    fn path_attr_mod_declarations_pairs_attributes_with_module_items() {
-        let declarations = path_attr_mod_declarations(
-            "#[cfg(test)]\n#[path = \"cook_tests.rs\"]\nmod tests;\n\n#[path = \"a/b.rs\"]\npub(crate) mod nested;\n\nmod plain;\n",
-        );
-
-        assert_eq!(
-            declarations,
-            vec![
-                ("cook_tests.rs".to_string(), "tests".to_string()),
-                ("a/b.rs".to_string(), "nested".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn module_path_from_routing_file_maps_roots_and_nested_modules() {
-        assert_eq!(module_path_from_routing_file("src/lib.rs"), "");
-        assert_eq!(module_path_from_routing_file("src/main.rs"), "");
-        assert_eq!(
-            module_path_from_routing_file("src/agent_task_service/mod.rs"),
-            "agent_task_service"
-        );
-        assert_eq!(
-            module_path_from_routing_file("src/agent_task_service/cook.rs"),
-            "agent_task_service::cook"
-        );
-    }
-
-    #[test]
     fn file_declares_test_function_detects_attribute_variants() {
         assert!(file_declares_test_function("#[test]\nfn a() {}"));
         assert!(file_declares_test_function("    #[test]\n    fn a() {}"));
@@ -2639,46 +2363,21 @@ mod tests {
     }
 
     #[test]
-    fn positional_passthrough_translates_equals_filter_to_runner_filter() {
-        let args = vec![
-            "--filter=core::daemon".to_string(),
-            "--".to_string(),
-            "--nocapture".to_string(),
-        ];
+    fn positional_passthrough_translates_filter_flag_to_runner_filter() {
         let filter = TestPassthroughFilter {
             strategy: TestPassthroughFilterStrategy::RunnerPositional,
         };
-
-        assert_eq!(
-            normalize_filter_passthrough_args(&args, &filter),
-            vec![
-                "core::daemon".to_string(),
-                "--".to_string(),
-                "--nocapture".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn positional_passthrough_translates_split_filter_to_runner_filter() {
-        let args = vec![
-            "--filter".to_string(),
-            "core::daemon".to_string(),
-            "--".to_string(),
-            "--nocapture".to_string(),
-        ];
-        let filter = TestPassthroughFilter {
-            strategy: TestPassthroughFilterStrategy::RunnerPositional,
-        };
-
-        assert_eq!(
-            normalize_filter_passthrough_args(&args, &filter),
-            vec![
-                "core::daemon".to_string(),
-                "--".to_string(),
-                "--nocapture".to_string()
-            ]
-        );
+        for args in [
+            vec!["--filter=core::daemon", "--", "--nocapture"],
+            vec!["--filter", "core::daemon", "--", "--nocapture"],
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(
+                normalize_filter_passthrough_args(&args, &filter),
+                ["core::daemon", "--", "--nocapture"],
+                "{args:?}"
+            );
+        }
     }
 
     #[test]
@@ -2715,80 +2414,6 @@ mod tests {
             &config,
         )
         .is_empty());
-    }
-
-    #[test]
-    fn compute_changed_test_scope_detects_new_test_file() {
-        let dir = TempDir::new().expect("temp dir should be created");
-        let root = dir.path();
-
-        fs::create_dir_all(root.join("src")).expect("src dir should be created");
-        fs::create_dir_all(root.join("tests")).expect("tests dir should be created");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname='scope-test'\nversion='0.1.0'\n",
-        )
-        .expect("Cargo.toml should be written");
-        fs::write(root.join("src/lib.rs"), "pub fn thing() {}\n").expect("lib should be written");
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .expect("git init should run");
-        Command::new("git")
-            .args(["config", "user.email", "tests@example.com"])
-            .current_dir(root)
-            .output()
-            .expect("git config email should run");
-        Command::new("git")
-            .args(["config", "user.name", "Tests"])
-            .current_dir(root)
-            .output()
-            .expect("git config name should run");
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .output()
-            .expect("git add should run");
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(root)
-            .output()
-            .expect("git commit should run");
-
-        fs::write(root.join("tests/scope_test.rs"), "#[test]\nfn smoke(){}\n")
-            .expect("test file should be written");
-        Command::new("git")
-            .args(["add", "tests/scope_test.rs"])
-            .current_dir(root)
-            .output()
-            .expect("git add test file should run");
-        Command::new("git")
-            .args(["commit", "-m", "add test"])
-            .current_dir(root)
-            .output()
-            .expect("git commit test file should run");
-
-        let component = Component::new(
-            "scope-test".to_string(),
-            root.to_string_lossy().to_string(),
-            "/tmp/remote".to_string(),
-            None,
-        );
-
-        let output = compute_changed_test_scope(&component, "HEAD~1")
-            .expect("scope computation should succeed");
-
-        assert_eq!(output.mode, "changed");
-        assert_eq!(output.changed_since, Some("HEAD~1".to_string()));
-        assert!(
-            output
-                .selected_files
-                .iter()
-                .any(|f| f.ends_with("tests/scope_test.rs")),
-            "expected changed test file to be included"
-        );
     }
 
     #[test]
@@ -2870,65 +2495,58 @@ mod tests {
         )
     }
 
-    fn commit_change(root: &Path, rel: &str, contents: &str) {
-        let path = root.join(rel);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("change parent directory");
-        }
-        fs::write(path, contents).expect("write change");
-        for args in [vec!["add", rel], vec!["commit", "-m", "change"]] {
-            Command::new("git")
-                .args(&args)
-                .current_dir(root)
-                .output()
-                .expect("git change command");
-        }
-    }
-
     #[test]
-    fn changed_source_without_selected_tests_flags_false_green() {
-        // #8340: a production source change that maps to no tests must record
-        // the impacted files so the gate can fail closed instead of passing on
-        // zero selection.
+    fn compute_changed_test_scope_detects_new_test_file() {
         let dir = TempDir::new().expect("temp dir");
         let root = dir.path();
         let component = init_scope_repo(root);
-        // Change production source only; no test file changes, and the trivial
-        // edit does not drift any existing test.
-        commit_change(root, "src/lib.rs", "pub fn thing() {}\npub fn added() {}\n");
+        commit_changes(root, &[("tests/scope_test.rs", "#[test]\nfn smoke(){}\n")]);
 
         let output = compute_changed_test_scope(&component, "HEAD~1")
             .expect("scope computation should succeed");
 
-        assert_eq!(output.selected_count, 0, "no test should be selected");
+        assert_eq!(output.mode, "changed");
+        assert_eq!(output.changed_since, Some("HEAD~1".to_string()));
         assert!(
             output
-                .source_changes_without_tests
+                .selected_files
                 .iter()
-                .any(|f| f.ends_with("src/lib.rs")),
-            "changed production source with zero tests must be flagged, got {:?}",
-            output.source_changes_without_tests
+                .any(|f| f.ends_with("tests/scope_test.rs")),
+            "expected changed test file to be included"
         );
     }
 
     #[test]
-    fn docs_only_change_allows_empty_test_scope() {
-        // #8340: a documentation-only change legitimately selects zero tests and
-        // must NOT be flagged as a false green.
-        let dir = TempDir::new().expect("temp dir");
-        let root = dir.path();
-        let component = init_scope_repo(root);
-        commit_change(root, "README.md", "# scope-test\n\nmore docs\n");
+    fn zero_selection_flags_source_changes_but_not_docs_changes() {
+        // #8340: a production source change that maps to no tests must record
+        // the impacted files so the gate can fail closed; a docs-only change
+        // legitimately selects zero tests and must not be flagged.
+        for (rel, contents, flagged) in [
+            ("src/lib.rs", "pub fn thing() {}\npub fn added() {}\n", true),
+            ("README.md", "# scope-test\n\nmore docs\n", false),
+        ] {
+            let dir = TempDir::new().expect("temp dir");
+            let root = dir.path();
+            let component = init_scope_repo(root);
+            commit_changes(root, &[(rel, contents)]);
 
-        let output = compute_changed_test_scope(&component, "HEAD~1")
-            .expect("scope computation should succeed");
+            let output = compute_changed_test_scope(&component, "HEAD~1")
+                .expect("scope computation should succeed");
 
-        assert_eq!(output.selected_count, 0, "docs change selects no tests");
-        assert!(
-            output.source_changes_without_tests.is_empty(),
-            "docs-only change must not be flagged as a source change, got {:?}",
-            output.source_changes_without_tests
-        );
+            assert_eq!(
+                output.selected_count, 0,
+                "{rel}: no test should be selected"
+            );
+            assert_eq!(
+                output
+                    .source_changes_without_tests
+                    .iter()
+                    .any(|f| f.ends_with(rel)),
+                flagged,
+                "{rel}: {:?}",
+                output.source_changes_without_tests
+            );
+        }
     }
 
     fn commit_changes(root: &Path, files: &[(&str, &str)]) {
