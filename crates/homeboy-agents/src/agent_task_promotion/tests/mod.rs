@@ -14,10 +14,7 @@ mod destination_ownership;
 mod immutable_candidate;
 mod resume_candidate;
 mod retry_candidate;
-use super::types::{
-    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionReport,
-    AgentTaskPromotionRequest,
-};
+use super::types::{AgentTaskPromotionReport, AgentTaskPromotionRequest};
 use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
     AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
@@ -102,16 +99,6 @@ impl FakePromotionWorkspaceProvider {
             reveal_policy,
             crate::agent_task_gate::AgentTaskGateEnvironment::default(),
         ))
-    }
-}
-
-pub(super) fn command_report(parts: Vec<&str>) -> AgentTaskPromotionCommandReport {
-    AgentTaskPromotionCommandReport {
-        command: parts.into_iter().map(str::to_string).collect(),
-        exit_code: 0,
-        stdout: String::new(),
-        stderr: String::new(),
-        capture: AgentTaskPromotionCommandCapture::default(),
     }
 }
 
