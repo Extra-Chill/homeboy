@@ -695,55 +695,50 @@ mod tests {
     }
 
     #[test]
-    fn default_parse_spec_preserves_phpunit_summary_fallback() {
-        let counts = parse_test_results_text("Tests: 12, Assertions: 20, Failures: 2, Skipped: 3")
-            .expect("default PHPUnit-ish fallback should still parse");
-
-        assert_eq!(counts.total, 12);
-        assert_eq!(counts.passed, 7);
-        assert_eq!(counts.failed, 2);
-        assert_eq!(counts.skipped, 3);
-    }
-
-    #[test]
-    fn default_parse_spec_folds_errors_into_failed_count() {
-        let counts = parse_test_results_text(
-            "Tests: 12, Assertions: 20, Failures: 2, Errors: 1, Skipped: 3",
-        )
-        .expect("default PHPUnit-ish fallback should parse errors");
-
-        assert_eq!(counts.total, 12);
-        assert_eq!(counts.passed, 6);
-        assert_eq!(counts.failed, 3);
-        assert_eq!(counts.skipped, 3);
-    }
-
-    #[test]
-    fn default_parse_spec_counts_phpunit_non_passing_summary_buckets_as_skipped() {
-        let counts = parse_test_results_text(
-            "Tests: 20, Assertions: 40, Errors: 1, Failures: 2, Warnings: 3, Skipped: 4, Incomplete: 5, Risky: 1",
-        )
-        .expect("default PHPUnit-ish fallback should parse all summary buckets");
-
-        assert_eq!(counts.total, 20);
-        assert_eq!(counts.passed, 4);
-        assert_eq!(counts.failed, 3);
-        assert_eq!(counts.skipped, 13);
-    }
-
-    #[test]
-    fn default_parse_spec_reads_terminal_key_value_summary() {
-        let counts = parse_test_results_text(
-            "HOST_SMOKE_SUMMARY:passed=21 failed=15\n\
-             Real-WordPress smoke tests failed (15 of 36):\n\
-               - tests/wiki/upsert-delegation-smoke.php (exit 1)",
-        )
-        .expect("key-value terminal summary should parse");
-
-        assert_eq!(counts.total, 36);
-        assert_eq!(counts.passed, 21);
-        assert_eq!(counts.failed, 15);
-        assert_eq!(counts.skipped, 0);
+    fn default_parse_spec_reads_phpunit_and_key_value_summaries() {
+        // (output, total, passed, failed, skipped)
+        let cases = [
+            (
+                "Tests: 12, Assertions: 20, Failures: 2, Skipped: 3",
+                12,
+                7,
+                2,
+                3,
+            ),
+            // Errors fold into the failed count.
+            (
+                "Tests: 12, Assertions: 20, Failures: 2, Errors: 1, Skipped: 3",
+                12,
+                6,
+                3,
+                3,
+            ),
+            // Warnings/Incomplete/Risky are non-passing and count as skipped.
+            (
+                "Tests: 20, Assertions: 40, Errors: 1, Failures: 2, Warnings: 3, Skipped: 4, Incomplete: 5, Risky: 1",
+                20,
+                4,
+                3,
+                13,
+            ),
+            (
+                "HOST_SMOKE_SUMMARY:passed=21 failed=15\n\
+                 Real-WordPress smoke tests failed (15 of 36):\n\
+                   - tests/wiki/upsert-delegation-smoke.php (exit 1)",
+                36,
+                21,
+                15,
+                0,
+            ),
+        ];
+        for (output, total, passed, failed, skipped) in cases {
+            let counts = parse_test_results_text(output).expect(output);
+            assert_eq!(
+                (counts.total, counts.passed, counts.failed, counts.skipped),
+                (total, passed, failed, skipped),
+                "{output}"
+            );
+        }
     }
 
     #[test]
@@ -842,26 +837,22 @@ mod tests {
     }
 
     #[test]
-    fn failures_file_parser_accepts_empty_object_payload() {
+    fn failures_file_parser_accepts_empty_or_null_failure_collections() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let failures_file = temp_dir.path().join("test-failures.json");
-        std::fs::write(
-            &failures_file,
-            r#"{
-                "failures": [],
-                "total": 10,
-                "passed": 10
-            }"#,
-        )
-        .expect("write test failures");
+        for (payload, total, passed) in [
+            (r#"{ "failures": [], "total": 10, "passed": 10 }"#, 10, 10),
+            (r#"{ "failures": null }"#, 0, 0),
+        ] {
+            std::fs::write(&failures_file, payload).expect("write test failures");
 
-        let parsed = parse_failures_file(&failures_file)
-            .expect("object-form test failures should parse")
-            .expect("test failures payload should be present");
+            let parsed = parse_failures_file(&failures_file)
+                .expect("test failures should parse")
+                .expect("test failures payload should be present");
 
-        assert!(parsed.failures.is_empty());
-        assert_eq!(parsed.total, 10);
-        assert_eq!(parsed.passed, 10);
+            assert!(parsed.failures.is_empty(), "{payload}");
+            assert_eq!((parsed.total, parsed.passed), (total, passed), "{payload}");
+        }
     }
 
     #[test]
@@ -974,18 +965,5 @@ mod tests {
         );
         assert_eq!(parsed.failures[1].test_name, "unknown test");
         assert_eq!(parsed.failures[1].message, "assertion failed");
-    }
-
-    #[test]
-    fn failures_file_parser_accepts_null_or_missing_failure_collections() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let failures_file = temp_dir.path().join("test-failures.json");
-        std::fs::write(&failures_file, r#"{ "failures": null }"#).expect("write null failures");
-
-        let parsed = parse_failures_file(&failures_file)
-            .expect("null failures should parse")
-            .expect("test failures payload should be present");
-
-        assert!(parsed.failures.is_empty());
     }
 }

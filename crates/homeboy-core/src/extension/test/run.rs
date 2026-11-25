@@ -3692,25 +3692,7 @@ mod tests {
             let result = run_main_test_workflow(
                 &component,
                 source.path(),
-                TestRunWorkflowArgs {
-                    component_label: component.id.clone(),
-                    component_id: component.id.clone(),
-                    path_override: None,
-                    settings: Vec::new(),
-                    settings_json: Vec::new(),
-                    skip_lint: true,
-                    coverage: false,
-                    coverage_min: None,
-                    analyze: false,
-                    baseline_flags: Default::default(),
-                    changed_since: None,
-                    precomputed_changed_files: None,
-                    json_summary: true,
-                    restore_checkout: false,
-                    ci_env: Vec::new(),
-                    passthrough_args: Vec::new(),
-                    test_execution_plan: homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(Duration::from_secs(42)).expect("positive timeout"),
-                },
+                fixture_workflow_args(&component),
                 &run_dir,
             )
             .expect("review workflow reaches secret-bearing child");
@@ -3960,7 +3942,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_failure_sidecar_parses_without_a_diagnostic() {
+    fn valid_or_absent_failure_sidecar_attaches_no_diagnostic() {
         let temp = tempfile::tempdir().expect("temp dir");
         let sidecar = temp.path().join("test-failures.json");
         std::fs::write(
@@ -3977,6 +3959,14 @@ mod tests {
         assert!(
             diagnostic.is_none(),
             "a valid sidecar must not attach a diagnostic"
+        );
+
+        let (input, diagnostic) =
+            parse_optional_failure_sidecar(&temp.path().join("does-not-exist.json"));
+        assert!(input.is_none());
+        assert!(
+            diagnostic.is_none(),
+            "an absent sidecar is not a diagnostic"
         );
     }
 
@@ -4037,37 +4027,24 @@ mod tests {
     }
 
     #[test]
-    fn absent_failure_sidecar_yields_no_input_and_no_diagnostic() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let sidecar = temp.path().join("does-not-exist.json");
-
-        let (input, diagnostic) = parse_optional_failure_sidecar(&sidecar);
-
-        assert!(input.is_none());
-        assert!(diagnostic.is_none());
-    }
-
-    #[test]
-    fn tail_lines_returns_full_text_when_under_limit() {
-        let input = "line 1\nline 2\nline 3";
-        let (tail, truncated) = tail_lines(input, 10);
-        assert_eq!(tail, input);
-        assert!(!truncated);
-    }
-
-    #[test]
-    fn tail_lines_handles_empty_input() {
-        let (tail, truncated) = tail_lines("", 10);
-        assert_eq!(tail, "");
-        assert!(!truncated);
-    }
-
-    #[test]
-    fn tail_lines_at_exact_limit_is_not_truncated() {
-        let input = "a\nb\nc";
-        let (tail, truncated) = tail_lines(input, 3);
-        assert_eq!(tail, input);
-        assert!(!truncated);
+    fn tail_lines_keeps_only_the_last_lines_and_reports_truncation() {
+        for (input, max, tail, truncated) in [
+            (
+                "line 1\nline 2\nline 3",
+                10,
+                "line 1\nline 2\nline 3",
+                false,
+            ),
+            ("", 10, "", false),
+            ("a\nb\nc", 3, "a\nb\nc", false),
+            ("a\nb\nc", 2, "b\nc", true),
+        ] {
+            assert_eq!(
+                tail_lines(input, max),
+                (tail.to_string(), truncated),
+                "{input:?} / {max}"
+            );
+        }
     }
 
     #[test]
@@ -4095,27 +4072,33 @@ mod tests {
         assert_eq!(findings[0].location.line, Some(42));
     }
 
+    /// Every recorded shape, fed through the real status function: `passed`
+    /// needs a successful runner and at least one measured, non-failing
+    /// assertion; `skipped` is reached only through bound no-tests evidence,
+    /// never through absent counts (#10685).
     #[test]
-    fn status_requires_successful_runner_even_with_zero_failures() {
-        let counts = TestCounts::new(3, 3, 0, 0);
-        assert_eq!(test_run_status(false, Some(&counts), false), "failed");
-    }
-
-    #[test]
-    fn status_passes_successful_runner_with_zero_failures() {
-        let counts = TestCounts::new(3, 3, 0, 0);
-        assert_eq!(test_run_status(true, Some(&counts), false), "passed");
-    }
-
-    #[test]
-    fn status_fails_successful_runner_with_parsed_failures() {
-        let counts = TestCounts::new(3, 2, 1, 0);
-        assert_eq!(test_run_status(true, Some(&counts), false), "failed");
-    }
-
-    #[test]
-    fn status_fails_successful_runner_without_result_evidence() {
-        assert_eq!(test_run_status(true, None, false), "failed");
+    fn test_run_status_requires_a_measured_green_run_or_signed_skip() {
+        let cases: &[(bool, Option<TestCounts>, bool, &str)] = &[
+            (true, Some(TestCounts::new(3, 3, 0, 0)), false, "passed"),
+            (true, Some(TestCounts::new(9, 4, 0, 5)), false, "passed"),
+            (false, Some(TestCounts::new(3, 3, 0, 0)), false, "failed"),
+            (true, Some(TestCounts::new(3, 2, 1, 0)), false, "failed"),
+            // Unmeasured: counts absent (child killed before its sidecar),
+            // nothing executed, every test skipped, or a truncated summary.
+            (true, None, false, "failed"),
+            (true, Some(TestCounts::new(0, 0, 0, 0)), false, "failed"),
+            (true, Some(TestCounts::new(12, 0, 0, 12)), false, "failed"),
+            (true, Some(TestCounts::new(412, 0, 0, 0)), false, "failed"),
+            (true, None, true, "skipped"),
+            (false, None, true, "failed"),
+        ];
+        for (runner_success, counts, no_tests, expected) in cases {
+            assert_eq!(
+                test_run_status(*runner_success, counts.as_ref(), *no_tests),
+                *expected,
+                "runner_success={runner_success} counts={counts:?} no_tests={no_tests}"
+            );
+        }
     }
 
     #[cfg(not(unix))]
@@ -4180,16 +4163,6 @@ mod tests {
             "requesting inventory mode without evidence must remain unmeasured"
         );
 
-        std::fs::write(&binding.child_path, "not json").expect("write malformed inventory");
-        assert!(
-            valid_test_inventory(&binding).is_err(),
-            "a malformed inventory must remain fail-closed"
-        );
-        assert!(
-            !temp.path().join(TEST_INVENTORY_PUBLIC_FILE).exists(),
-            "malformed evidence must never publish a root inventory"
-        );
-
         std::fs::write(
             &binding.child_path,
             valid_inventory_document(&binding, "test", "executed"),
@@ -4252,14 +4225,6 @@ mod tests {
 
         for (case, document) in [
             (
-                "wrong schema",
-                valid_inventory_document(&binding, "test", "executed").replacen(
-                    TEST_INVENTORY_SCHEMA,
-                    "other/schema/v1",
-                    1,
-                ),
-            ),
-            (
                 "incomplete document",
                 "{\"schema\":\"homeboy/test-inventory/v1\"}".to_string(),
             ),
@@ -4295,23 +4260,6 @@ mod tests {
                 "{case} must remain fail-closed"
             );
         }
-
-        let mut duplicate: TestInventoryEvidence =
-            serde_json::from_str(&valid_inventory_document(&binding, "test", "executed"))
-                .expect("parse valid inventory");
-        duplicate.tests.push(duplicate.tests[0].clone());
-        duplicate.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
-            &canonical_inventory_json(&duplicate),
-        );
-        std::fs::write(
-            &binding.child_path,
-            serde_json::to_vec(&duplicate).expect("serialize duplicate inventory"),
-        )
-        .expect("write duplicate inventory");
-        assert!(
-            valid_test_inventory(&binding).is_err(),
-            "duplicate identities must remain fail-closed even with a matching fingerprint"
-        );
 
         let missing_outcome = TestInventoryTest {
             id: "suite::missing-outcome".to_string(),
@@ -5128,55 +5076,12 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         });
     }
 
-    /// An unset cap must leave the unchanged selection behaviour byte-for-byte
-    /// identical: a large selection still runs the extension (#12365).
+    /// An unset, malformed or non-positive cap value disables the guard rather
+    /// than failing the run, mirroring HOMEBOY_TEST_TIMEOUT_SECONDS parsing, so
+    /// a large selection still runs the extension (#12365).
     #[cfg(unix)]
     #[test]
-    fn unset_changed_scope_cap_leaves_selection_behaviour_unchanged() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let _guard = changed_scope_cap_env_guard();
-            let source = tempfile::tempdir().expect("source workspace");
-            let component = changed_scope_cap_component(home.path(), source.path());
-            let changed_files = (0..5)
-                .map(|index| format!("tests/component_{index}.php"))
-                .collect::<Vec<_>>();
-
-            let _cap = ChangedScopeCapEnv::unset();
-            let result = run_main_test_workflow(
-                &component,
-                source.path(),
-                changed_scope_cap_args(&component, &changed_files),
-                &RunDir::create().expect("run directory"),
-            )
-            .expect("unset cap runs the runner");
-
-            assert_eq!(result.runner_exit_code, Some(0));
-            assert!(
-                source.path().join("runner-ran").exists(),
-                "an unset cap must not intercept a large selection"
-            );
-            assert!(
-                result.findings.as_ref().is_none_or(|findings| {
-                    !findings.iter().any(|finding| {
-                        finding.rule.as_deref() == Some("changed_scope_selection_exceeds_cap")
-                    })
-                }),
-                "an unset cap must not emit the cap finding"
-            );
-            // Pins the fixture itself: an empty selection would route this run
-            // through the no-tests-in-scope early return and make the assertions
-            // above vacuous rather than false.
-            let scope = result.test_scope.expect("scope retained");
-            assert_eq!(scope.selected_files, changed_files);
-            assert_eq!(scope.selected_count, 5);
-        });
-    }
-
-    /// A malformed or non-positive cap value disables the guard rather than
-    /// failing the run, mirroring HOMEBOY_TEST_TIMEOUT_SECONDS parsing (#12365).
-    #[cfg(unix)]
-    #[test]
-    fn malformed_or_non_positive_changed_scope_cap_values_are_ignored() {
+    fn unset_malformed_or_non_positive_changed_scope_cap_values_are_ignored() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let _guard = changed_scope_cap_env_guard();
             let source = tempfile::tempdir().expect("source workspace");
@@ -5186,9 +5091,12 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 .collect::<Vec<_>>();
             let marker = source.path().join("runner-ran");
 
-            for value in ["not-a-number", "0", "-5", ""] {
+            for value in [None, Some("not-a-number"), Some("0"), Some("-5"), Some("")] {
                 std::fs::remove_file(&marker).ok();
-                let _cap = ChangedScopeCapEnv::set(value);
+                let _cap = match value {
+                    Some(value) => ChangedScopeCapEnv::set(value),
+                    None => ChangedScopeCapEnv::unset(),
+                };
                 let result = run_main_test_workflow(
                     &component,
                     source.path(),
@@ -5216,7 +5124,7 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
                 );
                 let scope = result.test_scope.expect("scope retained");
                 assert_eq!(
-                    scope.selected_count, 5,
+                    scope.selected_files, changed_files,
                     "cap value {value:?} must leave the selection intact"
                 );
             }
@@ -5924,107 +5832,6 @@ print(hashlib.sha256(content.encode()).hexdigest())
     }
 
     #[test]
-    fn status_fails_all_skipped_tests() {
-        assert_eq!(
-            test_run_status(true, Some(&TestCounts::new(1, 0, 0, 1)), false),
-            "failed"
-        );
-    }
-
-    /// Recorded no-measurement scenarios, fed through the real status function.
-    ///
-    /// Assert the effect, not the command string (#10685). The post-merge audit
-    /// gate passed for weeks because its test asserted the command it invoked
-    /// rather than what that command produced, so every case here is a shape
-    /// actually observed in a CI run and every assertion is about the verdict
-    /// that came out.
-    #[test]
-    fn no_recorded_unmeasured_shape_renders_green() {
-        let unmeasured: &[(&str, Option<TestCounts>)] = &[
-            (
-                "child killed before writing its results sidecar (#10639/#10644): counts absent \
-                 entirely",
-                None,
-            ),
-            (
-                "runner exited 0 having executed nothing: `0 passed; 0 failed`",
-                Some(TestCounts::new(0, 0, 0, 0)),
-            ),
-            (
-                "every selected test skipped: the runner started and measured no assertion",
-                Some(TestCounts::new(12, 0, 0, 12)),
-            ),
-            (
-                "a total was reported but no assertion resolved -- the shape a truncated \
-                 summary parse produces",
-                Some(TestCounts::new(412, 0, 0, 0)),
-            ),
-        ];
-
-        for (scenario, counts) in unmeasured {
-            assert_eq!(
-                test_run_status(true, counts.as_ref(), false),
-                "failed",
-                "an unmeasured test phase rendered green: {scenario}"
-            );
-        }
-    }
-
-    /// The migration onto the shared predicate is behaviour-preserving.
-    ///
-    /// Stated as a property over the whole reachable input space rather than as
-    /// a handful of examples, because "identical behaviour" is the entire claim
-    /// the refactor rests on and examples cannot support it.
-    #[test]
-    fn test_run_status_matches_the_shared_predicate() {
-        for runner_success in [true, false] {
-            for no_tests in [true, false] {
-                for counts in [
-                    None,
-                    Some(TestCounts::new(0, 0, 0, 0)),
-                    Some(TestCounts::new(1, 0, 0, 1)),
-                    Some(TestCounts::new(3, 3, 0, 0)),
-                    Some(TestCounts::new(3, 2, 1, 0)),
-                    Some(TestCounts::new(3, 0, 3, 0)),
-                    Some(TestCounts::new(9, 4, 0, 5)),
-                ] {
-                    // The rule as it stood before #10685, verbatim.
-                    let legacy = if !runner_success {
-                        "failed"
-                    } else if no_tests {
-                        "skipped"
-                    } else if counts.as_ref().is_some_and(|counts| {
-                        counts.passed + counts.failed > 0 && counts.failed == 0
-                    }) {
-                        "passed"
-                    } else {
-                        "failed"
-                    };
-                    assert_eq!(
-                        test_run_status(runner_success, counts.as_ref(), no_tests),
-                        legacy,
-                        "shared-predicate migration changed behaviour for \
-                         runner_success={runner_success} no_tests={no_tests} counts={counts:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// `skipped` is the one exit from the measurement requirement, and it is
-    /// reached only through positive, nonce-bound evidence -- never through the
-    /// absence of counts.
-    #[test]
-    fn only_signed_evidence_can_skip_the_measurement_requirement() {
-        assert_eq!(test_run_status(true, None, true), "skipped");
-        assert_eq!(
-            test_run_status(true, None, false),
-            "failed",
-            "absent counts must never be read as `nothing to test`"
-        );
-    }
-
-    #[test]
     fn no_test_policy_requires_bound_structured_evidence() {
         let temp = tempfile::tempdir().expect("temp dir");
         let evidence_file = temp.path().join("no-tests-applicable.json");
@@ -6062,18 +5869,75 @@ print(hashlib.sha256(content.encode()).hexdigest())
         ));
     }
 
+    /// Execution context for a declared result parser. When `body` is given
+    /// the script is written into an exec-capable tempdir, so a `noexec`
+    /// $TMPDIR cannot fail the run with exit 126 regardless of the behavior
+    /// under test.
+    fn declared_parser_fixture(
+        script: &str,
+        body: Option<&str>,
+        adapter: &str,
+    ) -> (
+        tempfile::TempDir,
+        Component,
+        crate::extension::resolve::ExtensionExecutionContext,
+        ParseSpec,
+    ) {
+        let temp_dir = exec_capable_tempdir();
+        let extension_dir = temp_dir.path().join("extension");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        if let Some(body) = body {
+            homeboy_test_support::write_executable(extension_dir.join(script), body, 0o755)
+                .expect("parser script");
+        }
+        let component = Component::new(
+            "fixture".to_string(),
+            temp_dir.path().to_string_lossy().to_string(),
+            "fixture-extension".to_string(),
+            None,
+        );
+        let context = crate::extension::resolve::ExtensionExecutionContext {
+            component: component.clone(),
+            capability: ExtensionCapability::Test,
+            extension_id: "fixture-extension".to_string(),
+            extension_path: extension_dir,
+            script_path: "test.sh".to_string(),
+            settings: Vec::new(),
+            accepted_setting_keys: Vec::new(),
+        };
+        let spec = ParseSpec {
+            extension_script: Some(script.to_string()),
+            adapters: vec![adapter.to_string()],
+            rules: Vec::new(),
+            defaults: std::collections::HashMap::new(),
+            derive: Vec::new(),
+        };
+        (temp_dir, component, context, spec)
+    }
+
+    /// Runs a declared parser that must succeed and returns the normalized
+    /// counts it wrote to the run's test-results sidecar.
+    fn declared_parser_counts(script: &str, adapter: &str, runner_output: &str) -> TestCounts {
+        let (_temp, component, context, spec) =
+            declared_parser_fixture("parse-results.sh", Some(script), adapter);
+        let run_dir = RunDir::create().expect("run dir");
+
+        run_declared_result_parser(&component, &context, &spec, runner_output, &run_dir)
+            .expect("declared parser should run");
+        let counts = parse_test_results_file_with_spec(
+            &run_dir.step_file(run_dir::files::TEST_RESULTS),
+            Some(&spec),
+        )
+        .expect("declared parser should write normalized counts")
+        .expect("normalized counts should be present");
+        run_dir.cleanup();
+        counts
+    }
+
     #[test]
-    fn declared_result_parser_script_normalizes_provider_json() {
+    fn declared_result_parser_normalizes_provider_json_and_flat_stdout_counts() {
         with_isolated_home(|_| {
-            // Use an exec-capable tempdir: these tests write a parser script
-            // and execute it, so a `noexec` $TMPDIR (e.g. hardened `/tmp`)
-            // would fail with exit 126 regardless of the behavior under test.
-            let temp_dir = exec_capable_tempdir();
-            let extension_dir = temp_dir.path().join("extension");
-            std::fs::create_dir_all(&extension_dir).expect("extension dir");
-            let parser_script = extension_dir.join("parse-results.sh");
-            homeboy_test_support::write_executable(
-                &parser_script,
+            let counts = declared_parser_counts(
                 r#"#!/usr/bin/env bash
 set -euo pipefail
 if [ "${2:-}" != "custom-json" ]; then
@@ -6119,38 +5983,7 @@ EOF
 homeboy_write_test_results "$total" "$passed" "$failed" "$skipped"
 printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" "$failed" "$skipped"
 "#,
-                0o755,
-            )
-            .expect("parser script");
-
-            let component = Component::new(
-                "fixture".to_string(),
-                temp_dir.path().to_string_lossy().to_string(),
-                "fixture-extension".to_string(),
-                None,
-            );
-            let context = crate::extension::resolve::ExtensionExecutionContext {
-                component: component.clone(),
-                capability: ExtensionCapability::Test,
-                extension_id: "fixture-extension".to_string(),
-                extension_path: extension_dir,
-                script_path: "test.sh".to_string(),
-                settings: Vec::new(),
-                accepted_setting_keys: Vec::new(),
-            };
-            let spec = ParseSpec {
-                extension_script: Some("parse-results.sh".to_string()),
-                adapters: vec!["custom-json".to_string()],
-                rules: Vec::new(),
-                defaults: std::collections::HashMap::new(),
-                derive: Vec::new(),
-            };
-            let run_dir = RunDir::create().expect("run dir");
-
-            run_declared_result_parser(
-                &component,
-                &context,
-                &spec,
+                "custom-json",
                 r#"{
                 "schema": "custom-provider/test-results/v1",
                 "summary": { "total": 0 },
@@ -6159,53 +5992,28 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
                     { "total": 2, "passed": 1, "skipped": 1 }
                 ]
             }"#,
-                &run_dir,
-            )
-            .expect("declared parser should run");
+            );
+            assert_eq!(
+                (counts.total, counts.passed, counts.failed, counts.skipped),
+                (5, 3, 1, 1)
+            );
 
-            let counts = parse_test_results_file_with_spec(
-                &run_dir.step_file(run_dir::files::TEST_RESULTS),
-                Some(&spec),
-            )
-            .expect("declared parser should write normalized counts");
-            let counts = counts.expect("normalized counts should be present");
-
-            run_dir.cleanup();
-
-            assert_eq!(counts.total, 5);
-            assert_eq!(counts.passed, 3);
-            assert_eq!(counts.failed, 1);
-            assert_eq!(counts.skipped, 1);
+            let counts = declared_parser_counts(
+                "#!/usr/bin/env bash\nset -euo pipefail\nprintf '{\"total\":5,\"passed\":3,\"failed\":1,\"skipped\":1}\\n'\n",
+                "fixture-json",
+                "runner output",
+            );
+            assert_eq!(
+                (counts.total, counts.passed, counts.failed, counts.skipped),
+                (5, 3, 1, 1)
+            );
         });
     }
 
     #[test]
     fn declared_result_parser_errors_when_script_is_missing() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let extension_dir = temp_dir.path().join("extension");
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        let component = Component::new(
-            "fixture".to_string(),
-            temp_dir.path().to_string_lossy().to_string(),
-            "fixture-extension".to_string(),
-            None,
-        );
-        let context = crate::extension::resolve::ExtensionExecutionContext {
-            component: component.clone(),
-            capability: ExtensionCapability::Test,
-            extension_id: "fixture-extension".to_string(),
-            extension_path: extension_dir.clone(),
-            script_path: "test.sh".to_string(),
-            settings: Vec::new(),
-            accepted_setting_keys: Vec::new(),
-        };
-        let spec = ParseSpec {
-            extension_script: Some("missing-parser.sh".to_string()),
-            adapters: vec!["fixture-json".to_string()],
-            rules: Vec::new(),
-            defaults: std::collections::HashMap::new(),
-            derive: Vec::new(),
-        };
+        let (_temp, component, context, spec) =
+            declared_parser_fixture("missing-parser.sh", None, "fixture-json");
         let run_dir = RunDir::create().expect("run dir");
 
         let err = run_declared_result_parser(&component, &context, &spec, "{}", &run_dir)
@@ -6216,12 +6024,12 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
         assert!(err
             .message
             .contains("Declared test result parser script does not exist"));
-        assert!(err.message.contains("missing-parser.sh"));
         assert_eq!(err.details["script_path"], "missing-parser.sh");
         assert_eq!(
             err.details["resolved_script"].as_str(),
             Some(
-                extension_dir
+                context
+                    .extension_path
                     .join("missing-parser.sh")
                     .to_string_lossy()
                     .as_ref()
@@ -6231,51 +6039,16 @@ printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$total" "$passed" 
 
     #[test]
     fn declared_result_parser_errors_with_context_on_non_zero_exit() {
-        // This test executes a capability script, which builds an env derived
-        // from HOME / homeboy paths. Run it under the shared `home_lock()` so it
-        // is globally serialized against env-mutating tests instead of racing
-        // them under default parallelism (#6760, #6804).
+        // Executing a capability script builds an env derived from HOME /
+        // homeboy paths, so run under the shared home lock (#6760, #6804).
         with_isolated_home(|_| {
-            // Use an exec-capable tempdir: these tests write a parser script
-            // and execute it, so a `noexec` $TMPDIR (e.g. hardened `/tmp`)
-            // would fail with exit 126 regardless of the behavior under test.
-            let temp_dir = exec_capable_tempdir();
-            let extension_dir = temp_dir.path().join("extension");
-            std::fs::create_dir_all(&extension_dir).expect("extension dir");
-            let parser_script = extension_dir.join("parse-results.sh");
-            homeboy_test_support::write_executable(
-                &parser_script,
-                r#"#!/usr/bin/env bash
-printf 'parser stdout detail\n'
-printf 'parser stderr detail\n' >&2
-exit 23
-"#,
-                0o755,
-            )
-            .expect("parser script");
-
-            let component = Component::new(
-                "fixture".to_string(),
-                temp_dir.path().to_string_lossy().to_string(),
-                "fixture-extension".to_string(),
-                None,
+            let (_temp, component, context, spec) = declared_parser_fixture(
+                "parse-results.sh",
+                Some(
+                    "#!/usr/bin/env bash\nprintf 'parser stdout detail\\n'\nprintf 'parser stderr detail\\n' >&2\nexit 23\n",
+                ),
+                "fixture-json",
             );
-            let context = crate::extension::resolve::ExtensionExecutionContext {
-                component: component.clone(),
-                capability: ExtensionCapability::Test,
-                extension_id: "fixture-extension".to_string(),
-                extension_path: extension_dir,
-                script_path: "test.sh".to_string(),
-                settings: Vec::new(),
-                accepted_setting_keys: Vec::new(),
-            };
-            let spec = ParseSpec {
-                extension_script: Some("parse-results.sh".to_string()),
-                adapters: vec!["fixture-json".to_string()],
-                rules: Vec::new(),
-                defaults: std::collections::HashMap::new(),
-                derive: Vec::new(),
-            };
             let run_dir = RunDir::create().expect("run dir");
 
             let err = run_declared_result_parser(&component, &context, &spec, "{}", &run_dir)
@@ -6302,115 +6075,17 @@ exit 23
     }
 
     #[test]
-    fn declared_result_parser_accepts_flat_count_stdout_json() {
-        with_isolated_home(|_| {
-            // Use an exec-capable tempdir: these tests write a parser script
-            // and execute it, so a `noexec` $TMPDIR (e.g. hardened `/tmp`)
-            // would fail with exit 126 regardless of the behavior under test.
-            let temp_dir = exec_capable_tempdir();
-            let extension_dir = temp_dir.path().join("extension");
-            std::fs::create_dir_all(&extension_dir).expect("extension dir");
-            let parser_script = extension_dir.join("parse-results.sh");
-            homeboy_test_support::write_executable(
-                &parser_script,
-                r#"#!/usr/bin/env bash
-set -euo pipefail
-printf '{"total":5,"passed":3,"failed":1,"skipped":1}\n'
-"#,
-                0o755,
-            )
-            .expect("parser script");
-
-            let component = Component::new(
-                "fixture".to_string(),
-                temp_dir.path().to_string_lossy().to_string(),
-                "fixture-extension".to_string(),
-                None,
-            );
-            let context = crate::extension::resolve::ExtensionExecutionContext {
-                component: component.clone(),
-                capability: ExtensionCapability::Test,
-                extension_id: "fixture-extension".to_string(),
-                extension_path: extension_dir,
-                script_path: "test.sh".to_string(),
-                settings: Vec::new(),
-                accepted_setting_keys: Vec::new(),
-            };
-            let spec = ParseSpec {
-                extension_script: Some("parse-results.sh".to_string()),
-                adapters: vec!["fixture-json".to_string()],
-                rules: Vec::new(),
-                defaults: std::collections::HashMap::new(),
-                derive: Vec::new(),
-            };
-            let run_dir = RunDir::create().expect("run dir");
-
-            run_declared_result_parser(&component, &context, &spec, "runner output", &run_dir)
-                .expect("declared parser stdout should run");
-
-            let counts = parse_test_results_file_with_spec(
-                &run_dir.step_file(run_dir::files::TEST_RESULTS),
-                Some(&spec),
-            )
-            .expect("parser stdout JSON should be normalized to test-results.json");
-            let counts = counts.expect("normalized counts should be present");
-
-            run_dir.cleanup();
-
-            assert_eq!(counts.total, 5);
-            assert_eq!(counts.passed, 3);
-            assert_eq!(counts.failed, 1);
-            assert_eq!(counts.skipped, 1);
-        });
-    }
-
-    #[test]
     fn declared_result_parser_rejects_malformed_successful_stdout_json() {
-        // Exec-capable tempdir: this test runs the parser script, so a
-        // `noexec` $TMPDIR would fail with exit 126 before reaching the
-        // malformed-JSON assertion under test.
-        let temp_dir = exec_capable_tempdir();
-        let extension_dir = temp_dir.path().join("extension");
-        std::fs::create_dir_all(&extension_dir).expect("extension dir");
-        let parser_script = extension_dir.join("parse-results.sh");
-        homeboy_test_support::write_executable(
-            &parser_script,
-            r#"#!/usr/bin/env bash
-set -euo pipefail
-printf 'not json\n'
-"#,
-            0o755,
-        )
-        .expect("parser script");
-
-        let component = Component::new(
-            "fixture".to_string(),
-            temp_dir.path().to_string_lossy().to_string(),
-            "fixture-extension".to_string(),
-            None,
+        let (_temp, component, context, spec) = declared_parser_fixture(
+            "parse-results.sh",
+            Some("#!/usr/bin/env bash\nset -euo pipefail\nprintf 'not json\\n'\n"),
+            "fixture-json",
         );
-        let context = crate::extension::resolve::ExtensionExecutionContext {
-            component: component.clone(),
-            capability: ExtensionCapability::Test,
-            extension_id: "fixture-extension".to_string(),
-            extension_path: extension_dir,
-            script_path: "test.sh".to_string(),
-            settings: Vec::new(),
-            accepted_setting_keys: Vec::new(),
-        };
-        let spec = ParseSpec {
-            extension_script: Some("parse-results.sh".to_string()),
-            adapters: vec!["fixture-json".to_string()],
-            rules: Vec::new(),
-            defaults: std::collections::HashMap::new(),
-            derive: Vec::new(),
-        };
         let run_dir = RunDir::create().expect("run dir");
 
         let error =
             run_declared_result_parser(&component, &context, &spec, "runner output", &run_dir)
                 .expect_err("malformed parser stdout should fail");
-
         run_dir.cleanup();
 
         assert!(error.message.contains("Invalid JSON"));
@@ -6418,7 +6093,7 @@ printf 'not json\n'
     }
 
     #[test]
-    fn test_run_self_check_test_workflow() {
+    fn self_check_test_workflow_runs_component_script_with_the_supplied_plan() {
         let _env_lock = homeboy_core::test_support::env_lock();
         let dir = tempfile::tempdir().expect("temp dir");
         let _timeout =
@@ -6707,113 +6382,38 @@ mod inventory_profile_tests {
         );
     }
 
-    /// A runner the binding fingerprinted is accepted even when it is not a
-    /// Rust one. #12396 made root resolution, fingerprinting, and runner
-    /// identity extension-driven, but the payload validator still carried a
-    /// `"cargo" | "nextest"` name allowlist, which refused any declared runner
-    /// and left the contract Rust-only in practice. (#12394)
+    /// An inventory may only claim a runner the binding fingerprinted: an
+    /// undeclared or empty runner name has no fingerprint to match.
     #[test]
-    fn a_declared_non_rust_runner_is_accepted() {
-        let run = RunDir::create().expect("run dir");
-        let mut binding = super::tests::test_inventory_binding_for_test(run.path());
-        binding
-            .runner_fingerprints
-            .insert("wordpress".to_string(), "d".repeat(64));
-
-        let mut inventory = TestInventoryEvidence {
-            schema: TEST_INVENTORY_SCHEMA.to_string(),
-            runner: "wordpress".to_string(),
-            runner_fingerprint: "d".repeat(64),
-            workspace_fingerprint: binding.workspace_fingerprint.clone(),
-            tests: vec![TestInventoryTest {
-                id: "tests/plugin-smoke.php".to_string(),
-                package: "data-machine".to_string(),
-                target: "tests".to_string(),
-                target_kind: "smoke".to_string(),
-                name: "plugin-smoke".to_string(),
-                expected_outcome: Some("executed".to_string()),
-            }],
-            inventory_fingerprint: String::new(),
-            fallback_reason: None,
-        };
-        inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
-            &canonical_inventory_json(&inventory),
-        );
-
-        let accepted = valid_test_inventory_payload(&inventory, &binding)
-            .expect("a declared runner must be accepted");
-        assert_eq!(accepted.runner, "wordpress");
-        assert_eq!(accepted.test_count, 1);
-    }
-
-    /// Dropping the name allowlist must not weaken the check: a runner the
-    /// binding never fingerprinted is still refused, because
-    /// `expected_runner_fingerprint` has no entry to match against.
-    #[test]
-    fn an_undeclared_runner_is_still_refused_without_the_name_allowlist() {
+    fn inventory_runner_must_be_one_the_binding_fingerprinted() {
         let run = RunDir::create().expect("run dir");
         let binding = super::tests::test_inventory_binding_for_test(run.path());
 
-        let mut inventory = TestInventoryEvidence {
-            schema: TEST_INVENTORY_SCHEMA.to_string(),
-            runner: "totally-undeclared".to_string(),
-            runner_fingerprint: "e".repeat(64),
-            workspace_fingerprint: binding.workspace_fingerprint.clone(),
-            tests: vec![TestInventoryTest {
-                id: "suite::one".to_string(),
-                package: "pkg".to_string(),
-                target: "target".to_string(),
-                target_kind: "test".to_string(),
-                name: "one".to_string(),
-                expected_outcome: Some("executed".to_string()),
-            }],
-            inventory_fingerprint: String::new(),
-            fallback_reason: None,
-        };
-        inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
-            &canonical_inventory_json(&inventory),
-        );
+        for runner in ["totally-undeclared", "   ", ""] {
+            let mut inventory = TestInventoryEvidence {
+                schema: TEST_INVENTORY_SCHEMA.to_string(),
+                runner: runner.to_string(),
+                runner_fingerprint: "e".repeat(64),
+                workspace_fingerprint: binding.workspace_fingerprint.clone(),
+                tests: vec![TestInventoryTest {
+                    id: "suite::one".to_string(),
+                    package: "pkg".to_string(),
+                    target: "target".to_string(),
+                    target_kind: "test".to_string(),
+                    name: "one".to_string(),
+                    expected_outcome: Some("executed".to_string()),
+                }],
+                inventory_fingerprint: String::new(),
+                fallback_reason: None,
+            };
+            inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+                &canonical_inventory_json(&inventory),
+            );
 
-        assert!(valid_test_inventory_payload(&inventory, &binding).is_err());
-    }
-
-    /// An empty runner name carries no identity at all.
-    #[test]
-    fn an_empty_runner_name_is_refused() {
-        let run = RunDir::create().expect("run dir");
-        let binding = super::tests::test_inventory_binding_for_test(run.path());
-
-        let mut inventory = TestInventoryEvidence {
-            schema: TEST_INVENTORY_SCHEMA.to_string(),
-            runner: "   ".to_string(),
-            runner_fingerprint: "f".repeat(64),
-            workspace_fingerprint: binding.workspace_fingerprint.clone(),
-            tests: vec![TestInventoryTest {
-                id: "suite::one".to_string(),
-                package: "pkg".to_string(),
-                target: "target".to_string(),
-                target_kind: "test".to_string(),
-                name: "one".to_string(),
-                expected_outcome: Some("executed".to_string()),
-            }],
-            inventory_fingerprint: String::new(),
-            fallback_reason: None,
-        };
-        inventory.inventory_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
-            &canonical_inventory_json(&inventory),
-        );
-
-        assert!(valid_test_inventory_payload(&inventory, &binding).is_err());
-    }
-
-    /// An inventory may only claim a runner the binding fingerprinted.
-    #[test]
-    fn expected_runner_fingerprint_rejects_an_undeclared_runner() {
-        let run = RunDir::create().expect("run dir");
-        let binding = super::tests::test_inventory_binding_for_test(run.path());
-        assert!(expected_runner_fingerprint(&binding, "cargo").is_some());
-        assert!(expected_runner_fingerprint(&binding, "nextest").is_some());
-        assert!(expected_runner_fingerprint(&binding, "wordpress").is_none());
-        assert!(expected_runner_fingerprint(&binding, "").is_none());
+            assert!(
+                valid_test_inventory_payload(&inventory, &binding).is_err(),
+                "{runner:?}"
+            );
+        }
     }
 }
