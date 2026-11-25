@@ -444,15 +444,11 @@ mod tests {
     }
 
     #[test]
-    fn reads_structured_build_exit_code() {
+    fn reads_structured_build_exit_code_only_when_present() {
         assert_eq!(
             preparation_build_exit_code(&build_failure(Some(3))),
             Some(3)
         );
-    }
-
-    #[test]
-    fn returns_none_when_no_structured_exit_code_present() {
         assert_eq!(preparation_build_exit_code(&build_failure(None)), None);
     }
 }

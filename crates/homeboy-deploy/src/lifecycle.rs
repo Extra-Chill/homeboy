@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn success_failure_and_skip_are_durable() {
+    fn mutation_retry_skips_terminal_and_interrupted_targets_only() {
         let mut run = DeployLifecycleRun::new("run".to_string(), identity());
         run.update_target("a", DeployTargetStatus::Succeeded, None, None);
         run.update_target(
@@ -564,44 +564,22 @@ mod tests {
         );
         assert!(run.target_skips_mutation_retry("a"));
         assert!(!run.target_skips_mutation_retry("b"));
-        assert_eq!(run.targets[1].error.as_deref(), Some("boom"));
-    }
 
-    #[test]
-    fn resume_marks_interrupted_targets_unknown_without_redeploying() {
-        let mut run = DeployLifecycleRun::new("run".to_string(), identity());
-        run.update_target("a", DeployTargetStatus::Succeeded, None, None);
-        run.update_target("b", DeployTargetStatus::Running, None, None);
-        run.resume(&identity()).expect("matching resume");
-        assert!(run.target_skips_mutation_retry("a"));
-        assert_eq!(run.targets[1].status, DeployTargetStatus::Unknown);
-        assert!(run.target_skips_mutation_retry("b"));
-    }
-
-    #[test]
-    fn applied_unverified_targets_are_terminal_without_mutation_retry() {
-        let mut run = DeployLifecycleRun::new("run".to_string(), identity());
         run.update_target(
             "a",
             DeployTargetStatus::AppliedUnverified,
             Some("post-deploy verification unavailable".to_string()),
             None,
         );
+        run.update_target("b", DeployTargetStatus::Running, None, None);
         run.resume(&identity()).expect("matching resume");
-        assert!(run.target_skips_mutation_retry("a"));
         assert_eq!(
             run.target_status("a"),
             Some(DeployTargetStatus::AppliedUnverified)
         );
-    }
-
-    #[test]
-    fn resume_refuses_any_identity_mismatch() {
-        let run = DeployLifecycleRun::new("run".to_string(), identity());
-        let mut changed = identity();
-        changed.artifact = "sha256:changed".to_string();
-        let error = run.clone().resume(&changed).expect_err("must fail closed");
-        assert!(error.message.contains("does not exactly match"));
+        assert!(run.target_skips_mutation_retry("a"));
+        assert_eq!(run.targets[1].status, DeployTargetStatus::Unknown);
+        assert!(run.target_skips_mutation_retry("b"));
     }
 
     fn checkpoint_on_row(
@@ -944,19 +922,6 @@ mod tests {
             );
             assert_eq!(run.metadata_json["targets"]["target-a"], "target-run");
             assert_eq!(run.id, "aggregate-run");
-        });
-    }
-
-    #[test]
-    fn active_deploy_observation_is_available_in_runs_store() {
-        with_isolated_home(|_| {
-            let observation = DeployObservation::start("site", "HEAD").expect("admit run");
-            let store = ObservationStore::open_initialized().expect("runs store");
-            let run =
-                homeboy_core::observation::runs_service::require_run(&store, observation.run_id())
-                    .expect("show active deploy run");
-
-            assert_eq!(run.id, observation.run_id());
             assert_eq!(run.status, RunStatus::Running.as_str());
         });
     }

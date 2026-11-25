@@ -271,18 +271,10 @@ mod tests {
     }
 
     #[test]
-    fn identifiers_compare_trimmed_and_case_insensitively() {
+    fn identifiers_normalize_and_compare_case_insensitively() {
         assert_eq!(normalize_identifier("  HeLLo  "), "hello");
         assert!(identifier_eq("  My-Site ", "my-site"));
-    }
-
-    #[test]
-    fn normalize_doc_segment_replaces_spaces_and_tabs_with_dashes() {
         assert_eq!(normalize_doc_segment("  My Topic\tName "), "my-topic-name");
-    }
-
-    #[test]
-    fn cmp_case_insensitive_sorts_without_caring_about_case() {
         let mut values = vec!["b", "A", "c"];
         values.sort_by(|a, b| cmp_case_insensitive(a, b));
         assert_eq!(values, vec!["A", "b", "c"]);
@@ -302,50 +294,37 @@ mod tests {
     }
 
     #[test]
-    fn extract_first_finds_version() {
-        let content = r#"Version: 1.2.3"#;
-        let pattern = r"Version:\s*(\d+\.\d+\.\d+)";
-        assert_eq!(extract_first(content, pattern), Some("1.2.3".to_string()));
-    }
-
-    #[test]
-    fn extract_all_finds_multiple() {
-        let content = "v1.0.0 and v2.0.0";
+    fn regex_helpers_extract_and_replace_capture_groups() {
         let pattern = r"v(\d+\.\d+\.\d+)";
-        let result = extract_all(content, pattern).unwrap();
-        assert_eq!(result, vec!["1.0.0", "2.0.0"]);
-    }
-
-    #[test]
-    fn replace_all_counts_replacements() {
-        let content = "v1.0.0 and v1.0.0";
-        let pattern = r"v(\d+\.\d+\.\d+)";
-        let (replaced, count) = replace_all(content, pattern, "2.0.0").unwrap();
+        assert_eq!(
+            extract_first("Version: v1.2.3", pattern),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            extract_all("v1.0.0 and v2.0.0", pattern).unwrap(),
+            vec!["1.0.0", "2.0.0"]
+        );
+        let (replaced, count) = replace_all("v1.0.0 and v1.0.0", pattern, "2.0.0").unwrap();
         assert_eq!(replaced, "v2.0.0 and v2.0.0");
         assert_eq!(count, 2);
     }
 
     #[test]
-    fn require_identical_passes_duplicates() {
-        let values = vec!["1.0.0".to_string(), "1.0.0".to_string()];
+    fn require_identical_accepts_only_one_distinct_value() {
+        let same = vec!["1.0.0".to_string(), "1.0.0".to_string()];
+        assert_eq!(require_identical(&same, "test").unwrap(), "1.0.0");
+        let mixed = vec!["1.0.0".to_string(), "2.0.0".to_string()];
+        assert!(require_identical(&mixed, "test").is_err());
+        assert!(require_identical::<String>(&[], "test").is_err());
+    }
+
+    #[test]
+    fn lines_and_dedupe_drop_empties_and_duplicates_in_order() {
         assert_eq!(
-            require_identical(&values, "test").unwrap(),
-            "1.0.0".to_string()
+            lines("line1\n\nline2\n").collect::<Vec<_>>(),
+            vec!["line1", "line2"]
         );
-    }
-
-    #[test]
-    fn lines_filters_empty() {
-        let output = "line1\n\nline2\n";
-        let result: Vec<&str> = lines(output).collect();
-        assert_eq!(result, vec!["line1", "line2"]);
-    }
-
-    #[test]
-    fn dedupe_preserves_order() {
-        let items = vec!["a", "b", "a", "c", "b"];
-        let result = dedupe(items);
-        assert_eq!(result, vec!["a", "b", "c"]);
+        assert_eq!(dedupe(vec!["a", "b", "a", "c", "b"]), vec!["a", "b", "c"]);
     }
 
     #[test]

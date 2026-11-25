@@ -826,8 +826,6 @@ mod tests {
     }
 
     /// The extension environment carries exactly the shared command-step PATH.
-    /// It used to arrive through a rig-registered provider, so this crate's own
-    /// tests could only observe it by borrowing a provider from global state.
     #[test]
     fn build_exec_env_forwards_the_shared_command_step_path() {
         // Both sides read the process PATH, which other tests mutate.
@@ -1068,33 +1066,23 @@ mod tests {
     }
 
     #[test]
-    fn build_settings_json_cli_overrides_replace_values() {
-        let extension_settings: Vec<(String, serde_json::Value)> =
-            vec![("key".to_string(), serde_json::json!(["original"]))];
-        let overrides = vec![("key".to_string(), "override_value".to_string())];
-        let json_overrides: Vec<(String, serde_json::Value)> = vec![];
-
-        let json = build_settings_json(&[], &extension_settings, &overrides, &json_overrides)
-            .expect("should serialize");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
-
-        // CLI override replaces the array value with a string
-        assert_eq!(parsed["key"], serde_json::json!("override_value"));
-    }
-
-    #[test]
-    fn build_settings_json_typed_overrides_preserve_objects() {
-        // The whole point of --setting-json: object values stay objects,
-        // unlike --setting which would coerce them to a JSON-string-of-an-
-        // object. Mirrors the wp_config_defines / bench_env use case
-        // (homeboy-extensions #248 / #250).
+    fn build_settings_json_override_precedence() {
+        // Typed `--setting-json` values stay JSON (objects are not string-encoded)
+        // and win over a `--setting` string for the same key; a `--setting`
+        // string replaces a component-configured value.
         let manifest_settings = vec![setting("bench_env", serde_json::json!({}))];
-        let extension_settings: Vec<(String, serde_json::Value)> = vec![];
-        let overrides: Vec<(String, String)> = vec![];
-        let json_overrides = vec![(
-            "bench_env".to_string(),
-            serde_json::json!({"BENCH_CORPUS_SIZE": "1000"}),
-        )];
+        let extension_settings = vec![("key".to_string(), serde_json::json!(["original"]))];
+        let overrides = vec![
+            ("key".to_string(), "override_value".to_string()),
+            ("conflict".to_string(), "string_value".to_string()),
+        ];
+        let json_overrides = vec![
+            (
+                "bench_env".to_string(),
+                serde_json::json!({"BENCH_CORPUS_SIZE": "1000"}),
+            ),
+            ("conflict".to_string(), serde_json::json!({"nested": true})),
+        ];
 
         let json = build_settings_json(
             &manifest_settings,
@@ -1105,43 +1093,12 @@ mod tests {
         .expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
 
-        // The override is the actual JSON object, not a string-encoded one.
+        assert_eq!(parsed["key"], serde_json::json!("override_value"));
         assert_eq!(
             parsed["bench_env"],
             serde_json::json!({"BENCH_CORPUS_SIZE": "1000"})
         );
-        assert!(parsed["bench_env"].is_object());
-    }
-
-    #[test]
-    fn build_settings_json_typed_override_wins_on_conflict() {
-        // When the same key is targeted by both --setting and --setting-json,
-        // the typed override wins (strictly more expressive, applied later).
-        let extension_settings: Vec<(String, serde_json::Value)> = vec![];
-        let overrides = vec![("key".to_string(), "string_value".to_string())];
-        let json_overrides = vec![("key".to_string(), serde_json::json!({"nested": true}))];
-
-        let json = build_settings_json(&[], &extension_settings, &overrides, &json_overrides)
-            .expect("should serialize");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
-
-        assert_eq!(parsed["key"], serde_json::json!({"nested": true}));
-    }
-
-    #[test]
-    fn build_exec_env_preserves_step_filter_contract() {
-        let filter = RunnerStepFilter {
-            step: Some("lint,test".to_string()),
-            skip: Some("lint".to_string()),
-        };
-
-        let mut env = build_exec_env("rust", None, None, "{}", Some("/tmp/ext"), None, None, None);
-        env.extend(filter.to_env_pairs());
-
-        assert!(env
-            .iter()
-            .any(|(k, v)| k == "HOMEBOY_STEP" && v == "lint,test"));
-        assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "lint"));
+        assert_eq!(parsed["conflict"], serde_json::json!({"nested": true}));
     }
 
     #[test]
@@ -1387,107 +1344,52 @@ mod tests {
     }
 
     #[test]
-    fn absolutize_path_override_makes_relative_paths_absolute() {
-        // A non-existent relative override still resolves to an absolute path so
-        // it never reaches a runner verbatim.
-        let resolved = absolutize_path_override("some/relative/component");
+    fn absolutize_path_override_never_returns_a_relative_or_rebased_path() {
+        let relative = absolutize_path_override("some/relative/component");
         assert!(
-            Path::new(&resolved).is_absolute(),
-            "expected absolute path, got {resolved}"
+            Path::new(&relative).is_absolute(),
+            "expected absolute path, got {relative}"
         );
-        assert!(resolved.ends_with("some/relative/component"));
-    }
+        assert!(relative.ends_with("some/relative/component"));
 
-    #[test]
-    fn absolutize_path_override_canonicalizes_existing_dir() {
-        let dir = tempfile::tempdir().expect("component dir");
-        let resolved = absolutize_path_override(&dir.path().to_string_lossy());
-        let canonical = dir.path().canonicalize().expect("canonical dir");
-        assert_eq!(Path::new(&resolved), canonical.as_path());
-    }
-
-    #[test]
-    fn absolutize_path_override_preserves_absolute_nonexistent_path() {
-        // An absolute path that does not exist yet stays exactly as supplied
-        // instead of being rebased onto the working directory.
-        let resolved = absolutize_path_override("/does/not/exist/component");
-        assert_eq!(resolved, "/does/not/exist/component");
+        assert_eq!(
+            absolutize_path_override("/does/not/exist/component"),
+            "/does/not/exist/component"
+        );
     }
 
     #[test]
     fn path_override_resolves_to_absolute_component_root() {
-        // Regression for Extra-Chill/homeboy#6818: a non-absolute / non-canonical
-        // `--path` must be normalized so the component root handed to the runner
-        // resolves regardless of the working directory the runner (or a tool it
-        // invokes) ultimately executes from. A non-canonical absolute override
-        // (`<root>/sub/..`) exercises the same `canonicalize` normalization that
-        // a relative `--path .` triggers, without mutating the process-global
-        // working directory. The assertion stays framework-agnostic: core only
-        // guarantees an absolute component root and that a config file living at
-        // that root is locatable from the normalized path.
-        let component_root = tempfile::tempdir().expect("component dir");
-        std::fs::create_dir(component_root.path().join("sub")).expect("nested dir");
-        std::fs::write(component_root.path().join("config.toml"), "")
-            .expect("component-root config file");
-
-        // Non-canonical absolute override pointing back at the component root.
-        let noncanonical = component_root.path().join("sub").join("..");
-
-        let result = build_capability_execution_context(
-            &lint_execution_context(),
-            Component::new(
-                "fixture".to_string(),
-                "/configured/path".to_string(),
-                "fixture-extension".to_string(),
-                None,
-            ),
-            Some(&noncanonical.to_string_lossy()),
-        );
-
-        let resolved_root = Path::new(&result.component.local_path);
-        assert!(
-            resolved_root.is_absolute(),
-            "--path must resolve to an absolute component root, got {}",
-            result.component.local_path
-        );
-        assert_eq!(
-            resolved_root,
-            component_root
-                .path()
-                .canonicalize()
-                .expect("canonical root")
-        );
-        assert!(
-            resolved_root.join("config.toml").is_file(),
-            "normalized component root must locate component-root files"
-        );
-    }
-
-    #[test]
-    fn resolve_capability_component_normalizes_override() {
+        // A non-canonical override (`<root>/sub/..`) exercises the same
+        // normalization a relative `--path .` triggers, without mutating the
+        // process-global working directory.
         let component_root = tempfile::tempdir().expect("component dir");
         std::fs::create_dir(component_root.path().join("sub")).expect("nested dir");
         let noncanonical = component_root.path().join("sub").join("..");
-
+        let canonical = component_root
+            .path()
+            .canonicalize()
+            .expect("canonical root");
         let preloaded = Component::new(
             "fixture".to_string(),
             "/configured/path".to_string(),
             "fixture-extension".to_string(),
             None,
         );
+
         let resolved = resolve_capability_component(
             &lint_execution_context(),
             Some(&preloaded),
             Some(&noncanonical.to_string_lossy()),
         )
         .expect("resolve component");
+        assert_eq!(Path::new(&resolved.local_path), canonical.as_path());
 
-        assert_eq!(
-            Path::new(&resolved.local_path),
-            component_root
-                .path()
-                .canonicalize()
-                .expect("canonical root")
+        let result = build_capability_execution_context(
+            &lint_execution_context(),
+            preloaded,
+            Some(&noncanonical.to_string_lossy()),
         );
+        assert_eq!(Path::new(&result.component.local_path), canonical.as_path());
     }
 }

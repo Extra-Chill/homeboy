@@ -174,143 +174,102 @@ mod tests {
         paths.iter().map(|p| p.to_string()).collect()
     }
 
-    #[test]
-    fn detects_direct_changelog_edit() {
-        let violation = detect_changelog_edit(
-            Some("docs/changelog.md"),
-            &files(&["src/main.rs", "docs/changelog.md"]),
-        )
-        .expect("changelog edit should be flagged");
-        assert_eq!(violation.path, "docs/changelog.md");
-        assert!(violation.message.contains("conventional-prefixed commits"));
-    }
-
-    #[test]
-    fn ignores_changesets_without_changelog() {
-        assert!(detect_changelog_edit(
-            Some("docs/changelog.md"),
-            &files(&["src/main.rs", "README.md"]),
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn matches_despite_dot_slash_and_casing() {
-        // Configured target lower-cased, changed path with ./ prefix and
-        // different casing — these refer to the same file.
-        let violation =
-            detect_changelog_edit(Some("./docs/changelog.md"), &files(&["docs/CHANGELOG.md"]))
-                .expect("normalized + case-insensitive match should fire");
-        assert_eq!(violation.path, "docs/CHANGELOG.md");
-    }
-
-    #[test]
-    fn matches_root_changelog_target() {
-        let violation = detect_changelog_edit(Some("CHANGELOG.md"), &files(&["CHANGELOG.md"]))
-            .expect("root changelog edit should be flagged");
-        assert_eq!(violation.path, "CHANGELOG.md");
-    }
-
-    #[test]
-    fn does_not_match_similarly_named_unrelated_file() {
-        // A file that merely contains the word "changelog" but is not the
-        // configured target must not be flagged.
-        assert!(detect_changelog_edit(
-            Some("docs/changelog.md"),
-            &files(&["docs/changelog-policy.md", "src/changelog/io.rs"]),
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn no_target_is_a_noop() {
-        assert!(detect_changelog_edit(None, &files(&["docs/changelog.md"])).is_none());
-        assert!(detect_changelog_edit(Some("   "), &files(&["docs/changelog.md"])).is_none());
-    }
-
-    #[test]
-    fn empty_changeset_is_a_noop() {
-        assert!(detect_changelog_edit(Some("docs/changelog.md"), &[]).is_none());
-    }
-
-    #[test]
-    fn manual_changelog_edit_is_rejected_without_release_provenance() {
-        assert!(detect_manual_changelog_edit(
-            Some("docs/changelog.md"),
-            &files(&["docs/changelog.md"]),
-            false,
-            None,
-        )
-        .is_some());
-    }
-
-    #[test]
-    fn release_generated_changelog_edit_is_accepted_with_durable_provenance() {
-        let provenance = ChangeArtifactProvenance {
-            source: "release".to_string(),
-            run_id: Some("release.component".to_string()),
-            step_id: Some("changelog.finalize".to_string()),
+    fn provenance(source: &str, run_id: &str, step_id: &str) -> ChangeArtifactProvenance {
+        ChangeArtifactProvenance {
+            source: source.to_string(),
+            run_id: Some(run_id.to_string()),
+            step_id: Some(step_id.to_string()),
             command: None,
             captured_at: None,
-        };
-
-        assert!(generated_file_mutation_is_authorized(Some(&provenance)));
-        assert!(detect_manual_changelog_edit(
-            Some("docs/changelog.md"),
-            &files(&["docs/changelog.md"]),
-            false,
-            Some(&provenance),
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn generated_file_policy_rejects_incomplete_or_untrusted_provenance() {
-        for provenance in [
-            ChangeArtifactProvenance {
-                source: "manual".to_string(),
-                run_id: Some("release.component".to_string()),
-                step_id: Some("changelog.finalize".to_string()),
-                command: None,
-                captured_at: None,
-            },
-            ChangeArtifactProvenance {
-                source: "release".to_string(),
-                run_id: Some(" ".to_string()),
-                step_id: Some("changelog.finalize".to_string()),
-                command: None,
-                captured_at: None,
-            },
-        ] {
-            assert!(!generated_file_mutation_is_authorized(Some(&provenance)));
         }
     }
 
     #[test]
-    fn generated_file_policy_requires_the_expected_producing_step() {
-        let provenance = ChangeArtifactProvenance {
-            source: "release".to_string(),
-            run_id: Some("release.component".to_string()),
-            step_id: Some("version".to_string()),
-            command: None,
-            captured_at: None,
-        };
+    fn detect_changelog_edit_matches_only_the_configured_target() {
+        let cases: &[(Option<&str>, &[&str], Option<&str>)] = &[
+            (
+                Some("docs/changelog.md"),
+                &["src/main.rs", "docs/changelog.md"],
+                Some("docs/changelog.md"),
+            ),
+            (
+                Some("CHANGELOG.md"),
+                &["CHANGELOG.md"],
+                Some("CHANGELOG.md"),
+            ),
+            // `./` prefix and casing differences refer to the same file.
+            (
+                Some("./docs/changelog.md"),
+                &["docs/CHANGELOG.md"],
+                Some("docs/CHANGELOG.md"),
+            ),
+            (
+                Some("docs/changelog.md"),
+                &["src/main.rs", "README.md"],
+                None,
+            ),
+            // Similarly named files are not the configured target.
+            (
+                Some("docs/changelog.md"),
+                &["docs/changelog-policy.md", "src/changelog/io.rs"],
+                None,
+            ),
+            (None, &["docs/changelog.md"], None),
+            (Some("   "), &["docs/changelog.md"], None),
+            (Some("docs/changelog.md"), &[], None),
+        ];
 
-        assert!(generated_file_mutation_is_authorized(Some(&provenance)));
-        assert!(!generated_file_mutation_is_authorized_for(
-            Some(&provenance),
-            "changelog.finalize"
-        ));
+        for (target, changed, expected) in cases {
+            let violation = detect_changelog_edit(*target, &files(changed));
+            assert_eq!(
+                violation.as_ref().map(|v| v.path.as_str()),
+                *expected,
+                "target={target:?} changed={changed:?}"
+            );
+            if let Some(violation) = violation {
+                assert!(violation.message.contains("conventional-prefixed commits"));
+            }
+        }
     }
 
     #[test]
-    fn manual_edit_policy_allows_an_explicit_component_opt_out() {
-        assert!(detect_manual_changelog_edit(
-            Some("docs/changelog.md"),
-            &files(&["docs/changelog.md"]),
-            true,
-            None,
-        )
-        .is_none());
+    fn manual_changelog_edit_requires_release_provenance_or_opt_out() {
+        let release = provenance("release", "release.component", "changelog.finalize");
+        let cases = [
+            (false, None, true),
+            (false, Some(&release), false),
+            (true, None, false),
+        ];
+
+        for (allow_manual, provenance, rejected) in cases {
+            let violation = detect_manual_changelog_edit(
+                Some("docs/changelog.md"),
+                &files(&["docs/changelog.md"]),
+                allow_manual,
+                provenance,
+            );
+            assert_eq!(
+                violation.is_some(),
+                rejected,
+                "allow_manual={allow_manual} provenance={provenance:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_file_policy_rejects_untrusted_incomplete_or_wrong_step_provenance() {
+        for untrusted in [
+            provenance("manual", "release.component", "changelog.finalize"),
+            provenance("release", " ", "changelog.finalize"),
+        ] {
+            assert!(!generated_file_mutation_is_authorized(Some(&untrusted)));
+        }
+
+        let other_step = provenance("release", "release.component", "version");
+        assert!(generated_file_mutation_is_authorized(Some(&other_step)));
+        assert!(!generated_file_mutation_is_authorized_for(
+            Some(&other_step),
+            "changelog.finalize"
+        ));
     }
 }

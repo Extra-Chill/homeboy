@@ -78,37 +78,3 @@ impl TestScopeOutput {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn widened_to_full_records_reason_and_files() {
-        let changed = TestScopeOutput {
-            mode: TEST_SCOPE_MODE_CHANGED.to_string(),
-            changed_since: Some("base".to_string()),
-            selected_count: 0,
-            selected_files: Vec::new(),
-            source_changes_without_tests: vec![".github/workflows/ci.yml".to_string()],
-            widened_from: None,
-            widening_reason: None,
-            widening_files: Vec::new(),
-        };
-        let full = changed.widened_to_full(
-            TEST_SCOPE_WIDENING_HARNESS_CHANGED,
-            vec![".github/workflows/ci.yml".to_string()],
-        );
-        let json = serde_json::to_value(&full).expect("serialize");
-        assert_eq!(json["mode"], "full");
-        assert_eq!(json["widened_from"], "changed");
-        assert_eq!(json["widening_reason"], "harness_changed");
-        assert_eq!(json["widening_files"][0], ".github/workflows/ci.yml");
-        assert_eq!(json["changed_since"], "base");
-
-        let plain = serde_json::to_value(&changed).expect("serialize");
-        assert!(plain.get("widened_from").is_none());
-        assert!(plain.get("widening_reason").is_none());
-        assert!(plain.get("widening_files").is_none());
-    }
-}

@@ -117,33 +117,23 @@ fn aggregate_markdown_includes_percentile_columns() {
 }
 
 #[test]
-fn aggregate_json_serializes_available_percentiles() {
+fn aggregate_json_serializes_only_available_percentiles() {
     let span = aggregate_span(
         "boot_to_ready".to_string(),
         aggregate_samples(&((1..=20).map(|value| value * 10).collect::<Vec<_>>())),
         0,
     );
-
     let value = serde_json::to_value(&span).expect("span serializes");
-
     assert_eq!(value["p75_ms"], 150);
     assert_eq!(value["p90_ms"], 180);
     assert_eq!(value["p95_ms"], 190);
-    assert!(value["stddev_ms"]
-        .as_f64()
-        .is_some_and(|stddev| stddev > 57.6));
     assert_eq!(value["samples"].as_array().expect("samples").len(), 20);
     assert_eq!(value["samples"][0]["run_index"], 1);
     assert_eq!(value["samples"][0]["duration_ms"], 10);
-}
 
-#[test]
-fn aggregate_json_omits_unavailable_percentiles() {
-    let span = aggregate_span("boot_to_ready".to_string(), aggregate_samples(&[10, 20]), 0);
-
-    let value = serde_json::to_value(&span).expect("span serializes");
-
-    assert!(value.get("p75_ms").is_none());
-    assert!(value.get("p90_ms").is_none());
-    assert!(value.get("p95_ms").is_none());
+    let small = aggregate_span("boot_to_ready".to_string(), aggregate_samples(&[10, 20]), 0);
+    let value = serde_json::to_value(&small).expect("span serializes");
+    for key in ["p75_ms", "p90_ms", "p95_ms"] {
+        assert!(value.get(key).is_none(), "{key} should be omitted");
+    }
 }

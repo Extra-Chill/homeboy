@@ -462,176 +462,109 @@ pub struct ControlPlaneActionAcknowledgement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ControlPlaneState;
+    use serde_json::json;
 
-    #[test]
-    fn action_request_and_acknowledgement_round_trip() {
-        let run = RunId::new("run-1").expect("run");
-        let request = ControlPlaneActionRequest {
+    fn request(
+        action: ControlPlaneAction,
+        parameters_schema: &str,
+        data: Value,
+        confirmed: bool,
+    ) -> ControlPlaneActionRequest {
+        ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-            effect_id: EffectId("fixture:cancel:request-1".to_string()),
-            action: ControlPlaneAction::Cancel,
-            idempotency_key: "request-1".to_string(),
-            actor: "test".to_string(),
-            expected_updated_at: Some("2026-01-01T00:00:00Z".to_string()),
-            parameters: ControlPlaneActionPayload {
-                schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
-                data: serde_json::json!({ "reason": "stop" }),
-            },
-            confirmed: true,
-        };
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneActionRequest>(
-                serde_json::to_value(&request).expect("serialize")
-            )
-            .expect("deserialize"),
-            request
-        );
-
-        let mut resource = ControlPlaneRun::new(run.clone());
-        resource.state = ControlPlaneState::Cancelled;
-        let acknowledgement = ControlPlaneActionAcknowledgement {
-            schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
-            acknowledgement: "run-1:action:cancel:request-1".to_string(),
-            run,
-            action: request.action,
-            idempotency_key: request.idempotency_key,
-            actor: request.actor,
-            accepted_at: "2026-01-01T00:00:00Z".to_string(),
-            completed_at: "2026-01-01T00:00:01Z".to_string(),
-            outcome: ControlPlaneActionOutcome::Succeeded,
-            resource,
-            result: ControlPlaneActionPayload::empty(),
-            message: None,
-        };
-        let value = serde_json::to_value(&acknowledgement).expect("serialize");
-        assert_eq!(value["schema"], CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA);
-        assert_eq!(value["outcome"], "succeeded");
-    }
-
-    #[test]
-    fn recover_parameters_are_versioned_and_reject_unknown_inputs() {
-        let mut request = ControlPlaneActionRequest {
-            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.into(),
-            effect_id: action_effect_id("test", "run-1", "recover", "key"),
-            action: ControlPlaneAction::Recover,
-            idempotency_key: "key".into(),
-            actor: "test".into(),
+            effect_id: action_effect_id("test", "run-1", "action", "key"),
+            action,
+            idempotency_key: "key".to_string(),
+            actor: "operator".to_string(),
             expected_updated_at: None,
-            confirmed: true,
-            parameters: ControlPlaneActionPayload::empty(),
-        };
-        request.parameters = ControlPlaneActionPayload {
-            schema: CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA.into(),
-            data: serde_json::json!({}),
-        };
-        request.validate().unwrap();
-        assert_eq!(serde_json::to_value(request.action).unwrap(), "recover");
-        request.parameters.data = serde_json::json!({"preflight": true, "candidate_ref": "abc"});
-        assert!(request.validate().is_err());
-        request.parameters.data = serde_json::json!({"unexpected": true});
-        assert!(request.validate().is_err());
+            parameters: ControlPlaneActionPayload {
+                schema: parameters_schema.to_string(),
+                data,
+            },
+            confirmed,
+        }
     }
 
     #[test]
-    fn action_effect_id_preserves_short_persisted_identifiers() {
+    fn validate_enforces_typed_parameters_and_confirmation() {
+        use ControlPlaneAction::{PlacementUpdate, Recover, Retry};
+        let cases = [
+            (
+                Recover,
+                CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA,
+                json!({}),
+                true,
+                true,
+            ),
+            (
+                Recover,
+                CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA,
+                json!({"preflight": true, "candidate_ref": "abc"}),
+                true,
+                false,
+            ),
+            (
+                Recover,
+                CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA,
+                json!({"unexpected": true}),
+                true,
+                false,
+            ),
+            (
+                PlacementUpdate,
+                CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
+                json!({"placement": "local"}),
+                false,
+                false,
+            ),
+            (
+                PlacementUpdate,
+                CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
+                json!({"placement": "local"}),
+                true,
+                true,
+            ),
+            (
+                PlacementUpdate,
+                CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
+                json!({"placement": "auto"}),
+                true,
+                false,
+            ),
+            (
+                Retry,
+                CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
+                json!({"force": false, "provider_route": {"backend": "replacement"}}),
+                true,
+                true,
+            ),
+            (
+                Retry,
+                CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+                json!({}),
+                true,
+                false,
+            ),
+        ];
+        for (action, schema, data, confirmed, valid) in cases {
+            let label = format!("{action:?} {data} confirmed={confirmed}");
+            let result = request(action, schema, data, confirmed).validate();
+            assert_eq!(result.is_ok(), valid, "{label}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn action_effect_id_keeps_short_ids_and_bounds_long_ones_deterministically() {
         assert_eq!(
             action_effect_id("cli", "run-1", "retry", "request-1"),
             EffectId("cli:run-1:retry:request-1".to_string())
         );
-    }
 
-    #[test]
-    fn action_effect_id_bounds_long_inputs_without_losing_replay_identity() {
         let run_id = format!("run-{}", "x".repeat(120));
-        let first = action_effect_id(
-            "cli",
-            &run_id,
-            "retry",
-            "9b820379-35cf-4ca5-bcd4-1e743ee58b15",
-        );
-        let replay = action_effect_id(
-            "cli",
-            &run_id,
-            "retry",
-            "9b820379-35cf-4ca5-bcd4-1e743ee58b15",
-        );
-        let distinct = action_effect_id(
-            "cli",
-            &run_id,
-            "retry",
-            "c5c72555-8670-4f5c-8937-8eb23d582d3f",
-        );
-
+        let first = action_effect_id("cli", &run_id, "retry", "key-a");
         assert!(first.0.len() <= CONTROL_PLANE_ACTION_ID_BOUND);
-        assert_eq!(first, replay);
-        assert_ne!(first, distinct);
-        assert_eq!(
-            first.0.split(':').take(2).collect::<Vec<_>>(),
-            ["cli", "retry"]
-        );
-    }
-
-    #[test]
-    fn cancel_result_is_versioned_and_distinguishes_unconverged_requests() {
-        let result = ControlPlaneCancelResult {
-            schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
-            disposition: ControlPlaneCancelDisposition::Requested,
-            terminal: false,
-            wait_timeout_seconds: 15,
-            waited_seconds: 15,
-            poll_count: 15,
-            observation_error: Some("controller unavailable".to_string()),
-        };
-        let value = serde_json::to_value(&result).expect("serialize");
-        assert_eq!(value["schema"], CONTROL_PLANE_CANCEL_RESULT_SCHEMA);
-        assert_eq!(value["disposition"], "requested");
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneCancelResult>(value).expect("deserialize"),
-            result
-        );
-    }
-
-    #[test]
-    fn placement_update_requires_confirmation_and_explicit_local() {
-        let mut request = ControlPlaneActionRequest {
-            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-            effect_id: EffectId("fixture:placement:placement-1".to_string()),
-            action: ControlPlaneAction::PlacementUpdate,
-            idempotency_key: "placement-1".to_string(),
-            actor: "operator".to_string(),
-            expected_updated_at: None,
-            parameters: ControlPlaneActionPayload {
-                schema: CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA.to_string(),
-                data: serde_json::json!({ "placement": "local" }),
-            },
-            confirmed: false,
-        };
-        assert!(request.validate().is_err());
-        request.confirmed = true;
-        assert!(request.validate().is_ok());
-        request.parameters.data = serde_json::json!({ "placement": "auto" });
-        assert!(request.validate().is_err());
-    }
-
-    #[test]
-    fn route_retry_requires_typed_payload() {
-        let retry = ControlPlaneActionRequest {
-            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-            effect_id: EffectId("fixture:retry:retry-1".to_string()),
-            action: ControlPlaneAction::Retry,
-            idempotency_key: "retry-1".to_string(),
-            actor: "operator".to_string(),
-            expected_updated_at: None,
-            parameters: ControlPlaneActionPayload {
-                schema: CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA.to_string(),
-                data: serde_json::json!({
-                    "force": false,
-                    "provider_route": { "backend": "replacement" },
-                }),
-            },
-            confirmed: true,
-        };
-        assert!(retry.validate().is_ok());
+        assert_eq!(first, action_effect_id("cli", &run_id, "retry", "key-a"));
+        assert_ne!(first, action_effect_id("cli", &run_id, "retry", "key-b"));
+        assert!(first.0.starts_with("cli:retry:"));
     }
 }

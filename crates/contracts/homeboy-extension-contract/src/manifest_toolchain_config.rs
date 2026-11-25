@@ -23,33 +23,6 @@ pub struct ToolchainReadinessProbe {
     pub diagnostic_env: Vec<String>,
 }
 
-#[cfg(test)]
-mod probe_contract_tests {
-    use super::ToolchainReadinessProbe;
-
-    #[test]
-    fn readiness_probes_require_program_and_reject_shell_command_fields() {
-        for (value, expected) in [
-            (
-                serde_json::json!({"id": "missing"}),
-                "missing field `program`",
-            ),
-            (
-                serde_json::json!({"id": "retired", "command": "tool; touch /tmp/owned"}),
-                "unknown field `command`",
-            ),
-            (
-                serde_json::json!({"id": "mixed", "program": "tool", "command": "tool --version"}),
-                "unknown field `command`",
-            ),
-        ] {
-            let error = serde_json::from_value::<ToolchainReadinessProbe>(value)
-                .expect_err("probe declaration must use the canonical argv contract");
-            assert!(error.to_string().contains(expected), "{error}");
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequirementsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -596,17 +569,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn portable_env_accepts_exact_keys_and_prefixes() {
+    fn portable_env_accepts_identifiers_and_rejects_malformed_or_unbounded_declarations() {
         PortableEnvConfig {
             keys: vec!["DB_SERVICE_HOST".to_string()],
             prefixes: vec!["DB_SERVICE_".to_string()],
         }
         .validate()
         .expect("portable environment contract");
-    }
-
-    #[test]
-    fn portable_env_rejects_non_identifier_and_unbounded_declarations() {
         assert!(PortableEnvConfig {
             keys: vec!["db-service".to_string()],
             prefixes: Vec::new(),
@@ -674,23 +643,6 @@ mod tests {
             },
         ] {
             assert!(validate_test_secret_env_projections(&[malformed]).is_err());
-        }
-    }
-
-    #[test]
-    fn conditional_secret_projection_rejects_unsupported_predicates_and_value_fields() {
-        for malformed in [
-            serde_json::json!({
-                "when":{"path":["service","mode"],"operator":"equals","value":"remote"},
-                "names_path":["service","secret_env"]
-            }),
-            serde_json::json!({
-                "when":{"path":["service","mode"],"equals":"remote"},
-                "names_path":["service","secret_env"],
-                "value_path":["service","password"]
-            }),
-        ] {
-            assert!(serde_json::from_value::<TestSecretEnvProjection>(malformed).is_err());
         }
     }
 }

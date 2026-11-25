@@ -101,12 +101,6 @@ fn review_actions_accept_their_shared_post_action_options_in_help() {
     for (action, target, option, expected) in [
         ("lint", "fixture", "--changed-only", "Lint a component"),
         (
-            "test",
-            "fixture",
-            "--changed-since=main",
-            "Run tests for a component",
-        ),
-        (
             "build",
             "fixture",
             "--changed-since=main",

@@ -94,13 +94,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rigs_path_under_homeboy_dir() {
-        let path = rigs_in_root(&test_config_root());
-        assert!(path.ends_with("rigs"), "got {}", path.display());
-        assert!(path.parent().expect("parent").ends_with("homeboy"));
-    }
-
-    #[test]
     fn rig_registry_root_override_scopes_all_rig_state() {
         let default_root = PathBuf::from("/default/homeboy");
         assert_eq!(
@@ -122,6 +115,7 @@ mod tests {
     fn rig_files_nest_under_the_rig_state_dir() {
         let root = test_config_root();
         let rigs = rigs_in_root(&root);
+        assert_eq!(rigs, root.join("rigs"));
         assert_eq!(
             rig_config_in_root(&root, "studio-dev"),
             rigs.join("studio-dev.json")

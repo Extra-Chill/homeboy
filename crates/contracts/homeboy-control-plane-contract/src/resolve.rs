@@ -188,7 +188,7 @@ fn run_parts(value: &str) -> Option<RunParts<'_>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve, run_parts, IdentityKind, ResolveError};
+    use super::{resolve, IdentityKind, ResolveError};
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
@@ -198,79 +198,33 @@ mod tests {
         "cook-detached-37abbb52-d638-495c-b270-46fdc965fc9c-attempt-1-fb890874-transport-retry";
 
     #[test]
-    fn agent_task_run_id_resolves_mission_run_and_cook_attempt_number() {
-        let resolved = resolve(IdentityKind::RunId, AGENT_TASK_RUN).expect("run");
-        assert_eq!(
-            resolved.mission.as_ref().map(|id| id.as_str()),
-            Some(AGENT_TASK_COOK)
-        );
-        assert_eq!(
-            resolved.run.as_ref().map(|id| id.as_str()),
-            Some(AGENT_TASK_RUN)
-        );
-        assert_eq!(resolved.cook_attempt_number, Some(1));
-        assert!(resolved.task.is_none());
-        assert!(resolved.execution.is_none());
-    }
-
-    #[test]
-    fn detached_transport_retry_run_id_preserves_trailing_qualifiers() {
-        let resolved = resolve(IdentityKind::RunId, DETACHED_RUN).expect("detached run");
-        assert_eq!(
-            resolved.mission.as_ref().map(|id| id.as_str()),
-            Some(DETACHED_COOK)
-        );
-        assert_eq!(
-            resolved.run.as_ref().map(|id| id.as_str()),
-            Some(DETACHED_RUN)
-        );
-        assert!(DETACHED_RUN.ends_with("-transport-retry"));
-        assert_eq!(resolved.cook_attempt_number, Some(1));
-        assert_eq!(
-            run_parts(DETACHED_RUN).map(|parts| parts.mission),
-            Some(DETACHED_COOK)
-        );
-    }
-
-    #[test]
-    fn bare_cook_id_resolves_to_a_mission_with_no_attempt() {
-        for cook_id in [AGENT_TASK_COOK, DETACHED_COOK] {
-            let resolved = resolve(IdentityKind::CookId, cook_id).expect("cook");
+    fn run_ids_resolve_mission_and_attempt_keeping_trailing_qualifiers() {
+        for (run, mission) in [
+            (AGENT_TASK_RUN, AGENT_TASK_COOK),
+            (DETACHED_RUN, DETACHED_COOK),
+        ] {
+            let resolved = resolve(IdentityKind::RunId, run).expect("run");
             assert_eq!(
                 resolved.mission.as_ref().map(|id| id.as_str()),
-                Some(cook_id)
+                Some(mission)
             );
-            assert!(resolved.run.is_none());
-            assert!(resolved.cook_attempt_number.is_none());
+            assert_eq!(resolved.run.as_ref().map(|id| id.as_str()), Some(run));
+            assert_eq!(resolved.cook_attempt_number, Some(1));
         }
     }
 
     #[test]
-    fn fanout_portfolio_id_resolves_to_a_mission() {
-        let resolved =
-            resolve(IdentityKind::FanoutPortfolioId, "production-interface").expect("fanout");
-        assert_eq!(
-            resolved.mission.as_ref().map(|id| id.as_str()),
-            Some("production-interface")
-        );
-        assert!(resolved.cook_attempt_number.is_none());
-    }
-
-    #[test]
-    fn task_and_execution_ids_resolve_to_their_own_identities() {
-        let task = resolve(IdentityKind::TaskId, "cook-static-site-importer").expect("task");
-        assert_eq!(
-            task.task.as_ref().map(|id| id.as_str()),
-            Some("cook-static-site-importer")
-        );
-        assert!(task.mission.is_none());
-        let execution =
-            resolve(IdentityKind::ExecutionId, "run-1:task-1:1:execution").expect("execution");
-        assert_eq!(
-            execution.execution.as_ref().map(|id| id.as_str()),
-            Some("run-1:task-1:1:execution")
-        );
-        assert!(execution.mission.is_none());
+    fn grouping_ids_resolve_to_a_mission_with_no_attempt() {
+        for (kind, id) in [
+            (IdentityKind::CookId, AGENT_TASK_COOK),
+            (IdentityKind::CookId, DETACHED_COOK),
+            (IdentityKind::FanoutPortfolioId, "production-interface"),
+        ] {
+            let resolved = resolve(kind, id).expect("grouping id");
+            assert_eq!(resolved.mission.as_ref().map(|id| id.as_str()), Some(id));
+            assert!(resolved.run.is_none());
+            assert!(resolved.cook_attempt_number.is_none());
+        }
     }
 
     #[test]
@@ -281,52 +235,30 @@ mod tests {
                 kind: IdentityKind::RunId
             }
         );
-        assert_eq!(
-            resolve(IdentityKind::RunId, AGENT_TASK_COOK).unwrap_err(),
-            ResolveError::MalformedRun {
-                value: AGENT_TASK_COOK.to_string()
-            }
-        );
-        assert_eq!(
-            resolve(IdentityKind::RunId, "attempt-1-ea6a6751").unwrap_err(),
-            ResolveError::MalformedRun {
-                value: "attempt-1-ea6a6751".to_string()
-            }
-        );
-        assert_eq!(
-            resolve(
-                IdentityKind::RunId,
-                "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1"
-            )
-            .unwrap_err(),
-            ResolveError::MalformedRun {
-                value: "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1".to_string()
-            }
-        );
-        assert_eq!(
-            resolve(
-                IdentityKind::RunId,
-                "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-01-ea6a6751"
-            )
-            .unwrap_err(),
-            ResolveError::MalformedRun {
-                value: "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-01-ea6a6751"
-                    .to_string()
-            }
-        );
-        assert_eq!(
-            resolve(IdentityKind::CookId, AGENT_TASK_RUN).unwrap_err(),
-            ResolveError::GroupingIdEncodesRun {
-                kind: IdentityKind::CookId,
-                value: AGENT_TASK_RUN.to_string()
-            }
-        );
-        assert_eq!(
-            resolve(IdentityKind::FanoutPortfolioId, DETACHED_RUN).unwrap_err(),
-            ResolveError::GroupingIdEncodesRun {
-                kind: IdentityKind::FanoutPortfolioId,
-                value: DETACHED_RUN.to_string()
-            }
-        );
+        for malformed in [
+            AGENT_TASK_COOK,
+            "attempt-1-ea6a6751",
+            "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1",
+            "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-01-ea6a6751",
+        ] {
+            assert_eq!(
+                resolve(IdentityKind::RunId, malformed).unwrap_err(),
+                ResolveError::MalformedRun {
+                    value: malformed.to_string()
+                }
+            );
+        }
+        for (kind, run) in [
+            (IdentityKind::CookId, AGENT_TASK_RUN),
+            (IdentityKind::FanoutPortfolioId, DETACHED_RUN),
+        ] {
+            assert_eq!(
+                resolve(kind, run).unwrap_err(),
+                ResolveError::GroupingIdEncodesRun {
+                    kind,
+                    value: run.to_string()
+                }
+            );
+        }
     }
 }

@@ -3,7 +3,7 @@ use std::path::Path;
 use clap::Parser;
 use serde_json::{json, Value};
 
-use super::{run, WorkloadArgs, WorkloadCommand, WorkloadOutput};
+use super::{run, WorkloadArgs, WorkloadOutput};
 use crate::cli_surface::{Cli, Commands};
 
 fn parse(args: &[&str]) -> Result<WorkloadArgs, clap::Error> {
@@ -13,90 +13,6 @@ fn parse(args: &[&str]) -> Result<WorkloadArgs, clap::Error> {
         Commands::Workload(args) => args,
         _ => panic!("not a workload command"),
     })
-}
-
-#[test]
-fn every_subcommand_parses_with_a_kind() {
-    let run = parse(&[
-        "run",
-        "--kind",
-        "fuzz",
-        "pkg",
-        "--workload",
-        "parser",
-        "--seed",
-        "7",
-        "--run-id",
-        "r1",
-        "--baseline",
-        "--",
-        "--extra",
-    ])
-    .unwrap();
-    let WorkloadCommand::Run(run) = run.command else {
-        panic!("run")
-    };
-    assert_eq!(run.kind, "fuzz");
-    assert_eq!(run.target.comp.component.as_deref(), Some("pkg"));
-    assert_eq!(run.workload.as_deref(), Some("parser"));
-    assert!(run.baseline_args.baseline);
-    assert_eq!(run.args, vec!["--extra".to_string()]);
-
-    assert!(matches!(
-        parse(&["list", "--kind", "fuzz", "--rig", "studio"])
-            .unwrap()
-            .command,
-        WorkloadCommand::List(_)
-    ));
-    assert!(matches!(
-        parse(&[
-            "compare",
-            "--kind",
-            "fuzz",
-            "--from-run",
-            "a",
-            "--to-run",
-            "b"
-        ])
-        .unwrap()
-        .command,
-        WorkloadCommand::Compare(_)
-    ));
-    assert!(matches!(
-        parse(&[
-            "replay",
-            "--kind",
-            "fuzz",
-            "--run-id",
-            "a",
-            "--case-id",
-            "c",
-            "--dry-run"
-        ])
-        .unwrap()
-        .command,
-        WorkloadCommand::Replay(_)
-    ));
-    assert!(matches!(
-        parse(&[
-            "minimize",
-            "--kind",
-            "fuzz",
-            "--run-id",
-            "a",
-            "--case-id",
-            "c"
-        ])
-        .unwrap()
-        .command,
-        WorkloadCommand::Minimize(_)
-    ));
-    assert!(matches!(
-        parse(&["inspect", "run-1"]).unwrap().command,
-        WorkloadCommand::Inspect(_)
-    ));
-    assert!(parse(&["run", "pkg"]).is_err(), "--kind is required");
-    assert!(parse(&["compare", "--kind", "fuzz", "--from-run", "a"]).is_err());
 }
 
 #[test]

@@ -929,13 +929,14 @@ mod tests {
     }
 
     #[test]
-    fn relink_replaces_existing_symlink_source() {
+    fn relink_replaces_existing_symlink_source_and_materializes_shared_assets() {
         with_isolated_home(|home| {
             let home = home.path();
             let old_source = home.join("old-source");
             let new_source = home.join("new-source");
             write_extension_fixture(&old_source, "swift");
             write_extension_fixture_with_version(&new_source, "swift", "2.0.0");
+            write_declared_runtime_shared_assets(&new_source);
 
             install(&old_source.join("swift").to_string_lossy(), Some("swift"))
                 .expect("install linked extension");
@@ -956,6 +957,9 @@ mod tests {
 
             let extension = load_extension("swift").expect("load relinked extension");
             assert_eq!(extension.version, "2.0.0");
+            assert!(home
+                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .exists());
         });
     }
 
@@ -1006,36 +1010,6 @@ mod tests {
                 !metadata_dir.join(".pi.source-requested-ref").exists(),
                 "relink must clear the requested ref inherited from the durable source"
             );
-        });
-    }
-
-    #[test]
-    fn relink_materializes_declared_shared_assets() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let old_source = home.join("old-source");
-            let new_source = home.join("new-source");
-            write_extension_fixture(&old_source, "wordpress");
-            write_extension_fixture_with_version(&new_source, "wordpress", "2.0.0");
-            write_declared_runtime_shared_assets(&new_source);
-
-            install(
-                &old_source.join("wordpress").to_string_lossy(),
-                Some("wordpress"),
-            )
-            .expect("install linked extension");
-
-            relink("wordpress", &new_source.join("wordpress").to_string_lossy())
-                .expect("relink should materialize shared runtime");
-
-            assert!(home
-                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
-                .exists());
-            assert!(home
-                .join(
-                    ".config/homeboy/extensions/shared-helpers/lib/agent-task-provider-contract.js"
-                )
-                .exists());
         });
     }
 

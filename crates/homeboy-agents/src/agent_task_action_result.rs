@@ -225,49 +225,46 @@ mod tests {
     }
 
     #[test]
-    fn retry_decodes_plain_producer_result() {
-        let acknowledgement = retry_acknowledgement();
-        let result = retry(&acknowledgement).expect("plain retry result");
-
-        assert_eq!(
-            serde_json::to_value(&result.record).unwrap(),
-            acknowledgement.result.data["record"]
-        );
-        assert!(result.runnable);
-        assert!(result.created);
-        assert_eq!(result.blocker, None);
-        assert!(!result.recovered);
-    }
-
-    #[test]
-    fn retry_decodes_scheduling_blocker_producer_result() {
-        let mut acknowledgement = retry_acknowledgement();
+    fn retry_decodes_every_producer_result_shape() {
         let blocker = serde_json::json!({
             "error": "scheduling daemon unavailable",
             "next_action": "homeboy daemon recover",
         });
-        acknowledgement.result.data["blocker"] = blocker.clone();
+        let cases: [(&str, Value, bool, bool, Option<Value>); 3] = [
+            ("plain", serde_json::json!({}), true, false, None),
+            (
+                "scheduling blocker",
+                serde_json::json!({ "blocker": blocker.clone() }),
+                true,
+                false,
+                Some(blocker.clone()),
+            ),
+            (
+                "recovered successor",
+                serde_json::json!({ "created": false, "recovered": true }),
+                false,
+                true,
+                None,
+            ),
+        ];
+        for (label, overrides, created, recovered, expected_blocker) in cases {
+            let mut acknowledgement = retry_acknowledgement();
+            for (key, value) in overrides.as_object().expect("overrides") {
+                acknowledgement.result.data[key] = value.clone();
+            }
 
-        let result = retry(&acknowledgement).expect("blocked retry result");
+            let result = retry(&acknowledgement).expect(label);
 
-        assert_eq!(result.blocker, Some(blocker));
-        assert!(result.runnable);
-        assert!(result.created);
-        assert!(!result.recovered);
-    }
-
-    #[test]
-    fn retry_decodes_recovered_successor_producer_result() {
-        let mut acknowledgement = retry_acknowledgement();
-        acknowledgement.result.data["created"] = Value::Bool(false);
-        acknowledgement.result.data["recovered"] = Value::Bool(true);
-
-        let result = retry(&acknowledgement).expect("recovered retry result");
-
-        assert!(result.recovered);
-        assert!(result.runnable);
-        assert!(!result.created);
-        assert_eq!(result.blocker, None);
+            assert_eq!(
+                serde_json::to_value(&result.record).unwrap(),
+                acknowledgement.result.data["record"],
+                "{label}"
+            );
+            assert!(result.runnable, "{label}");
+            assert_eq!(result.created, created, "{label}");
+            assert_eq!(result.recovered, recovered, "{label}");
+            assert_eq!(result.blocker, expected_blocker, "{label}");
+        }
     }
 
     #[test]
@@ -284,38 +281,31 @@ mod tests {
     }
 
     #[test]
-    fn retry_refuses_an_acknowledgement_for_another_action_before_decoding() {
-        let error = retry(&acknowledgement(
-            ControlPlaneAction::Recover,
-            CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-        ))
-        .expect_err("action mismatch must be refused");
-
-        assert!(error
-            .message
-            .contains("expected retry action acknowledgement"));
-    }
-
-    #[test]
-    fn retry_refuses_an_unexpected_result_schema_before_decoding() {
-        let error = retry(&acknowledgement(
-            ControlPlaneAction::Retry,
-            CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-        ))
-        .expect_err("schema mismatch must be refused");
-
-        assert!(error.message.contains(CONTROL_PLANE_RETRY_RESULT_SCHEMA));
-    }
-
-    #[test]
-    fn retry_refuses_a_failed_acknowledgement_before_decoding() {
-        let mut acknowledgement =
+    fn retry_refuses_mismatched_or_failed_acknowledgements_before_decoding() {
+        let mut failed =
             acknowledgement(ControlPlaneAction::Retry, CONTROL_PLANE_RETRY_RESULT_SCHEMA);
-        acknowledgement.outcome = ControlPlaneActionOutcome::Failed;
-        acknowledgement.message = Some("retry admission rejected".to_string());
-
-        let error = retry(&acknowledgement).expect_err("failed acknowledgement must be refused");
-
-        assert!(error.message.contains("retry admission rejected"));
+        failed.outcome = ControlPlaneActionOutcome::Failed;
+        failed.message = Some("retry admission rejected".to_string());
+        let cases = [
+            (
+                acknowledgement(
+                    ControlPlaneAction::Recover,
+                    CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+                ),
+                "expected retry action acknowledgement",
+            ),
+            (
+                acknowledgement(
+                    ControlPlaneAction::Retry,
+                    CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+                ),
+                CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+            ),
+            (failed, "retry admission rejected"),
+        ];
+        for (acknowledgement, expected) in cases {
+            let error = retry(&acknowledgement).expect_err(expected);
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
     }
 }

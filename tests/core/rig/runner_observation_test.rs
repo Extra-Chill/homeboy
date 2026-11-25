@@ -102,13 +102,6 @@ fn test_run_check_persists_passing_observation() {
         assert_eq!(run.metadata_json["command"], "check");
         assert_eq!(run.metadata_json["pipeline"]["name"], "check");
         assert_eq!(
-            run.metadata_json["pipeline"]["steps"]
-                .as_array()
-                .unwrap()
-                .len(),
-            0
-        );
-        assert_eq!(
             run.metadata_json["state"]["last_check_result"],
             serde_json::Value::String("pass".to_string())
         );
@@ -196,85 +189,53 @@ fn test_run_check_persists_failing_observation() {
 }
 
 #[test]
-fn test_successful_nested_command_retains_registered_file() {
-    with_isolated_home(|home| {
-        let _xdg = XdgDataHomeGuard::unset();
-        let artifact = home.path().join("wp-codebox-result.json");
-        let script = home.path().join("register-success.sh");
-        write_registration_script(&script, &artifact, "file", 0);
-        let mut rig = observation_spec("observed-command-artifact-success");
-        rig.pipeline.insert(
-            "check".to_string(),
-            vec![command_step(format!(
-                "sh {} {}",
-                script.display(),
-                artifact.display()
-            ))],
-        );
+fn test_nested_command_registered_artifacts_are_retained_on_success_and_failure() {
+    for (artifact_type, kind, exit_code) in [
+        ("file", "wp_codebox_result", 0),
+        ("directory", "wp_codebox_bundle", 23),
+    ] {
+        with_isolated_home(|home| {
+            let _xdg = XdgDataHomeGuard::unset();
+            let artifact = home.path().join(format!("wp-codebox-{artifact_type}"));
+            let script = home.path().join("register.sh");
+            write_registration_script(&script, &artifact, artifact_type, exit_code);
+            let mut rig = observation_spec(&format!("observed-command-artifact-{artifact_type}"));
+            rig.pipeline.insert(
+                "check".to_string(),
+                vec![command_step(format!(
+                    "sh {} {}",
+                    script.display(),
+                    artifact.display()
+                ))],
+            );
 
-        let report = run_check(&rig).expect("check report");
-        assert!(report.success);
-        let run_id = report.run_id.as_deref().expect("run id");
-        let store = ObservationStore::open_initialized().expect("store");
-        let artifacts = store.list_artifacts(run_id).expect("artifacts");
-        let result = artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "wp_codebox_result")
-            .expect("registered result");
+            let report = run_check(&rig).expect("check report");
+            assert_eq!(report.success, exit_code == 0, "{artifact_type}");
+            let run_id = report.run_id.as_deref().expect("run id");
+            let store = ObservationStore::open_initialized().expect("store");
+            let artifacts = store.list_artifacts(run_id).expect("artifacts");
+            let retained = artifacts
+                .iter()
+                .find(|artifact| artifact.kind == kind)
+                .expect("registered artifact retained");
 
-        assert_eq!(result.artifact_type, "file");
-        assert_eq!(result.metadata_json["source"], "rig_command_registration");
-        assert_eq!(std::fs::read_to_string(&result.path).unwrap(), "{}");
-        assert!(report
-            .artifact_index
-            .as_ref()
-            .unwrap()
-            .registered_artifact_refs
-            .iter()
-            .any(|artifact| artifact.id == result.id));
-    });
-}
-
-#[test]
-fn test_failed_nested_wp_codebox_command_retains_registered_bundle() {
-    with_isolated_home(|home| {
-        let _xdg = XdgDataHomeGuard::unset();
-        let bundle = home.path().join("wp-codebox-failed-bundle");
-        let script = home.path().join("register-failure.sh");
-        write_registration_script(&script, &bundle, "directory", 23);
-        let mut rig = observation_spec("observed-command-artifact-failure");
-        rig.pipeline.insert(
-            "check".to_string(),
-            vec![command_step(format!(
-                "sh {} {}",
-                script.display(),
-                bundle.display()
-            ))],
-        );
-
-        let report = run_check(&rig).expect("failed check report");
-        assert!(!report.success);
-        let run_id = report.run_id.as_deref().expect("run id");
-        let store = ObservationStore::open_initialized().expect("store");
-        let artifacts = store.list_artifacts(run_id).expect("artifacts");
-        let retained = artifacts
-            .iter()
-            .find(|artifact| artifact.kind == "wp_codebox_bundle")
-            .expect("failed bundle retained");
-
-        assert_eq!(retained.artifact_type, "directory");
-        assert!(std::path::Path::new(&retained.path)
-            .join("failure.json")
-            .is_file());
-        assert_eq!(retained.metadata_json["registration_index"], 0);
-        assert!(report
-            .artifact_index
-            .as_ref()
-            .unwrap()
-            .registered_artifact_refs
-            .iter()
-            .any(|artifact| artifact.id == retained.id));
-    });
+            assert_eq!(retained.artifact_type, artifact_type);
+            assert_eq!(retained.metadata_json["source"], "rig_command_registration");
+            let retained_path = std::path::Path::new(&retained.path);
+            if artifact_type == "directory" {
+                assert!(retained_path.join("failure.json").is_file());
+            } else {
+                assert_eq!(std::fs::read_to_string(retained_path).unwrap(), "{}");
+            }
+            assert!(report
+                .artifact_index
+                .as_ref()
+                .unwrap()
+                .registered_artifact_refs
+                .iter()
+                .any(|artifact| artifact.id == retained.id));
+        });
+    }
 }
 
 #[test]

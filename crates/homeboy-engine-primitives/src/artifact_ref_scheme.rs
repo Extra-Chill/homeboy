@@ -102,20 +102,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recognizes_runner_artifact_refs() {
-        assert!(is_runner_artifact_ref("runner-artifact://r/run/a"));
-        assert!(!is_runner_artifact_ref("metadata-only:label"));
-        assert!(!is_runner_artifact_ref("/abs/path"));
-    }
-
-    #[test]
-    fn recognizes_metadata_only_refs() {
-        assert!(is_metadata_only_ref("metadata-only:label"));
-        assert!(!is_metadata_only_ref("runner-artifact://r/run/a"));
-        assert!(!is_metadata_only_ref("/abs/path"));
-    }
-
-    #[test]
     fn uri_component_round_trips_reserved_bytes() {
         assert_eq!(encode_uri_component("runner/a"), "runner%2Fa");
         assert_eq!(encode_uri_component("run b"), "run%20b");

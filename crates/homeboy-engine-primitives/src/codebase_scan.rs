@@ -231,142 +231,65 @@ fn should_skip_dir(name: &str, is_root: bool, config: &ScanConfig) -> bool {
 mod tests {
     use super::*;
 
-    // --- File walking tests ---
-
-    #[test]
-    fn walk_files_skips_always_dirs() {
-        let dir = std::env::temp_dir().join("homeboy_scan_always_skip_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(dir.join("node_modules"));
-        let _ = std::fs::create_dir_all(dir.join("vendor"));
-        let _ = std::fs::create_dir_all(dir.join(".homeboy-build/component"));
-        let _ = std::fs::create_dir_all(dir.join(".homeboy-bin"));
-        let _ = std::fs::create_dir_all(dir.join("src"));
-
-        std::fs::write(dir.join("node_modules/lib.js"), "x").unwrap();
-        std::fs::write(dir.join("vendor/lib.php"), "x").unwrap();
-        std::fs::write(dir.join(".homeboy-build/component/copied.rs"), "x").unwrap();
-        std::fs::write(dir.join(".homeboy-bin/helper.rs"), "x").unwrap();
-        std::fs::write(dir.join("src/main.rs"), "x").unwrap();
-
-        let files = walk_files(&dir, &ScanConfig::default());
-        let names: Vec<String> = files
+    fn scanned(root: &Path, config: &ScanConfig) -> Vec<String> {
+        let mut files: Vec<String> = walk_files(root, config)
             .iter()
-            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .map(|f| {
+                f.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
-
-        assert!(names.contains(&"main.rs".to_string()));
-        assert!(!names.contains(&"lib.js".to_string()));
-        assert!(!names.contains(&"lib.php".to_string()));
-        assert!(!names.contains(&"copied.rs".to_string()));
-        assert!(!names.contains(&"helper.rs".to_string()));
-        // Homeboy keeps no state inside source trees, so it needs no skip rule.
-        assert!(!ALWAYS_SKIP_DIRS.contains(&".homeboy"));
-        assert!(!dir.join(".homeboy").exists());
-
-        let _ = std::fs::remove_dir_all(&dir);
+        files.sort();
+        files
     }
 
     #[test]
-    fn walk_files_root_only_skip_at_root() {
-        let dir = std::env::temp_dir().join("homeboy_scan_root_skip_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(dir.join("build"));
-        let _ = std::fs::create_dir_all(dir.join("scripts/build"));
+    fn walk_files_skips_dependency_dirs_everywhere_and_build_dirs_only_at_root() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        for file in [
+            "node_modules/lib.js",
+            "vendor/lib.php",
+            ".homeboy-build/component/copied.rs",
+            ".homeboy-bin/helper.rs",
+            "src/__pycache__/module.py",
+            "src/main.py",
+            "build/output.rs",
+            "scripts/build/setup.sh",
+            "src/main.rs",
+        ] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
 
-        std::fs::write(dir.join("build/output.rs"), "x").unwrap();
-        std::fs::write(dir.join("scripts/build/setup.sh"), "x").unwrap();
-
-        let files = walk_files(&dir, &ScanConfig::default());
-        let names: Vec<String> = files
-            .iter()
-            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
-            .collect();
-
-        assert!(
-            names.contains(&"setup.sh".to_string()),
-            "Should find scripts/build/setup.sh"
+        assert_eq!(
+            scanned(dir.path(), &ScanConfig::default()),
+            vec!["scripts/build/setup.sh", "src/main.py", "src/main.rs"]
         );
-        assert!(
-            !names.contains(&"output.rs".to_string()),
-            "Should skip root-level build/"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn walk_files_extension_filter_only() {
-        let dir = std::env::temp_dir().join("homeboy_scan_ext_only_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-
-        std::fs::write(dir.join("main.rs"), "x").unwrap();
-        std::fs::write(dir.join("style.css"), "x").unwrap();
-        std::fs::write(dir.join("readme.md"), "x").unwrap();
+    fn walk_files_applies_extension_and_hidden_filters() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        for file in [
+            ".hidden/secret.rs",
+            ".dotfile.rs",
+            "main.rs",
+            "style.css",
+            "readme.md",
+        ] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
 
         let config = ScanConfig {
             extensions: ExtensionFilter::Only(vec!["rs".to_string(), "md".to_string()]),
-            ..Default::default()
-        };
-        let files = walk_files(&dir, &config);
-        let names: Vec<String> = files
-            .iter()
-            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
-            .collect();
-
-        assert!(names.contains(&"main.rs".to_string()));
-        assert!(names.contains(&"readme.md".to_string()));
-        assert!(!names.contains(&"style.css".to_string()));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn walk_files_skip_hidden() {
-        let dir = std::env::temp_dir().join("homeboy_scan_hidden_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(dir.join(".hidden"));
-
-        std::fs::write(dir.join(".hidden/secret.rs"), "x").unwrap();
-        std::fs::write(dir.join(".dotfile.rs"), "x").unwrap();
-        std::fs::write(dir.join("visible.rs"), "x").unwrap();
-
-        let config = ScanConfig {
             skip_hidden: true,
             ..Default::default()
         };
-        let files = walk_files(&dir, &config);
-        let names: Vec<String> = files
-            .iter()
-            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
-            .collect();
-
-        assert!(names.contains(&"visible.rs".to_string()));
-        assert!(!names.contains(&"secret.rs".to_string()));
-        assert!(!names.contains(&".dotfile.rs".to_string()));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn walk_files_pycache_always_skipped() {
-        let dir = std::env::temp_dir().join("homeboy_scan_pycache_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(dir.join("src/__pycache__"));
-
-        std::fs::write(dir.join("src/__pycache__/module.py"), "x").unwrap();
-        std::fs::write(dir.join("src/main.py"), "x").unwrap();
-
-        let files = walk_files(&dir, &ScanConfig::default());
-        let names: Vec<String> = files
-            .iter()
-            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
-            .collect();
-
-        assert!(names.contains(&"main.py".to_string()));
-        assert!(!names.contains(&"module.py".to_string()));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(scanned(dir.path(), &config), vec!["main.rs", "readme.md"]);
     }
 }

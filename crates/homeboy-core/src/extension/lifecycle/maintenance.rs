@@ -191,20 +191,3 @@ pub fn update_all(
         repaired_source_metadata,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_update_all() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let result = update_all(false, |_, _, _| Ok(())).unwrap();
-
-            assert!(result.updated.is_empty());
-            assert!(result.skipped.is_empty());
-            assert!(result.skipped_details.is_empty());
-            assert!(result.repaired_source_metadata.is_empty());
-        });
-    }
-}

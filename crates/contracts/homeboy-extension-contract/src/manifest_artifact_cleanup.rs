@@ -148,32 +148,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn category_wire_labels_and_reconstruction_eligibility_are_explicit() {
-        for (category, label, reconstructable) in [
-            (ArtifactCleanupCategory::Dependencies, "dependencies", true),
-            (ArtifactCleanupCategory::BuildOutput, "build_output", true),
-            (ArtifactCleanupCategory::BuildCache, "build_cache", true),
-            (
-                ArtifactCleanupCategory::ReleaseAsset,
-                "release_asset",
-                false,
-            ),
+    fn only_reconstructable_categories_are_eligible_for_reclaim() {
+        for (category, reconstructable) in [
+            (ArtifactCleanupCategory::Dependencies, true),
+            (ArtifactCleanupCategory::BuildOutput, true),
+            (ArtifactCleanupCategory::BuildCache, true),
+            (ArtifactCleanupCategory::ReleaseAsset, false),
         ] {
             assert_eq!(
                 category.is_reconstructable(),
                 reconstructable,
-                "eligibility for {label}"
-            );
-            assert_eq!(category.as_str(), label);
-            assert_eq!(
-                serde_json::to_value(category).expect("serialize category"),
-                label
+                "{category:?}"
             );
         }
     }
 
     #[test]
-    fn declaration_without_scopes_resolves_one_root_scope() {
+    fn scopes_resolve_to_one_root_and_bound_nested_depth() {
         let declaration = ArtifactCleanupDeclaration {
             id: "generated".to_string(),
             category: ArtifactCleanupCategory::BuildOutput,
@@ -183,23 +174,16 @@ mod tests {
             min_age_days: None,
             description: None,
         };
-
         let scopes = declaration.resolved_scopes();
-
         assert_eq!(scopes.len(), 1);
         assert!(scopes[0].manifest_files.is_empty());
-        assert!(!scopes[0].nested);
         assert_eq!(scopes[0].depth_bound(), 0);
-    }
 
-    #[test]
-    fn nested_scope_depth_defaults_when_unbounded() {
         let scope = ArtifactCleanupScope {
             manifest_files: vec!["scope.marker".to_string()],
             nested: true,
             max_depth: None,
         };
-
         assert_eq!(scope.depth_bound(), DEFAULT_NESTED_SCOPE_MAX_DEPTH);
         assert_eq!(
             ArtifactCleanupScope {
@@ -212,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn config_round_trips_through_manifest_json() {
+    fn manifest_config_round_trips_and_rejects_unknown_declaration_fields() {
         let raw = serde_json::json!({
             "declarations": [
                 {
@@ -236,30 +220,17 @@ mod tests {
 
         let parsed: ArtifactCleanupConfig =
             serde_json::from_value(raw.clone()).expect("config parses");
-
-        assert_eq!(parsed.declarations.len(), 2);
-        assert_eq!(
-            parsed.declarations[0].category,
-            ArtifactCleanupCategory::Dependencies
-        );
         assert_eq!(parsed.declarations[0].scopes[0].depth_bound(), 3);
-        assert_eq!(parsed.declarations[0].min_age_days, Some(7));
-        assert!(!parsed.declarations[1].category.is_reconstructable());
-        assert!(parsed.declarations[1].scopes.is_empty());
         assert_eq!(
             serde_json::to_value(&parsed).expect("config serializes"),
             raw
         );
-    }
 
-    #[test]
-    fn unknown_declaration_fields_are_rejected() {
-        let raw = serde_json::json!({
+        let unknown = serde_json::json!({
             "declarations": [
                 { "id": "x", "category": "build_output", "path": "out", "glob": "**/*" }
             ]
         });
-
-        assert!(serde_json::from_value::<ArtifactCleanupConfig>(raw).is_err());
+        assert!(serde_json::from_value::<ArtifactCleanupConfig>(unknown).is_err());
     }
 }

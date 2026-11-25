@@ -159,7 +159,7 @@ fn waiting_upgrade_response(
 fn upgrade_response(result: &upgrade::UpgradeResult) -> CmdResult<Value> {
     let json = serde_json::to_value(result)
         .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
-    Ok((json, upgrade_exit_code(result, false)))
+    Ok((json, result.exit_code()))
 }
 
 /// Configured runners that the upgrade left version-degraded (PATH/version drift
@@ -246,10 +246,6 @@ fn warn_dangling_extensions(result: &upgrade::UpgradeResult) {
     }
 }
 
-fn upgrade_exit_code(result: &upgrade::UpgradeResult, _targeted_runner_upgrade: bool) -> i32 {
-    result.exit_code()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,39 +299,37 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_wait_reports_external_success_without_stale_version_warning() {
-        let (body, exit) = externally_finished_upgrade(homeboy::core::observation::RunStatus::Pass);
-        assert_eq!(exit, 0);
-        assert_eq!(body["status"], "pass");
-        assert_eq!(body["failed"], false);
-        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
-            &Ok(body),
-            exit,
-            "upgrade",
-            None,
-        );
-        let envelope = serde_json::to_value(envelope).unwrap();
-        assert_eq!(envelope["success"], true);
-        assert_eq!(envelope["exit_code"], 0);
-        assert_eq!(envelope["status"], "succeeded");
-        assert!(!envelope.to_string().contains("behind latest"));
-    }
-
-    #[test]
-    fn upgrade_wait_preserves_external_failure() {
-        let (body, exit) = externally_finished_upgrade(homeboy::core::observation::RunStatus::Fail);
-        assert_ne!(exit, 0);
-        assert_eq!(body["status"], "fail");
-        assert_eq!(body["failed"], true);
-        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
-            &Ok(body),
-            exit,
-            "upgrade",
-            None,
-        );
-        let envelope = serde_json::to_value(envelope).unwrap();
-        assert_eq!(envelope["success"], false);
-        assert_eq!(envelope["status"], "failed");
+    fn upgrade_wait_reports_the_externally_terminalized_status() {
+        for (status, expected_status, failed, envelope_status) in [
+            (
+                homeboy::core::observation::RunStatus::Pass,
+                "pass",
+                false,
+                "succeeded",
+            ),
+            (
+                homeboy::core::observation::RunStatus::Fail,
+                "fail",
+                true,
+                "failed",
+            ),
+        ] {
+            let (body, exit) = externally_finished_upgrade(status);
+            assert_eq!(exit != 0, failed);
+            assert_eq!(body["status"], expected_status);
+            assert_eq!(body["failed"], failed);
+            let envelope =
+                crate::commands::utils::response::cli_response_for_json_result_for_command(
+                    &Ok(body),
+                    exit,
+                    "upgrade",
+                    None,
+                );
+            let envelope = serde_json::to_value(envelope).unwrap();
+            assert_eq!(envelope["success"], !failed);
+            assert_eq!(envelope["status"], envelope_status);
+            assert!(!envelope.to_string().contains("behind latest"));
+        }
     }
 
     #[test]
@@ -354,108 +348,34 @@ mod tests {
     }
 
     #[test]
-    fn targeted_runner_failures_return_non_zero_status() {
-        let mut result = base_upgrade_result();
-        result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
-            runner_id: "homeboy-lab".to_string(),
-            homeboy_path: "/home/user/.cargo/bin/homeboy".to_string(),
-            success: false,
-            upgraded: true,
-            previous_version: Some("0.228.6".to_string()),
-            new_version: Some("0.228.7".to_string()),
-            bare_homeboy_version: Some("0.222.17".to_string()),
-            path_drift: Some("bare `homeboy` reports 0.222.17".to_string()),
-            recovery_commands: vec![
-                "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string()
-            ],
-            extensions_synced: Vec::new(),
-            extensions_skipped: Vec::new(),
-            extensions_failed: Vec::new(),
-            stale_daemon: None,
-            daemon_previous_version: None,
-            daemon_new_version: None,
-            service_binaries: Vec::new(),
-            path_binaries: Vec::new(),
-            exit_code: 0,
-            detail: "extension sync failed".to_string(),
-        });
-
-        assert_eq!(upgrade_exit_code(&result, true), 1);
+    fn failed_runner_entries_return_non_zero_status() {
+        for upgraded in [true, false] {
+            let mut result = base_upgrade_result();
+            result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
+                success: false,
+                upgraded,
+                ..runner_entry()
+            });
+            assert_eq!(
+                upgrade_response(&result).unwrap().1,
+                1,
+                "upgraded={upgraded}"
+            );
+        }
     }
 
     #[test]
-    fn partial_convergence_returns_non_zero_status() {
-        let mut result = base_upgrade_result();
-        result.partial = true;
-
-        assert_eq!(upgrade_exit_code(&result, false), 1);
-    }
-
-    #[test]
-    fn partial_result_serializes_independent_component_statuses() {
-        let mut result = base_upgrade_result();
-        result.partial = true;
-        result.controller = Some(upgrade::UpgradeComponentStatus {
-            status: "updated".to_string(),
-            summary: "controller installation completed".to_string(),
-        });
-        result.extensions = Some(upgrade::UpgradeComponentStatus {
-            status: "completed".to_string(),
-            summary: "0 updated, 0 skipped".to_string(),
-        });
-        result.runners = Some(upgrade::UpgradeComponentStatus {
-            status: "partial".to_string(),
-            summary: "0 converged, 1 require repair".to_string(),
-        });
-
-        let json = serde_json::to_value(result).expect("upgrade result serializes");
-        assert_eq!(json["controller"]["status"], "updated");
-        assert_eq!(json["extensions"]["status"], "completed");
-        assert_eq!(json["runners"]["status"], "partial");
-    }
-
-    #[test]
-    fn non_targeted_runner_failures_return_nonzero_upgrade_status() {
-        let mut result = base_upgrade_result();
-        result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
-            runner_id: "homeboy-lab".to_string(),
-            homeboy_path: "homeboy".to_string(),
-            success: false,
-            upgraded: false,
-            previous_version: None,
-            new_version: None,
-            bare_homeboy_version: None,
-            path_drift: None,
-            recovery_commands: vec![
-                "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string()
-            ],
-            extensions_synced: Vec::new(),
-            extensions_skipped: Vec::new(),
-            extensions_failed: Vec::new(),
-            stale_daemon: None,
-            daemon_previous_version: None,
-            daemon_new_version: None,
-            service_binaries: Vec::new(),
-            path_binaries: Vec::new(),
-            exit_code: 1,
-            detail: "runner unavailable".to_string(),
-        });
-
-        assert_eq!(upgrade_exit_code(&result, false), 1);
-    }
-
-    #[test]
-    fn degraded_runner_emits_warning_with_remediation() {
+    fn only_drifted_runners_emit_degraded_warning_with_remediation() {
         let mut result = base_upgrade_result();
         result.new_version = Some("0.265.2".to_string());
+        result.runners_updated.push(upgrade::RunnerUpgradeEntry {
+            runner_id: "aligned-runner".to_string(),
+            ..runner_entry()
+        });
+        assert!(degraded_runner_warning_lines(&result).is_empty());
+
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
-            runner_id: "homeboy-lab".to_string(),
-            homeboy_path: "/home/user/homeboy-main/target/release/homeboy".to_string(),
             success: false,
-            upgraded: false,
-            previous_version: Some("0.265.2".to_string()),
-            new_version: Some("0.265.2".to_string()),
-            bare_homeboy_version: Some("0.255.8".to_string()),
             path_drift: Some(
                 "configured runner executable reports 0.265.2, but bare `homeboy` reports 0.255.8"
                     .to_string(),
@@ -463,31 +383,20 @@ mod tests {
             recovery_commands: vec![
                 "homeboy upgrade --force --upgrade-runner homeboy-lab".to_string()
             ],
-            extensions_synced: Vec::new(),
-            extensions_skipped: Vec::new(),
-            extensions_failed: Vec::new(),
-            stale_daemon: None,
-            daemon_previous_version: None,
-            daemon_new_version: None,
-            service_binaries: Vec::new(),
-            path_binaries: Vec::new(),
-            exit_code: 0,
-            detail: "runner remains degraded".to_string(),
+            ..runner_entry()
         });
-
         let lines = degraded_runner_warning_lines(&result);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("DEGRADED"));
         assert!(lines[0].contains("0.265.2"));
         assert!(lines[1].contains("homeboy-lab"));
+        assert!(!lines.iter().any(|line| line.contains("aligned-runner")));
         assert!(lines[2].contains("remediate"));
         assert!(lines[2].contains("homeboy upgrade --force --upgrade-runner homeboy-lab"));
     }
 
-    #[test]
-    fn aligned_runners_emit_no_degraded_warning() {
-        let mut result = base_upgrade_result();
-        result.runners_updated.push(upgrade::RunnerUpgradeEntry {
+    fn runner_entry() -> upgrade::RunnerUpgradeEntry {
+        upgrade::RunnerUpgradeEntry {
             runner_id: "homeboy-lab".to_string(),
             homeboy_path: "homeboy".to_string(),
             success: true,
@@ -507,9 +416,7 @@ mod tests {
             path_binaries: Vec::new(),
             exit_code: 0,
             detail: "upgraded".to_string(),
-        });
-
-        assert!(degraded_runner_warning_lines(&result).is_empty());
+        }
     }
 
     #[test]

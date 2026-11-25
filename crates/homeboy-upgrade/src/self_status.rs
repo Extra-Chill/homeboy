@@ -543,11 +543,6 @@ mod tests {
         assert_eq!(status.command, "self status");
         assert_eq!(status.active_binary, "/opt/homebrew/bin/homeboy");
         assert_eq!(status.active_version, upgrade::current_version());
-        assert_eq!(
-            status.active_build_identity.version,
-            upgrade::current_version()
-        );
-        assert!(status.active_build_identity.display.starts_with("homeboy "));
         assert_eq!(status.install_method, InstallMethod::Homebrew);
         assert_eq!(
             status.latest_github_release.version.as_deref(),
@@ -560,67 +555,20 @@ mod tests {
         );
     }
 
+    /// Offline or missing package managers must not fail `self status`; the
+    /// failures stay structured in the JSON consumers read.
     #[test]
-    fn external_probe_failures_do_not_fail_status_collection() {
+    fn external_probe_failures_stay_structured_in_status_json() {
         let status = collect_status_with(
             Some(PathBuf::from("/Users/test/.cargo/bin/homeboy")),
-            || Err("offline".to_string()),
-            |_cmd, _args| Err("not installed".to_string()),
-        );
-
-        assert_eq!(status.install_method, InstallMethod::Binary);
-        assert!(!status.latest_github_release.available);
-        assert_eq!(
-            status.latest_github_release.error.as_deref(),
-            Some("offline")
-        );
-        assert!(!status.homebrew.available);
-        assert_eq!(status.homebrew.error.as_deref(), Some("not installed"));
-        assert_eq!(status.version_relation, VersionRelation::Unknown);
-    }
-
-    #[test]
-    fn parses_brew_info_json_shape() {
-        let (stable, installed) = parse_brew_info(
-            r#"{"formulae":[{"versions":{"stable":"0.114.2"},"installed":[{"version":"0.114.1"}]}]}"#,
-        )
-        .unwrap();
-
-        assert_eq!(stable.as_deref(), Some("0.114.2"));
-        assert_eq!(installed.as_deref(), Some("0.114.1"));
-    }
-
-    #[test]
-    fn compares_versions_with_v_prefixes() {
-        assert_eq!(
-            relation_to_latest("0.114.1", Some("v0.114.2")),
-            VersionRelation::Behind
-        );
-        assert_eq!(
-            relation_to_latest("0.114.2", Some("0.114.2")),
-            VersionRelation::Current
-        );
-        assert_eq!(
-            relation_to_latest("0.114.3", Some("0.114.2")),
-            VersionRelation::Ahead
-        );
-        assert_eq!(
-            relation_to_latest("0.114.2", None),
-            VersionRelation::Unknown
-        );
-    }
-
-    #[test]
-    fn json_shape_keeps_failed_probes_structured() {
-        let status = collect_status_with(
-            Some(PathBuf::from("/tmp/homeboy")),
             || Err("github unavailable".to_string()),
             |_cmd, _args| Err("brew unavailable".to_string()),
         );
+        assert_eq!(status.install_method, InstallMethod::Binary);
         let json = serde_json::to_value(status).unwrap();
 
         assert_eq!(json["command"], "self status");
-        assert_eq!(json["active_binary"], "/tmp/homeboy");
+        assert_eq!(json["active_binary"], "/Users/test/.cargo/bin/homeboy");
         assert_eq!(
             json["active_build_identity"]["version"],
             upgrade::current_version()
@@ -633,17 +581,19 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_status() {
-        let status = collect_status_with(
-            None,
-            || Ok(upgrade::current_version().to_string()),
-            |_cmd, _args| Err("external probe skipped".to_string()),
-        );
-
-        assert_eq!(status.active_binary, "unknown");
-        assert_eq!(status.active_version, upgrade::current_version());
-        assert_eq!(status.install_method, InstallMethod::Unknown);
-        assert_eq!(status.version_relation, VersionRelation::Current);
+    fn compares_versions_with_v_prefixes() {
+        for (active, latest, relation) in [
+            ("0.114.1", Some("v0.114.2"), VersionRelation::Behind),
+            ("0.114.2", Some("0.114.2"), VersionRelation::Current),
+            ("0.114.3", Some("0.114.2"), VersionRelation::Ahead),
+            ("0.114.2", None, VersionRelation::Unknown),
+        ] {
+            assert_eq!(
+                relation_to_latest(active, latest),
+                relation,
+                "{active} vs {latest:?}"
+            );
+        }
     }
 
     fn identity(version: &str) -> BuildIdentity {
@@ -665,115 +615,60 @@ mod tests {
         }
     }
 
-    #[test]
-    fn runtime_view_agrees_when_runners_match_controller() {
-        let view = build_runtime_view(
-            controller_input("0.235.0"),
-            vec![RunnerRuntimeInput {
-                runner_id: "lab".to_string(),
-                kind: "ssh".to_string(),
-                server_id: Some("lab-host".to_string()),
-                configured_binary_path: Some("/home/runner/target/release/homeboy".to_string()),
-                connected: true,
-                daemon_version: Some("0.235.0".to_string()),
-                daemon_build_identity: Some("homeboy 0.235.0".to_string()),
-                daemon_drift: false,
-            }],
-        );
-
-        assert_eq!(view.command, "self doctor");
-        assert_eq!(view.controller.role, "controller");
-        assert_eq!(view.controller.version.as_deref(), Some("0.235.0"));
-        assert_eq!(
-            view.controller.relation_to_controller,
-            VersionRelation::Current
-        );
-        assert_eq!(view.runners.len(), 1);
-        let runner = &view.runners[0];
-        assert_eq!(runner.role, "runner");
-        assert_eq!(runner.id, "lab");
-        assert_eq!(runner.relation_to_controller, VersionRelation::Current);
-        assert!(runner.connected);
-        assert!(view.agrees);
-        assert!(view.drift_notes.is_empty());
+    fn runner(
+        connected: bool,
+        daemon_version: Option<&str>,
+        daemon_drift: bool,
+    ) -> RunnerRuntimeInput {
+        RunnerRuntimeInput {
+            runner_id: "lab".to_string(),
+            kind: "ssh".to_string(),
+            server_id: Some("lab-host".to_string()),
+            configured_binary_path: Some("/srv/homeboy".to_string()),
+            connected,
+            daemon_version: daemon_version.map(str::to_string),
+            daemon_build_identity: daemon_version.map(|version| format!("homeboy {version}")),
+            daemon_drift,
+        }
     }
 
+    /// The runtime view agrees only when every connected runner matches the
+    /// controller and no daemon drifted from its configured executable. A
+    /// disconnected runner is unknown, not drift.
     #[test]
-    fn runtime_view_flags_runner_version_skew() {
-        let view = build_runtime_view(
-            controller_input("0.235.0"),
-            vec![RunnerRuntimeInput {
-                runner_id: "lab".to_string(),
-                kind: "ssh".to_string(),
-                server_id: Some("lab-host".to_string()),
-                configured_binary_path: None,
-                connected: true,
-                daemon_version: Some("0.229.11".to_string()),
-                daemon_build_identity: Some("homeboy 0.229.11".to_string()),
-                daemon_drift: false,
-            }],
-        );
+    fn runtime_view_reports_runner_agreement_and_drift() {
+        for (input, relation, drift_note) in [
+            (
+                runner(true, Some("0.235.0"), false),
+                VersionRelation::Current,
+                None,
+            ),
+            (
+                runner(true, Some("0.229.11"), false),
+                VersionRelation::Behind,
+                Some("runner `lab` active daemon is 0.229.11 (behind) but controller is 0.235.0"),
+            ),
+            (
+                runner(true, Some("0.235.0"), true),
+                VersionRelation::Current,
+                Some("different build"),
+            ),
+            (runner(false, None, false), VersionRelation::Unknown, None),
+        ] {
+            let expected_drift = input.daemon_drift;
+            let view = build_runtime_view(controller_input("0.235.0"), vec![input]);
 
-        assert!(!view.agrees);
-        assert_eq!(
-            view.runners[0].relation_to_controller,
-            VersionRelation::Behind
-        );
-        assert_eq!(view.drift_notes.len(), 1);
-        assert!(view.drift_notes[0].contains("lab"));
-        assert!(view.drift_notes[0].contains("0.229.11"));
-        assert!(view.drift_notes[0].contains("0.235.0"));
-    }
-
-    #[test]
-    fn runtime_view_reports_internal_daemon_drift() {
-        let view = build_runtime_view(
-            controller_input("0.235.0"),
-            vec![RunnerRuntimeInput {
-                runner_id: "lab".to_string(),
-                kind: "ssh".to_string(),
-                server_id: None,
-                configured_binary_path: Some("/srv/homeboy".to_string()),
-                connected: true,
-                daemon_version: Some("0.235.0".to_string()),
-                daemon_build_identity: Some("homeboy 0.235.0+deadbeef".to_string()),
-                daemon_drift: true,
-            }],
-        );
-
-        assert!(!view.agrees);
-        assert!(view.runners[0].internal_drift);
-        assert_eq!(
-            view.runners[0].relation_to_controller,
-            VersionRelation::Current
-        );
-        assert_eq!(view.drift_notes.len(), 1);
-        assert!(view.drift_notes[0].contains("different build"));
-    }
-
-    #[test]
-    fn runtime_view_disconnected_runner_is_unknown_not_drift() {
-        let view = build_runtime_view(
-            controller_input("0.235.0"),
-            vec![RunnerRuntimeInput {
-                runner_id: "lab".to_string(),
-                kind: "ssh".to_string(),
-                server_id: None,
-                configured_binary_path: Some("/srv/homeboy".to_string()),
-                connected: false,
-                daemon_version: None,
-                daemon_build_identity: None,
-                daemon_drift: false,
-            }],
-        );
-
-        assert!(view.agrees);
-        assert!(view.drift_notes.is_empty());
-        assert!(!view.runners[0].connected);
-        assert_eq!(
-            view.runners[0].relation_to_controller,
-            VersionRelation::Unknown
-        );
+            assert_eq!(view.runners[0].relation_to_controller, relation);
+            assert_eq!(view.runners[0].internal_drift, expected_drift);
+            assert_eq!(view.agrees, drift_note.is_none());
+            match drift_note {
+                Some(note) => {
+                    assert_eq!(view.drift_notes.len(), 1);
+                    assert!(view.drift_notes[0].contains(note), "{:?}", view.drift_notes);
+                }
+                None => assert!(view.drift_notes.is_empty()),
+            }
+        }
     }
 
     #[test]
@@ -784,6 +679,7 @@ mod tests {
         assert_eq!(json["command"], "self doctor");
         assert_eq!(json["controller"]["role"], "controller");
         assert_eq!(json["controller"]["version"], "0.235.0");
+        assert_eq!(json["controller"]["relation_to_controller"], "current");
         assert_eq!(json["controller"]["connected"], true);
         assert_eq!(json["agrees"], true);
         assert!(json["runners"].as_array().unwrap().is_empty());

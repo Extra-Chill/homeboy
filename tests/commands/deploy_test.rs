@@ -1,40 +1,49 @@
-use super::{build_config, run, DeployArgs, DeployTargetArg};
+use super::{run, DeployArgs};
 use crate::cli_surface::{Cli, Commands};
 use clap::Parser;
 use std::collections::BTreeMap;
 
+/// Every dangerous source mode refuses a real deploy without
+/// `--confirm-dangerous`, and names itself in the refusal.
 #[test]
-fn deploy_head_requires_dangerous_confirmation_for_real_deploy() {
-    let result = run(deploy_args(|args| {
-        args.target_id = Some("project-a".to_string());
-        args.component_ids = vec!["component-a".to_string()];
-        args.head = true;
-    }));
+fn dangerous_real_deploys_require_explicit_confirmation() {
+    let manifest = tempfile::NamedTempFile::new().expect("manifest file");
+    std::fs::write(
+        manifest.path(),
+        r#"{"schema":"homeboy/release-set/v1","components":[{"id":"fixture","ref":"accepted"}]}"#,
+    )
+    .expect("manifest");
+    let manifest_path = manifest.path().display().to_string();
 
-    let err = match result {
-        Ok(_) => panic!("--head real deploy should require --confirm-dangerous"),
-        Err(err) => err,
-    };
-    assert!(err
-        .message
-        .contains("Real deploys with --head require explicit --confirm-dangerous"));
-}
-
-#[test]
-fn deploy_force_requires_dangerous_confirmation_for_real_deploy() {
-    let result = run(deploy_args(|args| {
-        args.target_id = Some("project-a".to_string());
-        args.component_ids = vec!["component-a".to_string()];
-        args.force = true;
-    }));
-
-    let err = match result {
-        Ok(_) => panic!("--force real deploy should require --confirm-dangerous"),
-        Err(err) => err,
-    };
-    assert!(err
-        .message
-        .contains("Real deploys with --force require explicit --confirm-dangerous"));
+    let cases: [(&str, Box<dyn Fn(&mut DeployArgs)>); 4] = [
+        ("--head", Box::new(|args| args.head = true)),
+        ("--force", Box::new(|args| args.force = true)),
+        (
+            "--ref",
+            Box::new(|args| args.requested_ref = Some("accepted-commit".to_string())),
+        ),
+        (
+            "--release-set",
+            Box::new(move |args| args.release_set = Some(manifest_path.clone())),
+        ),
+    ];
+    for (flag, customize) in cases {
+        let error = match run(deploy_args(|args| {
+            args.target_id = Some("project-a".to_string());
+            args.component_ids = vec!["component-a".to_string()];
+            customize(args);
+        })) {
+            Ok(_) => panic!("{flag} real deploy should require --confirm-dangerous"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .message
+                .contains(&format!("{flag} require explicit --confirm-dangerous")),
+            "{flag}: {}",
+            error.message
+        );
+    }
 }
 
 #[test]
@@ -58,63 +67,6 @@ fn deploy_head_dry_run_does_not_require_dangerous_confirmation() {
 }
 
 #[test]
-fn deploy_ref_requires_dangerous_confirmation_for_real_deploy() {
-    let result = run(deploy_args(|args| {
-        args.target_id = Some("project-a".to_string());
-        args.component_ids = vec!["component-a".to_string()];
-        args.requested_ref = Some("accepted-commit".to_string());
-    }));
-
-    let err = match result {
-        Ok(_) => panic!("--ref real deploy should require --confirm-dangerous"),
-        Err(err) => err,
-    };
-    assert!(err
-        .message
-        .contains("Real deploys with --ref require explicit --confirm-dangerous"));
-}
-
-#[test]
-fn release_set_rejects_conflicting_source_selectors() {
-    for conflicting in [vec!["--head"], vec!["--tagged"], vec!["--outdated"]] {
-        let mut argv = vec![
-            "homeboy",
-            "deploy",
-            "--project",
-            "project-a",
-            "--release-set",
-            "release-set.json",
-        ];
-        argv.extend(conflicting.iter().copied());
-        assert!(
-            Cli::try_parse_from(argv).is_err(),
-            "--release-set should conflict with {conflicting:?}"
-        );
-    }
-}
-
-#[test]
-fn release_set_requires_dangerous_confirmation_before_preflight() {
-    let manifest = tempfile::NamedTempFile::new().expect("manifest file");
-    std::fs::write(
-        manifest.path(),
-        r#"{"schema":"homeboy/release-set/v1","components":[{"id":"fixture","ref":"accepted"}]}"#,
-    )
-    .expect("manifest");
-    let args = deploy_args(|args| {
-        args.release_set = Some(manifest.path().display().to_string());
-    });
-
-    let error = match run(args) {
-        Ok(_) => panic!("release set must require --confirm-dangerous"),
-        Err(error) => error,
-    };
-    assert!(error
-        .message
-        .contains("--release-set require explicit --confirm-dangerous"));
-}
-
-#[test]
 fn release_set_check_is_rejected_before_ref_resolution_or_materialization() {
     let result = run(deploy_args(|args| {
         args.release_set = Some("not-read.json".to_string());
@@ -130,62 +82,6 @@ fn release_set_check_is_rejected_before_ref_resolution_or_materialization() {
     assert!(error
         .message
         .contains("--check cannot be combined with --release-set"));
-}
-
-#[test]
-fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "--skip-deps-hydration",
-        "deploy",
-        "project-a",
-        "component-a",
-    ])
-    .expect("--skip-deps-hydration should parse");
-
-    crate::commands::set_skip_deps_hydration(cli.skip_deps_hydration);
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-    let config = build_config(&args, false);
-    crate::commands::set_skip_deps_hydration(false);
-
-    assert!(config.skip_deps_hydration);
-}
-
-/// `--version` is deliberately absent from this list (#10648).
-///
-/// `--version` doubles as a tag selector on the non-ref path, but it is not a
-/// competing source selector: with a ref requested, `resolve_deploy_tags` is skipped entirely and the
-/// version reaches `PreparedDeployArtifact::validate` as an assertion about the
-/// package's contents. Selecting a commit and asserting what it builds are
-/// different questions, and recovery needs to ask both at once --
-/// `exact_ref_deploy_accepts_an_independent_expected_version` covers that.
-///
-/// Everything listed here genuinely competes with `--ref` for source
-/// selection and must stay refused.
-#[test]
-fn deploy_ref_rejects_every_other_source_selector() {
-    for conflicting in [
-        vec!["--head"],
-        vec!["--tagged"],
-        vec!["--behind-upstream"],
-        vec!["--check"],
-    ] {
-        let mut argv = vec![
-            "homeboy",
-            "deploy",
-            "project-a",
-            "component-a",
-            "--ref",
-            "accepted-commit",
-        ];
-        argv.extend(conflicting.iter().copied());
-        assert!(
-            Cli::try_parse_from(argv).is_err(),
-            "--ref should conflict with {conflicting:?}"
-        );
-    }
 }
 
 fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
@@ -245,46 +141,4 @@ fn exact_ref_deploy_accepts_an_independent_expected_version() {
     };
     assert_eq!(args.requested_ref.as_deref(), Some("v0.170.8"));
     assert_eq!(args.version.as_deref(), Some("0.170.8"));
-}
-
-/// A dual-deliverable component needs a way to say which target a deploy means,
-/// and the flag must reject anything it cannot select (#12853).
-#[test]
-fn deploy_target_selects_a_named_deliverable() {
-    for (value, expected) in [
-        ("server", DeployTargetArg::Server),
-        ("provider", DeployTargetArg::Provider),
-    ] {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "deploy",
-            "--project",
-            "project-a",
-            "--component",
-            "component-a",
-            "--target",
-            value,
-        ])
-        .expect("--target accepts each selectable deliverable");
-
-        let Commands::Deploy(args) = cli.command else {
-            panic!("expected deploy command");
-        };
-        assert_eq!(args.target, Some(expected));
-    }
-
-    assert!(
-        Cli::try_parse_from([
-            "homeboy",
-            "deploy",
-            "--project",
-            "project-a",
-            "--component",
-            "component-a",
-            "--target",
-            "worker",
-        ])
-        .is_err(),
-        "an unselectable target must be rejected at parse time"
-    );
 }

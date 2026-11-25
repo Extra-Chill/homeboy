@@ -73,8 +73,13 @@ mod secret_env_tests {
     use super::*;
 
     #[test]
-    fn resolved_trace_secret_env_moves_values_to_child_matrix_env() {
+    fn resolved_trace_secret_env_moves_values_to_child_matrix_env_only_when_resolved() {
         let mut secret_env = vec!["STRIPE_SECRET_KEY".to_string()];
+        let mut matrix_env = Vec::new();
+        apply_resolved_trace_secret_env_to_fields(&mut secret_env, &mut matrix_env, None);
+        assert_eq!(secret_env, vec!["STRIPE_SECRET_KEY".to_string()]);
+        assert!(matrix_env.is_empty());
+
         let mut matrix_env = vec![("EXISTING".to_string(), "1".to_string())];
         let resolved = ResolvedTraceSecretEnv {
             env: vec![(
@@ -82,13 +87,11 @@ mod secret_env_tests {
                 "redacted-test-value".to_string(),
             )],
         };
-
         apply_resolved_trace_secret_env_to_fields(
             &mut secret_env,
             &mut matrix_env,
             Some(&resolved),
         );
-
         assert!(secret_env.is_empty());
         assert_eq!(
             matrix_env,
@@ -100,16 +103,5 @@ mod secret_env_tests {
                 )
             ]
         );
-    }
-
-    #[test]
-    fn unresolved_trace_secret_env_leaves_child_args_unchanged() {
-        let mut secret_env = vec!["STRIPE_SECRET_KEY".to_string()];
-        let mut matrix_env = Vec::new();
-
-        apply_resolved_trace_secret_env_to_fields(&mut secret_env, &mut matrix_env, None);
-
-        assert_eq!(secret_env, vec!["STRIPE_SECRET_KEY".to_string()]);
-        assert!(matrix_env.is_empty());
     }
 }

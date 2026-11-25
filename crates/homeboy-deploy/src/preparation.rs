@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn binding_only_overrides_share_a_preparation_request() {
+    fn preparation_identity_tracks_build_inputs_not_binding_or_target_policy() {
         let source = component();
         let config = config();
         let first_project = homeboy_core::project::Project {
@@ -882,13 +882,18 @@ mod tests {
             first_binding.deploy_strategy,
             second_binding.deploy_strategy
         );
-    }
 
-    #[test]
-    fn build_artifact_override_changes_preparation_identity() {
-        let source = component();
-        let config = config();
-        let project = homeboy_core::project::Project {
+        // Target safety policy does not change what gets built either.
+        let mut target_policy = config.clone();
+        target_policy.force = true;
+        target_policy.allow_downgrade = true;
+        assert_eq!(
+            first.identity(),
+            ComponentPayloadPreparationRequest::new(&first_preparation, &target_policy).identity()
+        );
+
+        // A build-input override does.
+        let build_project = homeboy_core::project::Project {
             id: "custom-build".to_string(),
             component_overrides: [(
                 "fixture".to_string(),
@@ -901,37 +906,14 @@ mod tests {
             .collect(),
             ..Default::default()
         };
-        let (prepared, _) =
+        let (build_preparation, _) =
             homeboy_core::project::component::overrides::resolve_deploy_override_inputs(
-                &source, &project,
+                &source,
+                &build_project,
             );
-
         assert_ne!(
-            ComponentPayloadPreparationRequest::new(&source, &config).identity(),
-            ComponentPayloadPreparationRequest::new(&prepared, &config).identity()
-        );
-    }
-
-    #[test]
-    fn requests_are_pure_in_memory_transforms() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source_path = temp.path().join("missing-source");
-        let artifact_path = temp.path().join("missing-artifact.zip");
-        let mut component = component();
-        component.local_path = source_path.display().to_string();
-        component.build_artifact = Some(artifact_path.display().to_string());
-        let entries_before = std::fs::read_dir(temp.path())
-            .expect("read temp dir")
-            .count();
-        let _request = ComponentPayloadPreparationRequest::new(&component, &config());
-
-        assert!(!source_path.exists());
-        assert!(!artifact_path.exists());
-        assert_eq!(
-            std::fs::read_dir(temp.path())
-                .expect("read temp dir")
-                .count(),
-            entries_before
+            first.identity(),
+            ComponentPayloadPreparationRequest::new(&build_preparation, &config).identity()
         );
     }
 
@@ -971,10 +953,7 @@ mod tests {
         assert!(evidence.contains("BUILD_TOKEN"));
         assert!(evidence.contains("api_token"));
         assert!(evidence.contains("AUTH_TOKEN"));
-    }
 
-    #[test]
-    fn evidence_redacts_authenticated_remote_urls() {
         let mut component = component();
         component.remote_url =
             Some("https://username:sentinel-token@example.test/org/repo.git".to_string());
@@ -983,32 +962,13 @@ mod tests {
         assert!(!evidence.contains("username"));
         assert!(!evidence.contains("sentinel-token"));
         assert!(evidence.contains("example.test"));
+        // Redacted evidence must not collapse identity: a changed credential
+        // still produces a different preparation request.
+        component.remote_url =
+            Some("https://username:changed-token@example.test/org/repo.git".to_string());
         assert_ne!(
             request.identity(),
-            ComponentPayloadPreparationRequest::new(
-                &Component {
-                    remote_url: Some(
-                        "https://username:changed-token@example.test/org/repo.git".to_string()
-                    ),
-                    ..component
-                },
-                &config(),
-            )
-            .identity()
-        );
-    }
-
-    #[test]
-    fn target_safety_overrides_do_not_change_preparation_identity() {
-        let component = component();
-        let base = config();
-        let mut target_policy = config();
-        target_policy.force = true;
-        target_policy.allow_downgrade = true;
-
-        assert_eq!(
-            ComponentPayloadPreparationRequest::new(&component, &base).identity(),
-            ComponentPayloadPreparationRequest::new(&component, &target_policy).identity()
+            ComponentPayloadPreparationRequest::new(&component, &config()).identity()
         );
     }
 

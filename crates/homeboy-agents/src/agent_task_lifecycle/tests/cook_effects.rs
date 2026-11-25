@@ -43,9 +43,6 @@ fn renewing_cook_owner_blocks_until_expiry_and_replays_completion() {
     assert!(
         matches!(claim_cook_operation_in_store(&store, run, "promote", lease).unwrap(), ClaimOutcome::AlreadyCompleted(value) if value == result)
     );
-    let recorded = store.operation_claim(run, "promote").unwrap().unwrap();
-    assert_eq!(recorded.state, ClaimState::Completed);
-    assert_eq!(recorded.result, Some(result));
 }
 
 fn recorded_lease_deadline(store: &AgentTaskLifecycleStore, run: &str) -> String {

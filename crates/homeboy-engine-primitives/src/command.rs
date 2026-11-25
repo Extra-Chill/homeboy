@@ -4554,18 +4554,24 @@ mod tests {
     }
 
     #[test]
-    fn tail_capture_retains_last_bytes_and_marks_truncated() {
-        let mut capture = TailCapture::new(5);
-        capture.push(b"hello");
-        capture.push(b" world");
-
-        let captured = capture.finish();
-
-        assert_eq!(captured.bytes, b"world");
-        assert_eq!(captured.metadata.bytes_seen, 11);
-        assert_eq!(captured.metadata.bytes_retained, 5);
-        assert_eq!(captured.metadata.byte_limit, 5);
-        assert!(captured.metadata.truncated);
+    fn tail_capture_retains_last_bytes_and_reports_truncation() {
+        for (limit, chunks, retained, truncated) in [
+            (5, &[&b"hello"[..], b" world"][..], &b"world"[..], true),
+            (10, &[&b"ok"[..]][..], &b"ok"[..], false),
+        ] {
+            let mut capture = TailCapture::new(limit);
+            let mut seen = 0;
+            for chunk in chunks {
+                capture.push(chunk);
+                seen += chunk.len() as u64;
+            }
+            let captured = capture.finish();
+            assert_eq!(captured.bytes, retained);
+            assert_eq!(captured.metadata.bytes_seen, seen);
+            assert_eq!(captured.metadata.bytes_retained, retained.len());
+            assert_eq!(captured.metadata.byte_limit, limit);
+            assert_eq!(captured.metadata.truncated, truncated);
+        }
     }
 
     #[test]
@@ -4762,73 +4768,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn guarded_nonzero_root_exit_status_is_preserved() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "exit 7"]);
-        command
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
-        let mut child = command.spawn().expect("spawn nonzero root");
-        guard.attach(&child).expect("attach guard");
-        let supervised = wait_with_bounded_output_supervised_guarded(
-            &mut child,
-            &mut guard,
-            4096,
-            Duration::from_secs(2),
-            Duration::from_millis(50),
-            || false,
-            |_, _| Ok(()),
-        )
-        .expect("nonzero root completes");
-        assert_eq!(
-            supervised.termination,
-            SupervisedCommandTermination::Completed
-        );
-        assert_eq!(supervised.output.status.code(), Some(7));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn guarded_root_term_signal_status_is_preserved() {
+    fn guarded_root_exit_code_and_signal_status_are_preserved() {
         use std::os::unix::process::ExitStatusExt;
 
-        let mut command = Command::new("sh");
-        command.args(["-c", "kill -TERM $$"]);
-        command
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
-        let mut child = command.spawn().expect("spawn signaled root");
-        guard.attach(&child).expect("attach guard");
-        let supervised = wait_with_bounded_output_supervised_guarded(
-            &mut child,
-            &mut guard,
-            4096,
-            Duration::from_secs(2),
-            Duration::from_millis(50),
-            || false,
-            |_, _| Ok(()),
-        )
-        .expect("signaled root completes");
-        assert_eq!(
-            supervised.termination,
-            SupervisedCommandTermination::Completed
-        );
-        assert_eq!(supervised.output.status.signal(), Some(libc::SIGTERM));
-    }
-
-    #[test]
-    fn tail_capture_reports_untruncated_stream() {
-        let mut capture = TailCapture::new(10);
-        capture.push(b"ok");
-
-        let captured = capture.finish();
-
-        assert_eq!(captured.bytes, b"ok");
-        assert_eq!(captured.metadata.bytes_seen, 2);
-        assert_eq!(captured.metadata.bytes_retained, 2);
-        assert!(!captured.metadata.truncated);
+        for (script, code, signal) in [
+            ("exit 7", Some(7), None),
+            ("kill -TERM $$", None, Some(libc::SIGTERM)),
+        ] {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
+            let mut child = command.spawn().expect("spawn root");
+            guard.attach(&child).expect("attach guard");
+            let supervised = wait_with_bounded_output_supervised_guarded(
+                &mut child,
+                &mut guard,
+                4096,
+                Duration::from_secs(2),
+                Duration::from_millis(50),
+                || false,
+                |_, _| Ok(()),
+            )
+            .expect("root completes");
+            assert_eq!(
+                supervised.termination,
+                SupervisedCommandTermination::Completed,
+                "{script}"
+            );
+            assert_eq!(supervised.output.status.code(), code, "{script}");
+            assert_eq!(supervised.output.status.signal(), signal, "{script}");
+        }
     }
 
     #[cfg(unix)]

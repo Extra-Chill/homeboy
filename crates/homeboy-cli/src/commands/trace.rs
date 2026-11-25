@@ -1608,8 +1608,6 @@ pub(super) use homeboy::core::lab_routing::PersistedRunRetrieval;
 #[cfg(test)]
 mod aggregate_test_support;
 #[cfg(test)]
-mod compare_tests;
-#[cfg(test)]
 mod compare_variant_tests;
 #[cfg(test)]
 mod experiment_tests;

@@ -38,23 +38,7 @@ fn surface_normalizes_optional_fields_and_nested_inputs() {
 }
 
 #[test]
-fn operation_deserializes_old_payload_and_preserves_custom_kind() {
-    let surface = FuzzSurface::from_value(json!({
-        "id": "surface-1",
-        "kind": "api",
-        "safety_class": "read_only",
-        "operations": [
-            { "id": "custom-1", "kind": "domain_specific_probe" }
-        ]
-    }))
-    .expect("surface contract");
-
-    assert_eq!(surface.operations[0].kind, "domain_specific_probe");
-    assert_eq!(surface.operations[0].family, None);
-}
-
-#[test]
-fn operation_normalizes_canonical_families_from_kind() {
+fn operation_family_is_inferred_from_kind_unless_declared() {
     let surface = FuzzSurface::from_value(json!({
         "id": "surface-1",
         "kind": "api",
@@ -65,46 +49,34 @@ fn operation_normalizes_canonical_families_from_kind() {
             { "id": "update-1", "kind": "PATCH" },
             { "id": "delete-1", "kind": "delete" },
             { "id": "render-1", "kind": "render" },
-            { "id": "performance-1", "kind": "performance probe" }
-        ]
-    }))
-    .expect("surface contract");
-
-    let families: Vec<Option<FuzzOperationFamily>> = surface
-        .operations
-        .iter()
-        .map(|operation| operation.family)
-        .collect();
-
-    assert_eq!(
-        families,
-        vec![
-            Some(FuzzOperationFamily::Read),
-            Some(FuzzOperationFamily::Create),
-            Some(FuzzOperationFamily::Update),
-            Some(FuzzOperationFamily::Delete),
-            Some(FuzzOperationFamily::Render),
-            Some(FuzzOperationFamily::PerformanceProbe),
-        ]
-    );
-    assert_eq!(surface.operations[0].kind, "GET");
-}
-
-#[test]
-fn operation_preserves_declared_canonical_family() {
-    let surface = FuzzSurface::from_value(json!({
-        "id": "surface-1",
-        "kind": "api",
-        "safety_class": "read_only",
-        "operations": [
+            { "id": "performance-1", "kind": "performance probe" },
+            { "id": "custom-1", "kind": "domain_specific_probe" },
             { "id": "custom-search", "kind": "bespoke_lookup", "family": "search" }
         ]
     }))
     .expect("surface contract");
 
-    assert_eq!(surface.operations[0].kind, "bespoke_lookup");
+    let operations: Vec<(&str, Option<FuzzOperationFamily>)> = surface
+        .operations
+        .iter()
+        .map(|operation| (operation.kind.as_str(), operation.family))
+        .collect();
+
     assert_eq!(
-        surface.operations[0].family,
-        Some(FuzzOperationFamily::Search)
+        operations,
+        vec![
+            ("GET", Some(FuzzOperationFamily::Read)),
+            ("post", Some(FuzzOperationFamily::Create)),
+            ("PATCH", Some(FuzzOperationFamily::Update)),
+            ("delete", Some(FuzzOperationFamily::Delete)),
+            ("render", Some(FuzzOperationFamily::Render)),
+            (
+                "performance probe",
+                Some(FuzzOperationFamily::PerformanceProbe)
+            ),
+            // Custom kinds are preserved without a guessed family.
+            ("domain_specific_probe", None),
+            ("bespoke_lookup", Some(FuzzOperationFamily::Search)),
+        ]
     );
 }

@@ -427,9 +427,8 @@ fn cancel_appends_terminal_provider_progress_and_resumes_from_cursor() {
     let resumed = service
         .events(&run, cursor.as_ref())
         .expect("resume after cancel");
-    // Cancellation now durably records its own provenance event (actor,
-    // cause, recovery action) alongside the task's terminal state transition
-    // (#14925), so resuming past the running cursor sees both.
+    // Cancellation records its provenance event alongside the task's terminal
+    // state transition, so resuming past the running cursor sees both.
     assert_eq!(resumed.events.len(), 2);
     assert_eq!(resumed.events[0].kind, "task.state_changed");
     assert_eq!(resumed.events[0].data["state"], "cancelled");
@@ -454,25 +453,15 @@ fn logs_read_does_not_append_historical_metadata_progress() {
     lifecycle_store
         .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
         .expect("submitted");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions"] = json!([{
-                "key": "task-a:1",
-                "task_id": "task-a",
-                "attempt": 1,
-                "backend": "pi",
-                "state": "running",
-                "started_at": "2026-07-24T00:00:00Z"
-            }]);
-        })
+    rewrite_record_in_store(&lifecycle_store, run_id, |record| {
+        record.metadata["provider_executions"] = json!([{
+            "key": "task-a:1",
+            "task_id": "task-a",
+            "attempt": 1,
+            "backend": "pi",
+            "state": "running",
+            "started_at": "2026-07-24T00:00:00Z"
+        }]);
     })
     .expect("rewrote historical metadata");
 
@@ -932,35 +921,14 @@ fn provider_success_and_enrichment_keep_stable_receipts() {
         .expect("submitted");
     reserve_provider_execution_in_store(&lifecycle_store, run_id, &plan.tasks[0], 1)
         .expect("reserved");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions"][0]["owner_pid"] = json!(0);
-            record.metadata["provider_executions"][0]["launch_context"] = json!({"ok": true});
-        })
+    rewrite_record_in_store(&lifecycle_store, run_id, |record| {
+        record.metadata["provider_executions"][0]["owner_pid"] = json!(0);
+        record.metadata["provider_executions"][0]["launch_context"] = json!({"ok": true});
     })
     .expect("enriched running execution");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions"][0]["state"] = json!("succeeded");
-            record.metadata["provider_executions"][0]["finished_at"] =
-                json!("2026-07-24T00:01:00Z");
-        })
+    rewrite_record_in_store(&lifecycle_store, run_id, |record| {
+        record.metadata["provider_executions"][0]["state"] = json!("succeeded");
+        record.metadata["provider_executions"][0]["finished_at"] = json!("2026-07-24T00:01:00Z");
     })
     .expect("succeeded");
     let states: Vec<_> = durable_events(&lifecycle_store, run_id)
@@ -973,24 +941,6 @@ fn provider_success_and_enrichment_keep_stable_receipts() {
         .filter(|event| event.kind == "task.state_changed")
         .all(|event| event.data["task_id"] == "task-a"
             && event.task.as_ref().map(|task| task.as_str()) == Some("task-a")));
-}
-
-#[test]
-fn aggregate_progress_appends_once() {
-    with_isolated_home(|_| {
-        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
-        let plan = test_plan();
-        let aggregate = succeeded_aggregate(&plan);
-        record_completed_run(&plan, &aggregate, Some("durable-aggregate")).expect("completed");
-        let events = durable_events(&lifecycle_store, "durable-aggregate");
-        assert!(events
-            .iter()
-            .any(|event| event.data["state"] == "queued"
-                && event.data["message"] == "task submitted"));
-        assert!(events
-            .iter()
-            .any(|event| event.data["state"] == "succeeded" && event.data["message"] == "ok"));
-    });
 }
 
 #[test]
@@ -1021,7 +971,18 @@ fn aggregate_repeated_same_state_messages_keep_distinct_receipts() {
         ];
         record_completed_run(&plan, &aggregate, Some("durable-aggregate-repeat"))
             .expect("completed");
-        let running: Vec<_> = durable_events(&lifecycle_store, "durable-aggregate-repeat")
+        let events = durable_events(&lifecycle_store, "durable-aggregate-repeat");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.data["message"] == "task submitted")
+                .count(),
+            1
+        );
+        assert!(events
+            .iter()
+            .any(|event| event.data["state"] == "succeeded" && event.data["message"] == "ok"));
+        let running: Vec<_> = events
             .into_iter()
             .filter(|event| event.data["state"] == "running")
             .collect();
@@ -1092,18 +1053,8 @@ fn queued_identity_survives_submitted_at_revision() {
     lifecycle_store
         .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
         .expect("submitted");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(run_id, |record| {
-            record.submitted_at = "2020-01-01T00:00:00Z".to_string();
-        })
+    rewrite_record_in_store(&lifecycle_store, run_id, |record| {
+        record.submitted_at = "2020-01-01T00:00:00Z".to_string();
     })
     .expect("aged submitted_at");
     let events = durable_events(&lifecycle_store, run_id);
@@ -1120,37 +1071,17 @@ fn provider_state_survives_model_correction() {
     lifecycle_store
         .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
         .expect("submitted");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions"] = json!([{
-                "task_id": "task-a",
-                "attempt": 1,
-                "state": "succeeded",
-                "model": null
-            }]);
-        })
+    rewrite_record_in_store(&lifecycle_store, run_id, |record| {
+        record.metadata["provider_executions"] = json!([{
+            "task_id": "task-a",
+            "attempt": 1,
+            "state": "succeeded",
+            "model": null
+        }]);
     })
     .expect("terminal without model");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions"][0]["model"] = json!("openai/gpt-5.6-terra");
-        })
+    rewrite_record_in_store(&lifecycle_store, run_id, |record| {
+        record.metadata["provider_executions"][0]["model"] = json!("openai/gpt-5.6-terra");
     })
     .expect("model correction");
     let succeeded: Vec<_> = durable_events(&lifecycle_store, run_id)

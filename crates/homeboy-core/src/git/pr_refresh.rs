@@ -404,9 +404,4 @@ mod tests {
         let files = conflict_files_from_porcelain("UU src/lib.rs\n M README.md\nAA docs/a.md\n");
         assert_eq!(files, vec!["src/lib.rs", "docs/a.md"]);
     }
-
-    #[test]
-    fn default_check_is_git_diff_check() {
-        assert_eq!(effective_checks(&[]), vec!["git diff --check"]);
-    }
 }

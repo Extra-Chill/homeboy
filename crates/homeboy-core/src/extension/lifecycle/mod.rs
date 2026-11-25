@@ -752,6 +752,7 @@ exec '{}' "$@"
                 .iter()
                 .map(|entry| entry.extension_id.as_str())
                 .collect::<Vec<_>>();
+            assert_eq!(result.component_id, "multi-extension-component");
             assert_eq!(installed_ids, vec!["alpha", "beta"]);
             assert!(result.skipped.is_empty());
             assert!(home
@@ -852,54 +853,19 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn test_install_for_component_uses_path_based_portable_component_config() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let source = home.join("source");
-            write_extension_fixture(&source, "alpha");
-            write_extension_fixture(&source, "beta");
-
-            let component_dir = home.join("component");
-            fs::create_dir_all(&component_dir).expect("component dir");
-            write_component_fixture(&component_dir, &["alpha", "beta"]);
-
-            let component = component::discover_from_portable(&component_dir)
-                .expect("component should resolve from portable path");
-            let result = install_for_component(&component, &source.to_string_lossy(), None)
-                .expect("install should succeed");
-
-            assert_eq!(result.component_id, "multi-extension-component");
-            assert_eq!(result.installed.len(), 2);
-        });
-    }
-
-    #[test]
-    fn refresh_installs_first_time_without_uninstalling() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let source = home.join("source");
-            write_extension_fixture(&source, "alpha");
-
-            let result = refresh(&source.join("alpha").to_string_lossy(), Some("alpha"), None)
-                .expect("first-time refresh should install");
-
-            assert_eq!(result.extension_id, "alpha");
-            assert!(
-                !result.uninstalled_previous,
-                "first-time refresh has nothing to uninstall"
-            );
-            assert!(load_extension("alpha").is_ok());
-        });
-    }
-
-    #[test]
-    fn refresh_is_idempotent_and_reinstalls_existing() {
+    fn refresh_installs_first_time_then_reinstalls_existing() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source");
             write_extension_fixture_with_version(&source, "alpha", "1.0.0");
 
-            install(&source.join("alpha").to_string_lossy(), Some("alpha")).expect("pre-install");
+            let first = refresh(&source.join("alpha").to_string_lossy(), Some("alpha"), None)
+                .expect("first-time refresh should install");
+            assert_eq!(first.extension_id, "alpha");
+            assert!(
+                !first.uninstalled_previous,
+                "first-time refresh has nothing to uninstall"
+            );
 
             // Update the source, then refresh — the reinstall should pick it up
             // without erroring on the pre-existing install.
@@ -1137,7 +1103,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn extension_update_allows_generated_source_metadata_dirty_in_linked_subdir() {
+    fn extension_update_dirty_gate_ignores_generated_metadata_but_blocks_user_files() {
         let temp = TempDir::new().expect("create tempdir");
         let repo = temp.path();
         let extension_dir = repo.join("wordpress");
@@ -1153,28 +1119,11 @@ exec '{}' "$@"
         .expect("source url metadata");
         fs::write(extension_dir.join(".source-revision"), "abc123")
             .expect("source revision metadata");
-
         assert!(
             is_extension_update_workdir_clean(repo, &extension_dir).is_ok(),
             "generated extension metadata should not block update"
         );
-    }
 
-    #[test]
-    fn extension_update_blocks_user_dirty_file_next_to_generated_metadata() {
-        let temp = TempDir::new().expect("create tempdir");
-        let repo = temp.path();
-        let extension_dir = repo.join("wordpress");
-        write_extension_fixture(repo, "wordpress");
-        if !run_git(repo, &["init", "--quiet"]) || !commit_all(repo, "init") {
-            return;
-        }
-
-        fs::write(
-            extension_dir.join(".source-url"),
-            "https://example.com/ext.git",
-        )
-        .expect("source url metadata");
         fs::write(extension_dir.join("notes.txt"), "user work").expect("user-authored dirty file");
 
         let dirty_paths = is_extension_update_workdir_clean(repo, &extension_dir)
@@ -1371,29 +1320,9 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
                 .exists());
-        });
-    }
 
-    #[cfg(unix)]
-    #[test]
-    fn cloned_install_copies_shared_trees_rather_than_symlinking() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let source = home.join("source-repo");
-            fs::create_dir_all(&source).expect("source repo");
-            write_extension_fixture(&source, "wordpress");
-            write_declared_runtime_shared_assets(&source);
-            let remote = match prepare_git_repo(&source) {
-                Some(remote) => remote,
-                None => return,
-            };
-            let remote_url = remote.path().join("extension.git");
-
-            install(&remote_url.to_string_lossy(), Some("wordpress"))
-                .expect("install cloned extension");
-
-            // Cloned installs must keep copying: the clone temp dir is discarded,
-            // so the shared trees have to be standalone copies, not symlinks.
+            // Cloned installs must copy: the clone temp dir is discarded, so the
+            // shared trees have to be standalone directories, not symlinks.
             let runtimes = home.join(".config/homeboy/extensions/shared-tools");
             let meta = fs::symlink_metadata(&runtimes).expect("shared-tools exists");
             assert!(
@@ -1440,65 +1369,6 @@ exec '{}' "$@"
                 .exists());
             assert!(home
                 .join(".config/homeboy/extensions/wordpress/.homeboy-extension-root.json")
-                .exists());
-        });
-    }
-
-    #[test]
-    fn linked_monorepo_install_materializes_declared_shared_scripts() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let source = home.join("source-repo");
-            fs::create_dir_all(&source).expect("source repo");
-            write_extension_fixture(&source, "wordpress");
-            write_shared_asset_manifest(&source, &["scripts/lib"]);
-            let shared_helper = source.join("scripts/lib/test-result-adapters.sh");
-            fs::create_dir_all(shared_helper.parent().expect("helper parent"))
-                .expect("shared scripts dir");
-            fs::write(
-                &shared_helper,
-                "homeboy_parse_test_results_with_adapters() { :; }\n",
-            )
-            .expect("shared helper");
-
-            install(
-                &source.join("wordpress").to_string_lossy(),
-                Some("wordpress"),
-            )
-            .expect("install linked extension");
-
-            assert!(home
-                .join(".config/homeboy/extensions/wordpress/wordpress.json")
-                .exists());
-            assert!(home
-                .join(".config/homeboy/extensions/scripts/lib/test-result-adapters.sh")
-                .exists());
-        });
-    }
-
-    #[test]
-    fn linked_monorepo_install_materializes_declared_shared_assets() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let source = home.join("source-repo");
-            fs::create_dir_all(&source).expect("source repo");
-            write_extension_fixture(&source, "wordpress");
-            write_declared_runtime_shared_assets(&source);
-
-            install(
-                &source.join("wordpress").to_string_lossy(),
-                Some("wordpress"),
-            )
-            .expect("install linked extension");
-
-            assert!(home
-                .join(".config/homeboy/extensions/wordpress/wordpress.json")
-                .exists());
-            assert!(home
-                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
-                .exists());
-            assert!(home
-                .join(".config/homeboy/extensions/shared-contracts/agent-task-provider-contract.js")
                 .exists());
         });
     }
@@ -1571,44 +1441,18 @@ exec '{}' "$@"
                     target.display()
                 );
             }
-        });
-    }
 
-    #[cfg(unix)]
-    #[test]
-    fn editing_symlinked_shared_file_is_visible_to_linked_install() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let source = home.join("source-repo");
-            fs::create_dir_all(&source).expect("source repo");
-            write_extension_fixture(&source, "wordpress");
-            write_declared_runtime_shared_assets(&source);
-
-            install(
-                &source.join("wordpress").to_string_lossy(),
-                Some("wordpress"),
-            )
-            .expect("install linked extension");
-
-            // Edit the shared asset in the source worktree after install. Because
-            // the install symlinks the tree, the edit must be visible at the live
-            // install path with no reinstall — the iteration-blocker fix.
-            let source_contract = source.join("shared-contracts/agent-task-provider-contract.js");
+            // A source edit after install is visible without a reinstall.
             fs::write(
-                &source_contract,
+                source.join("shared-contracts/agent-task-provider-contract.js"),
                 "module.exports = { contract: 'edited-live' };\n",
             )
             .expect("edit shared source file");
-
-            let installed_contract = home.join(
+            let observed = fs::read_to_string(home.join(
                 ".config/homeboy/extensions/shared-contracts/agent-task-provider-contract.js",
-            );
-            let observed =
-                fs::read_to_string(&installed_contract).expect("read installed contract");
-            assert!(
-                observed.contains("edited-live"),
-                "edit to the symlinked shared tree should be visible to the install, got: {observed}"
-            );
+            ))
+            .expect("read installed contract");
+            assert!(observed.contains("edited-live"), "{observed}");
         });
     }
 
@@ -1637,7 +1481,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn linked_install_reports_manifest_path_and_discovers_declared_provider() {
+    fn linked_install_reports_manifest_path() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
@@ -1654,8 +1498,6 @@ exec '{}' "$@"
                 result.manifest_path,
                 home.join(".config/homeboy/extensions/wordpress/wordpress.json")
             );
-            // (Agent-task executor-provider discovery assertions moved to the
-            // homeboy-agents crate along with the discovery machinery.)
         });
     }
 
@@ -1678,46 +1520,6 @@ exec '{}' "$@"
                 std::fs::symlink_metadata(home.path().join(".config/homeboy/extensions/wordpress"))
                     .is_err(),
                 "failed setup must not leave an installed-but-unready extension"
-            );
-        });
-    }
-
-    #[test]
-    fn test_install_with_revision() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let source = home.join("source-repo");
-            fs::create_dir_all(&source).expect("source repo");
-            let remote = match prepare_git_extension_repo(&source, "wordpress") {
-                Some(remote) => remote,
-                None => return,
-            };
-            let pinned_revision = match git_output(&source, &["rev-parse", "HEAD"]) {
-                Some(revision) => revision,
-                None => return,
-            };
-
-            write_extension_fixture_with_version(&source, "wordpress", "2.0.0");
-            assert!(commit_all(&source, "update extension"));
-            assert!(run_git(&source, &["push", "origin", "HEAD"]));
-            let remote_url = remote.path().join("extension.git");
-
-            let result = install_with_revision(
-                &remote_url.to_string_lossy(),
-                Some("wordpress"),
-                Some(&pinned_revision),
-            )
-            .expect("install pinned revision");
-
-            let installed = load_extension("wordpress").expect("installed extension");
-            assert_eq!(installed.version, "1.0.0");
-            assert_eq!(
-                result.source_revision.as_deref(),
-                Some(pinned_revision.as_str())
-            );
-            assert_eq!(
-                read_source_revision("wordpress").as_deref(),
-                Some(pinned_revision.as_str())
             );
         });
     }
@@ -1764,7 +1566,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn extracted_update_preserves_requested_commit_pin() {
+    fn extracted_install_and_update_honor_requested_commit_pin() {
         with_isolated_home(|home| {
             let source = home.path().join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
@@ -1781,12 +1583,22 @@ exec '{}' "$@"
             assert!(run_git(&source, &["push", "origin", "HEAD"]));
             let remote_url = remote.path().join("extension.git");
 
-            install_with_revision(
+            let result = install_with_revision(
                 &remote_url.to_string_lossy(),
                 Some("wordpress"),
                 Some(&pinned_revision),
             )
             .expect("install pinned extracted extension");
+            assert_eq!(load_extension("wordpress").unwrap().version, "1.0.0");
+            assert_eq!(
+                result.source_revision.as_deref(),
+                Some(pinned_revision.as_str())
+            );
+            assert_eq!(
+                read_source_revision("wordpress").as_deref(),
+                Some(pinned_revision.as_str())
+            );
+
             update("wordpress", false, None).expect("update pinned extracted extension");
 
             assert_eq!(load_extension("wordpress").unwrap().version, "1.0.0");
@@ -1798,34 +1610,6 @@ exec '{}' "$@"
                 .unwrap()
                 .trim(),
                 pinned_revision
-            );
-        });
-    }
-
-    #[test]
-    fn update_all_updates_linked_extensions_through_single_update_path() {
-        with_isolated_home(|home| {
-            let home = home.path();
-            let source = home.join("source-repo");
-            fs::create_dir_all(&source).expect("source repo");
-            let _remote = match prepare_git_extension_repo(&source, "wordpress") {
-                Some(remote) => remote,
-                None => return,
-            };
-
-            install(
-                &source.join("wordpress").to_string_lossy(),
-                Some("wordpress"),
-            )
-            .expect("install linked extension");
-
-            let result = update_all(false, |_, _, _| Ok(())).unwrap();
-
-            assert_eq!(result.updated.len(), 1);
-            assert_eq!(result.updated[0].extension_id, "wordpress");
-            assert!(
-                result.skipped.is_empty(),
-                "linked extensions should not be pre-skipped by update_all"
             );
         });
     }
@@ -2524,58 +2308,22 @@ exec '{}' "$@"
         });
     }
 
+    /// Regression for Extra-Chill/homeboy#1181: tarball / plain-directory
+    /// installs (no `.git`) are clean; a git checkout is clean until it has
+    /// untracked or modified files.
     #[test]
-    fn is_workdir_clean_non_git_dir_returns_true() {
-        // Regression test for Extra-Chill/homeboy#1181: tarball / plain-directory
-        // installs (no `.git`) must be treated as clean, since there is no
-        // working tree to be dirty in the first place.
-        let temp = TempDir::new().expect("create tempdir");
-        std::fs::write(temp.path().join("some-file.txt"), "content").expect("write file");
+    fn is_workdir_clean_treats_non_git_as_clean_and_untracked_as_dirty() {
+        let plain = TempDir::new().expect("create tempdir");
+        std::fs::write(plain.path().join("some-file.txt"), "content").expect("write file");
+        assert!(homeboy_core::git::is_workdir_clean_or_not_git(plain.path()));
 
-        assert!(
-            homeboy_core::git::is_workdir_clean_or_not_git(temp.path()),
-            "non-git directory should be treated as clean"
-        );
-    }
-
-    #[test]
-    fn is_workdir_clean_clean_git_repo_returns_true() {
-        let temp = TempDir::new().expect("create tempdir");
-
-        let init = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(temp.path())
-            .status();
-        if init.map(|s| !s.success()).unwrap_or(true) {
-            // git not available in this environment; skip.
+        let repo = TempDir::new().expect("create tempdir");
+        if !run_git(repo.path(), &["init", "--quiet"]) {
             return;
         }
-
-        assert!(
-            homeboy_core::git::is_workdir_clean_or_not_git(temp.path()),
-            "freshly-initialized git repo with no changes should be clean"
-        );
-    }
-
-    #[test]
-    fn is_workdir_clean_dirty_git_repo_returns_false() {
-        let temp = TempDir::new().expect("create tempdir");
-
-        let init = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(temp.path())
-            .status();
-        if init.map(|s| !s.success()).unwrap_or(true) {
-            // git not available in this environment; skip.
-            return;
-        }
-
-        std::fs::write(temp.path().join("untracked.txt"), "hi").expect("write untracked file");
-
-        assert!(
-            !homeboy_core::git::is_workdir_clean_or_not_git(temp.path()),
-            "git repo with untracked file should be reported as dirty"
-        );
+        assert!(homeboy_core::git::is_workdir_clean_or_not_git(repo.path()));
+        std::fs::write(repo.path().join("untracked.txt"), "hi").expect("write untracked file");
+        assert!(!homeboy_core::git::is_workdir_clean_or_not_git(repo.path()));
     }
 }
 

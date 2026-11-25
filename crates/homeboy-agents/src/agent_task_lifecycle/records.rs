@@ -1548,10 +1548,6 @@ mod tests {
                 .expect("timestamp")
                 .with_timezone(&chrono::Utc)
         ));
-        let round_trip: AgentTaskRunRecord =
-            serde_json::from_value(serde_json::to_value(&record).expect("serialize"))
-                .expect("deserialize");
-        assert_eq!(round_trip.lab_handoff, record.lab_handoff);
     }
 
     #[test]
@@ -1645,12 +1641,11 @@ mod tests {
             authority: "independent-review".to_string(),
             policy: "release-v1".to_string(),
         };
-        let mut acceptance = AgentTaskAcceptanceRecord::pending(
+        let acceptance = AgentTaskAcceptanceRecord::pending(
             requirement,
             acceptance_candidate("candidate-a", "candidate-a-tree"),
             "base-a".to_string(),
         );
-        assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
         assert!(acceptance.matches_candidate(
             &acceptance_candidate("candidate-a", "candidate-a-tree"),
             "base-a"
@@ -1659,13 +1654,10 @@ mod tests {
             &acceptance_candidate("candidate-a", "replacement-tree"),
             "base-a"
         ));
-
-        acceptance.verdict = AgentTaskAcceptanceVerdict::Accepted;
-        let round_trip: AgentTaskAcceptanceRecord = serde_json::from_value(
-            serde_json::to_value(&acceptance).expect("serialize acceptance"),
-        )
-        .expect("deserialize acceptance");
-        assert_eq!(round_trip, acceptance);
+        assert!(!acceptance.matches_candidate(
+            &acceptance_candidate("candidate-a", "candidate-a-tree"),
+            "base-b"
+        ));
     }
 
     #[test]

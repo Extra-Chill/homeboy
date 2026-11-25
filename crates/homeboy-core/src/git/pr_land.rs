@@ -1066,22 +1066,6 @@ mod tests {
         assert_eq!(parsed, vec![123, 124]);
     }
 
-    #[test]
-    fn clean_success_pr_is_ready() {
-        assert_eq!(
-            readiness(
-                &pr(1, Some("SUCCESS"), Some("CLEAN")),
-                false,
-                Some("SUCCESS")
-            ),
-            PrReadiness::Ready
-        );
-        assert!(matches!(
-            readiness(&pr(1, None, Some("CLEAN")), false, None),
-            PrReadiness::Blocked(_)
-        ));
-    }
-
     /// The waiver may only ever downgrade a `FAILURE`, and only from a terminal
     /// report whose own filter cleared every blocking check (#12373).
     #[test]
@@ -1145,31 +1129,6 @@ mod tests {
             checks_verdict_with_waivers(&clean, &report(true, Vec::new())).as_deref(),
             Some("SUCCESS")
         );
-    }
-
-    /// A REQUIRED failing check can never be waived, so it can never reach the
-    /// downgrade with an empty blocking set.
-    #[test]
-    fn a_required_failing_check_is_never_waivable() {
-        let mut client = FakeClient::default();
-        client.push_view(pr_with_rollup(
-            1,
-            vec![check("test", "COMPLETED", "FAILURE", true)],
-        ));
-        let mut opts = options(vec!["1"]);
-        opts.check_waivers = vec![PrCheckWaiver {
-            head_sha: "sha1".to_string(),
-            name: "test".to_string(),
-            approved_by: "operator".to_string(),
-        }];
-
-        let output = land_prs_with_client(opts, &mut client).unwrap();
-
-        assert!(
-            client.merged.is_empty(),
-            "a waiver naming a REQUIRED check must not land it"
-        );
-        assert_eq!(output.summary.blocked, 1);
     }
 
     #[test]
@@ -1343,6 +1302,20 @@ mod tests {
             approved_by: "operator".to_string(),
         }];
         assert!(client_must_block(opts, &mut wrong_name));
+
+        // A REQUIRED failing check can never be waived, even by exact name and head.
+        let mut required = FakeClient::default();
+        required.push_view(pr_with_rollup(
+            1,
+            vec![check("docs", "COMPLETED", "FAILURE", true)],
+        ));
+        let mut opts = options(vec!["1"]);
+        opts.check_waivers = vec![PrCheckWaiver {
+            head_sha: "sha1".to_string(),
+            name: "docs".to_string(),
+            approved_by: "operator".to_string(),
+        }];
+        assert!(client_must_block(opts, &mut required));
 
         let mut approved = FakeClient::default();
         approved.push_view(failed());

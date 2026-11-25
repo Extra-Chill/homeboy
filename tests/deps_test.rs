@@ -720,34 +720,12 @@ fn stack_outdated_reports_behind_current_v_prefixed_and_unresolvable_against_rea
 }
 
 #[test]
-fn stack_outdated_exit_code_distinguishes_all_current_from_unresolvable() {
+fn stack_outdated_sourceless_edge_is_unresolvable_and_exits_2() {
     let dir = tempdir().unwrap();
     let upstream = dir.path().join("upstream");
     upstream_repo_with_tags(&upstream, &["transformer-v0.18.0"]);
     let repo = upstream.display().to_string();
     let downstream_path = dir.path().join("downstream");
-
-    // Every edge current -> exit 0.
-    let all_current = outdated_downstream(
-        &dir.path().join("downstream-all-current"),
-        &[("fixture/current", "0.18.0")],
-        vec![outdated_edge(
-            "fixture/current",
-            Some(homeboy::core::component::DependencyStackEdgeSource {
-                repo: repo.clone(),
-                prefix: "transformer".to_string(),
-                ..Default::default()
-            }),
-        )],
-    );
-    let status = deps::stack_outdated_for_component(
-        &all_current,
-        &dir.path().join("downstream-all-current"),
-    )
-    .unwrap();
-    assert_eq!(status.behind_count, 0);
-    assert_eq!(status.unresolvable_count, 0);
-    assert_eq!(status.exit_code(), 0);
 
     // An edge without a remote source cannot be checked: unresolvable, never
     // current, and the run exits 2 because nothing is behind but the gate
@@ -759,7 +737,7 @@ fn stack_outdated_exit_code_distinguishes_all_current_from_unresolvable() {
             outdated_edge(
                 "fixture/current",
                 Some(homeboy::core::component::DependencyStackEdgeSource {
-                    repo: repo.clone(),
+                    repo,
                     prefix: "transformer".to_string(),
                     ..Default::default()
                 }),

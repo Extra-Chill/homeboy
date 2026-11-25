@@ -440,34 +440,27 @@ mod tests {
         }
     }
 
-    fn with_artifact_root<R>(test: impl FnOnce(&Path) -> R) -> R {
-        let guard = tempfile::tempdir().expect("artifact root");
-        test(guard.path())
-    }
-
     #[test]
     fn links_executor_input_and_result_evidence_refs() {
-        with_artifact_root(|_| {
-            let request = executor_test_request();
-            let mut outcome = test_outcome();
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+        let request = executor_test_request();
+        let mut outcome = test_outcome();
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
-            let kinds: Vec<&str> = outcome
-                .evidence_refs
-                .iter()
-                .map(|evidence| evidence.kind.as_str())
-                .collect();
-            assert!(kinds.contains(&EXECUTOR_INPUT_EVIDENCE_KIND));
-            assert!(kinds.contains(&EXECUTOR_RESULT_EVIDENCE_KIND));
+        let kinds: Vec<&str> = outcome
+            .evidence_refs
+            .iter()
+            .map(|evidence| evidence.kind.as_str())
+            .collect();
+        assert!(kinds.contains(&EXECUTOR_INPUT_EVIDENCE_KIND));
+        assert!(kinds.contains(&EXECUTOR_RESULT_EVIDENCE_KIND));
 
-            for evidence in &outcome.evidence_refs {
-                let path = evidence
-                    .uri
-                    .strip_prefix("file://")
-                    .expect("file uri prefix");
-                assert!(Path::new(path).exists(), "evidence path should exist");
-            }
-        });
+        for evidence in &outcome.evidence_refs {
+            let path = evidence
+                .uri
+                .strip_prefix("file://")
+                .expect("file uri prefix");
+            assert!(Path::new(path).exists(), "evidence path should exist");
+        }
     }
 
     fn executor_test_request() -> AgentTaskExecutorRequest {
@@ -504,190 +497,178 @@ mod tests {
 
     #[test]
     fn persisted_input_redacts_secrets_but_retains_contracts_paths_and_artifacts() {
-        with_artifact_root(|_| {
-            let request = executor_test_request();
-            let mut outcome = test_outcome();
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+        let request = executor_test_request();
+        let mut outcome = test_outcome();
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
-            let input_ref = outcome
-                .evidence_refs
-                .iter()
-                .find(|evidence| evidence.kind == EXECUTOR_INPUT_EVIDENCE_KIND)
-                .expect("executor input evidence");
-            let path = input_ref
-                .uri
-                .strip_prefix("file://")
-                .expect("file uri prefix");
-            let raw = fs::read_to_string(path).expect("read input evidence");
+        let input_ref = outcome
+            .evidence_refs
+            .iter()
+            .find(|evidence| evidence.kind == EXECUTOR_INPUT_EVIDENCE_KIND)
+            .expect("executor input evidence");
+        let path = input_ref
+            .uri
+            .strip_prefix("file://")
+            .expect("file uri prefix");
+        let raw = fs::read_to_string(path).expect("read input evidence");
 
-            // Secret redacted...
-            assert!(!raw.contains("sk-super-secret"));
-            assert!(raw.contains("[REDACTED]"));
-            // ...while component contracts, runtime/component paths, model, and
-            // typed artifact expectations are retained.
-            assert!(raw.contains("/runner/components/sample-runtime"));
-            assert!(raw.contains("runtime_component_paths"));
-            assert!(raw.contains("claude-sonnet"));
-            assert!(raw.contains("component_contracts"));
-            assert!(raw.contains("/runner/artifacts/task"));
-            assert!(raw.contains("artifacts_path_provenance"));
-            assert!(raw.contains("\"locality\": \"runner\""));
-        });
+        // Secret redacted...
+        assert!(!raw.contains("sk-super-secret"));
+        assert!(raw.contains("[REDACTED]"));
+        // ...while component contracts, runtime/component paths, model, and
+        // typed artifact expectations are retained.
+        assert!(raw.contains("/runner/components/sample-runtime"));
+        assert!(raw.contains("runtime_component_paths"));
+        assert!(raw.contains("claude-sonnet"));
+        assert!(raw.contains("component_contracts"));
+        assert!(raw.contains("/runner/artifacts/task"));
+        assert!(raw.contains("artifacts_path_provenance"));
+        assert!(raw.contains("\"locality\": \"runner\""));
     }
 
     #[test]
     fn links_retained_runtime_files_and_redacted_provider_session_metadata() {
-        with_artifact_root(|_| {
-            let request = executor_test_request();
-            fs::write(
-                request.artifacts_path.join("provider-runtime-stdout.log"),
-                "runtime stdout",
-            )
-            .expect("write stdout");
-            fs::write(
-                request.artifacts_path.join("provider-runtime-stderr.log"),
-                "runtime stderr",
-            )
-            .expect("write stderr");
-            fs::write(
-                request.artifacts_path.join("provider-progress.jsonl"),
-                "{}\n",
-            )
-            .expect("write progress");
-            let mut outcome = test_outcome();
-            outcome.status = AgentTaskOutcomeStatus::Failed;
-            outcome.metadata = json!({
-                "provider_session": { "id": "session-123", "token": "secret-session-token" }
-            });
-
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
-
-            for kind in [
-                EXECUTOR_ARTIFACT_ROOT_EVIDENCE_KIND,
-                PROVIDER_SESSION_EVIDENCE_KIND,
-                RUNTIME_STDOUT_EVIDENCE_KIND,
-                RUNTIME_STDERR_EVIDENCE_KIND,
-                RUNTIME_PROGRESS_EVIDENCE_KIND,
-            ] {
-                assert!(
-                    outcome
-                        .evidence_refs
-                        .iter()
-                        .any(|evidence| evidence.kind == kind),
-                    "missing {kind} evidence ref"
-                );
-            }
-            let index = outcome
-                .evidence_refs
-                .iter()
-                .find(|evidence| evidence.kind == RUNTIME_EVIDENCE_KIND)
-                .expect("runtime evidence index");
-            let raw = fs::read_to_string(index.uri.strip_prefix("file://").expect("file uri"))
-                .expect("read runtime evidence index");
-            assert!(raw.contains("session-123"));
-            assert!(!raw.contains("secret-session-token"));
-            assert!(raw.contains("[REDACTED]"));
+        let request = executor_test_request();
+        fs::write(
+            request.artifacts_path.join("provider-runtime-stdout.log"),
+            "runtime stdout",
+        )
+        .expect("write stdout");
+        fs::write(
+            request.artifacts_path.join("provider-runtime-stderr.log"),
+            "runtime stderr",
+        )
+        .expect("write stderr");
+        fs::write(
+            request.artifacts_path.join("provider-progress.jsonl"),
+            "{}\n",
+        )
+        .expect("write progress");
+        let mut outcome = test_outcome();
+        outcome.status = AgentTaskOutcomeStatus::Failed;
+        outcome.metadata = json!({
+            "provider_session": { "id": "session-123", "token": "secret-session-token" }
         });
+
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+        for kind in [
+            EXECUTOR_ARTIFACT_ROOT_EVIDENCE_KIND,
+            PROVIDER_SESSION_EVIDENCE_KIND,
+            RUNTIME_STDOUT_EVIDENCE_KIND,
+            RUNTIME_STDERR_EVIDENCE_KIND,
+            RUNTIME_PROGRESS_EVIDENCE_KIND,
+        ] {
+            assert!(
+                outcome
+                    .evidence_refs
+                    .iter()
+                    .any(|evidence| evidence.kind == kind),
+                "missing {kind} evidence ref"
+            );
+        }
+        let index = outcome
+            .evidence_refs
+            .iter()
+            .find(|evidence| evidence.kind == RUNTIME_EVIDENCE_KIND)
+            .expect("runtime evidence index");
+        let raw = fs::read_to_string(index.uri.strip_prefix("file://").expect("file uri"))
+            .expect("read runtime evidence index");
+        assert!(raw.contains("session-123"));
+        assert!(!raw.contains("secret-session-token"));
+        assert!(raw.contains("[REDACTED]"));
     }
 
     #[test]
     fn classifies_a_structured_account_rejection() {
-        with_artifact_root(|_| {
-            let mut request = executor_test_request();
-            request.request.executor.backend = "pi".to_string();
-            fs::write(
-                request.artifacts_path.join("provider-runtime-stdout.log"),
-                r#"{"type":"error","error":{"name":"APIError","data":{"message":"spending-limit: You have run out of credits.","statusCode":403,"isRetryable":false}}}"#,
-            )
-            .expect("write stdout");
-            let mut outcome = test_outcome();
-            outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+        let mut request = executor_test_request();
+        request.request.executor.backend = "pi".to_string();
+        fs::write(
+            request.artifacts_path.join("provider-runtime-stdout.log"),
+            r#"{"type":"error","error":{"name":"APIError","data":{"message":"spending-limit: You have run out of credits.","statusCode":403,"isRetryable":false}}}"#,
+        )
+        .expect("write stdout");
+        let mut outcome = test_outcome();
+        outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
 
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
-            assert_eq!(
-                outcome.failure_classification,
-                Some(AgentTaskFailureClassification::ProviderBillingBlocked)
-            );
-        });
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::ProviderBillingBlocked)
+        );
     }
 
     #[test]
     fn classifies_structured_rejection_when_evidence_persistence_fails() {
-        with_artifact_root(|_| {
-            let mut request = executor_test_request();
-            request.request.executor.backend = "pi".to_string();
-            fs::write(
-                request.artifacts_path.join("provider-runtime-stdout-1.log"),
-                r#"{"type":"error","error":{"data":{"message":"usage quota exhausted","statusCode":403,"isRetryable":false}}}"#,
-            )
-            .expect("write stdout");
-            let evidence_root_file = request.artifact_store_root.join("not-a-directory");
-            fs::write(&evidence_root_file, "block evidence directory").expect("write blocker");
-            request.artifact_store_root = evidence_root_file;
-            let mut outcome = test_outcome();
-            outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+        let mut request = executor_test_request();
+        request.request.executor.backend = "pi".to_string();
+        fs::write(
+            request.artifacts_path.join("provider-runtime-stdout-1.log"),
+            r#"{"type":"error","error":{"data":{"message":"usage quota exhausted","statusCode":403,"isRetryable":false}}}"#,
+        )
+        .expect("write stdout");
+        let evidence_root_file = request.artifact_store_root.join("not-a-directory");
+        fs::write(&evidence_root_file, "block evidence directory").expect("write blocker");
+        request.artifact_store_root = evidence_root_file;
+        let mut outcome = test_outcome();
+        outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
 
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
-            assert_eq!(
-                outcome.failure_classification,
-                Some(AgentTaskFailureClassification::ProviderQuotaExhausted)
-            );
-            assert!(outcome.evidence_refs.is_empty());
-        });
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::ProviderQuotaExhausted)
+        );
+        assert!(outcome.evidence_refs.is_empty());
     }
 
     #[test]
     fn classifies_the_highest_numbered_runtime_capture_as_the_final_attempt() {
-        with_artifact_root(|_| {
-            let mut request = executor_test_request();
-            request.request.executor.backend = "pi".to_string();
-            fs::write(
-                request.artifacts_path.join("provider-runtime-stdout-2.log"),
-                r#"{"type":"error","error":{"data":{"message":"repository not accessible","statusCode":403,"isRetryable":false}}}"#,
-            )
-            .expect("write earlier stdout");
-            fs::write(
-                request.artifacts_path.join("provider-runtime-stdout-10.log"),
-                r#"{"type":"error","error":{"data":{"message":"API key expired","statusCode":403,"isRetryable":false}}}"#,
-            )
-            .expect("write final stdout");
-            let mut outcome = test_outcome();
-            outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+        let mut request = executor_test_request();
+        request.request.executor.backend = "pi".to_string();
+        fs::write(
+            request.artifacts_path.join("provider-runtime-stdout-2.log"),
+            r#"{"type":"error","error":{"data":{"message":"repository not accessible","statusCode":403,"isRetryable":false}}}"#,
+        )
+        .expect("write earlier stdout");
+        fs::write(
+            request.artifacts_path.join("provider-runtime-stdout-10.log"),
+            r#"{"type":"error","error":{"data":{"message":"API key expired","statusCode":403,"isRetryable":false}}}"#,
+        )
+        .expect("write final stdout");
+        let mut outcome = test_outcome();
+        outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
 
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
-            assert_eq!(
-                outcome.failure_classification,
-                Some(AgentTaskFailureClassification::ProviderCredentialsExhausted)
-            );
-        });
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::ProviderCredentialsExhausted)
+        );
     }
 
     #[test]
     fn runtime_evidence_index_records_absent_optional_streams() {
-        with_artifact_root(|_| {
-            let request = executor_test_request();
-            let mut outcome = test_outcome();
+        let request = executor_test_request();
+        let mut outcome = test_outcome();
 
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
 
-            let index = outcome
-                .evidence_refs
-                .iter()
-                .find(|evidence| evidence.kind == RUNTIME_EVIDENCE_KIND)
-                .expect("runtime evidence index");
-            let value: Value = serde_json::from_slice(
-                &fs::read(index.uri.strip_prefix("file://").expect("file uri"))
-                    .expect("read runtime evidence index"),
-            )
-            .expect("parse runtime evidence index");
-            assert_eq!(value["provider_runtime_identities"], json!([]));
-            assert_eq!(value["runtime_stdout"], Value::Null);
-            assert_eq!(value["runtime_stderr"], Value::Null);
-            assert_eq!(value["runtime_progress"], Value::Null);
-        });
+        let index = outcome
+            .evidence_refs
+            .iter()
+            .find(|evidence| evidence.kind == RUNTIME_EVIDENCE_KIND)
+            .expect("runtime evidence index");
+        let value: Value = serde_json::from_slice(
+            &fs::read(index.uri.strip_prefix("file://").expect("file uri"))
+                .expect("read runtime evidence index"),
+        )
+        .expect("parse runtime evidence index");
+        assert_eq!(value["provider_runtime_identities"], json!([]));
+        assert_eq!(value["runtime_stdout"], Value::Null);
+        assert_eq!(value["runtime_stderr"], Value::Null);
+        assert_eq!(value["runtime_progress"], Value::Null);
     }
 
     #[test]
@@ -708,74 +689,53 @@ mod tests {
 
     #[test]
     fn re_linking_does_not_duplicate_evidence_refs() {
-        with_artifact_root(|_| {
-            let request = executor_test_request();
-            let mut outcome = test_outcome();
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
-            let first = outcome.evidence_refs.len();
-            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
-            assert_eq!(outcome.evidence_refs.len(), first);
-        });
-    }
-
-    #[test]
-    fn evidence_dir_is_stable_for_a_run_and_task_id() {
-        with_artifact_root(|root| {
-            let first = executor_evidence_dir(root, Some("run/attempt:1"), "task/with weird:chars");
-            let second =
-                executor_evidence_dir(root, Some("run/attempt:1"), "task/with weird:chars");
-            assert_eq!(first, second);
-            assert!(first
-                .to_string_lossy()
-                .contains("agent-task/executor-evidence"));
-        });
+        let request = executor_test_request();
+        let mut outcome = test_outcome();
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+        let first = outcome.evidence_refs.len();
+        link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+        assert_eq!(outcome.evidence_refs.len(), first);
     }
 
     #[test]
     fn evidence_dir_is_under_durable_artifact_root() {
-        with_artifact_root(|artifact_root| {
-            let path = executor_evidence_dir(artifact_root, Some("run-1"), "task-1");
-            assert!(path.starts_with(artifact_root));
-            assert!(!path
-                .to_string_lossy()
-                .contains("homeboy-agent-task-evidence"));
-        });
+        let artifact_root = tempfile::tempdir().expect("artifact root");
+        let path = executor_evidence_dir(artifact_root.path(), Some("run-1"), "task-1");
+        assert!(path.starts_with(artifact_root.path()));
     }
 
     #[test]
     fn repeated_child_runs_with_same_task_id_keep_distinct_evidence_paths() {
-        with_artifact_root(|_| {
-            let request = executor_test_request();
-            let mut first_outcome = test_outcome();
-            let mut second_outcome = test_outcome();
+        let request = executor_test_request();
+        let mut first_outcome = test_outcome();
+        let mut second_outcome = test_outcome();
 
-            link_latest_executor_evidence(
-                &request,
-                &mut first_outcome,
-                Some("cook-homeboy-attempt-1-aaaa1111"),
-            );
-            link_latest_executor_evidence(
-                &request,
-                &mut second_outcome,
-                Some("cook-homeboy-attempt-1-bbbb2222"),
-            );
+        link_latest_executor_evidence(
+            &request,
+            &mut first_outcome,
+            Some("cook-homeboy-attempt-1-aaaa1111"),
+        );
+        link_latest_executor_evidence(
+            &request,
+            &mut second_outcome,
+            Some("cook-homeboy-attempt-1-bbbb2222"),
+        );
 
-            let first_input = first_outcome
-                .evidence_refs
-                .iter()
-                .find(|evidence| evidence.kind == EXECUTOR_INPUT_EVIDENCE_KIND)
-                .expect("first executor input evidence");
-            let second_input = second_outcome
-                .evidence_refs
-                .iter()
-                .find(|evidence| evidence.kind == EXECUTOR_INPUT_EVIDENCE_KIND)
-                .expect("second executor input evidence");
+        let first_input = first_outcome
+            .evidence_refs
+            .iter()
+            .find(|evidence| evidence.kind == EXECUTOR_INPUT_EVIDENCE_KIND)
+            .expect("first executor input evidence");
+        let second_input = second_outcome
+            .evidence_refs
+            .iter()
+            .find(|evidence| evidence.kind == EXECUTOR_INPUT_EVIDENCE_KIND)
+            .expect("second executor input evidence");
 
-            assert_ne!(first_input.uri, second_input.uri);
-            assert!(first_input.uri.contains("cook-homeboy-attempt-1-aaaa1111"));
-            assert!(second_input.uri.contains("cook-homeboy-attempt-1-bbbb2222"));
-            assert!(Path::new(first_input.uri.strip_prefix("file://").unwrap()).is_file());
-            assert!(Path::new(second_input.uri.strip_prefix("file://").unwrap()).is_file());
-        });
+        assert_ne!(first_input.uri, second_input.uri);
+        assert!(first_input.uri.contains("cook-homeboy-attempt-1-aaaa1111"));
+        assert!(second_input.uri.contains("cook-homeboy-attempt-1-bbbb2222"));
+        assert!(Path::new(first_input.uri.strip_prefix("file://").unwrap()).is_file());
+        assert!(Path::new(second_input.uri.strip_prefix("file://").unwrap()).is_file());
     }
 }

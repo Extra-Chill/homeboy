@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn rig_pinned_slot_is_isolated_from_unpinned() {
+    fn rig_and_runtime_kind_slots_are_isolated_under_durable_keys() {
         let dir = tempfile::tempdir().unwrap();
         save_baseline::<Counter>(&BaselineSlot::new(dir.path(), None), "demo", &values(1)).unwrap();
         save_baseline::<Counter>(
@@ -412,34 +412,28 @@ mod tests {
             &values(2),
         )
         .unwrap();
-
-        assert_eq!(stored(dir.path(), None), Some(1));
-        assert_eq!(stored(dir.path(), Some("studio")), Some(2));
-        assert_eq!(stored(dir.path(), Some("other")), None);
-        let json: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join("homeboy.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(json["baselines"]["counter.rig.studio"].is_object());
-    }
-
-    #[test]
-    fn runtime_kind_slot_replaces_the_static_kind_key() {
-        let dir = tempfile::tempdir().unwrap();
         let fuzz = BaselineSlot::new(dir.path(), None).with_kind("workload.fuzz");
         let bench = BaselineSlot::new(dir.path(), Some("studio")).with_kind("workload.bench");
         save_baseline::<Counter>(&fuzz, "demo", &values(3)).unwrap();
         save_baseline::<Counter>(&bench, "demo", &values(4)).unwrap();
 
+        assert_eq!(stored(dir.path(), None), Some(1));
+        assert_eq!(stored(dir.path(), Some("studio")), Some(2));
+        assert_eq!(stored(dir.path(), Some("other")), None);
         assert_eq!(load_baseline::<Counter>(&fuzz).unwrap().metadata.0[0].1, 3);
         assert_eq!(load_baseline::<Counter>(&bench).unwrap().metadata.0[0].1, 4);
-        assert_eq!(stored(dir.path(), None), None, "static KIND slot untouched");
         let json: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("homeboy.json")).unwrap(),
         )
         .unwrap();
-        assert!(json["baselines"]["workload.fuzz"].is_object());
-        assert!(json["baselines"]["workload.bench.rig.studio"].is_object());
+        for key in [
+            "counter",
+            "counter.rig.studio",
+            "workload.fuzz",
+            "workload.bench.rig.studio",
+        ] {
+            assert!(json["baselines"][key].is_object(), "{key}");
+        }
     }
 
     #[test]
@@ -450,6 +444,14 @@ mod tests {
         assert_eq!(compared.verdict.status(), "better");
         assert_eq!(compared.baseline, values(10));
         assert_eq!(compared.candidate, values(7));
+        // A mixed verdict reports the regression, not the improvement.
+        let mixed = Verdict {
+            regressions: vec!["r".to_string()],
+            advisories: Vec::new(),
+            improvements: vec!["i".to_string()],
+        };
+        assert_eq!(mixed.status(), "worse");
+        assert_eq!(Verdict::default().status(), "same");
     }
 
     #[test]
@@ -462,16 +464,5 @@ mod tests {
         assert_eq!(matched, vec![("c", "c"), ("a", "a")]);
         assert_eq!(paired.added, vec!["d".to_string()]);
         assert_eq!(paired.removed, vec!["b".to_string()]);
-    }
-
-    #[test]
-    fn verdict_status_prefers_worse_over_better() {
-        let verdict = Verdict {
-            regressions: vec!["r".to_string()],
-            advisories: Vec::new(),
-            improvements: vec!["i".to_string()],
-        };
-        assert_eq!(verdict.status(), "worse");
-        assert_eq!(Verdict::default().status(), "same");
     }
 }

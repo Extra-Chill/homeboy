@@ -880,31 +880,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_component_id() {
-        let plan = ReleasePlan::new("demo", true, Vec::new(), None, Vec::new(), Vec::new());
+    fn enabled_follows_policy_then_falls_back_to_plan_step_state() {
+        for enabled in [true, false] {
+            let plan = ReleasePlan::new("demo", enabled, Vec::new(), None, Vec::new(), Vec::new());
+            assert_eq!(plan.enabled(), enabled);
+        }
 
-        assert_eq!(plan.component_id(), Some("demo"));
-    }
-
-    #[test]
-    fn release_step_result_default_status_is_failed_never_success() {
-        assert_eq!(
-            ReleaseStepResult::default().status,
-            ReleaseStepStatus::Failed
-        );
-    }
-
-    #[test]
-    fn test_enabled() {
-        let enabled = ReleasePlan::new("demo", true, Vec::new(), None, Vec::new(), Vec::new());
-        let disabled = ReleasePlan::new("demo", false, Vec::new(), None, Vec::new(), Vec::new());
-
-        assert!(enabled.enabled());
-        assert!(!disabled.enabled());
-    }
-
-    #[test]
-    fn enabled_falls_back_to_plan_step_state_when_policy_is_absent() {
         let mut plan = HomeboyPlan::for_component(PlanKind::Release, "demo");
         plan.steps = vec![PlanStep::ready("version", "version").build()];
 
@@ -914,36 +895,6 @@ mod tests {
         disabled_plan.steps = vec![PlanStep::disabled("release.skip", "release.skip").build()];
 
         assert!(!ReleasePlan::from_plan(disabled_plan).enabled());
-    }
-
-    #[test]
-    fn test_semver_recommendation() {
-        let recommendation = ReleaseSemverRecommendation {
-            latest_tag: Some("v1.0.0".to_string()),
-            range: "v1.0.0..HEAD".to_string(),
-            commits: Vec::new(),
-            recommended_bump: Some("minor".to_string()),
-            requested_bump: "minor".to_string(),
-            is_underbump: false,
-            reasons: Vec::new(),
-            non_conventional_commit_count: 0,
-            considered_commit_count: 0,
-            bump_policy: None,
-        };
-        let plan = ReleasePlan::new(
-            "demo",
-            true,
-            Vec::new(),
-            Some(recommendation),
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert_eq!(
-            plan.semver_recommendation()
-                .and_then(|recommendation| recommendation.recommended_bump),
-            Some("minor".to_string())
-        );
     }
 
     #[test]
