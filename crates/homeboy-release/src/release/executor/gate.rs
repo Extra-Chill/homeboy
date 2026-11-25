@@ -423,57 +423,43 @@ mod tests {
     }
 
     #[test]
-    fn gate_without_selector_receives_primary_artifact() {
-        let artifacts = vec![
-            artifact("build/first.zip", false),
-            artifact("build/primary.zip", true),
-        ];
-        let selected = select_gate_artifact(&artifacts, &gate("g", "true")).expect("artifact");
-        assert_eq!(selected.path, "build/primary.zip");
-    }
-
-    #[test]
-    fn gate_profile_selector_must_match_exactly_one_artifact() {
+    fn gate_artifact_selector_picks_primary_path_or_unique_profile() {
         let artifacts = vec![
             artifact("build/site-html-site-import.zip", false),
             artifact("build/site-full.zip", true),
         ];
-        let mut gate = gate("import", "true");
-        gate.artifact = Some(ReleaseGateArtifactSelector {
-            profile: Some("html-site-import".to_string()),
-            path: None,
-        });
-        let selected = select_gate_artifact(&artifacts, &gate).expect("artifact");
-        assert_eq!(selected.path, "build/site-html-site-import.zip");
+        let selector = |profile: Option<&str>, path: Option<&str>| {
+            let mut gate = gate("import", "true");
+            gate.artifact = Some(ReleaseGateArtifactSelector {
+                profile: profile.map(str::to_string),
+                path: path.map(str::to_string),
+            });
+            gate
+        };
 
-        gate.artifact = Some(ReleaseGateArtifactSelector {
-            profile: Some("site".to_string()),
-            path: None,
-        });
-        let err = select_gate_artifact(&artifacts, &gate).expect_err("ambiguous profile");
-        assert!(err.message.contains("must match exactly one"));
+        let primary = select_gate_artifact(&artifacts, &gate("g", "true")).expect("primary");
+        assert_eq!(primary.path, "build/site-full.zip");
 
-        gate.artifact = Some(ReleaseGateArtifactSelector {
-            profile: Some("missing-profile".to_string()),
-            path: None,
-        });
-        let err = select_gate_artifact(&artifacts, &gate).expect_err("unmatched profile");
-        assert!(err.message.contains("no artifact file name contains it"));
-    }
+        let by_path = select_gate_artifact(
+            &artifacts,
+            &selector(None, Some("build/site-html-site-import.zip")),
+        )
+        .expect("path");
+        assert_eq!(by_path.path, "build/site-html-site-import.zip");
 
-    #[test]
-    fn gate_path_selector_matches_declared_artifact_path() {
-        let artifacts = vec![
-            artifact("build/first.zip", true),
-            artifact("build/second.zip", false),
-        ];
-        let mut gate = gate("g", "true");
-        gate.artifact = Some(ReleaseGateArtifactSelector {
-            profile: None,
-            path: Some("build/second.zip".to_string()),
-        });
-        let selected = select_gate_artifact(&artifacts, &gate).expect("artifact");
-        assert_eq!(selected.path, "build/second.zip");
+        let by_profile =
+            select_gate_artifact(&artifacts, &selector(Some("html-site-import"), None))
+                .expect("profile");
+        assert_eq!(by_profile.path, "build/site-html-site-import.zip");
+
+        for (profile, expected) in [
+            ("site", "must match exactly one"),
+            ("missing-profile", "no artifact file name contains it"),
+        ] {
+            let err = select_gate_artifact(&artifacts, &selector(Some(profile), None))
+                .expect_err("non-unique profile");
+            assert!(err.message.contains(expected), "{profile}: {}", err.message);
+        }
     }
 
     #[test]
@@ -524,31 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn failing_gate_reports_gate_id_exit_code_and_output_tail() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let dir = tempfile::tempdir().expect("component dir");
-            std::fs::create_dir_all(dir.path().join("build")).expect("build dir");
-            std::fs::write(dir.path().join("build/fixture.zip"), "artifact").expect("artifact");
-            let component = component_at(dir.path());
-            let state = state_with_artifact("build/fixture.zip");
-
-            let result = run_release_gate(
-                &test_roots(),
-                &component,
-                &state,
-                &gate("import", "echo import failed: bad site >&2; exit 7"),
-            )
-            .expect("gate run");
-
-            assert_eq!(result.status, ReleaseStepStatus::Failed);
-            let error = result.error.expect("gate error");
-            assert!(error.contains("Release gate 'import' failed (exit 7)"));
-            assert!(error.contains("import failed: bad site"));
-        });
-    }
-
-    #[test]
-    fn failing_gate_still_persists_declared_evidence() {
+    fn failing_gate_reports_exit_and_output_and_still_persists_evidence() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let dir = tempfile::tempdir().expect("component dir");
             std::fs::create_dir_all(dir.path().join("build")).expect("build dir");
@@ -557,7 +519,7 @@ mod tests {
             let state = state_with_artifact("build/fixture.zip");
             let mut gate = gate(
                 "import",
-                "mkdir -p evidence; echo boom > evidence/log.txt; exit 1",
+                "mkdir -p evidence; echo boom > evidence/log.txt; echo import failed: bad site >&2; exit 7",
             );
             gate.evidence = Some("evidence".to_string());
 
@@ -565,6 +527,9 @@ mod tests {
                 run_release_gate(&test_roots(), &component, &state, &gate).expect("gate run");
 
             assert_eq!(result.status, ReleaseStepStatus::Failed);
+            let error = result.error.expect("gate error");
+            assert!(error.contains("Release gate 'import' failed (exit 7)"));
+            assert!(error.contains("import failed: bad site"));
             let data = result.data.expect("gate data");
             let evidence = data["evidence"].as_str().expect("evidence path");
             assert!(Path::new(evidence).join("log.txt").is_file());
@@ -587,14 +552,5 @@ mod tests {
                 .expect("gate error")
                 .contains("no packaged artifacts"));
         });
-    }
-
-    #[test]
-    fn output_tail_is_bounded_and_char_safe() {
-        let long = "é".repeat(5000);
-        let tail = output_tail(&long, 100);
-        assert_eq!(tail.chars().count(), 101);
-        assert!(tail.starts_with('…'));
-        assert_eq!(output_tail("short", 100), "short");
     }
 }

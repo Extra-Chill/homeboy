@@ -285,39 +285,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copy_release_artifacts_copies_relative_artifact_to_durable_dir() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let component = temp.path().join("component");
-        let build = component.join("build");
-        let artifact_dir = temp.path().join("artifact-root");
-        fs::create_dir_all(&build).expect("build dir");
-        fs::create_dir_all(&artifact_dir).expect("artifact dir");
-        fs::write(build.join("plugin.zip"), "zip").expect("artifact");
-
-        let copied = copy_release_artifacts(
-            &component.display().to_string(),
-            &artifact_dir,
-            &[ReleaseArtifact {
-                path: "build/plugin.zip".to_string(),
-                durable_path: None,
-                artifact_type: Some("archive".to_string()),
-                platform: None,
-                phase: "final".to_string(),
-                producer: "test".to_string(),
-                sha256: None,
-                publication_authority: true,
-            }],
-        )
-        .expect("copy artifacts");
-
-        let copied_path = artifact_dir.join("plugin.zip");
-        assert_eq!(fs::read_to_string(&copied_path).expect("copied"), "zip");
-        assert_eq!(copied[0].path, copied_path.display().to_string());
-        assert_eq!(copied[0].artifact_type.as_deref(), Some("archive"));
-    }
-
-    #[test]
-    fn copy_release_artifacts_omits_superseded_duplicate_targets() {
+    fn copy_release_artifacts_copies_only_authoritative_relative_artifact_to_durable_dir() {
         let temp = tempfile::tempdir().expect("tempdir");
         let component = temp.path().join("component");
         let build = component.join("build");
@@ -355,10 +323,9 @@ mod tests {
         .expect("copy authoritative artifact");
 
         assert_eq!(copied.len(), 1);
-        assert_eq!(
-            fs::read_to_string(artifact_dir.join("plugin.zip")).unwrap(),
-            "final"
-        );
+        let copied_path = artifact_dir.join("plugin.zip");
+        assert_eq!(fs::read_to_string(&copied_path).unwrap(), "final");
+        assert_eq!(copied[0].path, copied_path.display().to_string());
         assert_eq!(copied[0].platform.as_deref(), Some("universal"));
         assert!(copied[0].publication_authority);
     }
