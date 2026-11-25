@@ -234,7 +234,11 @@ impl ReconcileEvidence {
         live_supervisors: &std::collections::BTreeSet<uuid::Uuid>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Self {
-        let liveness = classify_liveness(record, now, live_supervisors);
+        let liveness = pre_spawn_driver_liveness(
+            store,
+            record,
+            classify_liveness(record, now, live_supervisors),
+        );
         let actionable = !record.state().is_terminal() && liveness.is_reconcilable();
         Self {
             liveness,
@@ -258,6 +262,23 @@ impl ReconcileEvidence {
                             || record.is_locally_reconcilable_after_runner_idle()
                     }),
         }
+    }
+}
+
+/// A queued or pre-spawn attempt has no runner pid by design. While a
+/// controller holds its Cook's driver lock it is waiting on that driver
+/// (admission, worktree or provider lookup), not dead, so it is `Active` and
+/// never cancelled as `missing_runner_pid` (#19182).
+fn pre_spawn_driver_liveness(
+    store: &LifecycleStore,
+    record: &AgentTaskRunRecord,
+    liveness: AgentTaskLiveness,
+) -> AgentTaskLiveness {
+    if liveness.is_reconcilable() && super::cook::cook_driver_owns_unspawned_attempt(store, record)
+    {
+        AgentTaskLiveness::Active
+    } else {
+        liveness
     }
 }
 
@@ -433,6 +454,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             continue;
         };
         let record = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, &run.run_id)?;
+        let liveness = pre_spawn_driver_liveness(&lifecycle_store, &record, liveness);
         let in_flight_handoff = agent_task_lifecycle::CookRunState::accepted_lab_handoff(&record)
             && !(record.state().is_terminal() && record.runner_job_id().is_some());
         if in_flight_handoff && !dry_run {
@@ -692,7 +714,11 @@ fn reconcile_exact_run(
 ) -> Result<AgentTaskReconcileRun> {
     let live_supervisors = live_supervisor_jobs();
     let before = agent_task_lifecycle::exact_record_in_store(store, run_id)?;
-    let before_liveness = classify_liveness(&before, chrono::Utc::now(), &live_supervisors);
+    let before_liveness = pre_spawn_driver_liveness(
+        store,
+        &before,
+        classify_liveness(&before, chrono::Utc::now(), &live_supervisors),
+    );
     let record = converge(store, run_id, before.clone(), before_liveness, dry_run)?;
     let mut run = AgentTaskReconcileRun {
         run_id: run_id.to_string(),
@@ -1600,6 +1626,58 @@ mod tests {
                 homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(cancelled.metadata["cancel_reason"], "missing_runner_pid");
+        });
+    }
+
+    #[test]
+    fn queued_pre_spawn_attempt_with_live_driver_is_not_cancelled() {
+        // #19182: a queued attempt in worktree/provider lookup has no runner
+        // pid by design. While its Cook driver lock is held it is waiting, not
+        // dead, so the fleet reconciler must not cancel it.
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let cook_id = "reconcile-pre-spawn-cook";
+            let run_id = "reconcile-pre-spawn-cook-attempt-1";
+            let plan = AgentTaskPlan::new("reconcile-tick-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                let metadata = record.metadata.as_object_mut().expect("metadata object");
+                metadata.remove("runner_pid");
+                metadata.insert("cook_id".to_string(), serde_json::json!(cook_id));
+                metadata.insert(
+                    "cook_progress".to_string(),
+                    serde_json::json!({"phase": "worktree_provider_lookup", "attempt": 1}),
+                );
+            })
+            .expect("queued pre-spawn attempt");
+
+            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let driver = std::thread::spawn(move || {
+                let store = super::super::cook_recipe::CookRecipeStore::from_current_data_root()
+                    .expect("recipe store");
+                let guard = store
+                    .try_acquire_cook_driver(cook_id)
+                    .expect("acquire")
+                    .expect("driver lock free");
+                held_tx.send(()).expect("signal held");
+                let _ = release_rx.recv();
+                drop(guard);
+            });
+            held_rx.recv().expect("driver held");
+
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("watchdog pass");
+            release_tx.send(()).expect("release driver");
+            driver.join().expect("driver thread");
+
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let retained = agent_task_lifecycle::exact_record(run_id).expect("retained run");
+            assert_eq!(
+                retained.state(),
+                homeboy_lifecycle_contract::RunExecutionState::Queued
+            );
+            assert!(retained.metadata.get("cancel_reason").is_none());
         });
     }
 
