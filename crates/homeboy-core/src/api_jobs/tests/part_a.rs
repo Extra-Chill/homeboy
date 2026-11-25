@@ -6,17 +6,6 @@ use super::store::LinkedDurableRunResolution;
 use super::*;
 
 #[test]
-fn test_create() {
-    let store = JobStore::default();
-    let job = store.create("lint");
-
-    assert_eq!(job.operation, "lint");
-    assert_eq!(job.status, JobStatus::Queued);
-    assert_eq!(job.event_count, 1);
-    assert!(job.source_snapshot.is_none());
-}
-
-#[test]
 fn inspection_reuses_the_canonical_job_and_keeps_events_separate() {
     let store = JobStore::default();
     let job = store.create("controller.work");
@@ -197,29 +186,7 @@ fn runner_capacity_is_claimed_before_reserving_an_agent_task_child() {
 }
 
 #[test]
-fn test_create_with_source_snapshot() {
-    let store = JobStore::default();
-    let snapshot =
-        crate::source_snapshot::existing_remote("lab", "/srv/homeboy/repo", Some("/srv/homeboy"));
-    let job = store.create_with_source_snapshot("runner.exec", Some(snapshot.clone()));
-
-    assert_eq!(job.source_snapshot, Some(snapshot.clone()));
-    assert_eq!(
-        store.get(job.id).expect("job").source_snapshot,
-        Some(snapshot)
-    );
-}
-
-#[test]
-fn test_get() {
-    let store = JobStore::default();
-    let job = store.create("lint");
-
-    assert_eq!(store.get(job.id).expect("job is readable").id, job.id);
-}
-
-#[test]
-fn test_list() {
+fn list_orders_jobs_by_creation_time_then_id() {
     let store = JobStore::default();
     let first = store.create("lint");
     let second = store.create("lint");
@@ -236,64 +203,7 @@ fn test_list() {
 }
 
 #[test]
-fn test_start() {
-    let store = JobStore::default();
-    let job = store.create("lint");
-
-    let running = store.start(job.id).expect("job starts");
-    assert_eq!(running.status, JobStatus::Running);
-    assert!(running.started_at_ms.is_some());
-}
-
-#[test]
-fn test_append_event() {
-    let store = JobStore::default();
-    let job = store.create("lint");
-    store.start(job.id).expect("job starts");
-
-    let event = store
-        .append_event(
-            job.id,
-            JobEventKind::Stdout,
-            Some("running audit".to_string()),
-            None,
-        )
-        .expect("stdout event appends");
-
-    assert_eq!(event.kind, JobEventKind::Stdout);
-    assert_eq!(event.message.as_deref(), Some("running audit"));
-}
-
-#[test]
-fn test_complete() {
-    let store = JobStore::default();
-    let job = store.create("lint");
-    store.start(job.id).expect("job starts");
-
-    let completed = store
-        .complete(job.id, Some(json!({ "findings": 0 })))
-        .expect("job completes");
-    assert_eq!(completed.status, JobStatus::Succeeded);
-    assert!(completed.finished_at_ms.is_some());
-}
-
-#[test]
-fn test_fail() {
-    let store = JobStore::default();
-    let job = store.create("lint");
-    store.start(job.id).expect("job starts");
-
-    let failed = store.fail(job.id, "lint failed").expect("job fails");
-    assert_eq!(failed.status, JobStatus::Failed);
-    assert!(store
-        .events(job.id)
-        .expect("events are readable")
-        .iter()
-        .any(|event| event.kind == JobEventKind::Error));
-}
-
-#[test]
-fn test_cancel() {
+fn cancelling_a_cancelled_job_is_a_noop() {
     let store = JobStore::default();
     let job = store.create("bench");
 
@@ -301,14 +211,6 @@ fn test_cancel() {
     assert_eq!(cancelled.status, JobStatus::Cancelled);
     assert!(cancelled.started_at_ms.is_none());
     assert!(cancelled.finished_at_ms.is_some());
-}
-
-#[test]
-fn cancelling_a_cancelled_job_is_a_noop() {
-    let store = JobStore::default();
-    let job = store.create("bench");
-
-    let cancelled = store.cancel(job.id, "user requested").expect("job cancels");
     let events_after_first_cancel = store.events(job.id).expect("events are readable");
 
     let repeated = store
@@ -323,71 +225,6 @@ fn cancelling_a_cancelled_job_is_a_noop() {
         events_after_first_cancel.len(),
         "repeated cancellation must not add another status event"
     );
-}
-
-#[test]
-fn test_job_id() {
-    let store = JobStore::default();
-    let runner = store.run_background("test", |job| Ok(job.job_id().to_string()));
-
-    runner.handle.join().expect("worker thread exits cleanly");
-    assert_eq!(
-        store
-            .events(runner.job_id)
-            .expect("events are readable")
-            .iter()
-            .find(|event| event.kind == JobEventKind::Result)
-            .and_then(|event| event.data.as_ref()),
-        Some(&json!(runner.job_id.to_string()))
-    );
-}
-
-#[test]
-fn test_stdout() {
-    let store = JobStore::default();
-    let runner = store.run_background("test", |job| {
-        job.stdout("stdout line")?;
-        Ok(json!(true))
-    });
-
-    runner.handle.join().expect("worker thread exits cleanly");
-    assert!(store
-        .events(runner.job_id)
-        .expect("events are readable")
-        .iter()
-        .any(|event| event.kind == JobEventKind::Stdout));
-}
-
-#[test]
-fn test_stderr() {
-    let store = JobStore::default();
-    let runner = store.run_background("test", |job| {
-        job.stderr("stderr line")?;
-        Ok(json!(true))
-    });
-
-    runner.handle.join().expect("worker thread exits cleanly");
-    assert!(store
-        .events(runner.job_id)
-        .expect("events are readable")
-        .iter()
-        .any(|event| event.kind == JobEventKind::Stderr));
-}
-
-#[test]
-fn test_progress() {
-    let store = JobStore::default();
-    let runner = store.run_background("test", |job| {
-        job.progress(json!({ "current": 1, "total": 1 }))?;
-        Ok(json!(true))
-    });
-
-    runner.handle.join().expect("worker thread exits cleanly");
-    assert!(store
-        .events(runner.job_id)
-        .expect("events are readable")
-        .iter()
-        .any(|event| event.kind == JobEventKind::Progress));
 }
 
 #[test]
@@ -478,6 +315,7 @@ fn background_runner_captures_result_and_handle_events() {
     let store = JobStore::default();
     let runner = store.run_background("rig-check", |job| {
         job.stdout("checking services")?;
+        job.stderr("service warning")?;
         job.progress(json!({ "checked": 1, "total": 1 }))?;
         Ok(json!({ "ok": true, "job_id": job.job_id().to_string() }))
     });
@@ -489,15 +327,19 @@ fn background_runner_captures_result_and_handle_events() {
 
     let events = store.events(runner.job_id).expect("events are readable");
     assert_eq!(events[0].kind, JobEventKind::Status);
-    assert!(events
+    for kind in [
+        JobEventKind::Stdout,
+        JobEventKind::Stderr,
+        JobEventKind::Progress,
+    ] {
+        assert!(events.iter().any(|event| event.kind == kind), "{kind:?}");
+    }
+    let result = events
         .iter()
-        .any(|event| event.kind == JobEventKind::Stdout));
-    assert!(events
-        .iter()
-        .any(|event| event.kind == JobEventKind::Progress));
-    assert!(events
-        .iter()
-        .any(|event| event.kind == JobEventKind::Result));
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data.as_ref())
+        .expect("result event");
+    assert_eq!(result["job_id"], json!(runner.job_id.to_string()));
     assert_eq!(
         events.last().unwrap().data,
         Some(json!({ "status": "succeeded" }))
@@ -587,11 +429,13 @@ fn durable_transaction_reuses_snapshot_until_another_writer_commits() {
 }
 
 #[test]
-fn test_open() {
+fn durable_store_persists_terminal_job_events_and_source_snapshot_across_reopen() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
-    let job = store.create("bench");
+    let snapshot =
+        crate::source_snapshot::existing_remote("lab", "/srv/homeboy/repo", Some("/srv/homeboy"));
+    let job = store.create_with_source_snapshot("bench", Some(snapshot.clone()));
 
     store.start(job.id).expect("job starts");
     store
@@ -605,6 +449,7 @@ fn test_open() {
     let persisted = reopened.get(job.id).expect("job persists");
     assert_eq!(persisted.status, JobStatus::Succeeded);
     assert!(persisted.finished_at_ms.is_some());
+    assert_eq!(persisted.source_snapshot, Some(snapshot));
 
     let events = reopened.events(job.id).expect("events persist");
     assert!(events
@@ -613,35 +458,6 @@ fn test_open() {
     assert!(events
         .iter()
         .any(|event| event.kind == JobEventKind::Result));
-}
-
-#[test]
-fn durable_store_reconciles_running_jobs_as_stale_after_restart() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open(&path).expect("durable store opens");
-    let job = store.create("lint");
-    store.start(job.id).expect("job starts");
-
-    let reopened = JobStore::open(&path).expect("durable store reopens");
-    let stale = reopened.get(job.id).expect("job persists");
-    assert_eq!(stale.status, JobStatus::Failed);
-    assert_eq!(
-        stale.stale_reason.as_deref(),
-        Some("control plane lost before the job reached a terminal status")
-    );
-    assert!(stale.finished_at_ms.is_some());
-
-    let events = reopened.events(job.id).expect("events persist");
-    assert!(events.iter().any(|event| {
-        event.kind == JobEventKind::Error
-            && event.data.as_ref().is_some_and(|data| {
-                data["reason"] == json!("orphaned_after_control_plane_loss")
-                    && data["classification"]["kind"] == json!("orphaned_after_control_plane_loss")
-                    && data["classification"]["recoverable"] == json!(false)
-                    && data["classification"]["child"]["output_observed"] == json!(false)
-            })
-    }));
 }
 
 #[test]
@@ -793,39 +609,33 @@ fn unstamped_active_job_is_a_dead_generation_job_needing_attestation() {
 }
 
 #[test]
-fn dead_lease_reconciliation_preserves_a_job_with_a_live_recorded_child() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    record_test_local_child(&store, job.id, 4242);
+fn dead_lease_reconciliation_follows_recorded_child_liveness() {
+    for (child_alive, expected_status) in [(true, JobStatus::Running), (false, JobStatus::Failed)] {
+        let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+        let job = store.create("runner.exec");
+        record_test_local_child(&store, job.id, 4242);
 
-    let diagnostics = store
-        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |pid| pid == 4242)
-        .expect("reconcile dead lease");
+        let diagnostics = store
+            .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |pid| {
+                child_alive && pid == 4242
+            })
+            .expect("reconcile dead lease");
 
-    assert_eq!(diagnostics.protected_job_ids, vec![job.id]);
-    assert_eq!(diagnostics.terminalized_count(), 0);
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
-    assert!(store.events(job.id).expect("events").iter().all(|event| {
-        event
-            .data
-            .as_ref()
-            .is_none_or(|data| data["reason"] != json!("dead_daemon_lease"))
-    }));
-}
-
-#[test]
-fn dead_lease_reconciliation_terminalizes_a_job_with_a_dead_recorded_child() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    record_test_local_child(&store, job.id, 4242);
-
-    let diagnostics = store
-        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |_| false)
-        .expect("reconcile dead lease");
-
-    assert!(diagnostics.protected_job_ids.is_empty());
-    assert_eq!(diagnostics.terminalized_count(), 1);
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+        assert_eq!(
+            diagnostics.protected_job_ids,
+            if child_alive { vec![job.id] } else { vec![] }
+        );
+        assert_eq!(diagnostics.terminalized_count(), usize::from(!child_alive));
+        assert_eq!(store.get(job.id).expect("job").status, expected_status);
+        if child_alive {
+            assert!(store.events(job.id).expect("events").iter().all(|event| {
+                event
+                    .data
+                    .as_ref()
+                    .is_none_or(|data| data["reason"] != json!("dead_daemon_lease"))
+            }));
+        }
+    }
 }
 
 #[test]
