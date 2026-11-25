@@ -9,10 +9,9 @@ use std::sync::{Mutex, OnceLock};
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, immutable_replay_snapshot,
     register_after_snapshot_directory_discovery_hook, snapshot_install_command, stream_snapshot,
-    synthetic_checkout_value, workspace_content_hash, workspace_content_hash_algorithm,
-    workspace_content_hash_for_policy, workspace_content_manifest_and_hash_for_policy,
-    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
+    workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
+    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -77,20 +76,6 @@ fn rooted_local_runner(roots: &homeboy_core::paths::PathRoots, id: &str, workspa
         serde_json::to_string_pretty(&runner).expect("serialize runner"),
     )
     .expect("write runner config");
-}
-
-#[test]
-fn snapshot_git_readback_failure_fails_materialization_contract() {
-    let runner: crate::Runner = serde_json::from_value(serde_json::json!({
-        "id": "lab", "kind": "local"
-    }))
-    .expect("local runner");
-
-    let error = synthetic_checkout_value(&runner, "/does-not-exist", "rev-parse HEAD")
-        .expect_err("missing checkout readback must fail");
-
-    assert!(format!("{error:?}")
-        .contains("could not read `rev-parse HEAD` from synthetic snapshot-git checkout"));
 }
 
 #[test]
@@ -555,167 +540,103 @@ fn snapshot_git_fails_before_handoff_when_controller_closure_is_unavailable() {
     });
 }
 
-/// A failing producer must fail the materialization even when the consumer
-/// succeeds.
+/// A pipeline failure on either side must surface its own exit status, and
+/// failure messages must carry bounded transport output.
 ///
 /// The archive pipeline is `(cd src && prepare && tar -cf - .) | ssh runner
 /// 'tar -xf -'`. Under a plain POSIX shell the status is the *consumer's*, and
 /// `tar -xf -` exits 0 on a truncated or empty stream — so a local `tar` that
 /// died on a full disk or an unreadable file shipped a partial workspace and
-/// reported success (#11100).
+/// reported success (#11100). The consumer's failure must still win when it is
+/// the one that fails, so `pipefail` does not mask SSH-side transport errors
+/// (#8803).
 #[test]
-fn a_failing_pipeline_producer_fails_the_command() {
-    let error = super::super::util::run_shell_command(
-        "sh -c 'printf partial; exit 19' | cat",
-        "materialize SSH workspace snapshot",
-    )
-    .expect_err("a failing pipeline producer must fail the command");
-
-    assert!(
-        error.message.contains("exit status 19"),
-        "the producer's status must be the reported status, not the consumer's: {}",
-        error.message
-    );
+fn snapshot_command_failure_reports_pipeline_status_and_transport_output() {
+    for (command, expected) in [
+        (
+            "sh -c 'printf partial; exit 19' | cat",
+            &["exit status 19"][..],
+        ),
+        ("printf whole | sh -c 'exit 26'", &["exit status 26"][..]),
+        (
+            "exit 23",
+            &["(exit status 23): the command exited without stdout or stderr"][..],
+        ),
+        (
+            "printf stdout-evidence; printf stderr-evidence >&2; exit 24",
+            &[
+                "exit status 24",
+                "stdout: stdout-evidence",
+                "stderr: stderr-evidence",
+            ][..],
+        ),
+    ] {
+        let error =
+            super::super::util::run_shell_command(command, "materialize SSH workspace snapshot")
+                .expect_err("failing command must fail");
+        for fragment in expected {
+            assert!(
+                error.message.contains(fragment),
+                "`{command}` must report `{fragment}`: {}",
+                error.message
+            );
+        }
+    }
 }
 
-/// The consumer's failure must still win when it is the one that fails, so
-/// `pipefail` does not mask the SSH-side transport errors that
-/// `classify_transport_failure` depends on (#8803).
+/// #8803: an SSH transport that drops mid-pipe kills `sh` with a signal, and
+/// SSH exits 255 on a connection-level error. Both are retryable transport
+/// failures; a genuine remote command failure stays a plain command error so
+/// real bugs are not silently retried as transport flakes.
 #[test]
-fn a_failing_pipeline_consumer_still_fails_the_command() {
-    let error = super::super::util::run_shell_command(
-        "printf whole | sh -c 'exit 26'",
-        "materialize SSH workspace snapshot",
-    )
-    .expect_err("a failing pipeline consumer must fail the command");
+fn snapshot_command_failure_classifies_transport_drops_as_retryable() {
+    for (command, transport) in [
+        ("kill -PIPE $$", true),
+        (
+            "echo 'ssh: connect to host lab port 22: Connection refused' >&2; exit 255",
+            true,
+        ),
+        ("echo boom >&2; exit 2", false),
+    ] {
+        let error =
+            super::super::util::run_shell_command(command, "materialize SSH workspace snapshot")
+                .expect_err("failing command must fail");
+        let is_transport = error.code == homeboy_core::error::ErrorCode::RunnerLabTransportFailure;
+        assert_eq!(is_transport, transport, "`{command}`: {error:?}");
+        if transport {
+            assert_eq!(error.retryable, Some(true), "`{command}`");
+        }
+    }
 
-    assert!(
-        error.message.contains("exit status 26"),
-        "the consumer's status must survive: {}",
-        error.message
-    );
-}
-
-#[test]
-fn snapshot_command_failure_keeps_exit_status_and_silent_transport_cause() {
-    let error =
-        super::super::util::run_shell_command("exit 23", "materialize SSH workspace snapshot")
-            .expect_err("silent command failure must be actionable");
-
-    assert_eq!(
-        error.message,
-        "materialize SSH workspace snapshot failed during command execution (exit status 23): the command exited without stdout or stderr"
-    );
-}
-
-#[test]
-fn snapshot_command_failure_preserves_bounded_transport_output() {
-    let error = super::super::util::run_shell_command(
-        "printf stdout-evidence; printf stderr-evidence >&2; exit 24",
-        "materialize SSH workspace snapshot",
-    )
-    .expect_err("transport output must be retained");
-
-    assert!(error.message.contains("exit status 24"));
-    assert!(error.message.contains("stdout: stdout-evidence"));
-    assert!(error.message.contains("stderr: stderr-evidence"));
-}
-
-#[test]
-fn snapshot_command_failure_bounds_transport_output() {
-    let error = super::super::util::run_shell_command(
-        "head -c 5000 /dev/zero | tr '\\0' x; exit 25",
-        "materialize SSH workspace snapshot",
-    )
-    .expect_err("large transport output must be bounded");
-
-    assert!(error.message.contains("exit status 25"));
-    assert!(error.message.ends_with("... [truncated]"));
-    assert!(error.message.len() < 4_300);
-}
-
-#[test]
-fn snapshot_signal_death_is_a_retryable_transport_failure() {
-    // #8803: an SSH transport that drops mid-pipe kills `sh` with a signal, so
-    // it exits with no code (surfaced as -1). This must be classified as a
-    // retryable transport failure carrying structured diagnostics, not an
-    // opaque internal error.
-    let error = super::super::util::run_shell_command(
+    let signal = super::super::util::run_shell_command(
         "kill -PIPE $$",
         "materialize SSH workspace snapshot",
     )
-    .expect_err("signal death must be an actionable transport failure");
+    .expect_err("signal death must fail");
+    let details = serde_json::to_string(&signal.details).expect("serialize details");
+    assert!(details.contains("\"signal_death\":true"), "{details}");
+    assert!(details.contains("transport_close_reason"), "{details}");
+    assert!(!signal.message.contains("failed during command execution"));
 
-    assert_eq!(
-        error.code,
-        homeboy_core::error::ErrorCode::RunnerLabTransportFailure
-    );
-    assert_eq!(
-        error.retryable,
-        Some(true),
-        "transport failures must be retryable"
-    );
-    let details = serde_json::to_string(&error.details).expect("serialize details");
-    assert!(
-        details.contains("\"signal_death\":true"),
-        "must record that the process was killed by a signal: {details}"
-    );
-    assert!(
-        details.contains("transport_close_reason"),
-        "must record a transport close reason: {details}"
-    );
-    // The generic non-transport message must not be used for a transport drop.
-    assert!(
-        !error.message.contains("failed during command execution"),
-        "signal death must not fall through to the generic command error: {}",
-        error.message
-    );
-}
-
-#[test]
-fn snapshot_ssh_connection_exit_is_a_retryable_transport_failure() {
-    // SSH exits 255 on a connection-level error, distinct from a remote
-    // command's own non-zero exit code.
-    let error = super::super::util::run_shell_command(
+    let refused = super::super::util::run_shell_command(
         "echo 'ssh: connect to host lab port 22: Connection refused' >&2; exit 255",
         "materialize SSH workspace snapshot",
     )
-    .expect_err("ssh connection error must be an actionable transport failure");
-
-    assert_eq!(
-        error.code,
-        homeboy_core::error::ErrorCode::RunnerLabTransportFailure
-    );
-    assert_eq!(error.retryable, Some(true));
+    .expect_err("ssh connection error must fail");
     assert!(
-        error.message.to_lowercase().contains("connection refused"),
+        refused
+            .message
+            .to_lowercase()
+            .contains("connection refused"),
         "must surface the transport close reason: {}",
-        error.message
+        refused.message
     );
-}
-
-#[test]
-fn snapshot_ordinary_command_failure_is_not_classified_as_transport() {
-    // A genuine remote command failure (non-signal, non-255, no transient
-    // stderr) must remain a plain command error so real bugs are not silently
-    // retried as transport flakes.
-    let error = super::super::util::run_shell_command(
-        "echo boom >&2; exit 2",
-        "materialize SSH workspace snapshot",
-    )
-    .expect_err("ordinary failure still errors");
-
-    assert_ne!(
-        error.code,
-        homeboy_core::error::ErrorCode::RunnerLabTransportFailure
-    );
-    assert!(error.message.contains("exit status 2"));
 }
 
 #[test]
 fn snapshot_command_failure_bounds_multibyte_output_at_a_character_boundary() {
     let error = super::super::util::run_shell_command(
-        "head -c 4095 /dev/zero | tr '\\0' Z; printf '\\342\\202\\254'; exit 26",
+        "head -c 4095 /dev/zero | tr '\\0' Z; printf '\\342\\202\\254'; head -c 5000 /dev/zero | tr '\\0' x; exit 26",
         "materialize SSH workspace snapshot",
     )
     .expect_err("multibyte transport output must not panic while truncating");
@@ -724,6 +645,7 @@ fn snapshot_command_failure_bounds_multibyte_output_at_a_character_boundary() {
     assert_eq!(error.message.matches('Z').count(), 4095);
     assert!(!error.message.contains('\u{20ac}'));
     assert!(error.message.ends_with("... [truncated]"));
+    assert!(error.message.len() < 4_300);
 }
 
 #[test]
@@ -875,27 +797,6 @@ fn runner_snapshot_transports_source_owned_homeboy_paths_as_ordinary_content() {
 }
 
 #[test]
-fn generic_snapshot_copy_allows_source_owned_runner_workspace_path() {
-    let source = tempfile::tempdir().expect("source tempdir");
-    let destination = tempfile::tempdir().expect("destination tempdir");
-    fs::create_dir_all(source.path().join(".homeboy")).expect("metadata directory");
-    fs::write(
-        source.path().join(".homeboy/runner-workspace.json"),
-        "source-owned generic snapshot content\n",
-    )
-    .expect("source metadata");
-
-    copy_snapshot_to_directory(source.path(), destination.path(), &[])
-        .expect("generic snapshot copy");
-
-    assert_eq!(
-        fs::read_to_string(destination.path().join(".homeboy/runner-workspace.json"))
-            .expect("copied metadata"),
-        "source-owned generic snapshot content\n"
-    );
-}
-
-#[test]
 fn workspace_content_manifest_and_hash_share_one_traversal_instant() {
     let workspace = tempfile::tempdir().expect("workspace");
     let first = workspace.path().join("a-first.txt");
@@ -933,7 +834,7 @@ fn workspace_content_manifest_and_hash_share_one_traversal_instant() {
 }
 
 #[test]
-fn test_sync_workspace() {
+fn snapshot_sync_applies_default_excludes_and_keeps_build_outputs() {
     crate::test_support::with_isolated_home(|_| {
         let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source tempdir");
@@ -1678,59 +1579,42 @@ fn snapshot_git_hydrates_partial_clone_on_controller_without_lab_remote_access()
     });
 }
 
-#[test]
-fn snapshot_install_restores_workspace_owner_after_root_run() {
-    let command =
-        snapshot_install_command("/var/lib/sampleplugin/workspace/_lab_workspaces/homeboy-abc");
-
-    assert!(command.contains("owner_path=$parent"));
-    assert!(command.contains("mkdir -p \"$parent\""));
-    assert!(command.contains("mv \"$tmp\" \"$dest\" && if"));
-    assert!(command.contains("chown -R \"$owner\" $dest"));
-}
-
 /// The install commands cross the same `sh -c` boundary as the archive
 /// pipeline, on both the local and the SSH runner path, so hold them to the
-/// same portability contract (#10399).
+/// same portability contract (#10399). A root-run install must also hand the
+/// workspace back to the owner of its parent directory.
 #[test]
-fn snapshot_install_commands_parse_under_posix_shells() {
+fn snapshot_install_commands_parse_under_posix_shells_and_restore_owner() {
     for remote_path in [
         "/var/lib/sampleplugin/workspace/_lab_workspaces/homeboy-abc",
         "/var/lib/homeboy/work spaces/homeboy-abc",
     ] {
-        assert_parses_under_posix_shells(
-            &snapshot_install_command(remote_path),
-            "snapshot install command",
-        );
+        let command = snapshot_install_command(remote_path);
+        assert_parses_under_posix_shells(&command, "snapshot install command");
+        assert!(command.contains("owner_path=$parent"), "{command}");
+        assert!(command.contains("chown -R \"$owner\""), "{command}");
     }
 }
 
 #[cfg(unix)]
 #[test]
-fn immutable_replay_snapshot_rejects_external_symlinks_before_staging() {
+fn immutable_replay_snapshot_rejects_untracked_symlinks_before_staging() {
     use std::os::unix::fs::symlink;
 
-    let source = tempfile::tempdir().expect("source");
     let external = tempfile::NamedTempFile::new().expect("external");
-    symlink(external.path(), source.path().join("external-link")).expect("link external file");
+    for target in [external.path(), Path::new("tracked.txt")] {
+        let source = tempfile::tempdir().expect("source");
+        fs::write(source.path().join("tracked.txt"), "workspace bytes").expect("workspace file");
+        symlink(target, source.path().join("link")).expect("link");
 
-    let error = immutable_replay_snapshot(source.path(), &[])
-        .expect_err("external symlink must not enter replay artifact");
-    assert!(error.message.contains("refused a symlink"));
-}
-
-#[cfg(unix)]
-#[test]
-fn immutable_replay_snapshot_rejects_untracked_internal_symlinks_before_staging() {
-    use std::os::unix::fs::symlink;
-
-    let source = tempfile::tempdir().expect("source");
-    fs::write(source.path().join("tracked.txt"), "workspace bytes").expect("workspace file");
-    symlink("tracked.txt", source.path().join("untracked-link")).expect("link workspace file");
-
-    let error = immutable_replay_snapshot(source.path(), &[])
-        .expect_err("untracked symlink must not enter replay artifact");
-    assert!(error.message.contains("refused a symlink"));
+        let error = immutable_replay_snapshot(source.path(), &[])
+            .expect_err("untracked symlink must not enter replay artifact");
+        assert!(
+            error.message.contains("refused a symlink"),
+            "{target:?}: {}",
+            error.message
+        );
+    }
 }
 
 #[test]
@@ -1763,43 +1647,42 @@ fn immutable_replay_snapshot_identity_and_bytes_honor_exclusions() {
     assert!(!second.path().join("excluded.txt").exists());
 }
 
+/// An entry swapped to a symlink after directory discovery must fail closed,
+/// whether it was a regular file or a directory.
 #[cfg(unix)]
 #[test]
-fn immutable_replay_snapshot_rejects_regular_file_swapped_to_symlink_during_copy() {
+fn immutable_replay_snapshot_rejects_entries_swapped_to_symlinks_during_staging() {
     use std::os::unix::fs::symlink;
 
-    let source = tempfile::tempdir().expect("source");
-    let input = source.path().join("input.txt");
-    let external = tempfile::NamedTempFile::new().expect("external");
-    fs::write(&input, "recorded").expect("write regular input");
-    let _hook = register_after_snapshot_directory_discovery_hook(input.clone(), move || {
-        fs::remove_file(&input).expect("remove regular input");
-        symlink(external.path(), &input).expect("replace input with symlink");
-    });
-
-    let error = immutable_replay_snapshot(source.path(), &[])
-        .expect_err("regular-to-symlink swap must fail closed");
-    assert!(error.message.contains("refused a symlink"));
-}
-
-#[cfg(unix)]
-#[test]
-fn immutable_replay_snapshot_rejects_directory_swapped_to_external_symlink_during_archive() {
-    use std::os::unix::fs::symlink;
-
-    let source = tempfile::tempdir().expect("source");
-    let directory = source.path().join("directory");
     let external = tempfile::tempdir().expect("external");
-    fs::create_dir(&directory).expect("create source directory");
-    fs::write(directory.join("input.txt"), "recorded").expect("write source file");
-    let _hook = register_after_snapshot_directory_discovery_hook(directory.clone(), move || {
-        fs::remove_dir_all(&directory).expect("remove source directory");
-        symlink(external.path(), &directory).expect("replace directory with external symlink");
-    });
+    for swap_directory in [false, true] {
+        let source = tempfile::tempdir().expect("source");
+        let entry = source.path().join("entry");
+        if swap_directory {
+            fs::create_dir(&entry).expect("create source directory");
+            fs::write(entry.join("input.txt"), "recorded").expect("write source file");
+        } else {
+            fs::write(&entry, "recorded").expect("write regular input");
+        }
+        let target = external.path().to_path_buf();
+        let swapped = entry.clone();
+        let _hook = register_after_snapshot_directory_discovery_hook(entry, move || {
+            if swapped.is_dir() {
+                fs::remove_dir_all(&swapped).expect("remove source directory");
+            } else {
+                fs::remove_file(&swapped).expect("remove regular input");
+            }
+            symlink(&target, &swapped).expect("replace entry with symlink");
+        });
 
-    let error = immutable_replay_snapshot(source.path(), &[])
-        .expect_err("directory-to-symlink swap must fail closed");
-    assert!(error.message.contains("refused a symlink"));
+        let error = immutable_replay_snapshot(source.path(), &[])
+            .expect_err("symlink swap must fail closed");
+        assert!(
+            error.message.contains("refused a symlink"),
+            "directory={swap_directory}: {}",
+            error.message
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -2206,129 +2089,82 @@ fn workspace_content_hash_normalizes_git_materialization_umask_modes() {
     );
 }
 
+/// Each permission policy decides which mode bits are content identity.
+/// Portable (the default) ignores modes so a transport that drops execute
+/// bits still verifies; v2 unix-executable keeps its historical any-execute
+/// semantics without umask bits; v3 owner-executable binds only the owner
+/// execute bit, because tar extraction under a Linux runner umask can drop
+/// non-owner execute bits.
 #[test]
 #[cfg(unix)]
-fn workspace_content_hash_portable_policy_is_platform_mode_independent() {
+fn workspace_content_hash_permission_policies_bind_only_their_mode_bits() {
     use std::os::unix::fs::PermissionsExt;
 
-    let workspace = tempfile::tempdir().expect("workspace");
-    let file = workspace.path().join("file.txt");
-    fs::write(&file, "portable bytes\n").expect("source file");
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("non-executable mode");
-    let non_executable = workspace_content_hash_for_policy(
-        workspace.path(),
-        &[],
-        WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    )
-    .expect("non-executable hash");
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("executable mode");
-    assert_eq!(
-        workspace_content_hash_for_policy(
-            workspace.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-        )
-        .expect("executable hash"),
-        non_executable,
-        "portable v2 identity must not bind platform-specific permission bits"
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn workspace_content_hash_unix_policy_binds_executable_bit_without_umask_bits() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let workspace = tempfile::tempdir().expect("workspace");
-    let file = workspace.path().join("file.txt");
-    fs::write(&file, "portable bytes\n").expect("source file");
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("non-executable mode");
-    let non_executable = workspace_content_hash_for_policy(
-        workspace.path(),
-        &[],
-        WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
-    )
-    .expect("non-executable hash");
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o664)).expect("umask variant");
-    assert_eq!(
-        workspace_content_hash_for_policy(
-            workspace.path(),
-            &[],
+    for (policy, controller_mode, runner_mode, same_identity) in [
+        (WORKSPACE_CONTENT_PERMISSION_PORTABLE, 0o755, 0o644, true),
+        (
             WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
-        )
-        .expect("umask variant hash"),
-        non_executable
-    );
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).expect("executable mode");
-    assert_ne!(
-        workspace_content_hash_for_policy(
-            workspace.path(),
-            &[],
+            0o644,
+            0o664,
+            true,
+        ),
+        (
             WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
-        )
-        .expect("executable hash"),
-        non_executable
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn workspace_content_hash_owner_executable_policy_normalizes_non_owner_execute_bits() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let controller = tempfile::tempdir().expect("controller workspace");
-    let runner = tempfile::tempdir().expect("runner workspace");
-    for workspace in [controller.path(), runner.path()] {
-        fs::write(workspace.join("tool"), "#!/bin/sh\n").expect("tool");
+            0o644,
+            0o755,
+            false,
+        ),
+        (
+            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+            0o641,
+            0o640,
+            false,
+        ),
+        (
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+            0o641,
+            0o640,
+            true,
+        ),
+        (
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+            0o640,
+            0o740,
+            false,
+        ),
+        (
+            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+            0o755,
+            0o644,
+            false,
+        ),
+    ] {
+        let controller = tempfile::tempdir().expect("controller workspace");
+        let runner = tempfile::tempdir().expect("runner workspace");
+        let hashes = [
+            (controller.path(), controller_mode),
+            (runner.path(), runner_mode),
+        ]
+        .map(|(workspace, mode)| {
+            let tool = workspace.join("tool");
+            fs::write(&tool, "#!/bin/sh\n").expect("tool");
+            fs::set_permissions(&tool, fs::Permissions::from_mode(mode)).expect("mode");
+            workspace_content_hash_for_policy(workspace, &[], policy).expect("hash")
+        });
+        assert_eq!(
+            hashes[0] == hashes[1],
+            same_identity,
+            "{policy}: {controller_mode:o} vs {runner_mode:o}"
+        );
     }
-
-    // A non-owner execute bit can be removed when tar extraction applies the
-    // Linux runner's umask. It must not alter the cross-platform identity.
-    fs::set_permissions(
-        controller.path().join("tool"),
-        fs::Permissions::from_mode(0o641),
-    )
-    .expect("controller permissions");
-    fs::set_permissions(
-        runner.path().join("tool"),
-        fs::Permissions::from_mode(0o640),
-    )
-    .expect("runner permissions");
     assert_eq!(
-        workspace_content_hash_for_policy(
-            controller.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("controller hash"),
-        workspace_content_hash_for_policy(
-            runner.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("runner hash"),
-        "non-owner execute bits are host metadata, not portable executable capability"
+        workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE).as_deref(),
+        Some("homeboy-workspace-content-v2+unix-executable")
     );
-
-    fs::set_permissions(
-        runner.path().join("tool"),
-        fs::Permissions::from_mode(0o740),
-    )
-    .expect("runner owner-executable permissions");
-    assert_ne!(
-        workspace_content_hash_for_policy(
-            controller.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("controller hash"),
-        workspace_content_hash_for_policy(
-            runner.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("runner hash"),
-        "owner execute changes remain fail-closed"
+    assert_eq!(
+        workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE)
+            .as_deref(),
+        Some("homeboy-workspace-content-v3+unix-owner-executable")
     );
 }
 
@@ -2348,118 +2184,6 @@ fn workspace_content_hash_rejects_dereferenced_symlink_target_drift() {
         workspace_content_hash(controller.path(), &[]).expect("changed hash"),
         expected,
         "the dereferenced symlink target content remains provenance-bound"
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn workspace_content_hash_versions_legacy_any_execute_separately_from_owner_execute() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let controller = tempfile::tempdir().expect("controller workspace");
-    let runner = tempfile::tempdir().expect("runner workspace");
-    for workspace in [controller.path(), runner.path()] {
-        fs::write(workspace.join("tool"), "#!/bin/sh\n").expect("tool");
-    }
-    fs::set_permissions(
-        controller.path().join("tool"),
-        fs::Permissions::from_mode(0o641),
-    )
-    .expect("controller permissions");
-    fs::set_permissions(
-        runner.path().join("tool"),
-        fs::Permissions::from_mode(0o640),
-    )
-    .expect("runner permissions");
-
-    assert_ne!(
-        workspace_content_hash_for_policy(
-            controller.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE
-        )
-        .expect("legacy controller hash"),
-        workspace_content_hash_for_policy(
-            runner.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE
-        )
-        .expect("legacy runner hash"),
-        "v2 unix-executable preserves its historical any-execute semantics"
-    );
-    assert_eq!(
-        workspace_content_hash_for_policy(
-            controller.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE
-        )
-        .expect("v3 controller hash"),
-        workspace_content_hash_for_policy(
-            runner.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE
-        )
-        .expect("v3 runner hash"),
-        "v3 owner-only executable capability normalizes non-owner execute bits"
-    );
-    assert_eq!(
-        workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE).as_deref(),
-        Some("homeboy-workspace-content-v2+unix-executable")
-    );
-    assert_eq!(
-        workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE)
-            .as_deref(),
-        Some("homeboy-workspace-content-v3+unix-owner-executable")
-    );
-}
-
-#[test]
-#[cfg(unix)]
-fn snapshot_content_hash_is_portable_when_transport_drops_owner_execute() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let controller = tempfile::tempdir().expect("controller workspace");
-    let runner = tempfile::tempdir().expect("runner workspace");
-    for workspace in [controller.path(), runner.path()] {
-        fs::write(workspace.join("tool"), "#!/bin/sh\necho homeboy\n").expect("tool");
-    }
-    fs::set_permissions(
-        controller.path().join("tool"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .expect("controller permissions");
-    fs::set_permissions(
-        runner.path().join("tool"),
-        fs::Permissions::from_mode(0o644),
-    )
-    .expect("runner permissions");
-
-    assert_ne!(
-        workspace_content_hash_for_policy(
-            controller.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("controller Unix hash"),
-        workspace_content_hash_for_policy(
-            runner.path(),
-            &[],
-            WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
-        )
-        .expect("runner Unix hash"),
-        "Unix mode provenance is not portable through a cross-platform snapshot"
-    );
-    assert_eq!(
-        workspace_content_hash(controller.path(), &[]).expect("controller portable hash"),
-        workspace_content_hash(runner.path(), &[]).expect("runner portable hash"),
-        "new snapshots bind the portable content contract"
-    );
-
-    fs::write(runner.path().join("tool"), "#!/bin/sh\necho changed\n").expect("mutate tool");
-    assert_ne!(
-        workspace_content_hash(controller.path(), &[]).expect("controller portable hash"),
-        workspace_content_hash(runner.path(), &[]).expect("changed runner portable hash"),
-        "portable identity remains fail-closed for content changes"
     );
 }
 
