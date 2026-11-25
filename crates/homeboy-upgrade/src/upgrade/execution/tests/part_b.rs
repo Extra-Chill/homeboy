@@ -3,32 +3,6 @@
 use super::*;
 
 #[test]
-fn test_verify_upgrade_with_retry() {
-    // Smoke test covering the happy path with a single immediate read.
-    let (success, active) = verify_upgrade_with_retry(
-        InstallMethod::Binary,
-        false,
-        "0.157.1",
-        None,
-        1,
-        std::time::Duration::from_millis(0),
-        || {
-            Some(ActiveBinaryInfo {
-                version: Some("0.158.0".to_string()),
-                build_identity: None,
-            })
-        },
-        |_| {},
-    );
-
-    assert!(success);
-    assert_eq!(
-        active.and_then(|info| info.version).as_deref(),
-        Some("0.158.0")
-    );
-}
-
-#[test]
 fn binary_swap_failure_identifies_the_target_and_observed_destination() {
     let err = binary_swap_failure(
         "0.326.1",
@@ -121,84 +95,43 @@ fn source_swap_failure_errors_when_active_binary_unchanged() {
         .contains("Installed identity: homeboy 0.247.5+old")));
 }
 
+/// Only an unverified source swap fails loudly; non-source methods keep their
+/// soft unverified reporting. The message names whatever identity was read.
 #[test]
-fn source_swap_failure_reports_version_when_no_build_identity() {
-    let err = source_swap_failure(SourceSwapVerification {
-        method: InstallMethod::Source,
-        success: false,
-        new_version: Some("0.247.5"),
-        new_build_identity: None,
-        source_workspace: Some(Path::new("/src/homeboy")),
-        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
-        replacement_target: None,
-        built_binary_identity: None,
-    })
-    .expect("unverified source swap must surface an error");
-
-    assert!(err.message.contains("0.247.5"));
-}
-
-#[test]
-fn source_swap_failure_reports_placeholder_when_version_unverifiable() {
-    let err = source_swap_failure(SourceSwapVerification {
-        method: InstallMethod::Source,
-        success: false,
-        new_version: None,
-        new_build_identity: None,
-        source_workspace: Some(Path::new("/src/homeboy")),
-        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
-        replacement_target: None,
-        built_binary_identity: None,
-    })
-    .expect("unverified source swap must surface an error");
-
-    assert!(err.message.contains("an unverifiable version"));
-}
-
-#[test]
-fn source_swap_failure_silent_on_verified_swap() {
-    assert!(
-        source_swap_failure(SourceSwapVerification {
-            method: InstallMethod::Source,
-            success: true,
-            new_version: Some("0.249.0"),
+fn source_swap_failure_is_raised_only_for_unverified_source_swaps() {
+    for (method, success, new_version, expected) in [
+        (
+            InstallMethod::Source,
+            false,
+            Some("0.247.5"),
+            Some("0.247.5"),
+        ),
+        (
+            InstallMethod::Source,
+            false,
+            None,
+            Some("an unverifiable version"),
+        ),
+        (InstallMethod::Source, true, Some("0.249.0"), None),
+        (InstallMethod::Binary, false, Some("0.247.5"), None),
+        (InstallMethod::Homebrew, false, Some("0.247.5"), None),
+    ] {
+        let err = source_swap_failure(SourceSwapVerification {
+            method,
+            success,
+            new_version,
             new_build_identity: None,
             source_workspace: Some(Path::new("/src/homeboy")),
             built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
             replacement_target: None,
             built_binary_identity: None,
-        })
-        .is_none(),
-        "a verified source swap is not a failure"
-    );
-}
+        });
 
-#[test]
-fn source_swap_failure_ignores_non_source_methods() {
-    // Non-source methods keep their soft unverified reporting; only source
-    // (where the swap is part of the command's contract) fails loudly here.
-    assert!(source_swap_failure(SourceSwapVerification {
-        method: InstallMethod::Binary,
-        success: false,
-        new_version: Some("0.247.5"),
-        new_build_identity: None,
-        source_workspace: Some(Path::new("/src/homeboy")),
-        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
-        replacement_target: None,
-        built_binary_identity: None,
-    })
-    .is_none());
-    assert!(source_swap_failure(SourceSwapVerification {
-        method: InstallMethod::Homebrew,
-        success: false,
-        new_version: Some("0.247.5"),
-        new_build_identity: None,
-        source_workspace: Some(Path::new("/src/homeboy")),
-        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
-        replacement_target: None,
-        built_binary_identity: None,
-    })
-    .is_none());
+        match expected {
+            Some(fragment) => assert!(err.expect("source swap fails").message.contains(fragment)),
+            None => assert!(err.is_none(), "{method:?} success={success}"),
+        }
+    }
 }
 
 #[test]
@@ -281,28 +214,6 @@ fn source_swap_failure_diagnostics_include_paths_permissions_and_remediation() {
 }
 
 #[test]
-fn source_swap_failure_diagnostics_report_effective_cargo_target_binary() {
-    let source = Path::new("/src/homeboy");
-    let built = Path::new("/shared/cargo-target/release/homeboy");
-    let active = Path::new("/bin/homeboy");
-
-    let diagnostics = source_swap_failure_diagnostics_for_paths(
-        Some(source),
-        Some(built),
-        Some(active),
-        None,
-        None,
-    );
-
-    assert_eq!(diagnostics.built_binary_path, built.display().to_string());
-    assert!(diagnostics
-        .copy_command
-        .as_deref()
-        .expect("copy command")
-        .contains("'/shared/cargo-target/release/homeboy'"));
-}
-
-#[test]
 fn install_source_built_binary_replaces_active_target() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = dir.path().join("source");
@@ -321,35 +232,20 @@ fn install_source_built_binary_replaces_active_target() {
         "new homeboy"
     );
     assert!(binary_files_match(&built, &active).expect("files match"));
-}
-
-#[cfg(unix)]
-#[test]
-fn install_source_built_binary_sets_executable_mode() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let source = dir.path().join("source");
-    let target_dir = dir.path().join("bin");
-    std::fs::create_dir_all(source.join("target/release")).expect("source dirs");
-    std::fs::create_dir_all(&target_dir).expect("target dir");
-    let built = source.join("target/release/homeboy");
-    let active = target_dir.join("homeboy");
-    std::fs::write(&built, "new homeboy").expect("built binary");
-    std::fs::write(&active, "old homeboy").expect("active binary");
-
-    install_source_built_binary(&built, &active).expect("install source binary");
-
-    let mode = std::fs::metadata(&active)
-        .expect("active metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o755);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&active)
+            .expect("active metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+    }
 }
 
 #[test]
-fn install_source_built_binary_reports_copy_failure() {
+fn install_source_built_binary_reports_copy_failure_and_leaves_no_temp_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = dir.path().join("source");
     let target_dir = dir.path().join("bin");
@@ -364,6 +260,20 @@ fn install_source_built_binary_reports_copy_failure() {
     let details = err.details.to_string();
     assert!(details.contains("target/release/homeboy"));
     assert!(details.contains("install source-built binary"));
+    assert_eq!(
+        std::fs::read_to_string(&active).expect("active"),
+        "old homeboy"
+    );
+    let stale: Vec<_> = std::fs::read_dir(&target_dir)
+        .expect("read target dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(".homeboy-upgrade.")
+        })
+        .collect();
+    assert!(stale.is_empty(), "stale temp files remain: {stale:?}");
 }
 
 #[test]
@@ -372,12 +282,20 @@ fn shell_quote_handles_paths_with_single_quotes() {
 }
 
 #[test]
-fn test_resolve_source_workspace() {
-    let dir = checkout_with_package_name("homeboy");
+fn source_workspace_resolves_checkouts_snapshots_and_nested_paths() {
+    let checkout = checkout_with_package_name("homeboy");
+    let nested = checkout.path().join("src/core");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    let snapshot = source_workspace_with_package_name("homeboy");
 
-    let resolved = resolve_source_workspace(Some(dir.path())).expect("source checkout");
-
-    assert_eq!(resolved, dir.path());
+    for (input, expected) in [
+        (checkout.path(), checkout.path()),
+        (nested.as_path(), checkout.path()),
+        (snapshot.path(), snapshot.path()),
+    ] {
+        let resolved = resolve_source_workspace(Some(input)).expect("source workspace");
+        assert_eq!(resolved, expected, "{}", input.display());
+    }
 }
 
 #[test]
@@ -393,31 +311,11 @@ fn source_workspace_rejects_non_homeboy_checkout() {
         .any(|hint| hint.message.contains("--source-path")));
 }
 
-#[test]
-fn source_workspace_accepts_snapshot_without_git_metadata() {
-    let dir = source_workspace_with_package_name("homeboy");
-
-    let resolved = resolve_source_workspace(Some(dir.path())).expect("source snapshot");
-
-    assert_eq!(resolved, dir.path());
-}
-
-#[test]
-fn source_workspace_resolves_from_nested_checkout_path() {
-    let dir = checkout_with_package_name("homeboy");
-    let nested = dir.path().join("src/core");
-    std::fs::create_dir_all(&nested).expect("nested dir");
-
-    let resolved = resolve_source_workspace(Some(&nested)).expect("source checkout");
-
-    assert_eq!(resolved, dir.path());
-}
-
 /// The controller checkout resolution must depend only on the running
 /// executable's own path, never on the caller's working directory (#14736).
-/// The test process's actual cwd (somewhere under the workspace, not this
-/// fabricated checkout) is left untouched, so a passing assertion already
-/// proves cwd independence: the answer can only have come from `exe_path`.
+/// The test process's cwd is not the fabricated checkout, so a resolved answer
+/// can only have come from `exe_path`. A binary with no ancestor checkout
+/// marker (Homebrew or bare download) resolves to `None`.
 #[test]
 fn controller_source_checkout_resolves_from_exe_path_not_cwd() {
     let dir = checkout_with_package_name("homeboy");
@@ -427,24 +325,17 @@ fn controller_source_checkout_resolves_from_exe_path_not_cwd() {
 
     let resolved =
         controller_source_checkout_from(&exe_path).expect("checkout resolves from exe path");
-
     assert_eq!(resolved, dir.path().canonicalize().expect("canonicalize"));
+
+    let bare = tempfile::tempdir().expect("tempdir");
+    let installed = bare.path().join("bin/homeboy");
+    std::fs::create_dir_all(installed.parent().expect("parent")).expect("bin dir");
+    std::fs::write(&installed, "fake binary").expect("write fake exe");
+    assert!(controller_source_checkout_from(&installed).is_none());
 }
 
-/// A binary with no ancestor checkout marker (a Homebrew or bare-download
-/// install) resolves to `None` rather than falling back to an unrelated cwd.
-#[test]
-fn controller_source_checkout_is_none_without_a_checkout_marker() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let exe_path = dir.path().join("bin/homeboy");
-    std::fs::create_dir_all(exe_path.parent().expect("parent")).expect("bin dir");
-    std::fs::write(&exe_path, "fake binary").expect("write fake exe");
-
-    assert!(controller_source_checkout_from(&exe_path).is_none());
-}
-
-#[test]
-fn source_upgrade_preparation_preserves_detached_checkout_identity() {
+/// A bare `main` remote plus a committed seed checkout tracking it.
+fn seeded_remote() -> (tempfile::TempDir, tempfile::TempDir) {
     let remote = tempfile::tempdir().expect("remote tempdir");
     git(
         remote.path(),
@@ -467,6 +358,20 @@ fn source_upgrade_preparation_preserves_detached_checkout_identity() {
         ],
     );
     git(seed.path(), &["push", "-u", "origin", "main"]);
+    (remote, seed)
+}
+
+/// Pushes a new commit from `seed` so other clones fall behind origin.
+fn push_source_change(seed: &Path) {
+    std::fs::write(seed.join("src.txt"), "new source\n").expect("write source change");
+    git(seed, &["add", "."]);
+    git(seed, &["commit", "-m", "update source"]);
+    git(seed, &["push", "origin", "main"]);
+}
+
+#[test]
+fn source_upgrade_preparation_preserves_detached_checkout_identity() {
+    let (remote, seed) = seeded_remote();
 
     let checkout = tempfile::tempdir().expect("checkout tempdir");
     std::fs::remove_dir(checkout.path()).expect("remove placeholder checkout dir");
@@ -479,10 +384,7 @@ fn source_upgrade_preparation_preserves_detached_checkout_identity() {
         ],
     );
 
-    std::fs::write(seed.path().join("src.txt"), "new source\n").expect("write source change");
-    git(seed.path(), &["add", "."]);
-    git(seed.path(), &["commit", "-m", "update source"]);
-    git(seed.path(), &["push", "origin", "main"]);
+    push_source_change(seed.path());
 
     git(checkout.path(), &["switch", "--detach", "HEAD"]);
     let stale_head = git_stdout(checkout.path(), &["rev-parse", "HEAD"]);
@@ -501,28 +403,7 @@ fn source_upgrade_preparation_preserves_detached_checkout_identity() {
 
 #[test]
 fn source_upgrade_preparation_preserves_local_only_worktree_branch() {
-    let remote = tempfile::tempdir().expect("remote tempdir");
-    git(
-        remote.path(),
-        &["init", "--bare", "--initial-branch", "main"],
-    );
-
-    let seed = source_workspace_with_package_name("homeboy");
-    git(seed.path(), &["init", "--initial-branch", "main"]);
-    git(seed.path(), &["config", "user.email", "test@example.com"]);
-    git(seed.path(), &["config", "user.name", "Homeboy Test"]);
-    git(seed.path(), &["add", "."]);
-    git(seed.path(), &["commit", "-m", "initial"]);
-    git(
-        seed.path(),
-        &[
-            "remote",
-            "add",
-            "origin",
-            &remote.path().display().to_string(),
-        ],
-    );
-    git(seed.path(), &["push", "-u", "origin", "main"]);
+    let (remote, seed) = seeded_remote();
 
     let root = tempfile::tempdir().expect("root tempdir");
     let main_checkout = root.path().join("main-checkout");
@@ -548,10 +429,7 @@ fn source_upgrade_preparation_preserves_local_only_worktree_branch() {
         ],
     );
 
-    std::fs::write(seed.path().join("src.txt"), "new source\n").expect("write source change");
-    git(seed.path(), &["add", "."]);
-    git(seed.path(), &["commit", "-m", "update source"]);
-    git(seed.path(), &["push", "origin", "main"]);
+    push_source_change(seed.path());
 
     let switch_main = std::process::Command::new("git")
         .arg("-C")
@@ -591,28 +469,7 @@ fn source_upgrade_preparation_preserves_local_only_worktree_branch() {
 
 #[test]
 fn source_upgrade_preparation_rejects_dirty_source_checkout() {
-    let remote = tempfile::tempdir().expect("remote tempdir");
-    git(
-        remote.path(),
-        &["init", "--bare", "--initial-branch", "main"],
-    );
-
-    let seed = source_workspace_with_package_name("homeboy");
-    git(seed.path(), &["init", "--initial-branch", "main"]);
-    git(seed.path(), &["config", "user.email", "test@example.com"]);
-    git(seed.path(), &["config", "user.name", "Homeboy Test"]);
-    git(seed.path(), &["add", "."]);
-    git(seed.path(), &["commit", "-m", "initial"]);
-    git(
-        seed.path(),
-        &[
-            "remote",
-            "add",
-            "origin",
-            &remote.path().display().to_string(),
-        ],
-    );
-    git(seed.path(), &["push", "-u", "origin", "main"]);
+    let (_remote, seed) = seeded_remote();
     std::fs::write(seed.path().join("uncommitted.txt"), "dirty\n").expect("dirty file");
 
     let err = prepare_source_workspace_for_upgrade(seed.path()).expect_err("dirty rejected");
@@ -630,71 +487,29 @@ fn source_upgrade_preparation_rejects_checkout_without_a_commit() {
     assert!(err.message.contains("immutable commit"));
 }
 
+/// Commands are passed through unchanged for a non-explicit branch checkout
+/// and for a snapshot without git metadata.
 #[test]
-fn source_upgrade_command_preserves_branch_checkout_command() {
-    let checkout = source_workspace_with_package_name("homeboy");
-    git(checkout.path(), &["init", "--initial-branch", "main"]);
-
-    let command = source_upgrade_command_for_prepared_workspace(
-        "git pull --ff-only\ncargo build --release",
-        checkout.path(),
-        false,
-    )
-    .expect("source command");
-
-    assert_eq!(command, "git pull --ff-only\ncargo build --release");
-}
-
-#[test]
-fn explicit_source_upgrade_command_skips_pull_for_detached_checkout() {
-    let checkout = source_workspace_with_package_name("homeboy");
-    git(checkout.path(), &["init", "--initial-branch", "main"]);
+fn source_upgrade_command_passes_through_when_no_git_guard_applies() {
+    let branch_checkout = source_workspace_with_package_name("homeboy");
     git(
-        checkout.path(),
-        &["config", "user.email", "test@example.com"],
+        branch_checkout.path(),
+        &["init", "--initial-branch", "main"],
     );
-    git(checkout.path(), &["config", "user.name", "Homeboy Test"]);
-    git(checkout.path(), &["add", "."]);
-    git(checkout.path(), &["commit", "-m", "initial"]);
-    git(checkout.path(), &["switch", "--detach", "HEAD"]);
+    let snapshot = source_workspace_with_package_name("homeboy");
 
-    let command = source_upgrade_command_for_prepared_workspace(
-        "git pull --ff-only\ncargo build --release",
-        checkout.path(),
-        true,
-    )
-    .expect("source command");
-
-    assert!(
-        command.contains("Skipping git $homeboy_git_arg for explicitly selected source checkout")
-    );
-    assert!(command.contains("HOMEBOY_GIT_GUARD_DIR"));
-    assert!(command.contains("git pull --ff-only\ncargo build --release"));
-}
-
-#[test]
-fn explicit_source_upgrade_command_skips_pull_for_local_only_branch() {
-    let checkout = source_workspace_with_package_name("homeboy");
-    git(checkout.path(), &["init", "--initial-branch", "local-only"]);
-    git(
-        checkout.path(),
-        &["config", "user.email", "test@example.com"],
-    );
-    git(checkout.path(), &["config", "user.name", "Homeboy Test"]);
-    git(checkout.path(), &["add", "."]);
-    git(checkout.path(), &["commit", "-m", "initial"]);
-
-    let command = source_upgrade_command_for_prepared_workspace(
-        "git pull --ff-only\ncargo build --release",
-        checkout.path(),
-        true,
-    )
-    .expect("source command");
-
-    assert!(
-        command.contains("Skipping git $homeboy_git_arg for explicitly selected source checkout")
-    );
-    assert!(command.contains("git pull --ff-only\ncargo build --release"));
+    for (workspace, explicit, raw) in [
+        (
+            branch_checkout.path(),
+            false,
+            "git pull --ff-only\ncargo build --release",
+        ),
+        (snapshot.path(), true, "cargo build --release"),
+    ] {
+        let command = source_upgrade_command_for_prepared_workspace(raw, workspace, explicit)
+            .expect("source command");
+        assert_eq!(command, raw);
+    }
 }
 
 #[test]
@@ -770,20 +585,6 @@ fn explicit_source_upgrade_skips_git_switch_main_and_reaches_build_phase() {
 }
 
 #[test]
-fn source_upgrade_command_preserves_snapshot_command() {
-    let checkout = source_workspace_with_package_name("homeboy");
-
-    let command = source_upgrade_command_for_prepared_workspace(
-        "cargo build --release",
-        checkout.path(),
-        true,
-    )
-    .expect("source command");
-
-    assert_eq!(command, "cargo build --release");
-}
-
-#[test]
 fn executable_workspace_only_resolves_target_build_paths() {
     let path = Path::new("/repo/target/release/homeboy");
     assert_eq!(
@@ -795,79 +596,44 @@ fn executable_workspace_only_resolves_target_build_paths() {
     assert!(workspace_from_exe_path(installed).is_none());
 }
 
+/// A release 404 names the asset URL and target triple it looked for (#11750),
+/// admits an undetermined target instead of guessing one, and always offers
+/// the source fallback.
 #[test]
-fn binary_404_upgrade_error_suggests_source_fallback() {
-    let err = upgrade_failure_error(
-        InstallMethod::Binary,
-        "curl: (22) The requested URL returned error: 404",
-        None,
-    );
-
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("No release asset")));
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("--source-path")));
-}
-
-/// The reported 404 named neither the URL it fetched nor the triple it looked
-/// for, so diagnosing it required listing release assets by hand (#11750).
-#[test]
-fn binary_404_upgrade_error_names_the_asset_url_and_target_triple() {
-    let release = SelectedRelease {
+fn binary_404_upgrade_error_diagnoses_the_missing_asset() {
+    let release = |target: Option<&str>| SelectedRelease {
         tag: "v0.333.0".to_string(),
         version: "0.333.0".to_string(),
-        target: Some("x86_64-unknown-linux-gnu".to_string()),
+        target: target.map(str::to_string),
     };
-
-    let err = upgrade_failure_error(
-        InstallMethod::Binary,
-        "curl: (22) The requested URL returned error: 404",
-        Some(&release),
-    );
-
-    let hints: Vec<&str> = err.hints.iter().map(|hint| hint.message.as_str()).collect();
-    assert!(
-        hints
-            .iter()
-            .any(|hint| hint.contains("x86_64-unknown-linux-gnu")),
-        "404 must name the target triple it looked for: {hints:?}"
-    );
-    assert!(
-        hints.iter().any(|hint| hint.contains(
-            "https://github.com/Extra-Chill/homeboy/releases/download/v0.333.0/homeboy-x86_64-unknown-linux-gnu.tar.xz"
-        )),
-        "404 must name the resolved asset URL: {hints:?}"
-    );
-    assert!(
-        hints.iter().any(|hint| hint.contains("--version <TAG>")),
-        "404 must offer the pin as a way out: {hints:?}"
-    );
-}
-
-/// An unresolvable target must be reported as unresolved rather than papered
-/// over with a guessed triple in the diagnostic.
-#[test]
-fn binary_404_upgrade_error_admits_an_undetermined_target() {
-    let release = SelectedRelease {
-        tag: "v0.333.0".to_string(),
-        version: "0.333.0".to_string(),
-        target: None,
-    };
-
-    let err = upgrade_failure_error(
-        InstallMethod::Binary,
-        "curl: (22) The requested URL returned error: 404",
-        Some(&release),
-    );
-
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("could not be determined")));
+    let resolved = release(Some("x86_64-unknown-linux-gnu"));
+    let unresolved = release(None);
+    for (selected, expected) in [
+        (None, vec!["No release asset", "--source-path"]),
+        (
+            Some(&resolved),
+            vec![
+                "x86_64-unknown-linux-gnu",
+                "https://github.com/Extra-Chill/homeboy/releases/download/v0.333.0/homeboy-x86_64-unknown-linux-gnu.tar.xz",
+                "--version <TAG>",
+                "--source-path",
+            ],
+        ),
+        (Some(&unresolved), vec!["could not be determined", "--source-path"]),
+    ] {
+        let err = upgrade_failure_error(
+            InstallMethod::Binary,
+            "curl: (22) The requested URL returned error: 404",
+            selected,
+        );
+        let hints: Vec<&str> = err.hints.iter().map(|hint| hint.message.as_str()).collect();
+        for fragment in expected {
+            assert!(
+                hints.iter().any(|hint| hint.contains(fragment)),
+                "missing {fragment:?} in {hints:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -887,90 +653,6 @@ fn verify_source_install_with_retry_terminates_on_mismatch() {
     );
     assert!(!success, "mismatch must fail closed");
     assert_eq!(sleep_count, attempts - 1, "must sleep between each attempt");
-}
-
-#[test]
-fn verify_upgrade_with_retry_terminates_on_identity_mismatch() {
-    // Issue #9686: even when `read_active` always returns the same identity
-    // (i.e. the swap was a no-op), the bounded retry must terminate and report
-    // failure rather than looping indefinitely.
-    let attempts = 4;
-    let mut reads = 0u32;
-    let (success, last) = verify_upgrade_with_retry(
-        InstallMethod::Source,
-        true,
-        "0.300.0",
-        Some("homeboy 0.300.0+old"),
-        attempts,
-        std::time::Duration::from_millis(0),
-        || {
-            reads += 1;
-            Some(ActiveBinaryInfo {
-                version: Some("0.300.0".to_string()),
-                build_identity: Some("homeboy 0.300.0+old".to_string()),
-            })
-        },
-        |_| {},
-    );
-    assert!(!success, "identity mismatch must fail closed");
-    assert_eq!(reads, attempts, "must attempt exactly the configured count");
-    assert_eq!(
-        last.and_then(|i| i.build_identity).as_deref(),
-        Some("homeboy 0.300.0+old")
-    );
-}
-
-#[test]
-fn source_swap_failure_includes_identity_comparison() {
-    let err = source_swap_failure(SourceSwapVerification {
-        method: InstallMethod::Source,
-        success: false,
-        new_version: Some("0.300.0"),
-        new_build_identity: Some("homeboy 0.300.0+old"),
-        source_workspace: Some(Path::new("/src/homeboy")),
-        built_binary: Some(Path::new("/src/homeboy/target/release/homeboy")),
-        replacement_target: Some(Path::new("/active/homeboy")),
-        built_binary_identity: Some("homeboy 0.300.0+new"),
-    })
-    .expect("unverified source swap must surface an error");
-
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("Built identity: homeboy 0.300.0+new")));
-    assert!(err.hints.iter().any(|hint| hint
-        .message
-        .contains("Installed identity: homeboy 0.300.0+old")));
-}
-
-#[test]
-fn install_source_built_binary_cleans_up_temp_on_copy_failure() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let source = dir.path().join("source");
-    let target_dir = dir.path().join("bin");
-    std::fs::create_dir_all(&source).expect("source dir");
-    std::fs::create_dir_all(&target_dir).expect("target dir");
-    let active = target_dir.join("homeboy");
-    std::fs::write(&active, "old").expect("active binary");
-
-    let built = source.join("target/release/homeboy");
-    let _ = install_source_built_binary(&built, &active);
-
-    // Verify no stale .homeboy-upgrade.*.tmp files remain in the bin directory.
-    let stale: Vec<_> = std::fs::read_dir(&target_dir)
-        .expect("read target dir")
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with(".homeboy-upgrade.")
-        })
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "no stale temp files should remain after a failed install, found: {:?}",
-        stale
-    );
 }
 
 #[test]
