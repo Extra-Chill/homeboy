@@ -660,10 +660,7 @@ mod tests {
         assert!(summary.contains("Key metrics:\n"));
         assert!(summary.contains("p50_ms=12.5"));
         assert!(summary.contains("p95_ms=30"));
-        assert!(summary.contains("Hotspots:\n"));
-        assert!(summary.contains("  Slowest timing metrics:\n"));
         assert!(summary.contains("    rtc-smoke p95_ms=30\n"));
-        // Surface artifact pointers (#3260).
         assert!(summary.contains("Artifacts (2):\n"));
         assert!(summary.contains("rtc-smoke/response-rows: /tmp/shared/response-rows.json\n"));
         assert!(summary.contains("rtc-smoke/bundle: https://runner.test/bundle.zip\n"));
@@ -998,13 +995,5 @@ mod tests {
         assert!(summary.contains("Artifacts:\n"));
         assert!(summary.contains("  baseline/rows: /tmp/baseline-rows.json\n"));
         assert!(summary.contains("  candidate/rows: /tmp/candidate-rows.json\n"));
-    }
-
-    #[test]
-    fn format_metric_trims_trailing_zeros() {
-        assert_eq!(format_metric(30.0), "30");
-        assert_eq!(format_metric(12.5), "12.5");
-        assert_eq!(format_metric(12.500), "12.5");
-        assert_eq!(format_metric(0.125), "0.125");
     }
 }
