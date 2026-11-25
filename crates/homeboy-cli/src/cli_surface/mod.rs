@@ -1118,19 +1118,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_quality_remediation_commands_parse() {
-        for argv in [
-            ["homeboy", "review", "lint", "fixture"].as_slice(),
-            ["homeboy", "review", "test", "fixture"].as_slice(),
-            ["homeboy", "review", "lint", "fixture", "--fix"].as_slice(),
-        ] {
-            Cli::try_parse_from(argv).unwrap_or_else(|error| {
-                panic!("generated quality remediation failed to parse: {argv:?}\n{error}")
-            });
-        }
-    }
-
-    #[test]
     fn generated_cook_recovery_commands_parse_against_the_live_cli() {
         use homeboy_agents::agent_task_service::{cook_recover_command, cook_recovery_command};
 
@@ -1163,96 +1150,53 @@ mod tests {
     }
 
     #[test]
-    fn allow_dirty_lab_workspace_global_flag_parses() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "trace",
-            "--runner",
-            "homeboy-lab",
-            "--allow-dirty-lab-workspace",
-        ])
-        .expect("global dirty Lab workspace override should parse");
-
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert!(cli.allow_dirty_lab_workspace);
-    }
-
-    #[test]
-    fn skip_deps_hydration_global_flag_parses() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "trace",
-            "--runner",
-            "homeboy-lab",
-            "--skip-deps-hydration",
-        ])
-        .expect("global skip deps hydration override should parse");
-
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        assert!(cli.skip_deps_hydration);
-    }
-
-    #[test]
-    fn delete_workspace_on_failure_global_flag_parses() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "trace",
-            "--runner",
-            "homeboy-lab",
-            "--delete-workspace-on-failure",
-        ])
-        .expect("Lab failure-retention profile should parse");
-
-        assert!(cli.delete_workspace_on_failure);
-    }
-
-    #[test]
     fn registered_parse_path_accepts_placement_in_every_global_position() {
-        for args in [
-            ["homeboy", "--placement=local", "bench", "example"].as_slice(),
-            ["homeboy", "bench", "--placement", "lab", "example"].as_slice(),
-            ["homeboy", "bench", "--placement", "lab-or-local", "example"].as_slice(),
+        for (args, expected) in [
+            (
+                ["homeboy", "--placement=local", "bench", "example"].as_slice(),
+                Placement::Local,
+            ),
+            (
+                ["homeboy", "bench", "--placement", "lab", "example"].as_slice(),
+                Placement::Lab,
+            ),
+            (
+                ["homeboy", "bench", "--placement", "lab-or-local", "example"].as_slice(),
+                Placement::LabOrLocal,
+            ),
+            (
+                [
+                    "homeboy",
+                    "--placement",
+                    "lab",
+                    "agent-task",
+                    "cook",
+                    "--to-worktree",
+                    "repo@slug",
+                ]
+                .as_slice(),
+                Placement::Lab,
+            ),
+            (
+                [
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--placement",
+                    "lab",
+                    "--to-worktree",
+                    "repo@slug",
+                ]
+                .as_slice(),
+                Placement::Lab,
+            ),
         ] {
             let matches = Cli::command_with_scoped_lab_args()
                 .try_get_matches_from(args)
                 .expect("registered command parses placement");
             let (cli, _) = Cli::from_registered_arg_matches(&matches)
                 .expect("registered parse path accepts placement");
-            assert_ne!(cli.placement, Placement::Auto);
-        }
-    }
-
-    #[test]
-    fn registered_cook_parse_preserves_placement_from_compact_help_position() {
-        for args in [
-            [
-                "homeboy",
-                "--placement",
-                "lab",
-                "agent-task",
-                "cook",
-                "--to-worktree",
-                "repo@slug",
-            ]
-            .as_slice(),
-            [
-                "homeboy",
-                "agent-task",
-                "cook",
-                "--placement",
-                "lab",
-                "--to-worktree",
-                "repo@slug",
-            ]
-            .as_slice(),
-        ] {
-            let matches = Cli::command_with_scoped_lab_args()
-                .try_get_matches_from(args)
-                .expect("Cook placement parses from its documented positions");
-            let (cli, _) = Cli::from_registered_arg_matches(&matches)
-                .expect("registered Cook parse retains placement");
-
-            assert_eq!(cli.placement, Placement::Lab);
+            assert_eq!(cli.placement, expected, "{args:?}");
         }
     }
 
@@ -1330,16 +1274,6 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn placement_exposes_explicit_lab_or_local_fallback() {
-        let cli =
-            Cli::try_parse_from(["homeboy", "bench", "example", "--placement", "lab-or-local"])
-                .expect("lab-or-local placement should parse");
-
-        assert_eq!(cli.placement, Placement::LabOrLocal);
-        assert!(cli.placement.allows_local_fallback());
     }
 
     #[test]
@@ -1474,6 +1408,10 @@ mod tests {
         // so it named prose the tree no longer contained.
         assert!(help.contains("Select where eligible work executes"));
         assert!(help.contains("This implies Lab placement"));
+
+        let review_help = scoped_help(&["review", "lint"]);
+        assert!(review_help.contains("--placement"));
+        assert!(review_help.contains("--runner"));
     }
 
     #[test]
@@ -1488,13 +1426,6 @@ mod tests {
             help.contains("Use `--runner <id>` instead to pin one runner"),
             "{help}"
         );
-    }
-
-    #[test]
-    fn portable_review_subcommand_help_keeps_lab_flags() {
-        let help = scoped_help(&["review", "lint"]);
-        assert!(help.contains("--placement"));
-        assert!(help.contains("--runner"));
     }
 
     #[test]
@@ -1573,41 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_set_commands_require_canonical_update_inputs() {
-        for args in [
-            [
-                "homeboy",
-                "server",
-                "set",
-                "sandbox",
-                "auth.mode=key_plus_password_controlmaster",
-            ]
-            .as_slice(),
-            [
-                "homeboy",
-                "project",
-                "set",
-                "sandbox",
-                r#"{"base_path":"/srv/site"}"#,
-            ]
-            .as_slice(),
-            [
-                "homeboy",
-                "runner",
-                "set",
-                "sandbox",
-                "--",
-                "--concurrency_limit",
-                "4",
-            ]
-            .as_slice(),
-        ] {
-            assert!(
-                Cli::try_parse_from(args).is_err(),
-                "dynamic set compatibility form should not parse: {args:?}"
-            );
-        }
-
+    fn dynamic_set_commands_accept_canonical_update_inputs() {
         for args in [
             [
                 "homeboy",

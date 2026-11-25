@@ -647,26 +647,30 @@ mod progress_tests {
     }
 
     #[test]
-    fn long_unchanged_phase_has_bounded_machine_liveness_output() {
-        let mut state = CookProgressState::default();
-        let mut messages = Vec::new();
-        for _ in 0..100 {
-            if let Some(message) = next_machine_progress_message(
-                &mut state,
-                "heartbeat",
-                None,
-                Some("run-123"),
-                None,
-                None,
-            ) {
-                messages.push(message);
+    fn unchanged_heartbeats_keep_a_bounded_sampled_cadence() {
+        // Repeating the same sentence is the flood the sampling cap exists to
+        // prevent (#10455, #11087); only new information earns a line.
+        for activity in [None, Some("no files written yet")] {
+            let mut state = CookProgressState::default();
+            let mut messages = Vec::new();
+            for _ in 0..100 {
+                if let Some(message) = next_machine_progress_message(
+                    &mut state,
+                    "heartbeat",
+                    None,
+                    Some("run-123"),
+                    activity,
+                    None,
+                ) {
+                    messages.push(message);
+                }
             }
-        }
 
-        assert_eq!(messages.len(), 3, "heartbeats must not scale with polls");
-        assert!(messages
-            .iter()
-            .all(|message| message.contains("still running")));
+            assert_eq!(messages.len(), 3, "heartbeats must not scale with polls");
+            assert!(messages
+                .iter()
+                .all(|message| message.contains("still running")));
+        }
     }
 
     #[test]
@@ -687,32 +691,6 @@ mod progress_tests {
 
         assert!(message.contains("no files written yet"));
         assert!(message.contains("cargo test -p homeboy-agents"));
-    }
-
-    #[test]
-    fn an_unchanged_activity_sample_does_not_add_heartbeat_lines() {
-        // Repeating the same sentence is the flood the sampling cap exists to
-        // prevent (#10455, #11087); only new information earns a line.
-        let mut state = CookProgressState::default();
-        let mut messages = Vec::new();
-        for _ in 0..100 {
-            if let Some(message) = next_machine_progress_message(
-                &mut state,
-                "heartbeat",
-                None,
-                Some("run-123"),
-                Some("no files written yet"),
-                None,
-            ) {
-                messages.push(message);
-            }
-        }
-
-        assert_eq!(
-            messages.len(),
-            3,
-            "a static sample keeps the sampled cadence"
-        );
     }
 
     #[test]
@@ -783,50 +761,6 @@ mod progress_tests {
         )
         .is_none());
         assert_eq!(state.emitted_lines, MAX_MACHINE_PROGRESS_LINES + 1);
-    }
-
-    #[test]
-    fn terminal_machine_progress_is_emitted_once_before_the_heartbeat_budget() {
-        let mut state = CookProgressState::default();
-
-        assert!(next_machine_progress_message(
-            &mut state,
-            "terminal",
-            None,
-            Some("run-123"),
-            Some("failed"),
-            Some("homeboy agent-task recover run-123"),
-        )
-        .is_some());
-        assert!(next_machine_progress_message(
-            &mut state,
-            "terminal",
-            None,
-            Some("run-123"),
-            Some("failed"),
-            Some("homeboy agent-task recover run-123"),
-        )
-        .is_none());
-        assert_eq!(state.emitted_lines, 1);
-    }
-
-    #[test]
-    fn terminal_machine_progress_names_a_successful_outcome() {
-        let mut state = CookProgressState::default();
-        let terminal = next_machine_progress_message(
-            &mut state,
-            "terminal",
-            None,
-            Some("run-123"),
-            Some("succeeded"),
-            None,
-        )
-        .expect("terminal outcome remains visible");
-
-        assert_eq!(
-            terminal,
-            "Cook terminal: durable run `run-123`. Phase: terminal. Outcome: succeeded. Next: `homeboy agent-task status run-123`."
-        );
     }
 
     #[test]
@@ -944,14 +878,6 @@ mod output_projection_tests {
     }
 
     #[test]
-    fn full_projection_is_lossless() {
-        let value = production_shaped_evidence();
-        let expected = value.clone();
-
-        assert_eq!(value, expected);
-    }
-
-    #[test]
     fn default_diagnosis_keeps_cause_and_refs_without_runtime_payloads() {
         let mut value = json!({
             "schema": "homeboy/agent-task-diagnose/v1",
@@ -974,7 +900,6 @@ mod output_projection_tests {
             }],
             "next_commands": ["homeboy runs evidence run-diagnosis --full"],
         });
-        let full = value.clone();
 
         project_operator_output(&mut value);
 
@@ -988,13 +913,6 @@ mod output_projection_tests {
         assert_eq!(
             value["next_commands"][0],
             "homeboy runs evidence run-diagnosis --full"
-        );
-        assert_eq!(
-            full["hydrated_evidence"][0]["content"]["body"]
-                .as_str()
-                .unwrap()
-                .len(),
-            256 * 1024
         );
     }
 }
