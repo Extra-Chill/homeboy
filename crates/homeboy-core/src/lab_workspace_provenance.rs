@@ -116,7 +116,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn noop_verify_errors_clearly() {
+    fn noop_provider_refuses_verification_and_materialization() {
         let noop = NoopLabWorkspaceProvenanceProvider;
         let err = noop
             .verify_lab_workspace(
@@ -128,11 +128,7 @@ mod tests {
             )
             .expect_err("must error without a provider");
         assert!(err.contains("no runner is registered"));
-    }
 
-    #[test]
-    fn noop_materialize_errors_clearly() {
-        let noop = NoopLabWorkspaceProvenanceProvider;
         let err = noop
             .materialize_verified_lab_snapshot_git_baseline(
                 "path",

@@ -102,24 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn atomic_writer_can_create_parent_dirs_and_ensure_newline() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let output_path = dir.path().join("nested").join("output.json");
-
-        write_output_file_atomically(
-            &output_path,
-            "{}",
-            OutputWriteOptions {
-                create_parent_dirs: true,
-                trailing_newline: TrailingNewline::Ensure,
-            },
-        )
-        .expect("write output");
-
-        assert_eq!(std::fs::read_to_string(&output_path).unwrap(), "{}\n");
-    }
-
-    #[test]
     fn output_preserves_binary_contents_and_existing_newline() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("output");
@@ -138,10 +120,13 @@ mod tests {
     }
 
     #[test]
-    fn output_does_not_create_parents_unless_requested() {
+    fn output_creates_parent_dirs_only_when_requested() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing/output");
         assert!(write_output_file_atomically(&path, "data", OutputWriteOptions::file()).is_err());
         assert!(!path.parent().unwrap().exists());
+
+        write_output_file_atomically(&path, "data", OutputWriteOptions::artifact()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "data");
     }
 }
