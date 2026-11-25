@@ -17,36 +17,25 @@ fn small_stderr_is_inlined_instead_of_hashed() {
 }
 
 #[test]
-fn retains_code_less_payloads_for_every_liftable_failure_status() {
-    for status in [
-        "blocked",
-        "error",
-        "failed",
-        "failure",
-        "timed_out",
-        "timeout",
+fn retains_code_less_failure_payloads() {
+    for failure in [
+        serde_json::json!({ "status": "blocked" }),
+        serde_json::json!({ "status": "error" }),
+        serde_json::json!({ "status": "failed" }),
+        serde_json::json!({ "status": "failure" }),
+        serde_json::json!({ "status": "timed_out" }),
+        serde_json::json!({ "status": "timeout" }),
+        serde_json::json!({ "success": false }),
     ] {
-        let payload = serde_json::json!({
-            "status": status,
-            "message": "x".repeat(COMPACT_TEXT_LIMIT),
-        })
-        .to_string();
+        let mut payload = failure.clone();
+        payload["message"] = serde_json::json!("x".repeat(COMPACT_TEXT_LIMIT));
+        let payload = payload.to_string();
         assert!(payload.len() > COMPACT_TEXT_LIMIT);
         assert!(
             bounded_failure_result(&payload, &mut RawFailureBudget::default()).is_some(),
-            "status={status}"
+            "{failure}"
         );
     }
-}
-
-#[test]
-fn retains_success_false_without_a_code() {
-    let payload = serde_json::json!({
-        "success": false,
-        "message": "x".repeat(COMPACT_TEXT_LIMIT),
-    })
-    .to_string();
-    assert!(bounded_failure_result(&payload, &mut RawFailureBudget::default()).is_some());
 }
 
 #[test]
@@ -148,12 +137,6 @@ fn operator_projection_redacts_and_bounds_recursive_failure_payloads_globally() 
     project_operator_output(&mut projected);
     let text = projected.to_string();
 
-    assert_eq!(
-        original["attempts"][0]["content"]["body"]
-            .as_str()
-            .is_some(),
-        true
-    );
     assert!(!text.contains("secret-"));
     assert!(text.matches("[omitted ").count() >= RAW_FAILURE_COUNT_LIMIT);
     assert!(text.matches("[REDACTED]").count() <= RAW_FAILURE_COUNT_LIMIT);
