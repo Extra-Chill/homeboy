@@ -34,16 +34,6 @@ fn foreign_worktree_never_becomes_controller_executable_provenance() {
         "-m",
         "foreign task",
     ]);
-    let foreign_revision = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(foreign.path())
-        .output()
-        .expect("read foreign revision");
-    let _foreign_revision = String::from_utf8(foreign_revision.stdout)
-        .expect("foreign revision is UTF-8")
-        .trim()
-        .to_string();
-
     let plan = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/agent_task_smoke_plan.json");
     let mut run = context.command(TestBinary::HomeboyFixture);
@@ -66,12 +56,9 @@ fn foreign_worktree_never_becomes_controller_executable_provenance() {
         String::from_utf8_lossy(&ran.stderr)
     );
 
-    // The CLI's `agent-task status` projection is a bounded operator summary:
-    // it carries `runtime.build_identity` but no `metadata`, so the originating
-    // source provenance this test exists to pin is not reachable through it at
-    // all (the earlier `--full` flag it passed does not exist). Read the
-    // durable lifecycle record instead, which is where the controller runtime
-    // records that provenance and where the library-level coverage asserts it.
+    // The `agent-task status` projection carries no `metadata`, so read the
+    // durable lifecycle record where the controller runtime records the
+    // originating source provenance.
     let record =
         homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots())
             .read_record("foreign-runtime-provenance")
