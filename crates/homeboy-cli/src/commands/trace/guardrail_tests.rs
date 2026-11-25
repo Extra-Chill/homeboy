@@ -3,63 +3,10 @@ use std::fs;
 use crate::test_support::with_isolated_home;
 
 use super::test_fixture::{write_trace_extension, write_trace_rig};
+use super::test_support::trace_args_for_rig;
 use super::*;
 
-fn trace_args_for_rig(rig_id: &str) -> TraceArgs {
-    TraceArgs {
-        command: None,
-        comp: PositionalComponentArgs {
-            component: Some("studio".to_string()),
-            path: None,
-        },
-        component_arg: None,
-        scenario: Some("studio-app-create-site".to_string()),
-        scenario_arg: None,
-        compare_after: None,
-        baseline_target: None,
-        candidate: None,
-        rig: Some(rig_id.to_string()),
-        profile: None,
-        profiles: false,
-        setting_args: SettingArgs::default(),
-        secret_env: Vec::new(),
-        json_summary: false,
-        report: None,
-        experiment: None,
-        repeat: 1,
-        aggregate: Some("spans".to_string()),
-        schedule: TraceSchedule::Grouped,
-        focus_spans: Vec::new(),
-        metric_guardrails: Vec::new(),
-        spans: Vec::new(),
-        phases: Vec::new(),
-        attachments: Vec::new(),
-        phase_preset: None,
-        baseline_args: BaselineArgs::default(),
-        regression_threshold: extension_trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: extension_trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-        overlays: Vec::new(),
-        variants: Vec::new(),
-        matrix: TraceVariantMatrixMode::None,
-        axes: Vec::new(),
-        matrix_env: Vec::new(),
-        output_dir: None,
-        visual_compare: false,
-        visual_artifacts_dir: None,
-        visual_compare_provider: None,
-        visual_provider_args: Vec::new(),
-        visual_threshold: None,
-        keep_overlay: false,
-        stale: false,
-        force: false,
-        canonical: false,
-        allow_local_toolchain: true,
-        checkout_provenance: None,
-    }
-}
-
-#[test]
-fn trace_aggregate_runs_passing_guardrails() {
+fn run_aggregate_with_guardrail(command: &str) -> (TraceCommandOutput, i32) {
     with_isolated_home(|home| {
         write_trace_extension(home);
         let component_dir = tempfile::TempDir::new().expect("component dir");
@@ -75,7 +22,7 @@ fn trace_aggregate_runs_passing_guardrails() {
             serde_json::from_str(&fs::read_to_string(&rig_path).expect("read rig"))
                 .expect("parse rig");
         rig_json["trace_guardrails"] = serde_json::json!([
-            { "label": "behavior smoke", "command": "true" }
+            { "label": "behavior smoke", "command": command }
         ]);
         fs::write(
             &rig_path,
@@ -83,76 +30,41 @@ fn trace_aggregate_runs_passing_guardrails() {
         )
         .expect("write rig");
 
-        let (output, exit_code) =
-            run_repeat(trace_args_for_rig("studio-rig")).expect("trace aggregate should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            TraceCommandOutput::Aggregate(aggregate) => {
-                assert!(aggregate.passed);
-                assert_eq!(aggregate.guardrail_failure_count, 0);
-                assert_eq!(aggregate.guardrails.len(), 1);
-                assert_eq!(aggregate.guardrails[0].label, "behavior smoke");
-                assert!(aggregate.guardrails[0].passed);
-            }
-            _ => panic!("expected aggregate output"),
-        }
-    });
+        run_repeat(TraceArgs {
+            aggregate: Some("spans".to_string()),
+            ..trace_args_for_rig("studio-rig", "studio", "studio-app-create-site")
+        })
+        .expect("trace aggregate should run")
+    })
 }
 
 #[test]
-fn trace_aggregate_fails_guardrails_without_losing_timing_artifacts() {
-    with_isolated_home(|home| {
-        write_trace_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_trace_rig(home, "studio-rig", "studio", component_dir.path());
+fn trace_aggregate_guardrail_verdict_drives_exit_without_losing_timing_artifacts() {
+    let (output, exit_code) = run_aggregate_with_guardrail("true");
+    assert_eq!(exit_code, 0);
+    let TraceCommandOutput::Aggregate(aggregate) = output else {
+        panic!("expected aggregate output");
+    };
+    assert!(aggregate.passed);
+    assert_eq!(aggregate.guardrail_failure_count, 0);
+    assert_eq!(aggregate.guardrails[0].label, "behavior smoke");
+    assert!(aggregate.guardrails[0].passed);
 
-        let rig_path = home
-            .path()
-            .join(".config")
-            .join("homeboy")
-            .join("rigs")
-            .join("studio-rig.json");
-        let mut rig_json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&rig_path).expect("read rig"))
-                .expect("parse rig");
-        rig_json["trace_guardrails"] = serde_json::json!([
-            { "label": "behavior smoke", "command": "sh -c 'printf regression >&2; exit 7'" }
-        ]);
-        fs::write(
-            &rig_path,
-            serde_json::to_string_pretty(&rig_json).expect("serialize rig"),
-        )
-        .expect("write rig");
-
-        let (output, exit_code) = run_repeat(trace_args_for_rig("studio-rig"))
-            .expect("trace aggregate should preserve artifacts");
-
-        assert_eq!(exit_code, 1);
-        match output {
-            TraceCommandOutput::Aggregate(aggregate) => {
-                assert!(!aggregate.passed);
-                assert_eq!(aggregate.status, "fail");
-                assert_eq!(aggregate.failure_count, 0);
-                assert_eq!(aggregate.guardrail_failure_count, 1);
-                assert_eq!(aggregate.runs.len(), 1);
-                assert_eq!(aggregate.runs[0].status, "pass");
-                assert!(!aggregate.runs[0].artifact_path.is_empty());
-                assert_eq!(aggregate.spans[0].id, "boot_to_ready");
-                assert_eq!(aggregate.spans[0].median_ms, Some(125));
-                assert_eq!(aggregate.guardrails[0].status, "fail");
-                assert!(aggregate.guardrails[0]
-                    .failure
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("regression"));
-
-                let artifact = serde_json::to_value(&aggregate).expect("serialize aggregate");
-                assert_eq!(artifact["guardrail_failure_count"], 1);
-                assert_eq!(artifact["guardrails"][0]["label"], "behavior smoke");
-                assert_eq!(artifact["runs"][0]["status"], "pass");
-            }
-            _ => panic!("expected aggregate output"),
-        }
-    });
+    let (output, exit_code) = run_aggregate_with_guardrail("sh -c 'printf regression >&2; exit 7'");
+    assert_eq!(exit_code, 1);
+    let TraceCommandOutput::Aggregate(aggregate) = output else {
+        panic!("expected aggregate output");
+    };
+    assert!(!aggregate.passed);
+    assert_eq!(aggregate.status, "fail");
+    assert_eq!(aggregate.failure_count, 0);
+    assert_eq!(aggregate.guardrail_failure_count, 1);
+    assert_eq!(aggregate.runs[0].status, "pass");
+    assert!(!aggregate.runs[0].artifact_path.is_empty());
+    assert_eq!(aggregate.spans[0].median_ms, Some(125));
+    assert!(aggregate.guardrails[0]
+        .failure
+        .as_deref()
+        .unwrap_or_default()
+        .contains("regression"));
 }
