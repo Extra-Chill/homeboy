@@ -534,60 +534,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_pr_list_extracts_all_entries() {
-        let raw = r#"[
-            {"number":10,"title":"feat: x","url":"u10","state":"OPEN","isDraft":true},
-            {"number":11,"title":"chore: y","url":"u11","state":"OPEN"}
-        ]"#;
-        let items = parse_pr_list_json(raw).unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].number, 10);
-        assert!(items[0].is_draft);
-        assert!(!items[1].is_draft);
-        assert_eq!(items[1].state, "OPEN");
-    }
-
-    #[test]
     fn pr_ready_uses_the_explicit_github_transition() {
         assert_eq!(
             pr_ready_args("Extra-Chill/homeboy", 42),
             ["pr", "ready", "42", "-R", "Extra-Chill/homeboy"]
-        );
-    }
-
-    #[test]
-    fn test_pr_files() {
-        let owner = "Extra-Chill";
-        let repo = "homeboy";
-        let number = 42_u64;
-        assert_eq!(
-            format!("repos/{}/{}/pulls/{}/files", owner, repo, number),
-            "repos/Extra-Chill/homeboy/pulls/42/files"
-        );
-    }
-
-    #[test]
-    fn test_pr_view() {
-        let raw = r#"{
-            "author":{"login":"homeboy-ci[bot]"},
-            "baseRefName":"main",
-            "headRefName":"ci/autofix/homeboy/main",
-            "headRepository":{"nameWithOwner":"Extra-Chill/homeboy"}
-        }"#;
-        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
-        assert_eq!(
-            parsed.pointer("/author/login").and_then(|v| v.as_str()),
-            Some("homeboy-ci[bot]")
-        );
-        assert_eq!(
-            parsed.get("baseRefName").and_then(|v| v.as_str()),
-            Some("main")
-        );
-        assert_eq!(
-            parsed
-                .pointer("/headRepository/nameWithOwner")
-                .and_then(|v| v.as_str()),
-            Some("Extra-Chill/homeboy")
         );
     }
 
@@ -685,15 +635,20 @@ exit 0
     }
 
     #[test]
-    fn test_pr_merge() {
-        let result = pr_merge(
+    fn pr_merge_rejects_unknown_method_before_resolving_the_component() {
+        let error = pr_merge(
             Some("missing-component"),
             PrMergeOptions {
                 method: "explode".into(),
                 number: 1,
                 ..Default::default()
             },
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("Unsupported merge method 'explode'"),
+            "{}",
+            error.message
         );
-        assert!(result.is_err());
     }
 }

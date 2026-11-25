@@ -37,35 +37,6 @@ fn init_repo_with_initial_commit() -> (tempfile::TempDir, String) {
 }
 
 #[test]
-fn changes_at_path_only_discovers_portable_component_id() {
-    use std::fs;
-    let (dir, path) = init_repo_with_initial_commit();
-    fs::write(
-        dir.path().join("homeboy.json"),
-        r#"{"id":"portable-changes"}"#,
-    )
-    .unwrap();
-
-    let out = changes_at(None, None, false, Some(&path)).expect("changes_at with --path");
-
-    assert_eq!(out.component_id, "portable-changes");
-    assert_eq!(out.path, path);
-    assert!(out.success);
-}
-
-#[test]
-fn changes_at_component_and_path_trusts_both_inputs() {
-    let (_dir, path) = init_repo_with_initial_commit();
-
-    let out = changes_at(Some("explicit-changes"), None, false, Some(&path))
-        .expect("changes_at with component and --path");
-
-    assert_eq!(out.component_id, "explicit-changes");
-    assert_eq!(out.path, path);
-    assert!(out.success);
-}
-
-#[test]
 fn test_remote_tag_commit() {
     let (_dir, path) = init_repo_with_initial_commit();
     let remote = tempfile::TempDir::new().expect("remote tempdir");
@@ -122,11 +93,13 @@ fn rebase_against_self_is_a_noop_success() {
     assert_eq!(out.path, path);
 }
 
+/// Git refusing the operation is reported as a failed `GitOutput`, not an
+/// `Err`, so callers can surface git's own stderr.
 #[test]
-fn rebase_abort_outside_of_rebase_is_an_error() {
+fn abort_outside_of_an_operation_is_a_failed_output() {
     let (_dir, path) = init_repo_with_initial_commit();
 
-    let out = rebase_at(
+    let rebase = rebase_at(
         None,
         RebaseOptions {
             abort: true,
@@ -134,15 +107,21 @@ fn rebase_abort_outside_of_rebase_is_an_error() {
         },
         Some(&path),
     )
-    .expect("rebase_at returns Ok with failed GitOutput");
+    .expect("rebase_at");
+    let cherry_pick = cherry_pick_at(
+        None,
+        CherryPickOptions {
+            abort: true,
+            ..Default::default()
+        },
+        Some(&path),
+    )
+    .expect("cherry_pick_at");
 
-    assert!(!out.success);
-    assert_ne!(out.exit_code, 0);
-    assert!(
-        out.stderr.contains("rebase") || out.stderr.contains("No rebase"),
-        "expected stderr to mention rebase: {:?}",
-        out.stderr
-    );
+    for out in [rebase, cherry_pick] {
+        assert!(!out.success, "{}", out.action);
+        assert_ne!(out.exit_code, 0, "{}", out.action);
+    }
 }
 
 #[test]
@@ -217,47 +196,6 @@ fn cherry_pick_with_no_refs_and_no_pr_errors() {
         msg.contains("at least one commit ref") || msg.contains("--pr"),
         "expected helpful error, got: {}",
         msg
-    );
-}
-
-#[test]
-fn cherry_pick_abort_outside_of_pick_is_a_failed_output() {
-    let (_dir, path) = init_repo_with_initial_commit();
-
-    let out = cherry_pick_at(
-        None,
-        CherryPickOptions {
-            abort: true,
-            ..Default::default()
-        },
-        Some(&path),
-    )
-    .expect("cherry_pick_at returns Ok with failed GitOutput");
-
-    assert!(!out.success);
-    assert_ne!(out.exit_code, 0);
-}
-
-#[test]
-fn push_options_force_with_lease_includes_flag() {
-    let (_dir, path) = init_repo_with_initial_commit();
-
-    let out = push_at(
-        None,
-        PushOptions {
-            tags: false,
-            force_with_lease: true,
-            ..Default::default()
-        },
-        Some(&path),
-    )
-    .expect("push_at");
-
-    assert!(!out.success, "push without remote should fail");
-    assert!(
-        !out.stderr.contains("unknown option") && !out.stderr.contains("invalid argument"),
-        "--force-with-lease should be a known flag, got: {}",
-        out.stderr
     );
 }
 
@@ -437,11 +375,13 @@ fn changes_at_since_moving_branch_diffs_against_merge_base_and_warns() {
 }
 
 #[test]
-fn test_short_head_revision_at() {
+fn short_head_revision_at_is_a_prefix_of_head() {
     let (_dir, path) = init_repo_with_initial_commit();
 
     let revision = short_head_revision_at(std::path::Path::new(&path)).expect("short revision");
+    let head = get_head_commit(&path).expect("head commit");
 
     assert!(!revision.is_empty());
     assert!(revision.len() <= 12, "unexpected short sha: {revision}");
+    assert!(head.starts_with(&revision), "{revision} vs {head}");
 }

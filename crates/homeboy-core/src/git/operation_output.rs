@@ -145,25 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_failure_evidence_keeps_stderr() {
-        let output = GitOutput {
-            component_id: "local".to_string(),
-            path: "/private/worktree".to_string(),
-            action: "commit".to_string(),
-            success: false,
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: "author identity unknown".to_string(),
-        };
-
-        let evidence = output.failure_command_evidence();
-        assert_eq!(evidence.command, "git commit");
-        assert_eq!(evidence.stderr, "author identity unknown");
-        assert!(evidence.stdout.is_empty());
-    }
-
-    #[test]
-    fn failure_evidence_uses_the_shared_redaction_policy() {
+    fn commit_failure_evidence_keeps_stderr_and_redacts_secrets() {
         let output = GitOutput {
             component_id: "local".to_string(),
             path: "/private/worktree".to_string(),
@@ -171,10 +153,12 @@ mod tests {
             success: false,
             exit_code: 1,
             stdout: "token=super-secret-value".to_string(),
-            stderr: String::new(),
+            stderr: "author identity unknown".to_string(),
         };
 
         let evidence = output.failure_command_evidence();
+        assert_eq!(evidence.command, "git commit");
+        assert_eq!(evidence.stderr, "author identity unknown");
         assert!(!evidence.stdout.contains("super-secret-value"));
     }
 }
