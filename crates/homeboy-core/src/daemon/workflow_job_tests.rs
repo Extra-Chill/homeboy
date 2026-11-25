@@ -869,6 +869,49 @@ fn recovery_after_a_commit_starts_each_admitted_step_exactly_once() {
     });
 }
 
+/// A restarted daemon resumes the workflow its predecessor created, so the
+/// instance's run row stays running while the controller job is active and
+/// settles only once the job is gone.
+#[test]
+fn a_workflow_row_outlives_its_creating_daemon_while_its_job_is_active() {
+    with_isolated_home(|home| {
+        let request = request(
+            json!({
+                "schema": "homeboy/workflow/v1",
+                "id": "owned",
+                "steps": [{"id": "hold", "approval": {"prompt": "continue?"}}]
+            }),
+            home.path(),
+        );
+        let store =
+            JobStore::open_without_reconciliation(crate::paths::observation_db().unwrap()).unwrap();
+        let job_id = admit(&store, &request);
+        let observations = crate::observation::ObservationStore::open_initialized().unwrap();
+        observations
+            .start_run_with_id(
+                crate::observation::NewRunRecord::builder("workflow").build(),
+                request.instance.clone(),
+            )
+            .unwrap();
+        // The daemon that created the row has exited.
+        observations
+            .update_run_metadata(
+                &request.instance,
+                json!({"homeboy_run_owner": {"pid": u32::MAX}}),
+            )
+            .unwrap();
+        let reconcile = || {
+            crate::observation::runs_service::reconcile_owned_stale_running_runs(&observations, 100)
+                .unwrap()
+                .len()
+        };
+
+        assert_eq!(reconcile(), 0, "an active job owns its row");
+        crate::daemon::cancel_controller_job(job_id, "test", &store).unwrap();
+        assert_eq!(reconcile(), 1, "an orphaned row still settles");
+    });
+}
+
 /// #15830: a daemon died mid-workflow. Two replacements race to restart it in
 /// place; the directory's exclusive owner lock admits exactly one. The winner
 /// resumes the instance from its checkpoint: every step key is submitted once,
