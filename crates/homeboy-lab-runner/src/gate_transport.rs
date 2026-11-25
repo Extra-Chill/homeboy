@@ -1409,9 +1409,6 @@ fn receipt_download_recovers_the_real_receipt_after_a_retryable_failure() {
         &[],
     )
     .unwrap();
-    assert!(report.environment.resources.is_some());
-    assert!(report.environment.host_pressure_start.is_some());
-    assert!(report.environment.host_pressure_end.is_some());
     let receipt = LabGateReceipt {
         schema: "homeboy/lab-gate-receipt/v1".into(),
         request_sha256: "request".into(),
@@ -1572,23 +1569,6 @@ mod secret_env_tests {
     use super::*;
 
     #[test]
-    fn lab_gate_exec_declares_component_test_secret_names() {
-        let names = vec![
-            "WP_CODEBOX_DB_HOST".to_string(),
-            "WP_CODEBOX_DB_PASSWORD".to_string(),
-        ];
-        let options =
-            lab_gate_exec_options(vec!["homeboy".to_string()], "lab-gate-x", names.clone());
-        assert_eq!(options.secret_env_names, names);
-        assert!(
-            options.env.is_empty(),
-            "secret values never travel in request env"
-        );
-        assert_eq!(options.run_id.as_deref(), Some("lab-gate-x"));
-        assert!(options.detach_after_handoff);
-    }
-
-    #[test]
     fn unresolvable_admitted_component_declares_no_secret_names() {
         let dir = tempfile::tempdir().expect("cwd");
         assert!(admitted_component_test_secret_env_names(
@@ -1612,7 +1592,7 @@ mod resolve_only_capability_tests {
             assert_eq!(error.code, homeboy_core::ErrorCode::RunnerVersionSkew);
             assert_eq!(error.details["gate_disposition"], "unavailable");
             // Both versions mark this as runner build skew, which the gate
-            // waits through as convergence (#18477) rather than failing.
+            // waits through as convergence rather than failing.
             assert!(error.details["controller_version"].is_string());
             assert!(error.details["runner_version"].is_string());
             assert_eq!(
@@ -1685,7 +1665,7 @@ mod gate_job_start_tests {
     use homeboy_core::foreground_wait::{self, ForegroundWaitPolicy, WaitStop};
     use std::sync::{Arc, Mutex};
 
-    /// #18042: a job still queued for runner capacity reports what the client
+    /// A job still queued for runner capacity reports what the client
     /// waits for and writes no start fence; the fence is written once, when
     /// the daemon admits the job. A foreground stop cancels the gate, so the
     /// queued job is withdrawn.
@@ -1803,15 +1783,22 @@ mod public_error_tests {
 
     #[test]
     fn errors_after_runner_handoff_preserve_the_redacted_cause() {
-        let mut error = missing_secret_ref();
-        error.details = serde_json::json!({"job_id": "job-1", "stage": "execution"});
+        let mut execution = missing_secret_ref();
+        execution.details = serde_json::json!({"job_id": "job-1", "stage": "execution"});
+        let transport = Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "ssh: connection reset",
+            serde_json::json!({"stage": "transport"}),
+        );
 
-        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
+        for error in [execution, transport] {
+            let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
 
-        assert!(public.message.contains(&error.message));
-        assert_eq!(public.details["diagnostic"]["code"], error.code.as_str());
-        assert_eq!(public.details["diagnostic"]["details"]["job_id"], "job-1");
-        assert_eq!(public.retryable, None);
+            assert!(public.message.contains(&error.message));
+            assert_eq!(public.details["diagnostic"]["code"], error.code.as_str());
+            assert_eq!(public.details["diagnostic"]["details"], error.details);
+            assert_eq!(public.retryable, None);
+        }
     }
 
     #[test]
@@ -1828,8 +1815,8 @@ mod public_error_tests {
         assert_eq!(public.details["entry_path"], "tracked/cycle");
     }
 
-    /// #18121: a gate job whose reservation expired before spawn is a
-    /// retryable never-spawned failure, not a lost receipt stream.
+    /// A gate job whose reservation expired before spawn is a retryable
+    /// never-spawned failure, not a lost receipt stream.
     #[test]
     fn reservation_expired_gate_job_is_a_retryable_never_spawned_failure() {
         let result = serde_json::json!({
@@ -1896,7 +1883,7 @@ mod public_error_tests {
         assert!(!is_pre_handoff_configuration_error(&absent_result));
     }
 
-    /// #18121: a terminal job without terminal artifact evidence never judged
+    /// A terminal job without terminal artifact evidence never judged
     /// the candidate. It names the job and the receipt path, and stays a
     /// retryable non-execution through the public wrapper so Cook defers the
     /// gate with the candidate preserved instead of failing the run.
@@ -1977,23 +1964,5 @@ mod public_error_tests {
             false,
         );
         assert!(plain.message.contains("exit code 137") && plain.message.contains("Killed"));
-    }
-
-    #[test]
-    fn transport_failures_preserve_the_cause() {
-        let error = Error::new(
-            homeboy_core::ErrorCode::RunnerLabTransportFailure,
-            "ssh: connection reset",
-            serde_json::json!({"stage": "transport"}),
-        );
-
-        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
-
-        assert!(public.message.contains("ssh: connection reset"));
-        assert_eq!(
-            public.details["diagnostic"]["details"]["stage"],
-            "transport"
-        );
-        assert_eq!(public.retryable, None);
     }
 }

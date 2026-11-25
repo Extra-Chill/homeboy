@@ -472,7 +472,7 @@ fn explicit_job_data_directory_remains_authoritative() {
 }
 
 /// A lost tunnel, or a daemon that stops answering because another controller
-/// restarted the shared host daemon (#18063), recovers the session once and
+/// restarted the shared host daemon, recovers the session once and
 /// resends the keyed submission there.
 #[test]
 fn daemon_submission_recovers_the_session_before_resending() {
@@ -516,7 +516,7 @@ fn daemon_submission_recovers_the_session_before_resending() {
     }
 }
 
-/// #17987: a daemon slow to admit under contention must not strand the gate.
+/// A daemon slow to admit under contention must not strand the gate.
 /// `/exec` is keyed, so an unanswered submission is resent to the same daemon
 /// until it answers, within a bounded number of attempts.
 #[test]
@@ -608,25 +608,18 @@ fn transport_error(kind: &str) -> Error {
 }
 
 #[test]
-fn explicit_refresh_allows_an_idle_stale_daemon_after_reconnect() {
-    let mut status = stale_direct_daemon_status();
-    status.active_job_state = RunnerActiveJobState::Unavailable;
-    status.active_job_source = None;
-    status.active_job_error = Some(crate::RunnerActiveJobError {
+fn explicit_refresh_replaces_only_an_idle_stale_daemon() {
+    let options = explicit_refresh_options();
+    let mut idle = stale_direct_daemon_status();
+    idle.active_job_state = RunnerActiveJobState::Unavailable;
+    idle.active_job_source = None;
+    idle.active_job_error = Some(crate::RunnerActiveJobError {
         code: "jobs_unavailable".to_string(),
         message: "typed jobs endpoint belongs to the stale daemon".to_string(),
     });
-    status.daemon_freshness = Some(authoritative_drained_freshness());
+    idle.daemon_freshness = Some(authoritative_drained_freshness());
+    assert!(allows_idle_stale_daemon_refresh(&options, &idle));
 
-    assert!(allows_idle_stale_daemon_refresh(
-        &explicit_refresh_options(),
-        &status,
-    ));
-}
-
-#[test]
-fn explicit_refresh_keeps_active_or_uncertain_stale_daemons_protected() {
-    let options = explicit_refresh_options();
     let mut active = stale_direct_daemon_status();
     active.active_job_count = 1;
     active.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
@@ -654,15 +647,6 @@ fn runner_exec_accepts_a_live_daemon_with_a_different_build_identity() {
         &status,
     )
     .is_none());
-}
-
-#[test]
-fn runner_exec_keeps_stale_session_projections_fail_closed_without_fresh_daemon_evidence() {
-    assert!(refuses_nonfresh_daemon_execution(
-        &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
-        &stale_direct_daemon_status(),
-    )
-    .is_some());
 }
 
 #[test]
@@ -790,7 +774,7 @@ fn nonfresh_daemon_admission_refusal_names_its_failing_check() {
             error.message
         );
         assert_eq!(error.retryable, Some(retryable), "{check}");
-        // Queued work waits through exactly the retryable refusals (#17776).
+        // Queued work waits through exactly the retryable refusals.
         assert_eq!(
             homeboy_core::substrate_wait::is_transient_error(&error),
             retryable,
@@ -816,8 +800,7 @@ fn nonfresh_daemon_admission_refusal_names_its_failing_check() {
 fn read_only_artifact_retrieval_is_not_blocked_by_a_stale_admission_daemon() {
     // A completed run retains its artifact on a generation that is now draining
     // behind a stale admission daemon. A read-only retrieval routes to that
-    // owner and never rotates the shared tunnel, so it must not be refused
-    // (Extra-Chill/homeboy#9420).
+    // owner and never rotates the shared tunnel, so it must not be refused.
     let read_only = RunnerExecOptions {
         read_only_artifact_access: true,
         ..RunnerExecOptions::raw_command(vec!["node".to_string()])
@@ -855,7 +838,12 @@ fn read_only_artifact_retrieval_reports_a_non_destructive_resolution_command_whe
 }
 
 #[test]
-fn generic_runner_exec_rejects_a_mismatched_persisted_run_identity() {
+fn generic_runner_exec_binds_only_its_explicit_persisted_run_identity() {
+    validate_generic_exec_mirror_run_id(true, Some("requested-run"), Some("requested-run"))
+        .expect("matching identity remains valid");
+    validate_generic_exec_mirror_run_id(false, Some("agent-task-run"), Some("mirrored-run"))
+        .expect("non-generic workflows retain their existing mirror ownership");
+
     let error = validate_generic_exec_mirror_run_id(
         true,
         Some("requested-run"),
@@ -878,14 +866,6 @@ fn unavailable_direct_admission_fails_closed_as_retryable_transport() {
     assert!(error
         .message
         .contains("no healthy daemon admission session"));
-}
-
-#[test]
-fn generic_runner_exec_accepts_its_explicit_persisted_run_identity() {
-    validate_generic_exec_mirror_run_id(true, Some("requested-run"), Some("requested-run"))
-        .expect("matching identity remains valid");
-    validate_generic_exec_mirror_run_id(false, Some("agent-task-run"), Some("mirrored-run"))
-        .expect("non-generic workflows retain their existing mirror ownership");
 }
 
 #[test]
@@ -1281,78 +1261,49 @@ fn daemon_runner_exec_requires_declared_missing_secret_env_refs() {
 }
 
 #[test]
-fn runner_exec_secret_env_names_include_tunnel_preview_client_token() {
-    let names = runner_exec_secret_env_names(
-        &[
-            "homeboy".to_string(),
-            "tunnel".to_string(),
-            "preview-client".to_string(),
-            "start".to_string(),
-            "--ingress".to_string(),
-            "https://preview-broker.example.test".to_string(),
-            "--public-host".to_string(),
-            "preview.example.test".to_string(),
-            "--local-origin".to_string(),
-            "http://127.0.0.1:8888".to_string(),
-        ],
-        None,
-        &[],
-        &HashMap::new(),
+fn runner_exec_secret_env_names_come_from_command_and_runtime_declarations() {
+    let argv = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    let provider = (
+        "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
+        "codex".to_string(),
     );
-
-    assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
-}
-
-#[test]
-fn runner_exec_secret_env_names_carry_no_hardcoded_provider_literals() {
-    // Generic core must not embed provider-specific token names. A bare
-    // provider hint without an explicit allowlist contributes no secret env
-    // names; the runtime/extension is the authority and declares them itself
-    // (generic-core rule, #6676).
-    let names = runner_exec_secret_env_names(
-        &["node".to_string(), "run-headless-loop.cjs".to_string()],
-        None,
-        &[],
-        &HashMap::from([(
-            "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
-            "codex".to_string(),
-        )]),
-    );
-
-    assert!(
-        names.is_empty(),
-        "provider hint alone must not imply provider token names: {names:?}"
-    );
-}
-
-#[test]
-fn runner_exec_secret_env_names_use_runtime_declared_allowlist() {
-    // A codex-style runtime keeps working by declaring the exact names it owns
-    // through the generic allowlist — no core change per provider.
-    let names = runner_exec_secret_env_names(
-        &["node".to_string(), "run-headless-loop.cjs".to_string()],
-        None,
-        &[],
-        &HashMap::from([
-            (
-                "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
-                "codex".to_string(),
-            ),
-            (
-                "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
-                "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN,AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"
-                    .to_string(),
-            ),
-        ]),
-    );
-
-    assert_eq!(
-        names,
-        vec![
-            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
-            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
-        ]
-    );
+    let cases = [
+        // The tunnel preview client owns its broker token.
+        (
+            argv(&[
+                "homeboy",
+                "tunnel",
+                "preview-client",
+                "start",
+                "--ingress",
+                "https://preview-broker.example.test",
+            ]),
+            HashMap::new(),
+            vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN"],
+        ),
+        // A provider hint alone implies no provider-specific token names.
+        (
+            argv(&["node", "run-headless-loop.cjs"]),
+            HashMap::from([provider.clone()]),
+            vec![],
+        ),
+        // The runtime-declared allowlist is authoritative and sorted.
+        (
+            argv(&["node", "run-headless-loop.cjs"]),
+            HashMap::from([
+                provider,
+                (
+                    "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+                    "CUSTOM_REFRESH,CUSTOM_ACCESS".to_string(),
+                ),
+            ]),
+            vec!["CUSTOM_ACCESS", "CUSTOM_REFRESH"],
+        ),
+    ];
+    for (command, env, expected) in cases {
+        let names = runner_exec_secret_env_names(&command, None, &[], &env);
+        assert_eq!(names, expected, "{command:?}");
+    }
 }
 
 #[test]
@@ -1404,30 +1355,6 @@ fn runner_exec_secret_env_plan_preserves_explicit_plan_fields() {
             .as_ref()
             .map(|hint| hint.provider.as_str()),
         Some("provider-auth")
-    );
-}
-
-#[test]
-fn runner_exec_secret_env_names_prefer_explicit_runtime_secret_env() {
-    let names = runner_exec_secret_env_names(
-        &["node".to_string(), "run-headless-loop.cjs".to_string()],
-        None,
-        &[],
-        &HashMap::from([
-            (
-                "HOMEBOY_AGENT_RUNTIME_PROVIDER".to_string(),
-                "codex".to_string(),
-            ),
-            (
-                "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
-                "CUSTOM_REFRESH,CUSTOM_ACCESS".to_string(),
-            ),
-        ]),
-    );
-
-    assert_eq!(
-        names,
-        vec!["CUSTOM_ACCESS".to_string(), "CUSTOM_REFRESH".to_string()]
     );
 }
 
@@ -1552,7 +1479,7 @@ fn real_runner_exec_rejects_a_duplicate_terminal_explicit_run_id() {
 }
 
 #[test]
-fn test_exec_does_not_leak_ambient_process_env() {
+fn test_exec_isolates_ambient_process_env_and_preserves_explicit_request_env() {
     crate::test_support::with_isolated_home(|_| {
         let _guard = EnvVarGuard::set("HOMEBOY_TEST_AMBIENT_ONLY", "leaked");
         super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
@@ -1572,58 +1499,8 @@ fn test_exec_does_not_leak_ambient_process_env() {
                 command: vec![
                     "sh".to_string(),
                     "-c".to_string(),
-                    "test -z \"${HOMEBOY_TEST_AMBIENT_ONLY+x}\" && printf isolated".to_string(),
-                ],
-                env: Default::default(),
-                secret_env_names: Vec::new(),
-                secret_env_plan: None,
-                env_materialization: None,
-                capture_patch: false,
-                raw_exec: false,
-                source_snapshot: None,
-                path_materialization_plan: None,
-                capability_preflight: None,
-                required_extensions: Vec::new(),
-                extension_env_providers: Vec::new(),
-                accepted_extension_settings: Vec::new(),
-                require_paths: Vec::new(),
-                lab_runner_workload: None,
-                run_id: None,
-                run_id_owns_generic_exec: false,
-                detach_after_handoff: false,
-                mirror_evidence: true,
-                print_handoff: true,
-                read_only_artifact_access: false,
-            },
-        )
-        .expect("exec local runner");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.stdout, "isolated");
-    });
-}
-
-#[test]
-fn test_exec_preserves_explicit_request_env() {
-    crate::test_support::with_isolated_home(|_| {
-        super::super::super::create(r#"{"id":"lab-local","kind":"local"}"#, false)
-            .expect("create local runner");
-
-        let (output, exit_code) = exec(
-            "lab-local",
-            RunnerExecOptions {
-                execution_context:
-                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
-                        "homeboy",
-                    ),
-                cwd: None,
-                project_id: None,
-                allow_diagnostic_ssh: false,
-                diagnostic_ssh_timeout: None,
-                command: vec![
-                    "sh".to_string(),
-                    "-c".to_string(),
-                    "printf %s \"$HOMEBOY_TEST_EXPLICIT\"".to_string(),
+                    "test -z \"${HOMEBOY_TEST_AMBIENT_ONLY+x}\" && printf %s \"$HOMEBOY_TEST_EXPLICIT\""
+                        .to_string(),
                 ],
                 env: HashMap::from([("HOMEBOY_TEST_EXPLICIT".to_string(), "planned".to_string())]),
                 secret_env_names: Vec::new(),

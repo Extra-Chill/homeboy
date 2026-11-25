@@ -18,7 +18,7 @@ fn deadline() -> Error {
 /// Only a controller-chosen stop (supervision cancel, heartbeat failure) or
 /// the gate's own deadline cancels the remote job. A lost control plane is an
 /// observation gap: the running gate is left alone and the failure is a
-/// retryable deferral that names the job (#17376).
+/// retryable deferral that names the job.
 #[test]
 fn only_a_controller_stop_cancels_a_running_gate() {
     struct Case {
