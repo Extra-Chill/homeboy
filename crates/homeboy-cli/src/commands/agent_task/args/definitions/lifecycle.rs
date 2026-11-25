@@ -161,6 +161,9 @@ mod tests {
 }
 #[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
+    /// Publish a green incomplete candidate unchanged and file remaining scope on its tracker.
+    #[arg(long, conflicts_with_all = ["review_form", "regate", "candidate_ref", "review_overrides"])]
+    pub publish_partial: bool,
     /// Explanation for this operator intervention
     #[arg(long)]
     pub reason: Option<String>,

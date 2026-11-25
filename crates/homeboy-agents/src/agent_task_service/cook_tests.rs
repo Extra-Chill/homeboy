@@ -12179,6 +12179,98 @@ impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecovery
 }
 
 #[test]
+fn green_incomplete_cook_publishes_partial_and_tracks_remaining_scope() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-partial-19171";
+        let run_id = "cook-partial-19171-attempt-1";
+        let source = "https://github.com/o/tracker/issues/1";
+        let follow_up = "https://github.com/o/tracker/issues/2";
+        let target = tempfile::tempdir().unwrap();
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.into();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".into());
+        options.workspace.source_refs = vec![source.into()];
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .unwrap();
+        let mut aggregate = review_form_aggregate(&options.identity.initial_plan);
+        aggregate.outcomes[0].outputs["review_form"]["completion"] =
+            serde_json::json!("incomplete");
+        aggregate.outcomes[0].outputs["review_form"]["incomplete_reason"] =
+            serde_json::json!("Six remaining files need migration.");
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &aggregate)
+            .unwrap();
+        let promotion = promotion_with_existing_path(run_id, target.path());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&promotion).unwrap())
+            .unwrap();
+        let mut backend = CaptureBackend {
+            synthetic_gate_proof: Some(promotion),
+            ..Default::default()
+        };
+        let mut calls = Vec::new();
+        let mut tracker = |args: &[&str]| -> Result<String> {
+            calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+            match args[1] {
+                "list" => Ok("[]".into()),
+                "create" => Ok(follow_up.into()),
+                "comment" => Ok(String::new()),
+                other => panic!("unexpected tracker operation {other}"),
+            }
+        };
+        let (result, code) = super::super::cook_promotion::publish_partial_cook_with(
+            run_id,
+            &crate::agent_task_service::CookPublishRequest {
+                partial: true,
+                ..Default::default()
+            },
+            false,
+            &mut backend,
+            &mut tracker,
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{result}");
+        assert_eq!(result["status"], "succeeded_partial");
+        let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
+        assert_eq!(
+            super::super::cook_summary(&record).status,
+            "succeeded_partial"
+        );
+        assert!(
+            backend.body.contains("Six remaining files need migration."),
+            "{}",
+            backend.body
+        );
+        assert!(backend.body.contains(follow_up));
+        assert!(calls
+            .iter()
+            .any(|args| args[1] == "create" && args.last().unwrap().contains(source)));
+        assert!(calls.iter().any(|args| args[1] == "comment"
+            && args[2] == source
+            && args.last().unwrap().contains(follow_up)));
+        assert!(calls
+            .iter()
+            .any(|args| args[1] == "comment" && args[2] == follow_up));
+        let persisted = test_lifecycle_store().read_aggregate(run_id).unwrap();
+        assert_eq!(
+            persisted.outcomes[0].outputs["review_form"],
+            aggregate.outcomes[0].outputs["review_form"]
+        );
+        assert_eq!(
+            test_lifecycle_store().read_record(run_id).unwrap().metadata["partial_delivery"]
+                ["follow_up_url"],
+            follow_up
+        );
+    });
+}
+
+#[test]
 fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-16441";
