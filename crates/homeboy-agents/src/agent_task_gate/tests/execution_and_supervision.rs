@@ -679,11 +679,8 @@ fn env_var_guard_restores_even_when_the_test_body_panics() {
 
 #[test]
 fn isolated_gate_test_leaves_home_intact() {
-    // Regression: `isolated_gate_does_not_observe_ambient_...` used to end
-    // with an unconditional `remove_var("HOME")`, deleting HOME for the
-    // rest of the process. Roughly ninety tests in modules that sort after
-    // `agent_task_gate` then failed, many with "HOME environment variable
-    // not set on Unix-like system".
+    // Isolated gate tests must not remove HOME for the rest of the process;
+    // tests in later modules depend on it.
     let _lock = env_mutex();
     let before = std::env::var_os("HOME");
 

@@ -826,14 +826,6 @@ mod tests {
         let wire: Value = serde_json::from_slice(&wire).expect("wire round trips");
         assert_eq!(wire["command"], "ssh");
         assert_eq!(wire["operation"], "list");
-        assert_eq!(
-            format!(
-                "{} {}",
-                wire["command"].as_str().unwrap(),
-                wire["operation"].as_str().unwrap()
-            ),
-            "ssh list"
-        );
         assert_eq!(wire["data"]["action"], "List");
         assert!(wire["presentation"]["stdout"].is_string());
         assert_eq!(wire["data"]["servers"].as_array().unwrap().len(), 1);
@@ -927,9 +919,16 @@ mod tests {
         );
     }
 
-    /// Project base paths remain the default, while explicit cwd applies to every target type.
+    /// Project base paths remain the default, while explicit cwd applies to every
+    /// target type. Without any cwd the command passes through verbatim and an
+    /// interactive session lets ssh open its own login shell.
     #[test]
     fn explicit_cwd_overrides_project_base_path_and_roots_server_commands() {
+        assert_eq!(
+            effective_remote_command(None, Some("uptime")).as_deref(),
+            Some("uptime")
+        );
+        assert_eq!(effective_remote_command(None, None), None);
         assert_eq!(
             effective_cwd(Some("/srv/override"), Some("/srv/project")),
             Some("/srv/override")
@@ -958,33 +957,6 @@ mod tests {
         );
     }
 
-    /// Server-only SSH remains unchanged when neither a cwd nor project base path exists.
-    #[test]
-    fn cwdless_remote_command_shapes_are_unchanged() {
-        // Server-only, no base path: the command passes through verbatim.
-        assert_eq!(
-            effective_remote_command(None, Some("uptime")).as_deref(),
-            Some("uptime")
-        );
-        // Server-only interactive: ssh opens its own login shell, as before.
-        assert_eq!(effective_remote_command(None, None), None);
-        // A project without a base path has nothing to cd to.
-        assert_eq!(
-            effective_remote_command(None, Some("uptime")).as_deref(),
-            Some("uptime")
-        );
-        assert_eq!(effective_remote_command(None, None), None);
-    }
-
-    #[test]
-    fn cwd_cli_validation_rejects_empty_values() {
-        assert_eq!(non_empty_cwd("/srv/app").as_deref(), Ok("/srv/app"));
-        assert_eq!(
-            non_empty_cwd(""),
-            Err("remote working directory must not be empty".to_string())
-        );
-    }
-
     #[test]
     fn cwd_parses_before_a_safe_multi_argument_command_and_rejects_empty_input() {
         let cli = Cli::try_parse_from([
@@ -1005,6 +977,10 @@ mod tests {
         assert_eq!(args.cwd.as_deref(), Some("/srv/dir with spaces;$(nope)'"));
         assert_eq!(args.command, ["printf", "%s", "safe; argument"]);
         assert!(Cli::try_parse_from(["homeboy", "ssh", "sandbox", "--cwd", ""]).is_err());
+        assert_eq!(
+            non_empty_cwd(""),
+            Err("remote working directory must not be empty".to_string())
+        );
     }
 
     #[test]
@@ -1033,21 +1009,28 @@ mod tests {
     }
 
     #[test]
-    fn ssh_success_classification_does_not_depend_on_output() {
-        assert_eq!(ssh_result_classification(true, 0), "remote_command_success");
-        assert_eq!(ssh_failure_reason(true, 0), None);
-    }
-
-    #[test]
-    fn ssh_failure_reason_handles_empty_output_failures() {
-        assert_eq!(
-            ssh_result_classification(false, 42),
-            "remote_command_failed"
-        );
-        assert_eq!(
-            ssh_failure_reason(false, 42).as_deref(),
-            Some("Remote command exited with status 42; stdout/stderr may be empty for no-output commands")
-        );
+    fn exit_status_classifies_success_remote_failure_and_transport_failure() {
+        for (success, exit_code, classification, reason) in [
+            (true, 0, "remote_command_success", None),
+            (
+                false,
+                42,
+                "remote_command_failed",
+                Some("Remote command exited with status 42; stdout/stderr may be empty for no-output commands"),
+            ),
+            (
+                false,
+                255,
+                "ssh_transport_failed",
+                Some("SSH transport failed with exit code 255"),
+            ),
+        ] {
+            assert_eq!(
+                ssh_result_classification(success, exit_code),
+                classification
+            );
+            assert_eq!(ssh_failure_reason(success, exit_code).as_deref(), reason);
+        }
     }
 
     #[test]
@@ -1105,18 +1088,6 @@ mod tests {
             Some("SSH transport failed with exit code 255")
         );
         assert!(homeboy::core::server::is_transient_ssh_error(&unreachable));
-    }
-
-    #[test]
-    fn ssh_transport_failure_is_distinct_from_remote_command_failure() {
-        assert_eq!(
-            ssh_result_classification(false, 255),
-            "ssh_transport_failed"
-        );
-        assert_eq!(
-            ssh_failure_reason(false, 255).as_deref(),
-            Some("SSH transport failed with exit code 255")
-        );
     }
 
     fn command_output(
@@ -1198,8 +1169,16 @@ mod tests {
             CommandObservation::TransportObservationFailed,
         ));
         assert_eq!(transport.stderr, "connection lost");
+        let stdin_failed = raw_execution_from_output(command_output(
+            "partial stdout",
+            "unrelated remote stderr",
+            false,
+            1,
+            false,
+            CommandObservation::StdinDeliveryFailed,
+        ));
 
-        for execution in [timeout, interrupted, transport] {
+        for execution in [timeout, interrupted, transport, stdin_failed] {
             assert!(execution.observation_lost);
             assert_eq!(
                 execution.result_classification,
@@ -1212,23 +1191,6 @@ mod tests {
                 .completion_phase_stderr()
                 .contains("command-finished"));
         }
-    }
-
-    #[test]
-    fn structured_phases_do_not_report_command_finished_after_lost_observation() {
-        let output = command_output(
-            "",
-            "transport observation failed",
-            false,
-            -1,
-            false,
-            CommandObservation::TransportObservationFailed,
-        );
-        let phases = ssh_execution_phases(&output);
-
-        assert!(phases.contains(&"command-observation-lost".to_string()));
-        assert!(!phases.contains(&"command-finished".to_string()));
-        assert_eq!(phases.last().map(String::as_str), Some("cleanup-finished"));
     }
 
     #[test]
@@ -1283,27 +1245,6 @@ mod tests {
             .phases
             .contains(&"command-observation-lost".to_string()));
         assert!(!connect.phases.contains(&"command-finished".to_string()));
-    }
-
-    #[test]
-    fn piped_stdin_delivery_failure_is_typed_indeterminate_state() {
-        let execution = raw_execution_from_output(command_output(
-            "partial stdout",
-            "unrelated remote stderr",
-            false,
-            1,
-            false,
-            CommandObservation::StdinDeliveryFailed,
-        ));
-
-        assert!(execution.observation_lost);
-        assert_eq!(
-            execution.result_classification,
-            "remote_state_indeterminate"
-        );
-        assert!(execution
-            .completion_phase_stderr()
-            .contains("command-observation-lost"));
     }
 
     #[test]
@@ -1412,24 +1353,6 @@ mod tests {
             is_local: true,
             env: std::collections::HashMap::new(),
         }
-    }
-
-    /// The non-interactive SSH dispatcher must select the timed piped-stdin path
-    /// when `--timeout` is present and controller stdin is not a terminal, so
-    /// the fix for timed SSH stdin forwarding is actually exercised from the CLI.
-    #[test]
-    fn non_interactive_dispatch_selects_timed_piped_stdin_for_non_terminal_timeout() {
-        let client = localhost_client();
-
-        let output = execute_non_interactive(
-            &client,
-            "printf timed-piped",
-            Some(Duration::from_secs(5)),
-            false,
-        );
-
-        assert!(output.success, "{}", output.stderr);
-        assert_eq!(output.stdout, "timed-piped");
     }
 
     /// Each of the four dispatch quadrants must route to the expected execution

@@ -291,8 +291,29 @@ mod tests {
         }
     }
 
+    fn manifest_rewrite(changes: Vec<PackageManifestChange>) -> HostMutation {
+        HostMutation::PackageManifestRewrite {
+            manifest_path: "package.json".to_string(),
+            package_manager: Some("npm".to_string()),
+            changes,
+        }
+    }
+
+    fn manifest_restore() -> HostMutationRevertPlan {
+        let mut restore = revert(HostMutationRevertStrategy::RestorePackageManifest);
+        restore.backup_path = Some("package.json.homeboy-backup".to_string());
+        restore
+    }
+
+    fn temp_dir() -> HostMutation {
+        HostMutation::TempDir {
+            path: "/tmp/homeboy-run".to_string(),
+            purpose: None,
+        }
+    }
+
     #[test]
-    fn validates_symlink_mutation_with_remove_revert() {
+    fn validate_accepts_mutations_with_compatible_revert_plans() {
         contract(
             HostMutation::Symlink {
                 link_path: "/tmp/current".to_string(),
@@ -303,100 +324,53 @@ mod tests {
         )
         .validate()
         .unwrap();
-    }
-
-    #[test]
-    fn validates_package_manifest_rewrite_with_backup_restore() {
-        let mut restore = revert(HostMutationRevertStrategy::RestorePackageManifest);
-        restore.backup_path = Some("package.json.homeboy-backup".to_string());
 
         contract(
-            HostMutation::PackageManifestRewrite {
-                manifest_path: "package.json".to_string(),
-                package_manager: Some("npm".to_string()),
-                changes: vec![PackageManifestChange {
-                    package: "example-package".to_string(),
-                    before: Some("^1.0.0".to_string()),
-                    after: Some("^1.1.0".to_string()),
-                }],
-            },
-            restore,
+            manifest_rewrite(vec![PackageManifestChange {
+                package: "example-package".to_string(),
+                before: Some("^1.0.0".to_string()),
+                after: Some("^1.1.0".to_string()),
+            }]),
+            manifest_restore(),
         )
         .validate()
         .unwrap();
     }
 
     #[test]
-    fn rejects_wrong_schema() {
-        let mut contract = contract(
-            HostMutation::TempDir {
-                path: "/tmp/homeboy-run".to_string(),
-                purpose: None,
-            },
-            revert(HostMutationRevertStrategy::RemovePath),
-        );
-        contract.schema = "homeboy/host-mutation-lifecycle/v0".to_string();
+    fn validate_rejects_invalid_contracts_with_field_path() {
+        let mut wrong_schema = contract(temp_dir(), revert(HostMutationRevertStrategy::RemovePath));
+        wrong_schema.schema = "homeboy/host-mutation-lifecycle/v0".to_string();
+        let mut blank_backup = revert(HostMutationRevertStrategy::RestoreBackup);
+        blank_backup.backup_path = Some("file.homeboy-backup".to_string());
 
-        let error = contract.validate().unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "schema");
-    }
-
-    #[test]
-    fn rejects_blank_mutation_path() {
-        let error = contract(
-            HostMutation::FileBackup {
-                original_path: "  ".to_string(),
-                backup_path: "file.homeboy-backup".to_string(),
-            },
-            HostMutationRevertPlan {
-                strategy: HostMutationRevertStrategy::RestoreBackup,
-                backup_path: Some("file.homeboy-backup".to_string()),
-                target_path: None,
-                notes: None,
-            },
-        )
-        .validate()
-        .unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "mutations[0].original_path");
-    }
-
-    #[test]
-    fn rejects_incompatible_revert_strategy() {
-        let error = contract(
-            HostMutation::TempDir {
-                path: "/tmp/homeboy-run".to_string(),
-                purpose: None,
-            },
-            revert(HostMutationRevertStrategy::RestoreBackup),
-        )
-        .validate()
-        .unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "mutations[0].revert.strategy");
-    }
-
-    #[test]
-    fn rejects_empty_manifest_rewrite_changes() {
-        let mut restore = revert(HostMutationRevertStrategy::RestorePackageManifest);
-        restore.backup_path = Some("package.json.homeboy-backup".to_string());
-
-        let error = contract(
-            HostMutation::PackageManifestRewrite {
-                manifest_path: "package.json".to_string(),
-                package_manager: None,
-                changes: vec![],
-            },
-            restore,
-        )
-        .validate()
-        .unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "mutations[0].changes");
+        for (lifecycle, field) in [
+            (wrong_schema, "schema"),
+            (
+                contract(
+                    HostMutation::FileBackup {
+                        original_path: "  ".to_string(),
+                        backup_path: "file.homeboy-backup".to_string(),
+                    },
+                    blank_backup,
+                ),
+                "mutations[0].original_path",
+            ),
+            (
+                contract(
+                    temp_dir(),
+                    revert(HostMutationRevertStrategy::RestoreBackup),
+                ),
+                "mutations[0].revert.strategy",
+            ),
+            (
+                contract(manifest_rewrite(vec![]), manifest_restore()),
+                "mutations[0].changes",
+            ),
+        ] {
+            let error = lifecycle.validate().unwrap_err();
+            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+            assert_eq!(error.details["field"], field);
+        }
     }
 }

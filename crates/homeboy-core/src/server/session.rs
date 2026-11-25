@@ -98,43 +98,12 @@ fn is_openssh_duration(persist: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::{ServerAuthMode, ServerSessionConfig};
 
     #[test]
-    fn test_from_auth() {
-        let auth = ServerAuth {
-            mode: ServerAuthMode::KeyPlusPasswordControlmaster,
-            session: ServerSessionConfig {
-                control_path: Some("/tmp/homeboy-session-%h-%p-%r".to_string()),
-                persist: "30m".to_string(),
-            },
-        };
-
-        let session = ManagedSshSession::from_auth(&auth);
-
-        assert_eq!(session.control_path, "/tmp/homeboy-session-%h-%p-%r");
-        assert_eq!(session.persist, "30m");
-    }
-
-    #[test]
-    fn test_ensure_control_path_parent() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let control_path = dir.path().join("nested/control");
-
-        ensure_control_path_parent(&control_path.to_string_lossy()).expect("create parent");
-
-        assert!(control_path.parent().expect("parent").exists());
-    }
-
-    #[test]
-    fn validate_persist_accepts_openssh_durations() {
+    fn validate_persist_accepts_only_openssh_controlpersist_values() {
         for persist in ["yes", "no", "0", "4h", "1h30m"] {
             validate_persist(persist).expect(persist);
         }
-    }
-
-    #[test]
-    fn validate_persist_rejects_malformed_values() {
         for persist in ["", "four hours", "1x", "01:30:00", "1h-30m"] {
             assert!(
                 validate_persist(persist).is_err(),

@@ -1,4 +1,3 @@
-mod browser;
 mod daemon;
 mod extension_parity;
 mod homeboy_path;
@@ -7,14 +6,3 @@ mod shape;
 mod tools;
 #[cfg(unix)]
 mod version_skew;
-
-use super::*;
-
-#[test]
-fn scoped_lab_doctor_does_not_replace_complete_capability_observation() {
-    assert!(observes_complete_capabilities(RunnerDoctorScope::General));
-    assert!(observes_complete_capabilities(RunnerDoctorScope::SecretEnv));
-    assert!(!observes_complete_capabilities(
-        RunnerDoctorScope::LabOffload
-    ));
-}

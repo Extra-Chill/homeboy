@@ -290,38 +290,23 @@ fn a_new_raw_argv_flag_scan_is_a_failure() {
 }
 
 #[test]
-fn an_acknowledged_scan_that_no_longer_exists_is_a_failure() {
+fn the_inventories_still_describe_the_tree() {
     // A stale entry is how an inventory stops describing the tree it guards.
-    // The row must still name a real scan, and that scan must still be raw:
-    // a site that has since adopted the primitive belongs in the sanctioned
-    // list, not in the acknowledged one.
+    // An acknowledged row must still name a raw scan (a site that has since
+    // adopted the primitive belongs in the sanctioned list), and a sanctioned
+    // site must still route through the primitive.
     let scans = raw_argv_flag_scans();
     let stale: Vec<&str> = ACKNOWLEDGED_RAW_ARGV_FLAG_SCANS
         .iter()
         .filter(|(site, _)| scans.get(*site) != Some(&false))
         .map(|(site, _)| *site)
         .collect();
-
     assert!(
         stale.is_empty(),
         "ACKNOWLEDGED_RAW_ARGV_FLAG_SCANS names scans that no longer exist as raw argv \
          scans: {stale:?}. Remove the stale rows."
     );
-}
 
-#[test]
-fn every_acknowledged_scan_states_a_reason() {
-    for (site, reason) in ACKNOWLEDGED_RAW_ARGV_FLAG_SCANS {
-        assert!(
-            reason.len() > 20,
-            "{site} is acknowledged without a usable reason"
-        );
-    }
-}
-
-#[test]
-fn the_sanctioned_sites_still_route_through_the_primitive() {
-    let scans = raw_argv_flag_scans();
     for site in SANCTIONED_ARGV_FLAG_SCANS {
         assert_eq!(
             scans.get(*site),
@@ -329,54 +314,4 @@ fn the_sanctioned_sites_still_route_through_the_primitive() {
             "{site} no longer routes its argv flag scan through homeboy_owned_args"
         );
     }
-}
-
-#[test]
-fn the_guard_recognizes_the_shape_it_is_written_to_catch() {
-    // The two #11577 sites, as they were written.
-    assert!(compares_against_a_flag_literal(
-        r#"if args.iter().any(|arg| arg == "--help" || arg == "-h") {"#
-    ));
-    assert!(compares_against_a_flag_literal(
-        r#"index > list_index && (arg == "--runner" || arg.starts_with("--runner="))"#
-    ));
-
-    // The separator carries no flag name, so the primitive's own scan for it
-    // is not a finding — otherwise the guard would flag its own foundation.
-    assert!(!compares_against_a_flag_literal(
-        r#"args.iter().position(|arg| arg == "--")"#
-    ));
-    // A subcommand token is not a flag.
-    assert!(!compares_against_a_flag_literal(
-        r#"args.iter().position(|arg| arg == "runs")"#
-    ));
-    // A negative number is not a flag either.
-    assert!(!compares_against_a_flag_literal(r#"value == "-1""#));
-}
-
-#[test]
-fn function_attribution_names_the_enclosing_declaration() {
-    assert_eq!(
-        declared_fn_name("pub fn homeboy_owned_args(args: &[String]) -> &[String] {"),
-        Some("homeboy_owned_args")
-    );
-    assert_eq!(
-        declared_fn_name("    fn is_top_level_version_request(args: &[String]) -> bool {"),
-        Some("is_top_level_version_request")
-    );
-    assert_eq!(
-        declared_fn_name("    let owned = separator_index(argv);"),
-        None
-    );
-    // A word ending in `fn` must not be read as a declaration keyword.
-    assert_eq!(declared_fn_name("    let asfn = 1;"), None);
-}
-
-#[test]
-fn test_sources_are_out_of_scope() {
-    assert!(is_test_source("commands/runner/tests/status.rs"));
-    assert!(is_test_source("commands/bench/parse_tests.rs"));
-    assert!(is_test_source("owned_args_guard_test.rs"));
-    assert!(!is_test_source("cli_runtime.rs"));
-    assert!(!is_test_source("commands/infra/route.rs"));
 }

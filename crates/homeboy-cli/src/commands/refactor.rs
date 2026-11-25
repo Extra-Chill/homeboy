@@ -493,16 +493,6 @@ mod tests {
     }
 
     #[test]
-    fn collect_component_ids_dedupes_and_trims() {
-        let ids = collect_component_ids(
-            &["alpha".to_string(), " beta ".to_string()],
-            &["beta".to_string(), "gamma".to_string(), "".to_string()],
-        );
-
-        assert_eq!(ids, vec!["alpha", "beta", "gamma"]);
-    }
-
-    #[test]
     fn target_args_reject_path_with_multiple_components() {
         let args = RefactorTargetArgs {
             component_ids: vec!["alpha".to_string(), "beta".to_string()],
@@ -519,16 +509,21 @@ mod tests {
     }
 
     #[test]
-    fn target_args_build_multi_component_targets() {
+    fn target_args_build_trimmed_deduped_multi_component_targets() {
         let args = RefactorTargetArgs {
-            component_ids: vec!["alpha".to_string()],
-            components: vec!["beta".to_string(), "alpha".to_string()],
+            component_ids: vec!["alpha".to_string(), " beta ".to_string()],
+            components: vec![
+                "beta".to_string(),
+                "alpha".to_string(),
+                "".to_string(),
+                "gamma".to_string(),
+            ],
             path: None,
         };
 
         let targets = args.resolve_targets().unwrap();
         let labels: Vec<_> = targets.into_iter().map(|target| target.label).collect();
-        assert_eq!(labels, vec!["alpha", "beta"]);
+        assert_eq!(labels, vec!["alpha", "beta", "gamma"]);
     }
 
     #[test]

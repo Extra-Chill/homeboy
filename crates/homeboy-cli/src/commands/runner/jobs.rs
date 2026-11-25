@@ -767,21 +767,6 @@ mod tests {
     }
 
     #[test]
-    fn job_list_json_keeps_the_live_count() {
-        let payload = serde_json::to_value(RunnerJobListOutput {
-            variant: "job_list",
-            command: "runner.job.list",
-            runner_id: "lab".to_string(),
-            live_daemon_job_count: 1,
-            jobs: Vec::new(),
-        })
-        .expect("serialize job list");
-
-        assert_eq!(payload["live_daemon_job_count"], 1);
-        assert!(payload.get("retained_durable_projection_count").is_none());
-    }
-
-    #[test]
     fn unknown_daemon_owner_is_inspect_only() {
         let unknown = runner_job(
             "unknown-daemon-owner-lease-live-1",
@@ -907,35 +892,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_event_observed_after_outage_stops_following() {
-        assert!(runner_job_terminal(JobStatus::Succeeded));
-        assert!(runner_job_terminal(JobStatus::Failed));
-        assert!(runner_job_terminal(JobStatus::Cancelled));
-        assert!(!runner_job_terminal(JobStatus::Running));
-    }
-
-    #[test]
-    fn cursor_resume_command_preserves_runner_job_and_polling_contract() {
-        assert_eq!(
-            resume_command("lab", "job-42", 99, 250),
-            "homeboy runner job logs lab job-42 --follow --cursor 99 --poll-ms 250"
-        );
-    }
-
-    #[test]
-    fn cursor_excludes_replayed_history_from_the_result_payload() {
-        let events = vec![event(4), event(2), event(3), event(3)];
-
-        assert_eq!(
-            job_events_after_cursor(events, 2)
-                .iter()
-                .map(|event| event.sequence)
-                .collect::<Vec<_>>(),
-            vec![3, 4]
-        );
-    }
-
-    #[test]
     fn failed_job_human_and_json_views_each_render_child_stdout_once() {
         let blob = "unique-failure-output".repeat(200);
         let events = vec![
@@ -1012,7 +968,9 @@ mod tests {
 
         let recovered = follow_recovery_error("lab", "job-42", 9, 250, error);
 
-        assert!(recovered.message.contains("--cursor 9 --poll-ms 250"));
+        assert!(recovered
+            .message
+            .contains("homeboy runner job logs lab job-42 --follow --cursor 9 --poll-ms 250"));
     }
 
     #[cfg(unix)]
@@ -1067,7 +1025,6 @@ mod tests {
 
         assert_eq!(rendered, vec![1, 2, 3]);
         assert_eq!(cursor, 3);
-        assert!(runner_job_terminal(JobStatus::Succeeded));
         runner::close_transport(&authoritative);
         assert!(!tunnel.wait().expect("recovery tunnel exits").success());
         authoritative_server

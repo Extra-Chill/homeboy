@@ -61,10 +61,8 @@ pub(crate) fn classify_reqwest_error(err: &reqwest::Error) -> DaemonHttpErrorKin
     }
 }
 
-/// Minimal CLI-style success envelope shared by the runner daemon HTTP GET
-/// helper. Both `connection.rs` and `execution.rs` previously carried their own
-/// byte-identical copy of this struct plus `daemon_get`; they now share this
-/// single implementation (#5362).
+/// Minimal CLI-style success envelope read by the runner daemon HTTP GET
+/// helper that `connection.rs` and `execution.rs` share (#5362).
 #[derive(Debug, Clone, Deserialize)]
 struct DaemonGetEnvelope {
     success: bool,

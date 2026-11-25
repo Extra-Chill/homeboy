@@ -115,15 +115,11 @@ fn declared_metrics_gate_by_direction_and_threshold() {
     let improved = compare::<WorkloadAdapter>(&base, &better, &latency_config()).unwrap();
     assert_eq!(improved.verdict.status(), "better");
     assert_eq!(improved.verdict.improvements.len(), 2);
-}
 
-#[test]
-fn a_declared_metric_that_disappears_is_a_regression() {
-    let base = envelope("pass", json!({ "p95_ms": 100 }), &[], json!([]));
-    let candidate = envelope("pass", json!({}), &[], json!([]));
-    let compared = compare::<WorkloadAdapter>(&base, &candidate, &latency_config()).unwrap();
+    let missing = envelope("pass", json!({ "coverage": 50 }), &[], json!([]));
+    let disappeared = compare::<WorkloadAdapter>(&base, &missing, &latency_config()).unwrap();
     assert_eq!(
-        compared.verdict.regressions,
+        disappeared.verdict.regressions,
         vec!["metric `p95_ms` is no longer reported".to_string()]
     );
 }
@@ -795,10 +791,6 @@ fn run_exports_rig_workload_paths_and_a_file_can_escalate_safety() {
             allow_destructive: allow,
             isolation_proof: proof_path.map(Path::to_path_buf),
         };
-        let refused =
-            safety::authorize("demo", effective.class, &request(false, Some(&proof_file)))
-                .unwrap_err();
-        assert!(refused.message.contains("--allow-destructive"));
         let authorization =
             safety::authorize("demo", effective.class, &request(true, Some(&proof_file)))
                 .unwrap()

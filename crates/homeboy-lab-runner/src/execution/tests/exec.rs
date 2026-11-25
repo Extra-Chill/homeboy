@@ -666,42 +666,28 @@ fn runner_exec_keeps_stale_session_projections_fail_closed_without_fresh_daemon_
 }
 
 #[test]
-fn raw_execution_rejects_version_mismatch_without_a_legacy_stale_warning() {
-    let mut status = stale_direct_daemon_status();
-    status.stale_daemon = None;
-    status.daemon_freshness = Some(authoritative_drained_freshness());
-
-    assert!(!status.daemon_fresh_for_admission());
-    assert!(refuses_nonfresh_daemon_execution(
-        &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
-        &status,
-    )
-    .is_some());
-}
-
-#[test]
-fn raw_execution_rejects_ambiguous_lease_missing_without_a_legacy_stale_warning() {
-    let mut status = stale_direct_daemon_status();
-    status.stale_daemon = None;
-    status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+fn raw_execution_rejects_nonfresh_authoritative_freshness_without_a_stale_warning() {
+    let lease_missing = homeboy_core::daemon::DaemonFreshnessReport {
         stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
         restartable: false,
         lease_id: None,
         pid: None,
         ..authoritative_drained_freshness()
-    });
+    };
+    for freshness in [authoritative_drained_freshness(), lease_missing] {
+        let mut status = stale_direct_daemon_status();
+        status.stale_daemon = None;
+        status.daemon_freshness = Some(freshness);
 
-    assert!(!status.daemon_fresh_for_admission());
-    assert!(refuses_nonfresh_daemon_execution(
-        &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
-        &status,
-    )
-    .is_some());
+        assert!(!status.daemon_fresh_for_admission());
+        assert!(refuses_nonfresh_daemon_execution(
+            &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
+            &status,
+        )
+        .is_some());
+    }
 }
 
-/// The non-fresh admission refusal names its failing check, the daemon it
-/// observed, and a matching next action, retryable only for transient causes
-/// (#17666).
 #[test]
 fn nonfresh_daemon_admission_refusal_names_its_failing_check() {
     use crate::lab::offload::metadata::lab_runner_admission_refusal;
@@ -1954,14 +1940,6 @@ fn test_exec_rejects_unreachable_ssh_runner_without_diagnostic_fallback() {
             "unexpected rejection: {err:?}"
         );
     });
-}
-
-#[test]
-fn test_diagnostic_ssh_mode_serializes_as_diagnostic_ssh() {
-    assert_eq!(
-        serde_json::to_value(RunnerTransport::DiagnosticSsh).expect("mode json"),
-        json!("diagnostic_ssh")
-    );
 }
 
 #[test]

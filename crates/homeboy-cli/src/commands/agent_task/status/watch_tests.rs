@@ -55,21 +55,31 @@ fn changed_status_emission_is_live_and_skips_identical_heartbeat_polls() {
 }
 
 #[test]
-fn changed_status_ignores_volatile_read_metadata() {
-    let mut progress = StatusWatchProgress::default();
-    let mut emitted = Vec::new();
-    progress.observe(
-        &json!({ "run_id": "run-1", "state": "running", "updated_at": "2026-08-13T00:00:00Z" }),
-        1,
-        |line| emitted.push(line),
-    );
-    progress.observe(
-        &json!({ "run_id": "run-1", "state": "running", "updated_at": "2026-08-13T00:00:01Z" }),
-        2,
-        |line| emitted.push(line),
-    );
-
-    assert_eq!(emitted.len(), 1);
+fn only_canonical_changes_emit_a_new_event() {
+    for (field, first, second, events) in [
+        // Volatile read metadata is not a change.
+        (
+            "updated_at",
+            json!("2026-08-13T00:00:00Z"),
+            json!("2026-08-13T00:00:01Z"),
+            1,
+        ),
+        (
+            "gates",
+            json!({ "state": "pending" }),
+            json!({ "state": "failed" }),
+            2,
+        ),
+    ] {
+        let mut progress = StatusWatchProgress::default();
+        let mut emitted = Vec::new();
+        for (poll, value) in [(1, first), (2, second)] {
+            let mut snapshot = json!({ "run_id": "run-1", "state": "running" });
+            snapshot[field] = value;
+            progress.observe(&snapshot, poll, |line| emitted.push(line));
+        }
+        assert_eq!(emitted.len(), events, "{field}");
+    }
 }
 
 #[test]
@@ -167,26 +177,6 @@ fn terminal_summary_uses_terminal_durable_state_counts_and_diagnostic() {
 }
 
 #[test]
-fn canonical_gate_changes_emit_a_new_event() {
-    let mut progress = StatusWatchProgress::default();
-    let mut emitted = Vec::new();
-    progress.observe(
-        &json!({ "run_id": "run-1", "state": "running", "gates": { "state": "pending" } }),
-        1,
-        |line| emitted.push(line),
-    );
-    progress.observe(
-        &json!({ "run_id": "run-1", "state": "running", "gates": { "state": "failed" } }),
-        2,
-        |line| emitted.push(line),
-    );
-
-    assert_eq!(emitted.len(), 2);
-    let second: Value = serde_json::from_str(&emitted[1]).expect("gate change event");
-    assert_eq!(second["change"]["gates"]["state"], "failed");
-}
-
-#[test]
 fn fixed_watch_sections_fall_back_to_typed_refs_within_total_budget() {
     let mut output = json!({
         "run_id": "run-1",
@@ -277,12 +267,23 @@ fn scripted_watch_emits_progress_before_returning_timeout_partial_status() {
 }
 
 #[test]
-fn terminal_success_returns_latest_status_and_zero() {
+fn terminal_success_returns_the_canonical_snapshot_and_zero() {
+    let snapshot = json!({
+        "schema": "homeboy/control-plane-run/v1",
+        "run": "run-1",
+        "state": "succeeded",
+        "phase": "terminal"
+    });
     let (output, exit) = watch_status_output(
         &args(),
-        result("succeeded", WatchConclusion::Terminal),
+        WatchResult {
+            item: (snapshot.clone(), 0),
+            conclusion: WatchConclusion::Terminal,
+            poll_count: 1,
+            waited: Duration::ZERO,
+        },
         StatusWatchProgress {
-            changes: vec![json!({ "poll": 1, "status": { "state": "succeeded" } })],
+            changes: vec![status_watch_change(&snapshot, 1)],
             ..Default::default()
         },
     );
@@ -290,6 +291,8 @@ fn terminal_success_returns_latest_status_and_zero() {
     assert_eq!(exit, 0);
     assert_eq!(output["terminal"], true);
     assert_eq!(output["latest"]["state"], "succeeded");
+    assert_eq!(output["latest"]["run"], "run-1");
+    assert_eq!(output["latest"]["phase"], "terminal");
     assert_eq!(output["changes"].as_array().unwrap().len(), 1);
     assert_eq!(
         output["continuation_command"],
@@ -377,34 +380,7 @@ fn timeout_retains_partial_runner_status_and_uses_shared_exit_code() {
 }
 
 #[test]
-fn canonical_snapshot_is_retained_without_projection_loss() {
-    let snapshot = json!({
-        "schema": "homeboy/control-plane-run/v1",
-        "run": "run-1",
-        "state": "succeeded",
-        "phase": "terminal"
-    });
-    let (output, exit) = watch_status_output(
-        &args(),
-        WatchResult {
-            item: (snapshot.clone(), 0),
-            conclusion: WatchConclusion::Terminal,
-            poll_count: 1,
-            waited: Duration::ZERO,
-        },
-        StatusWatchProgress {
-            changes: vec![status_watch_change(&snapshot, 1)],
-            ..Default::default()
-        },
-    );
-
-    assert_eq!(exit, 0);
-    assert_eq!(output["latest"]["run"], "run-1");
-    assert_eq!(output["latest"]["phase"], "terminal");
-}
-
-#[test]
-fn terminality_keeps_active_states_open_and_accepts_unknown_terminal_states() {
+fn terminality_keeps_active_states_open_and_closes_terminal_ones() {
     for state in ["queued", "running", "in_flight"] {
         assert!(!status_is_terminal(&json!({ "state": state })), "{state}");
     }

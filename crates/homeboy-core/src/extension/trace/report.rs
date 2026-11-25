@@ -959,69 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn test_from_main_workflow() {
-        let result = TraceRunWorkflowResult {
-            status: "pass".to_string(),
-            component: "Studio".to_string(),
-            exit_code: 0,
-            evidence: canonical_evidence(),
-            results: Some(TraceResults {
-                component_id: "studio".to_string(),
-                scenario_id: "close-window-running-site".to_string(),
-                status: TraceStatus::Pass,
-                summary: Some("No window reopened".to_string()),
-                failure: None,
-                rig: None,
-                evidence: None,
-                timeline: Vec::new(),
-                span_definitions: Vec::new(),
-                span_results: Vec::new(),
-                assertions: Vec::new(),
-                temporal_assertions: Vec::new(),
-                artifacts: vec![TraceArtifact {
-                    label: "main log".to_string(),
-                    path: "artifacts/main.log".to_string(),
-                    kind: None,
-                }],
-                metrics: Default::default(),
-                toolchain: None,
-                components: None,
-                dependencies: Vec::new(),
-                preview: None,
-            }),
-            failure: None,
-            overlays: vec![TraceOverlay {
-                variant: Some("disable-install-mail".to_string()),
-                component_id: Some("studio".to_string()),
-                path: "/tmp/overlay.patch".to_string(),
-                component_path: "/tmp/studio".to_string(),
-                touched_files: vec!["scenario.txt".to_string()],
-                kept: false,
-            }],
-            baseline_comparison: None,
-            hints: None,
-            toolchain: None,
-            components: None,
-        };
-
-        let (output, exit_code) = from_main_workflow(result, None, true);
-        let value = serde_json::to_value(output).expect("summary output should serialize");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(value["summary_only"], true);
-        assert_eq!(value["passed"], true);
-        assert_eq!(value["scenario_id"], "close-window-running-site");
-        assert_eq!(value["artifact_count"], 1);
-        assert_eq!(value["span_count"], 0);
-        assert_eq!(value["overlays"][0]["path"], "/tmp/overlay.patch");
-        assert_eq!(value["overlays"][0]["variant"], "disable-install-mail");
-        assert_eq!(value["overlays"][0]["component_id"], "studio");
-        assert_eq!(value["overlays"][0]["component_path"], "/tmp/studio");
-        assert_eq!(value["overlays"][0]["touched_files"][0], "scenario.txt");
-        assert_eq!(value["overlays"][0]["kept"], false);
-    }
-
-    #[test]
     fn test_from_main_workflow_outputs_keeps_full_output_for_summary_artifact() {
         let result = TraceRunWorkflowResult {
             status: "pass".to_string(),
@@ -1064,7 +1001,14 @@ mod tests {
                 preview: None,
             }),
             failure: None,
-            overlays: Vec::new(),
+            overlays: vec![TraceOverlay {
+                variant: Some("disable-install-mail".to_string()),
+                component_id: Some("studio".to_string()),
+                path: "/tmp/overlay.patch".to_string(),
+                component_path: "/tmp/studio".to_string(),
+                touched_files: vec!["scenario.txt".to_string()],
+                kept: false,
+            }],
             baseline_comparison: None,
             hints: None,
             toolchain: None,
@@ -1081,6 +1025,17 @@ mod tests {
         assert_eq!(stdout_value["summary_only"], true);
         assert_eq!(stdout_value["span_count"], 1);
         assert!(stdout_value.get("results").is_none());
+        assert_eq!(stdout_value["passed"], true);
+        assert_eq!(stdout_value["overlays"][0]["path"], "/tmp/overlay.patch");
+        assert_eq!(
+            stdout_value["overlays"][0]["variant"],
+            "disable-install-mail"
+        );
+        assert_eq!(
+            stdout_value["overlays"][0]["touched_files"][0],
+            "scenario.txt"
+        );
+        assert_eq!(stdout_value["overlays"][0]["kept"], false);
         assert_eq!(
             artifact_value["results"]["span_results"][0]["id"],
             "submit_to_cli"
@@ -1122,38 +1077,6 @@ mod tests {
         assert_eq!(value["command"], "trace.repeat");
         assert_eq!(value["component"], "Studio");
         assert!(value.get("Aggregate").is_none());
-    }
-
-    #[test]
-    fn test_push_overlay_markdown_lists_paths() {
-        let mut markdown = String::new();
-        let overlays = vec![
-            TraceOverlay {
-                variant: None,
-                component_id: Some("studio".to_string()),
-                path: "/tmp/overlay.patch".to_string(),
-                component_path: "/tmp/studio".to_string(),
-                touched_files: vec!["apps/studio/out/app.js".to_string()],
-                kept: false,
-            },
-            TraceOverlay {
-                variant: None,
-                component_id: Some("studio".to_string()),
-                path: "/tmp/kept.patch".to_string(),
-                component_path: "/tmp/studio".to_string(),
-                touched_files: Vec::new(),
-                kept: true,
-            },
-        ];
-
-        push_overlay_markdown(&mut markdown, &overlays);
-
-        assert!(markdown.contains("## Trace Overlays"));
-        assert!(markdown.contains("- **Patch:** `/tmp/overlay.patch` (`reverted`)"));
-        assert!(markdown.contains("- Applied relative to: `/tmp/studio`"));
-        assert!(markdown.contains("- `apps/studio/out/app.js`"));
-        assert!(markdown.contains("- **Patch:** `/tmp/kept.patch` (`kept`)"));
-        assert!(markdown.contains("Touched files: none reported by `git apply --numstat`"));
     }
 
     #[test]
@@ -1212,14 +1135,24 @@ mod tests {
             preview: None,
         };
 
-        let overlays = vec![TraceOverlay {
-            variant: None,
-            component_id: Some("studio".to_string()),
-            path: "/tmp/overlay.patch".to_string(),
-            component_path: "/tmp/studio".to_string(),
-            touched_files: vec!["apps/studio/out/app.js".to_string()],
-            kept: false,
-        }];
+        let overlays = vec![
+            TraceOverlay {
+                variant: None,
+                component_id: Some("studio".to_string()),
+                path: "/tmp/overlay.patch".to_string(),
+                component_path: "/tmp/studio".to_string(),
+                touched_files: vec!["apps/studio/out/app.js".to_string()],
+                kept: false,
+            },
+            TraceOverlay {
+                variant: None,
+                component_id: Some("studio".to_string()),
+                path: "/tmp/kept.patch".to_string(),
+                component_path: "/tmp/studio".to_string(),
+                touched_files: Vec::new(),
+                kept: true,
+            },
+        ];
         let markdown = render_markdown(&results, &overlays);
 
         assert!(markdown.contains("# Trace: `create-site`"));
@@ -1227,6 +1160,8 @@ mod tests {
         assert!(markdown.contains("- **Patch:** `/tmp/overlay.patch` (`reverted`)"));
         assert!(markdown.contains("- Applied relative to: `/tmp/studio`"));
         assert!(markdown.contains("- `apps/studio/out/app.js`"));
+        assert!(markdown.contains("- **Patch:** `/tmp/kept.patch` (`kept`)"));
+        assert!(markdown.contains("Touched files: none reported by `git apply --numstat`"));
         assert!(markdown.contains("## Toolchain Provenance"));
         assert!(markdown.contains("- **Mode:** `canonical` (canonical)"));
         assert!(markdown

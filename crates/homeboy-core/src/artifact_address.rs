@@ -164,65 +164,58 @@ mod tests {
     }
 
     #[test]
-    fn local_paths_become_non_reviewer_visible_artifact_refs() {
-        let address = ArtifactAddress::from_record(&artifact("file", "/tmp/private.json"));
-
-        assert_eq!(address.kind, ArtifactAddressKind::LocalOperatorPath);
-        assert_eq!(address.value, "homeboy://run/run-1/artifact/artifact-1");
-        assert!(!address.reviewer_visible);
-        assert_eq!(address.reviewer_target(), None);
-    }
-
-    #[test]
-    fn public_urls_are_reviewer_visible_after_validation() {
-        let address =
-            ArtifactAddress::from_record(&artifact("url", "https://example.test/evidence"));
-
-        assert_eq!(address.kind, ArtifactAddressKind::PublicUrl);
-        assert_eq!(
-            address.reviewer_target(),
-            Some("https://example.test/evidence")
-        );
-    }
-
-    #[test]
-    fn localhost_urls_are_not_reviewer_visible_public_urls() {
-        let address =
-            ArtifactAddress::from_record(&artifact("url", "http://localhost:8888/evidence"));
-
-        assert_eq!(address.kind, ArtifactAddressKind::MetadataOnly);
-        assert!(!address.reviewer_visible);
-    }
-
-    #[test]
-    fn remote_runner_refs_are_reviewer_visible_tokens() {
-        let address = ArtifactAddress::from_record(&artifact(
-            "remote_file",
-            "runner-artifact://lab/run-1/artifact-1",
-        ));
-
-        assert_eq!(address.kind, ArtifactAddressKind::RemoteRunnerRef);
-        assert_eq!(
-            address.reviewer_target(),
-            Some("runner-artifact://lab/run-1/artifact-1")
-        );
-    }
-
-    #[test]
-    fn malformed_remote_file_paths_are_metadata_only() {
-        let address = ArtifactAddress::from_record(&artifact("remote_file", "/srv/private.zip"));
-
-        assert_eq!(address.kind, ArtifactAddressKind::MetadataOnly);
-        assert_eq!(address.value, "remote-artifact:artifact-1");
-        assert!(!address.reviewer_visible);
-    }
-
-    #[test]
-    fn absolute_metadata_only_paths_are_redacted_to_labels() {
-        let address = ArtifactAddress::from_record(&artifact("metadata-only", "/tmp/private.zip"));
-
-        assert_eq!(address.kind, ArtifactAddressKind::MetadataOnly);
-        assert_eq!(address.value, "metadata-only:artifact-1");
-        assert!(!address.reviewer_visible);
+    fn records_classify_into_reviewer_visibility_and_redacted_values() {
+        use ArtifactAddressKind::*;
+        let canonical = "homeboy://run/run-1/artifact/artifact-1";
+        for (artifact_type, path, kind, value, reviewer_target) in [
+            (
+                "file",
+                "/tmp/private.json",
+                LocalOperatorPath,
+                canonical,
+                None,
+            ),
+            (
+                "url",
+                "https://example.test/evidence",
+                PublicUrl,
+                "https://example.test/evidence",
+                Some("https://example.test/evidence"),
+            ),
+            (
+                "url",
+                "http://localhost:8888/evidence",
+                MetadataOnly,
+                "unvalidated-url:artifact-1",
+                None,
+            ),
+            (
+                "remote_file",
+                "runner-artifact://lab/run-1/artifact-1",
+                RemoteRunnerRef,
+                "runner-artifact://lab/run-1/artifact-1",
+                Some("runner-artifact://lab/run-1/artifact-1"),
+            ),
+            (
+                "remote_file",
+                "/srv/private.zip",
+                MetadataOnly,
+                "remote-artifact:artifact-1",
+                None,
+            ),
+            (
+                "metadata-only",
+                "/tmp/private.zip",
+                MetadataOnly,
+                "metadata-only:artifact-1",
+                None,
+            ),
+        ] {
+            let address = ArtifactAddress::from_record(&artifact(artifact_type, path));
+            assert_eq!(address.kind, kind, "{artifact_type} {path}");
+            assert_eq!(address.value, value, "{artifact_type} {path}");
+            assert_eq!(address.reviewer_target(), reviewer_target);
+            assert_eq!(address.reviewer_visible, reviewer_target.is_some());
+        }
     }
 }

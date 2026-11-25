@@ -187,66 +187,37 @@ mod tests {
         assert_eq!(value["variant"], "list");
         assert_eq!(value["payload"]["command"], "rig.list");
         assert_eq!(value["payload"]["entities"][0]["id"], "studio-bfb");
+
+        let empty = serde_json::to_value(RigCommandOutput::List(RigListOutput::new(Vec::new())))
+            .expect("serialize empty rig list");
+        assert_eq!(empty["payload"]["entities"], serde_json::json!([]));
     }
 
     #[test]
-    fn empty_rig_list_emits_entities_array() {
-        let value = serde_json::to_value(RigCommandOutput::List(RigListOutput::new(Vec::new())))
-            .expect("serialize rig list");
-
-        assert_eq!(value["payload"]["entities"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn test_rig_show_output_includes_expanded_resources() {
+    fn rig_show_output_includes_expanded_resources() {
         let output = RigShowOutput {
             command: "rig.show",
             rig: RigSpec {
-                effective_component_paths: Default::default(),
                 id: "studio-bfb".to_string(),
-                description: String::new(),
-                components: Default::default(),
-                services: Default::default(),
-                symlinks: Vec::new(),
-                shared_paths: Vec::new(),
-                resources: RigResourcesSpec {
-                    paths: vec!["~/Developer/studio".to_string()],
-                    ..Default::default()
-                },
-                lifecycle: Default::default(),
-                requirements: Default::default(),
-                pipeline: Default::default(),
-                bench: None,
-                fuzz: None,
-                trace: Default::default(),
-                bench_workloads: Default::default(),
-                trace_workloads: Default::default(),
-                fuzz_workloads: Default::default(),
-                workloads: Default::default(),
-                trace_workload_defaults: Default::default(),
-                trace_variants: Default::default(),
-                trace_profiles: Default::default(),
-                trace_experiments: Default::default(),
-                trace_guardrails: Default::default(),
-                bench_profiles: Default::default(),
-                fuzz_profiles: Default::default(),
-                app_launcher: None,
+                ..Default::default()
             },
             resources: RigResourcesSpec {
                 exclusive: vec!["studio-runtime".to_string()],
                 paths: vec!["/Users/user/Developer/studio".to_string()],
-                ports: vec![9724],
-                process_patterns: vec!["wordpress-server-child.mjs".to_string()],
                 ..Default::default()
             },
         };
 
-        let json = serde_json::to_string(&output).expect("serialize");
-        assert!(json.contains("\"command\":\"rig.show\""));
-        assert!(json.contains("\"resources\""));
-        assert!(json.contains("/Users/user/Developer/studio"));
-        assert!(json.contains("studio-runtime"));
-        assert!(json.contains("wordpress-server-child.mjs"));
+        let value = serde_json::to_value(&output).expect("serialize");
+        assert_eq!(value["command"], "rig.show");
+        assert_eq!(
+            value["resources"]["paths"],
+            serde_json::json!(["/Users/user/Developer/studio"])
+        );
+        assert_eq!(
+            value["resources"]["exclusive"],
+            serde_json::json!(["studio-runtime"])
+        );
     }
 
     #[test]

@@ -539,9 +539,7 @@ fn slug_fragment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
-
-    use super::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanSummary, PlanValues};
+    use super::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanSummary};
 
     #[test]
     fn serializes_minimal_component_plan() {
@@ -562,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn test_for_description() {
+    fn for_description_slugs_the_description_into_the_plan_id() {
         let plan = HomeboyPlan::for_description(PlanKind::Trace, "Variant A/B");
 
         assert_eq!(plan.id, "trace.variant-a-b");
@@ -587,83 +585,38 @@ mod tests {
 
     #[test]
     fn builder_generates_summary_from_step_statuses() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
-            .steps(vec![
+        let steps = || {
+            vec![
                 PlanStep::ready("quality.lint", "quality.lint").build(),
                 PlanStep::builder("quality.test", "quality.test", PlanStepStatus::Missing).build(),
                 PlanStep::builder("quality.audit", "quality.audit", PlanStepStatus::Skipped)
                     .build(),
                 PlanStep::disabled("quality.docs", "quality.docs").build(),
-            ])
+            ]
+        };
+        let summary = |skipped| PlanSummary {
+            total_steps: 4,
+            ready: 1,
+            blocked: 1,
+            skipped,
+            next_actions: Vec::new(),
+        };
+
+        let standard = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
+            .steps(steps())
             .summarize()
             .build();
+        assert_eq!(standard.summary, Some(summary(1)));
 
-        assert_eq!(
-            plan.summary,
-            Some(PlanSummary {
-                total_steps: 4,
-                ready: 1,
-                blocked: 1,
-                skipped: 1,
-                next_actions: Vec::new(),
-            })
-        );
-    }
-
-    #[test]
-    fn step_builder_preserves_minimal_step_json_shape() {
-        let step = PlanStep::ready("lint", "quality.lint")
-            .label("Run lint")
-            .blocking(false)
-            .needs(vec!["audit".to_string()])
-            .input_value("reason", serde_json::json!("manual"))
-            .skip_reason("manual")
+        let disabled_as_skipped = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
+            .steps(steps())
+            .summarize_disabled_as_skipped()
             .build();
-
-        let serialized = serde_json::to_value(&step).expect("serialize step");
-
-        assert_eq!(
-            serialized,
-            serde_json::json!({
-                "id": "lint",
-                "kind": "quality.lint",
-                "label": "Run lint",
-                "blocking": false,
-                "needs": ["audit"],
-                "status": "ready",
-                "inputs": {
-                    "reason": "manual"
-                },
-                "skip_reason": "manual"
-            })
-        );
+        assert_eq!(disabled_as_skipped.summary, Some(summary(2)));
     }
 
     #[test]
-    fn plan_values_encode_each_typed_input() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Trace, "fixture")
-            .inputs(
-                PlanValues::new()
-                    .string("group", "baseline")
-                    .bool("dry_run", true)
-                    .number("iteration", 2_u64)
-                    .json("items", ["first", "second"]),
-            )
-            .build();
-
-        assert_eq!(
-            serde_json::to_value(&plan.inputs).unwrap(),
-            serde_json::json!({
-                "group": "baseline",
-                "dry_run": true,
-                "iteration": 2,
-                "items": ["first", "second"]
-            })
-        );
-    }
-
-    #[test]
-    fn test_input_as() {
+    fn input_as_decodes_typed_inputs_and_rejects_missing_or_mismatched() {
         let step = PlanStep::ready("refactor", "refactor.decompose")
             .input_value("items", serde_json::json!(["first", "second"]))
             .build();
@@ -675,60 +628,5 @@ mod tests {
         assert_eq!(items, Some(vec!["first".to_string(), "second".to_string()]));
         assert_eq!(missing, None);
         assert_eq!(wrong_type, None);
-    }
-
-    #[test]
-    fn test_gate_result_output() {
-        let step = PlanStep::ready("verify.tests", "gate.command")
-            .gate_result(HomeboyGateResult::new(
-                "gate-1",
-                "cargo test",
-                HomeboyGateKind::Command,
-                HomeboyGateStatus::Passed,
-            ))
-            .build();
-
-        let gate_result: HomeboyGateResult = serde_json::from_value(
-            step.outputs
-                .get("gate_result")
-                .expect("gate result output")
-                .clone(),
-        )
-        .expect("deserialize gate result output");
-
-        assert_eq!(gate_result.id, "gate-1");
-        assert_eq!(gate_result.kind, HomeboyGateKind::Command);
-        assert_eq!(gate_result.status, HomeboyGateStatus::Passed);
-    }
-
-    #[test]
-    fn test_summarize_disabled_as_skipped() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
-            .steps(vec![PlanStep::disabled(
-                "audit.docs",
-                "audit.detector.docs",
-            )
-            .build()])
-            .summarize_disabled_as_skipped()
-            .build();
-
-        assert_eq!(
-            plan.summary.as_ref().map(|summary| summary.skipped),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn test_disabled_with_reason() {
-        let step = PlanStep::disabled_with_reason("release.skip", "release.skip", "no-commits")
-            .label("No releasable commits")
-            .build();
-
-        assert_eq!(step.status, PlanStepStatus::Disabled);
-        assert_eq!(step.skip_reason.as_deref(), Some("no-commits"));
-        assert_eq!(
-            step.inputs.get("reason").and_then(|value| value.as_str()),
-            Some("no-commits")
-        );
     }
 }

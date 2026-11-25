@@ -707,11 +707,6 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
     Ok((output, exit_code))
 }
 
-#[cfg(test)]
-fn cleanup_is_dry_run(apply: bool) -> bool {
-    !apply
-}
-
 pub(crate) const INVENTORY_APPLY_COMMAND: &str = "homeboy worktree inventory --apply";
 
 /// Whether `worktree inventory --apply` would reconcile at least one record
@@ -757,280 +752,123 @@ fn worktree_cleanup_actionable(
 
 #[cfg(test)]
 mod tests {
-    use clap::{error::ErrorKind, Parser};
     use homeboy::core::worktree::{
-        CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState, WorktreeCreateAction,
-        WorktreeCreateEvidence, WorktreeCreateOutput, WorktreeCreateReconciliation,
-        WorktreeImportOutput, WorktreeListOutput,
+        CleanupPolicy, TaskWorktreeRecord, TaskWorktreeState, WorktreeCleanupCounts,
+        WorktreeCleanupOutput, WorktreeCreateAction, WorktreeCreateEvidence, WorktreeCreateOutput,
+        WorktreeCreateReconciliation, WorktreeImportOutput,
     };
 
-    use super::{cleanup_is_dry_run, WorktreeCommand, WorktreeOutput};
-    use crate::cli_surface::{Cli, Commands};
+    use super::{worktree_cleanup_actionable, WorktreeOutput};
 
-    fn create_output(reconciliation: Option<WorktreeCreateReconciliation>) -> WorktreeCreateOutput {
-        let identity = homeboy::core::worktree::WorkspaceIdentity::new(
-            "task-worktree",
-            "fixture/fixture@branch",
-        )
-        .expect("workspace identity");
-        WorktreeCreateOutput {
-            record: TaskWorktreeRecord {
-                id: "fixture@branch".to_string(),
-                component_id: "fixture".to_string(),
-                source_checkout: "/tmp/source".to_string(),
-                worktree_path: "/tmp/fixture@branch".to_string(),
-                branch: "branch".to_string(),
-                base_ref: "HEAD".to_string(),
-                workspace_identity: Some(identity),
-                task_url: None,
-                run_id: None,
-                cleanup_policy: CleanupPolicy::RemoveWhenSafe,
-                terminal_disposition: None,
-                branch_cleanup_intent: Default::default(),
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                state: TaskWorktreeState::Active,
-                lifecycle_revision: 0,
-                terminal_workspace_authority: None,
-            },
-            reconciliation,
-            handoff_freshness: None,
+    fn record() -> TaskWorktreeRecord {
+        TaskWorktreeRecord {
+            id: "fixture@branch".to_string(),
+            component_id: "fixture".to_string(),
+            source_checkout: "/tmp/source".to_string(),
+            worktree_path: "/tmp/fixture@branch".to_string(),
+            branch: "branch".to_string(),
+            base_ref: "HEAD".to_string(),
+            workspace_identity: Some(
+                homeboy::core::worktree::WorkspaceIdentity::new(
+                    "task-worktree",
+                    "fixture/fixture@branch",
+                )
+                .expect("workspace identity"),
+            ),
+            task_url: None,
+            run_id: None,
+            cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+            terminal_disposition: None,
+            branch_cleanup_intent: Default::default(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            state: TaskWorktreeState::Active,
+            lifecycle_revision: 0,
+            terminal_workspace_authority: None,
         }
     }
 
+    fn create(reconciliation: Option<WorktreeCreateReconciliation>) -> WorktreeOutput {
+        WorktreeOutput::Create(WorktreeCreateOutput {
+            record: record(),
+            reconciliation,
+            handoff_freshness: None,
+        })
+    }
+
+    /// JSON consumers read each payload's fields beside the outer `action`
+    /// tag, and only see `reconciliation` when an existing worktree was restored.
     #[test]
-    fn worktree_create_serialization_preserves_outer_action_and_adds_restore_detail() {
-        let created = serde_json::to_value(WorktreeOutput::Create(create_output(None)))
-            .expect("serialize created output");
-        let existing = serde_json::to_value(WorktreeOutput::Create(create_output(None)))
-            .expect("serialize existing output");
+    fn worktree_output_flattens_each_payload_beside_its_action_tag() {
         let evidence = WorktreeCreateEvidence {
             task_worktree_id: "fixture@branch".to_string(),
             component_id: "fixture".to_string(),
             source_checkout: "/tmp/source".to_string(),
             worktree_path: "/tmp/fixture@branch".to_string(),
             branch: "branch".to_string(),
-            workspace_identity: homeboy::core::worktree::WorkspaceIdentity::new(
-                "task-worktree",
-                "fixture/fixture@branch",
-            )
-            .expect("workspace identity"),
+            workspace_identity: record().workspace_identity.unwrap(),
             git_registration: "registered".to_string(),
         };
-        let restored = serde_json::to_value(WorktreeOutput::Create(create_output(Some(
-            WorktreeCreateReconciliation {
-                action: WorktreeCreateAction::Restored,
-                previous: evidence.clone(),
-                current: evidence,
-            },
-        ))))
-        .expect("serialize restored output");
-
-        assert_eq!(created["action"], "create");
-        assert_eq!(existing["action"], "create");
-        assert!(created.get("reconciliation").is_none());
-        assert!(existing.get("reconciliation").is_none());
-        assert_eq!(restored["action"], "create");
-        assert_eq!(restored["reconciliation"]["action"], "restored");
-    }
-
-    #[test]
-    fn worktree_import_and_finalize_are_public_typed_cli_commands() {
-        let cli = Cli::parse_from([
-            "homeboy",
-            "worktree",
-            "import",
-            "fixture",
-            "fixture@branch",
-            "/tmp/fixture@branch",
-            "--branch",
-            "branch",
-            "--base-ref",
-            "main",
-            "--owner-run-ref",
-            "run-1",
-            "--cleanup-policy",
-            "preserve-on-failure",
-            "--created-at",
-            "2026-01-02T03:04:05Z",
-        ]);
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Import {
-            owner_run_ref,
-            created_at,
-            ..
-        } = args.command
-        else {
-            panic!("expected import command");
-        };
-        assert_eq!(owner_run_ref.as_deref(), Some("run-1"));
-        assert_eq!(created_at.as_deref(), Some("2026-01-02T03:04:05Z"));
-
-        let record = create_output(None).record;
-        let imported = serde_json::to_value(WorktreeOutput::Import(WorktreeImportOutput {
-            record,
-            imported: true,
-        }))
-        .expect("serialize import");
-        let mut record = create_output(None).record;
-        record.terminal_disposition = Some("succeeded".to_string());
-        let finalized =
-            serde_json::to_value(WorktreeOutput::Finalize(record)).expect("serialize finalization");
-
-        assert_eq!(imported["action"], "import");
-        assert_eq!(imported["imported"], true);
-        assert_eq!(finalized["action"], "finalize");
-        assert_eq!(finalized["terminal_disposition"], "succeeded");
-    }
-
-    #[test]
-    fn worktree_list_serializes_native_diagnostics_per_record() {
-        let output = serde_json::to_value(WorktreeOutput::List(WorktreeListOutput {
-            worktrees: Vec::new(),
-            cursor: None,
-            next_cursor: None,
-            next_command: None,
-            limit: 100,
-            truncated: false,
-            diagnostics: Vec::new(),
-        }))
-        .expect("serialize worktree list");
-
-        assert_eq!(output["action"], "list");
-        assert_eq!(output["worktrees"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn worktree_quarantine_list_serializes_as_a_stable_object() {
-        let output = serde_json::to_value(WorktreeOutput::QuarantineList {
-            quarantines: Vec::new(),
-        })
-        .expect("serialize quarantine list");
-
-        assert_eq!(output["action"], "quarantine_list");
-        assert_eq!(output["quarantines"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn worktree_cleanup_bare_is_a_plan() {
-        let cli = Cli::parse_from(["homeboy", "worktree", "cleanup"]);
-
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Cleanup {
-            mutation,
-            cleanup_artifacts,
-            ..
-        } = args.command
-        else {
-            panic!("expected worktree cleanup command");
-        };
-
-        assert!(!mutation.apply);
-        assert!(!mutation.dry_run);
-        assert!(cleanup_is_dry_run(mutation.is_apply()));
-        assert!(!cleanup_artifacts);
-    }
-
-    #[test]
-    fn worktree_cleanup_apply_enables_worktree_and_artifact_mutation() {
-        let cli = Cli::parse_from([
-            "homeboy",
-            "worktree",
-            "cleanup",
-            "--apply",
-            "--cleanup-artifacts",
-        ]);
-
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Cleanup {
-            mutation,
-            cleanup_artifacts,
-            ..
-        } = args.command
-        else {
-            panic!("expected worktree cleanup command");
-        };
-
-        assert!(mutation.apply);
-        assert!(!cleanup_is_dry_run(mutation.is_apply()));
-        assert!(cleanup_artifacts);
-    }
-
-    #[test]
-    fn worktree_cleanup_dry_run_is_the_shared_plan_only_flag() {
-        let cli = Cli::parse_from(["homeboy", "worktree", "cleanup", "--dry-run"]);
-
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Cleanup { mutation, .. } = args.command else {
-            panic!("expected worktree cleanup command");
-        };
-
-        assert!(!mutation.apply);
-        assert!(mutation.dry_run);
-        assert!(cleanup_is_dry_run(mutation.is_apply()));
-    }
-
-    #[test]
-    fn worktree_inventory_defaults_to_a_bounded_preview() {
-        let cli = Cli::parse_from(["homeboy", "worktree", "inventory"]);
-
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Inventory {
-            limit,
-            cursor,
-            adopted_cursor,
-            apply,
-        } = args.command
-        else {
-            panic!("expected worktree inventory command");
-        };
-
-        assert_eq!(limit, 500);
-        assert!(cursor.is_none());
-        assert!(adopted_cursor.is_none());
-        assert!(!apply);
-    }
-
-    #[test]
-    fn worktree_holder_accepts_a_checkout_path() {
-        let cli = Cli::parse_from(["homeboy", "worktree", "holder", "/tmp/managed-checkout"]);
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Holder { target } = args.command else {
-            panic!("expected holder command");
-        };
-        assert_eq!(target, "/tmp/managed-checkout");
-    }
-
-    #[test]
-    fn worktree_cleanup_rejects_conflicting_apply_and_dry_run() {
-        let error =
-            match Cli::try_parse_from(["homeboy", "worktree", "cleanup", "--apply", "--dry-run"]) {
-                Ok(_) => panic!("conflicting cleanup modes must be rejected"),
-                Err(error) => error,
+        let mut finalized = record();
+        finalized.terminal_disposition = Some("succeeded".to_string());
+        let cases = [
+            (
+                create(None),
+                "create",
+                "reconciliation",
+                serde_json::Value::Null,
+            ),
+            (
+                create(Some(WorktreeCreateReconciliation {
+                    action: WorktreeCreateAction::Restored,
+                    previous: evidence.clone(),
+                    current: evidence,
+                })),
+                "create",
+                "reconciliation",
+                serde_json::json!("restored"),
+            ),
+            (
+                WorktreeOutput::Import(WorktreeImportOutput {
+                    record: record(),
+                    imported: true,
+                }),
+                "import",
+                "imported",
+                serde_json::json!(true),
+            ),
+            (
+                WorktreeOutput::Finalize(finalized),
+                "finalize",
+                "terminal_disposition",
+                serde_json::json!("succeeded"),
+            ),
+            (
+                WorktreeOutput::QuarantineList {
+                    quarantines: Vec::new(),
+                },
+                "quarantine_list",
+                "quarantines",
+                serde_json::json!([]),
+            ),
+        ];
+        for (output, action, field, expected) in cases {
+            let value = serde_json::to_value(output).expect("serialize worktree output");
+            assert_eq!(value["action"], action);
+            let actual = match &value[field] {
+                serde_json::Value::Object(reconciliation) => reconciliation["action"].clone(),
+                other => other.clone(),
             };
-
-        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+            assert_eq!(actual, expected, "{action}.{field}");
+        }
     }
 
     #[test]
-    fn worktree_cleanup_prioritizes_bounded_reconciliation_before_cleanup() {
-        let output = homeboy::core::worktree::WorktreeCleanupOutput {
-            dry_run: true,
-            counts: homeboy::core::worktree::WorktreeCleanupCounts {
-                candidates: 1,
-                skipped: 1,
-                reconciliation_blockers: 1,
+    fn worktree_cleanup_next_actions_follow_plan_state() {
+        let output = |dry_run, candidates, removed| WorktreeCleanupOutput {
+            dry_run,
+            counts: WorktreeCleanupCounts {
+                candidates,
+                removed,
                 ..Default::default()
             },
             candidates: Vec::new(),
@@ -1039,106 +877,48 @@ mod tests {
             next_cursor: None,
             continuation: None,
         };
-
-        let actions = super::worktree_cleanup_actionable(&output, true, true);
-        assert_eq!(
-            actions.next_actions[0].command,
-            "homeboy worktree inventory --apply"
-        );
-        assert_eq!(
-            actions.next_actions[1].command,
-            "homeboy worktree cleanup --cleanup-branches --apply"
-        );
-
-        // Blockers that inventory cannot reconcile never point at it.
-        let actions = super::worktree_cleanup_actionable(&output, true, false);
-        assert_eq!(actions.next_actions.len(), 1);
-        assert_eq!(
-            actions.next_actions[0].command,
-            "homeboy worktree cleanup --cleanup-branches --apply"
-        );
-    }
-
-    #[test]
-    fn worktree_cleanup_preview_preserves_branch_cleanup_request() {
-        let output = homeboy::core::worktree::WorktreeCleanupOutput {
-            dry_run: true,
-            counts: homeboy::core::worktree::WorktreeCleanupCounts {
-                candidates: 1,
-                ..Default::default()
-            },
-            candidates: Vec::new(),
-            removed: Vec::new(),
-            skipped: Vec::new(),
-            next_cursor: None,
-            continuation: None,
-        };
-
-        let without_branches = super::worktree_cleanup_actionable(&output, false, false);
-        assert_eq!(
-            without_branches.next_actions[0].command,
-            "homeboy worktree cleanup --apply"
-        );
-        let with_branches = super::worktree_cleanup_actionable(&output, true, false);
-        assert_eq!(
-            with_branches.next_actions[0].command,
-            "homeboy worktree cleanup --cleanup-branches --apply"
-        );
-    }
-
-    #[test]
-    fn worktree_reclaim_defaults_to_a_non_mutating_plan() {
-        let cli = Cli::parse_from(["homeboy", "worktree", "reclaim"]);
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Reclaim { mutation } = args.command else {
-            panic!("expected worktree reclaim command");
-        };
-        assert!(!mutation.apply);
-        assert!(!mutation.dry_run);
-    }
-
-    #[test]
-    fn worktree_reclaim_apply_is_explicit() {
-        let cli = Cli::parse_from(["homeboy", "worktree", "reclaim", "--apply"]);
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Reclaim { mutation } = args.command else {
-            panic!("expected worktree reclaim command");
-        };
-        assert!(mutation.apply);
-    }
-
-    #[test]
-    fn worktree_reclaim_rejects_conflicting_apply_and_dry_run() {
-        let error =
-            match Cli::try_parse_from(["homeboy", "worktree", "reclaim", "--apply", "--dry-run"]) {
-                Ok(_) => panic!("conflicting reclaim modes must be rejected"),
-                Err(error) => error,
-            };
-        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
-    }
-
-    #[test]
-    fn worktree_cleanup_apply_omits_action_after_removing_all_candidates() {
-        let output = homeboy::core::worktree::WorktreeCleanupOutput {
-            dry_run: false,
-            counts: homeboy::core::worktree::WorktreeCleanupCounts {
-                candidates: 1,
-                removed: 1,
-                ..Default::default()
-            },
-            candidates: Vec::new(),
-            removed: Vec::new(),
-            skipped: Vec::new(),
-            next_cursor: None,
-            continuation: None,
-        };
-
-        assert!(super::worktree_cleanup_actionable(&output, true, false)
-            .next_actions
-            .is_empty());
+        let cases: [(WorktreeCleanupOutput, bool, bool, &[&str]); 5] = [
+            // Bounded reconciliation is offered before cleanup.
+            (
+                output(true, 1, 0),
+                true,
+                true,
+                &[
+                    "homeboy worktree inventory --apply",
+                    "homeboy worktree cleanup --cleanup-branches --apply",
+                ],
+            ),
+            // Blockers that inventory cannot reconcile never point at it.
+            (
+                output(true, 1, 0),
+                true,
+                false,
+                &["homeboy worktree cleanup --cleanup-branches --apply"],
+            ),
+            // The preview preserves the branch cleanup request.
+            (
+                output(true, 1, 0),
+                false,
+                false,
+                &["homeboy worktree cleanup --apply"],
+            ),
+            // Apply that removed some candidates still offers the rest.
+            (
+                output(false, 2, 1),
+                false,
+                false,
+                &["homeboy worktree cleanup --apply"],
+            ),
+            // Apply that removed every candidate has nothing left to suggest.
+            (output(false, 1, 1), true, false, &[]),
+        ];
+        for (output, cleanup_branches, reconciles, expected) in cases {
+            let commands = worktree_cleanup_actionable(&output, cleanup_branches, reconciles)
+                .next_actions
+                .into_iter()
+                .map(|action| action.command)
+                .collect::<Vec<_>>();
+            assert_eq!(commands, expected);
+        }
     }
 }

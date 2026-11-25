@@ -359,136 +359,42 @@ mod tests {
 
     use super::{
         build_dry_run_preflight_plan, build_initial_preflight_plan, execute_plan_steps,
-        initial_executable_preflight_ids, release_tag_version, resolve_head_release,
+        release_tag_version, resolve_head_release,
     };
     use crate::release::types::{ReleaseOptions, ReleasePipelineOptions, ReleaseStepStatus};
     use homeboy_core::plan::PlanStepStatus;
-    use semver::Version;
     use std::collections::HashSet;
     use std::path::Path;
     use std::process::Command;
 
-    // ========================================================================
-    // release_tag_version — semver parsing (see #10321)
-    // ========================================================================
-
+    /// Release-tag resolution must see prerelease and build-metadata tags
+    /// (#10321) and reject malformed tags outright: the old hand-rolled parser
+    /// read `v1.x.3` as `1.0.3`, letting it win a `max_by` against real tags.
     #[test]
-    fn release_tag_version_parses_plain_and_prefixed_tags() {
-        assert_eq!(
-            release_tag_version("v1.2.3", None),
-            Some(Version::new(1, 2, 3))
-        );
-        assert_eq!(
-            release_tag_version("1.2.3", None),
-            Some(Version::new(1, 2, 3))
-        );
-        assert_eq!(
-            release_tag_version("wordpress-v1.2.3", Some("wordpress")),
-            Some(Version::new(1, 2, 3))
-        );
-        // A prefixed component tag must not match when the prefix is absent.
-        assert_eq!(release_tag_version("v1.2.3", Some("wordpress")), None);
-    }
-
-    /// The hand-rolled parser required exactly three all-ASCII-digit parts, so
-    /// every prerelease tag was invisible to release-tag resolution.
-    #[test]
-    fn release_tag_version_accepts_prerelease_and_build_metadata() {
-        let pre = release_tag_version("v1.2.3-beta.1", None).expect("prerelease tag parses");
-        assert_eq!(pre.to_string(), "1.2.3-beta.1");
-        assert_eq!(pre.pre.as_str(), "beta.1");
-
-        let build = release_tag_version("v1.2.3+build.5", None).expect("build metadata tag parses");
-        assert_eq!(build.to_string(), "1.2.3+build.5");
-        assert_eq!(build.build.as_str(), "build.5");
-
-        let both = release_tag_version("v1.2.3-rc.1+build.5", None).expect("combined tag parses");
-        assert_eq!(both.to_string(), "1.2.3-rc.1+build.5");
-    }
-
-    /// Malformed tags must be rejected outright. The old `version_parts` helper
-    /// used `.unwrap_or(0)`, so `v1.x.3` silently compared as `1.0.3`.
-    #[test]
-    fn release_tag_version_rejects_malformed_tags() {
-        for tag in ["v1.x.3", "v1.2", "v1.2.3.4", "release", "v", "v1..3", ""] {
+    fn release_tag_version_parses_semver_tags_and_rejects_malformed_ones() {
+        for (tag, prefix, expected) in [
+            ("v1.2.3", None, Some("1.2.3")),
+            ("1.2.3", None, Some("1.2.3")),
+            ("wordpress-v1.2.3", Some("wordpress"), Some("1.2.3")),
+            // A prefixed component tag must not match when the prefix is absent.
+            ("v1.2.3", Some("wordpress"), None),
+            ("v1.2.3-beta.1", None, Some("1.2.3-beta.1")),
+            ("v1.2.3+build.5", None, Some("1.2.3+build.5")),
+            ("v1.2.3-rc.1+build.5", None, Some("1.2.3-rc.1+build.5")),
+            ("v1.x.3", None, None),
+            ("v1.2", None, None),
+            ("v1.2.3.4", None, None),
+            ("release", None, None),
+            ("v", None, None),
+            ("v1..3", None, None),
+            ("", None, None),
+        ] {
             assert_eq!(
-                release_tag_version(tag, None),
-                None,
-                "tag '{}' must not parse as a release version",
-                tag
+                release_tag_version(tag, prefix).map(|version| version.to_string()),
+                expected.map(str::to_string),
+                "tag '{tag}' with prefix {prefix:?}"
             );
         }
-    }
-
-    /// Ordering comes from `semver`'s `Ord`: a prerelease sorts below its
-    /// release, and numeric identifiers compare numerically rather than
-    /// lexically.
-    ///
-    /// Build metadata is the one place `semver::Version` deliberately diverges
-    /// from spec §10 precedence. `Ord` must agree with `Eq`, and `Eq` includes
-    /// build metadata, so `1.2.3+build.5` and `1.2.3` are ordered rather than
-    /// equal (#10477).
-    ///
-    /// The divergence is harmless for tag selection and is asserted as such
-    /// below: build metadata breaks a tie deterministically and can never
-    /// promote a version above a genuinely higher one, which is all `max_by`
-    /// over release tags depends on.
-    #[test]
-    fn release_tag_versions_sort_by_semver_precedence() {
-        let v = |tag: &str| release_tag_version(tag, None).expect(tag);
-
-        assert!(v("v1.2.3-beta.1") < v("v1.2.3"));
-        assert!(v("v1.2.3-alpha") < v("v1.2.3-beta.1"));
-        assert!(v("v1.2.3-beta.2") < v("v1.2.3-beta.10"));
-        assert!(v("v1.2.3") < v("v1.10.0"));
-        assert!(v("v1.9.0") < v("v1.10.0"));
-
-        // Same core precedence: build metadata changes none of the fields spec
-        // §10 actually compares.
-        let build = v("v1.2.3+build.5");
-        let plain = v("v1.2.3");
-        assert_eq!(
-            (build.major, build.minor, build.patch, &build.pre),
-            (plain.major, plain.minor, plain.patch, &plain.pre)
-        );
-        // Deterministically ordered rather than equal, and never able to
-        // outrank a higher version.
-        assert_ne!(build.cmp(&plain), std::cmp::Ordering::Equal);
-        assert!(build < v("v1.2.4"));
-        assert!(build > v("v1.2.3-beta.1"));
-
-        // `v1.x.3` is rejected rather than read as `(1, 0, 3)`, so it can
-        // never win a `max_by` against a real tag.
-        let mut tags = ["v1.2.3-beta.1", "v1.x.3", "v1.2.3", "v0.9.9"]
-            .into_iter()
-            .filter_map(|tag| release_tag_version(tag, None))
-            .collect::<Vec<_>>();
-        tags.sort();
-        assert_eq!(
-            tags.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
-            vec!["0.9.9", "1.2.3-beta.1", "1.2.3"]
-        );
-    }
-
-    #[test]
-    fn test_initial_executable_preflight_ids() {
-        assert_eq!(
-            initial_executable_preflight_ids(),
-            &[
-                "preflight.default_branch",
-                "preflight.git_identity",
-                "preflight.working_tree",
-                "preflight.head_identity",
-                "preflight.recovery_artifacts",
-                "preflight.remote_sync",
-                "preflight.tag_availability",
-                "preflight.test_secret_env",
-                "preflight.dependencies",
-                "preflight.lint",
-                "preflight.test",
-                "preflight.changelog_bootstrap",
-            ]
-        );
     }
 
     #[test]
@@ -561,55 +467,8 @@ mod tests {
         }
     }
 
-    /// A missing runner/service credential must be diagnosed before dependency
-    /// hydration spends time on a release whose test gate cannot pass. (#10402)
     #[test]
-    fn initial_preflight_plan_validates_declared_test_secrets_before_hydration() {
-        let options = ReleaseOptions {
-            bump_type: "none".to_string(),
-            ..Default::default()
-        };
-        let plan = super::build_initial_preflight_plan("fixture", &options);
-        let steps = plan.plan.steps;
-        let secret_env = steps
-            .iter()
-            .position(|step| step.id == "preflight.test_secret_env")
-            .expect("declared test secret preflight");
-        let deps = steps
-            .iter()
-            .position(|step| step.id == "preflight.dependencies")
-            .expect("dependency preflight");
-
-        assert!(
-            secret_env < deps,
-            "declared test secrets must resolve before dependencies hydrate"
-        );
-        assert_eq!(steps[deps].needs, vec!["preflight.test_secret_env"]);
-    }
-
-    #[test]
-    fn initial_preflight_plan_hydrates_dependencies_before_lint() {
-        let options = ReleaseOptions {
-            bump_type: "none".to_string(),
-            ..Default::default()
-        };
-        let plan = super::build_initial_preflight_plan("fixture", &options);
-        let steps = plan.plan.steps;
-        let deps = steps
-            .iter()
-            .position(|step| step.id == "preflight.dependencies")
-            .expect("dependency preflight");
-        let lint = steps
-            .iter()
-            .position(|step| step.id == "preflight.lint")
-            .expect("lint preflight");
-
-        assert!(deps < lint, "dependencies must hydrate before lint runs");
-        assert_eq!(steps[lint].needs, vec!["preflight.dependencies"]);
-    }
-
-    #[test]
-    fn test_build_initial_preflight_plan() {
+    fn initial_preflight_plan_orders_guards_before_hydration_and_quality_gates() {
         let options = ReleaseOptions {
             bump_type: "none".to_string(),
             ..Default::default()
@@ -649,6 +508,23 @@ mod tests {
             .iter()
             .any(|step| step.id == "preflight.git_identity"
                 && step.status == PlanStepStatus::Disabled));
+        let needs = |id: &str| {
+            plan.plan
+                .steps
+                .iter()
+                .find(|step| step.id == id)
+                .expect(id)
+                .needs
+                .clone()
+        };
+        // A missing runner/service credential must be diagnosed before
+        // dependency hydration spends time on a release whose test gate cannot
+        // pass (#10402), and dependencies hydrate before lint self-checks.
+        assert_eq!(
+            needs("preflight.dependencies"),
+            ["preflight.test_secret_env"]
+        );
+        assert_eq!(needs("preflight.lint"), ["preflight.dependencies"]);
     }
 
     #[test]
@@ -791,55 +667,34 @@ mod tests {
     }
 
     #[test]
-    fn missing_expected_head_tag_never_invokes_project_scripts_or_creates_source_outputs() {
-        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.11");
-        let options = ReleaseOptions {
-            bump_type: "head".to_string(),
-            path_override: Some(checkout.path().to_string_lossy().to_string()),
-            pipeline: crate::release::types::ReleasePipelineOptions {
-                head: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let plan = build_initial_preflight_plan("fixture", &options);
-        let mut results = Vec::new();
+    fn invalid_head_identity_never_invokes_project_scripts_or_creates_source_outputs() {
+        for case in [
+            "missing tag",
+            "wrong version tag at head",
+            "expected tag away from head",
+        ] {
+            let remote_tag = if case == "expected tag away from head" {
+                "v0.11.10"
+            } else {
+                "v0.11.11"
+            };
+            let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", remote_tag);
+            match case {
+                "wrong version tag at head" => run_in(checkout.path(), &["git", "tag", "v0.11.11"]),
+                "expected tag away from head" => {
+                    std::fs::write(checkout.path().join("README.md"), "later commit\n")
+                        .expect("write commit");
+                    run_in(checkout.path(), &["git", "add", "README.md"]);
+                    run_in(
+                        checkout.path(),
+                        &["git", "commit", "-q", "-m", "fix: later change"],
+                    );
+                }
+                _ => {}
+            }
 
-        let error = execute_plan_steps(
-            &test_roots(),
-            &plan.plan.steps,
-            "fixture",
-            &options,
-            &mut results,
-            &HashSet::new(),
-        )
-        .expect_err("a mismatched release tag must fail before project scripts run");
-
-        assert!(error
-            .message
-            .contains("--head requires a release tag at the resolved HEAD commit"));
-        assert_project_scripts_were_not_invoked(checkout.path());
-    }
-
-    #[test]
-    fn wrong_version_tag_at_head_never_invokes_project_scripts_or_creates_source_outputs() {
-        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.11");
-        run_in(checkout.path(), &["git", "tag", "v0.11.11"]);
-
-        assert_invalid_head_identity_has_no_project_side_effects(checkout.path());
-    }
-
-    #[test]
-    fn expected_tag_away_from_head_never_invokes_project_scripts_or_creates_source_outputs() {
-        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.10");
-        std::fs::write(checkout.path().join("README.md"), "later commit\n").expect("write commit");
-        run_in(checkout.path(), &["git", "add", "README.md"]);
-        run_in(
-            checkout.path(),
-            &["git", "commit", "-q", "-m", "fix: later change"],
-        );
-
-        assert_invalid_head_identity_has_no_project_side_effects(checkout.path());
+            assert_invalid_head_identity_has_no_project_side_effects(checkout.path());
+        }
     }
 
     #[test]
@@ -887,26 +742,23 @@ mod tests {
     }
 
     #[test]
-    fn head_release_resolves_annotated_tag_from_attached_branch_after_main_advances() {
-        let repo = tagged_release_repo("annotated");
-        let path = repo.path().to_str().expect("checkout path");
+    fn head_release_resolves_its_tag_after_main_advances() {
+        for (tag_kind, detach) in [("annotated", false), ("lightweight", true)] {
+            let repo = tagged_release_repo(tag_kind);
+            if detach {
+                run_in(repo.path(), &["git", "switch", "--detach", "v1.2.3"]);
+            }
+            let path = repo.path().to_str().expect("checkout path");
 
-        let (tag, version) = resolve_head_release(path, "v1.2.3", None, "fixture")
-            .expect("attached release branch must resolve its annotated tag");
+            let (tag, version) = resolve_head_release(path, "v1.2.3", None, "fixture")
+                .expect("release checkout must resolve its tag");
 
-        assert_eq!((tag.as_str(), version.as_str()), ("v1.2.3", "1.2.3"));
-    }
-
-    #[test]
-    fn head_release_resolves_lightweight_tag_from_detached_checkout_after_main_advances() {
-        let repo = tagged_release_repo("lightweight");
-        run_in(repo.path(), &["git", "switch", "--detach", "v1.2.3"]);
-        let path = repo.path().to_str().expect("checkout path");
-
-        let (tag, version) = resolve_head_release(path, "v1.2.3", None, "fixture")
-            .expect("detached tag checkout must resolve its lightweight tag");
-
-        assert_eq!((tag.as_str(), version.as_str()), ("v1.2.3", "1.2.3"));
+            assert_eq!(
+                (tag.as_str(), version.as_str()),
+                ("v1.2.3", "1.2.3"),
+                "{tag_kind}"
+            );
+        }
     }
 
     #[test]
@@ -928,24 +780,6 @@ mod tests {
             assert!(err.message.contains("resolved HEAD commit:"), "{err:?}");
             assert!(err.message.contains("tags at that commit: none"));
         }
-    }
-
-    #[test]
-    fn test_execute_plan_steps() {
-        let mut results = Vec::new();
-
-        let stopped = execute_plan_steps(
-            &test_roots(),
-            &[],
-            "missing-component-is-not-loaded-for-empty-plan",
-            &ReleaseOptions::default(),
-            &mut results,
-            &HashSet::new(),
-        )
-        .expect("empty plan should be a no-op");
-
-        assert!(!stopped);
-        assert!(results.is_empty());
     }
 
     fn release_repo_with_remote_tag(

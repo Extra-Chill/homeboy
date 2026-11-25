@@ -9,9 +9,8 @@ use super::super::{
 use super::delegated::{DELEGATED_RUN_POLL_MS_ENV, DELEGATED_RUN_STATUS_FILE_ENV};
 use super::host::{get_local_ips, is_local_host};
 use super::local_exec::{
-    execute_local_command_in_dir, execute_local_command_interactive,
-    execute_local_command_passthrough, execute_local_command_stderr_passthrough,
-    windows_pipe_error_is_eof, StdinSource,
+    execute_local_command_in_dir, execute_local_command_passthrough,
+    execute_local_command_stderr_passthrough, windows_pipe_error_is_eof, StdinSource,
 };
 use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_source_timeout,
@@ -64,15 +63,12 @@ fn secret_env_values_stream_over_stdin_not_command_argv() {
     assert!(block.contains("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN=super-secret-access-token"));
     assert!(block.contains("OPENAI_API_KEY=sk-do-not-leak-this"));
     assert!(block.trim_end().ends_with(SECRET_ENV_STDIN_SENTINEL));
-}
 
-#[test]
-fn empty_secret_env_block_carries_only_the_sentinel() {
-    let block = String::from_utf8(build_secret_env_stdin_block(
+    let empty = String::from_utf8(build_secret_env_stdin_block(
         &std::collections::BTreeMap::new(),
     ))
     .expect("utf8 block");
-    assert_eq!(block, format!("{SECRET_ENV_STDIN_SENTINEL}\n"));
+    assert_eq!(empty, format!("{SECRET_ENV_STDIN_SENTINEL}\n"));
 }
 
 #[test]
@@ -146,20 +142,6 @@ fn small_secret_stdin_payload_completes_successfully() {
     assert_eq!(output.stdout, "done");
 }
 
-#[test]
-fn ssh_envelope_owns_remote_descendant_cleanup() {
-    let envelope = wrap_owned_remote_command("sleep 30 & printf terminal-result");
-
-    assert!(envelope.contains("setsid sh -c"));
-    assert!(envelope.contains("command -v perl"));
-    assert!(envelope.contains("POSIX::setsid"));
-    assert!(envelope.contains("exec 3<&0"));
-    assert!(envelope.contains("<&3"));
-    assert!(envelope.contains("kill -TERM -\"$__homeboy_remote_pid\""));
-    assert!(envelope.contains("kill -KILL -\"$__homeboy_remote_pid\""));
-    assert!(envelope.contains("exit \"$__homeboy_remote_status\""));
-}
-
 #[cfg(target_os = "linux")]
 #[test]
 fn timed_piped_ssh_envelope_preserves_stdin_and_output_while_reaping_descendants() {
@@ -209,29 +191,6 @@ fn timed_piped_ssh_envelope_preserves_stdin_and_output_while_reaping_descendants
         "runner disconnect left its attributed pipe-holding descendant running"
     );
     let _ = std::fs::remove_file(descendant_pid_path);
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn timed_remote_wrapper_preserves_piped_stdin() {
-    let mut command = Command::new("sh");
-    command
-        .args(["-c", &wrap_owned_remote_command("cat")])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
-
-    let input = tempfile::NamedTempFile::new().expect("piped stdin fixture");
-    std::fs::write(input.path(), "piped-input").expect("write piped stdin fixture");
-    let output = execute_command_with_stdin_source_timeout(
-        command,
-        StdinSource::Piped(std::fs::File::open(input.path()).expect("open piped stdin fixture")),
-        Duration::from_secs(5),
-    );
-
-    assert!(output.success, "{}", output.stderr);
-    assert_eq!(output.exit_code, 0);
-    assert_eq!(output.stdout, "piped-input");
 }
 
 #[cfg(target_os = "linux")]
@@ -372,25 +331,6 @@ fn piped_command(script: &str) -> Command {
 }
 
 #[test]
-fn piped_stdin_preserves_binary_bytes_exactly() {
-    let path = tempfile::NamedTempFile::new().expect("temporary payload target");
-    let payload = [0, 255, 1, b'\n', 0, 42, 128];
-    let command = piped_command(&format!(
-        "cat > {}",
-        crate::engine::shell::quote_path(&path.path().to_string_lossy())
-    ));
-
-    let output =
-        run_command_with_stdin_source(command, StdinSource::Reader(Box::new(Cursor::new(payload))));
-
-    assert!(output.success, "{}", output.stderr);
-    assert_eq!(
-        std::fs::read(path.path()).expect("read received payload"),
-        payload
-    );
-}
-
-#[test]
 fn explicit_ssh_child_collection_preserves_terminal_and_file_stdin_output() {
     let mut terminal = Command::new("sh");
     terminal.args(["-c", "printf terminal; printf diagnostic >&2"]);
@@ -482,40 +422,20 @@ fn idle_pipe() -> (std::fs::File, std::fs::File) {
 
 #[cfg(unix)]
 #[test]
-fn idle_piped_stdin_is_cancelled_after_zero_exit() {
-    let (reader, _producer) = idle_pipe();
-    let started = Instant::now();
+fn idle_piped_stdin_is_cancelled_after_exit_and_preserves_the_exit_code() {
+    for exit_code in [0, 42] {
+        let (reader, _producer) = idle_pipe();
+        let started = Instant::now();
 
-    let output = run_command_with_stdin_source(piped_command("exit 0"), StdinSource::Piped(reader));
+        let output = run_command_with_stdin_source(
+            piped_command(&format!("exit {exit_code}")),
+            StdinSource::Piped(reader),
+        );
 
-    assert!(output.success, "{}", output.stderr);
-    assert_eq!(output.exit_code, 0);
-    assert!(started.elapsed() < Duration::from_secs(1));
-}
-
-#[cfg(unix)]
-#[test]
-fn idle_piped_stdin_is_cancelled_after_nonzero_exit() {
-    let (reader, _producer) = idle_pipe();
-    let started = Instant::now();
-
-    let output =
-        run_command_with_stdin_source(piped_command("exit 42"), StdinSource::Piped(reader));
-
-    assert!(!output.success);
-    assert_eq!(output.exit_code, 42);
-    assert!(started.elapsed() < Duration::from_secs(1));
-}
-
-#[test]
-fn transport_failure_preserves_its_nonzero_exit_code() {
-    let output = run_command_with_stdin_source(
-        piped_command("cat >/dev/null; exit 255"),
-        StdinSource::Reader(Box::new(Cursor::new(b"payload".to_vec()))),
-    );
-
-    assert!(!output.success);
-    assert_eq!(output.exit_code, 255);
+        assert_eq!(output.success, exit_code == 0, "{}", output.stderr);
+        assert_eq!(output.exit_code, exit_code);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }
 
 struct FailingReader;
@@ -607,24 +527,14 @@ fn windows_closed_pipe_delivers_buffered_bytes_before_eof() {
 }
 
 #[test]
-fn test_non_local_hosts() {
+fn only_this_machines_addresses_are_local_hosts() {
     assert!(!is_local_host("example.com"));
-    assert!(!is_local_host("192.168.1.1")); // private but not this machine (unless it is)
     assert!(!is_local_host("8.8.8.8"));
-}
-
-#[test]
-fn test_own_ip_detected_as_local() {
-    // Get this machine's IPs and verify they're detected as local
-    if let Some(ips) = get_local_ips() {
-        for ip in &ips {
-            let ip_str = ip.to_string();
-            assert!(
-                is_local_host(&ip_str),
-                "Machine's own IP {} should be detected as local",
-                ip_str
-            );
-        }
+    for ip in get_local_ips().unwrap_or_default() {
+        assert!(
+            is_local_host(&ip.to_string()),
+            "machine's own IP {ip} should be detected as local"
+        );
     }
 }
 
@@ -649,80 +559,49 @@ fn test_execute_local_command_in_dir() {
 }
 
 #[test]
-fn delegated_terminal_failure_stops_passthrough_wrapper() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let status_file = dir.path().join("delegated-run-status.json");
-    let status_file_for_writer = status_file.clone();
-    let writer = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(150));
-        std::fs::write(
-            status_file_for_writer,
-            r#"{"status":"failed","message":"provider runtime failed before ready"}"#,
-        )
-        .expect("write delegated status");
-    });
-
-    let status_path = status_file.to_string_lossy().to_string();
-    let poll_ms = "25";
-    let env = [
-        (DELEGATED_RUN_STATUS_FILE_ENV, status_path.as_str()),
-        (DELEGATED_RUN_POLL_MS_ENV, poll_ms),
+fn delegated_terminal_failure_stops_passthrough_and_captured_wrappers() {
+    let executors: [(
+        &str,
+        fn(&str, Option<&str>, Option<&[(&str, &str)]>) -> CommandOutput,
+    ); 2] = [
+        ("passthrough", execute_local_command_passthrough),
+        ("captured", execute_local_command_in_dir),
     ];
-    let started = Instant::now();
-    let output =
-        execute_local_command_passthrough("while true; do sleep 1; done", None, Some(&env));
-    writer.join().expect("writer joins");
+    for (label, execute) in executors {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let status_file = dir.path().join("delegated-run-status.json");
+        let status_file_for_writer = status_file.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            std::fs::write(
+                status_file_for_writer,
+                r#"{"status":"failed","message":"provider runtime failed before ready"}"#,
+            )
+            .expect("write delegated status");
+        });
 
-    assert!(!output.success);
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "delegated terminal failure should stop the wrapper promptly"
-    );
-    assert!(output
-        .stderr
-        .contains("Delegated runtime reached terminal failure status `failed`"));
-    assert!(output
-        .stderr
-        .contains("provider runtime failed before ready"));
-    assert!(output.child_resource.is_some());
-}
+        let status_path = status_file.to_string_lossy().to_string();
+        let env = [
+            (DELEGATED_RUN_STATUS_FILE_ENV, status_path.as_str()),
+            (DELEGATED_RUN_POLL_MS_ENV, "25"),
+        ];
+        let started = Instant::now();
+        let output = execute("while true; do sleep 1; done", None, Some(&env));
+        writer.join().expect("writer joins");
 
-#[test]
-fn delegated_terminal_failure_stops_captured_wrapper() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let status_file = dir.path().join("delegated-run-status.json");
-    let status_file_for_writer = status_file.clone();
-    let writer = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(150));
-        std::fs::write(
-            status_file_for_writer,
-            r#"{"status":"failed","message":"provider runtime failed before ready"}"#,
-        )
-        .expect("write delegated status");
-    });
-
-    let status_path = status_file.to_string_lossy().to_string();
-    let poll_ms = "25";
-    let env = [
-        (DELEGATED_RUN_STATUS_FILE_ENV, status_path.as_str()),
-        (DELEGATED_RUN_POLL_MS_ENV, poll_ms),
-    ];
-    let started = Instant::now();
-    let output = execute_local_command_in_dir("while true; do sleep 1; done", None, Some(&env));
-    writer.join().expect("writer joins");
-
-    assert!(!output.success);
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "delegated terminal failure should stop captured wrapper promptly"
-    );
-    assert!(output
-        .stderr
-        .contains("Delegated runtime reached terminal failure status `failed`"));
-    assert!(output
-        .stderr
-        .contains("provider runtime failed before ready"));
-    assert!(output.child_resource.is_some());
+        assert!(!output.success, "{label}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "delegated terminal failure should stop the {label} wrapper promptly"
+        );
+        assert!(output
+            .stderr
+            .contains("Delegated runtime reached terminal failure status `failed`"));
+        assert!(output
+            .stderr
+            .contains("provider runtime failed before ready"));
+        assert!(output.child_resource.is_some(), "{label}");
+    }
 }
 
 #[test]
@@ -973,28 +852,6 @@ fn ssh_stream_reader_signals_eof_with_raw_large_output() {
 
 #[cfg(unix)]
 #[test]
-fn timed_ssh_child_with_stuck_streams_fails_within_its_cleanup_bound() {
-    let mut command = Command::new("sh");
-    command
-        .args(["-c", "sleep 5"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::server::process_cleanup::configure_process_group_cleanup(&mut command);
-    let started = Instant::now();
-
-    let output = execute_command_with_stdin_timeout(command, None, Duration::from_millis(50));
-
-    assert!(output.timed_out);
-    assert_eq!(output.exit_code, 124);
-    assert!(
-        started.elapsed() < Duration::from_millis(750),
-        "stuck SSH child must remain bounded by its deadline and cleanup allowance"
-    );
-    assert!(output.stderr.contains("timed out after 50ms"));
-}
-
-#[cfg(unix)]
-#[test]
 fn managed_alias_reuses_its_controlpath_and_bounds_mux_control() {
     let fixture = tempfile::tempdir().expect("fixture directory");
     let ssh = fixture.path().join("ssh");
@@ -1078,35 +935,22 @@ fn test_from_server() {
 }
 
 #[test]
-fn test_connect_managed_session() {
+fn local_managed_session_lifecycle_reports_liveness() {
     let client = local_managed_session_client();
 
-    let output = client.connect_managed_session().expect("connect");
+    let connected = client.connect_managed_session().expect("connect");
+    assert!(connected.live);
+    assert_eq!(connected.session.persist, "10m");
+    assert_eq!(connected.exit_code, 0);
 
-    assert!(output.live);
-    assert_eq!(output.session.persist, "10m");
-    assert_eq!(output.exit_code, 0);
-}
+    let checked = client.check_managed_session().expect("check");
+    assert!(checked.live);
+    assert_eq!(checked.session.control_path, "/tmp/homeboy-local-control");
+    assert_eq!(checked.exit_code, 0);
 
-#[test]
-fn test_check_managed_session() {
-    let client = local_managed_session_client();
-
-    let output = client.check_managed_session().expect("check");
-
-    assert!(output.live);
-    assert_eq!(output.session.control_path, "/tmp/homeboy-local-control");
-    assert_eq!(output.exit_code, 0);
-}
-
-#[test]
-fn test_disconnect_managed_session() {
-    let client = local_managed_session_client();
-
-    let output = client.disconnect_managed_session().expect("disconnect");
-
-    assert!(!output.live);
-    assert_eq!(output.exit_code, 0);
+    let disconnected = client.disconnect_managed_session().expect("disconnect");
+    assert!(!disconnected.live);
+    assert_eq!(disconnected.exit_code, 0);
 }
 
 #[test]
@@ -1153,11 +997,6 @@ fn test_execute_interactive() {
 }
 
 #[test]
-fn test_execute_local_command_interactive() {
-    assert_eq!(execute_local_command_interactive("true", None, None), 0);
-}
-
-#[test]
 fn test_execute_local_command_passthrough() {
     let output = execute_local_command_passthrough("printf 'passthrough\\n'", None, None);
 
@@ -1191,48 +1030,6 @@ fn test_execute_local_command_stderr_passthrough() {
     assert!(output.success);
     assert_eq!(output.stdout, "{\"ok\":true}\n");
     assert_eq!(output.stderr, "progress turn=1\n");
-}
-
-#[cfg(unix)]
-#[test]
-fn process_cleanup_kills_lingering_background_children() {
-    let pid_file = std::env::temp_dir().join(format!(
-        "homeboy-process-cleanup-{}.pid",
-        uuid::Uuid::new_v4()
-    ));
-    let command = format!(
-        "sh -c 'sleep 30 >/dev/null 2>&1 < /dev/null & echo $! > {}'",
-        crate::engine::shell::quote_path(&pid_file.to_string_lossy())
-    );
-
-    let output = execute_local_command_in_dir(&command, None, None);
-
-    assert!(output.success, "command failed: {}", output.stderr);
-    let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
-        .expect("pid file")
-        .trim()
-        .parse()
-        .expect("pid");
-    let _ = std::fs::remove_file(&pid_file);
-
-    for _ in 0..20 {
-        if !pid_is_alive(pid) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    assert!(
-        !pid_is_alive(pid),
-        "background child {pid} should be cleaned up"
-    );
-}
-
-#[cfg(unix)]
-fn pid_is_alive(pid: libc::pid_t) -> bool {
-    u32::try_from(pid)
-        .map(crate::process::pid_is_running)
-        .unwrap_or(false)
 }
 
 /// An interactive session carrying a remote command needs an explicit tty

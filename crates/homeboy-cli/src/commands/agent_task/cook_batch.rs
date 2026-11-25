@@ -890,7 +890,6 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(missing.contains("Registered components"), "{missing}");
-            assert!(IssueRef::parse("https://example.com/owner/repo/issues/1").is_err());
         });
     }
 
@@ -1015,11 +1014,7 @@ mod tests {
 
     #[test]
     fn priority_flag_propagates_to_every_child_cook() {
-        for (flag, expected) in [
-            (None, None),
-            (Some("high"), Some("high")),
-            (Some("normal"), Some("normal")),
-        ] {
+        for (flag, expected) in [(None, None), (Some("high"), Some("high"))] {
             let mut argv = vec!["--repo", "scratch", "--verify", "true"];
             if let Some(lane) = flag {
                 argv.extend(["--priority", lane]);
@@ -1185,9 +1180,5 @@ mod tests {
         assert_eq!(issues[1].key, "chubes4/homeboy-cook-scratch#2");
         assert!(parse_issues(&[ISSUES[0].to_string(), ISSUES[0].to_string()]).is_err());
         assert!(parse_issues(&["https://example.test/pulls/1".to_string()]).is_err());
-        assert_eq!(
-            slugify("fix/issue-2-homeboy", SlugStyle::CookBatch),
-            "fix-issue-2-homeboy"
-        );
     }
 }

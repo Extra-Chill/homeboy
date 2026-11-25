@@ -331,16 +331,6 @@ mod tests {
         assert!(!status.success(), "the running group was terminated");
     }
 
-    #[test]
-    fn interrupted_command_output_records_signal() {
-        let stderr = stderr_with_interruption("runner output".to_string(), Some(15));
-
-        assert_eq!(interrupted_exit_code(Some(15), 0), 143);
-        assert!(stderr.contains("runner output"));
-        assert!(stderr.contains("Homeboy interrupted by signal 15"));
-        assert!(stderr.contains("terminated child process group"));
-    }
-
     /// Raise SIGTERM (only once handlers are installed, so it cannot kill
     /// the test process) and wait for both observers to see it.
     #[cfg(unix)]

@@ -2024,10 +2024,7 @@ mod tests {
             "wordpress-fixture".to_string(),
         ];
 
-        let command_prefix = lab_offload_command_prefix(
-            Path::new("/runner/workspaces/node-project"),
-            "/runner/bin/homeboy",
-        );
+        let command_prefix = lab_offload_command_prefix("/runner/bin/homeboy");
         let command = build_lab_offload_remote_command(
             &command_prefix.argv,
             &args,

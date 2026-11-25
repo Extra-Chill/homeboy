@@ -397,25 +397,20 @@ mod tests {
             .is_some_and(|reason| reason.contains("cargo-test")));
     }
 
+    /// A published success stays uncategorized even when an earlier gate in
+    /// its history failed.
     #[test]
-    fn succeeded_cook_has_no_reason_and_no_category() {
-        let verdict = cook_verdict(&resource(ControlPlaneState::Succeeded));
-        assert_eq!(verdict.state, "succeeded");
-        assert_eq!(verdict.reason, None);
-        assert_eq!(verdict.category(), None);
-        assert!(!verdict.is_stale());
-    }
-
-    #[test]
-    fn agent_task_published_success_is_not_categorized_by_historical_gate_failure() {
+    fn succeeded_cook_has_no_reason_or_category_despite_historical_gate_failure() {
         let mut run = resource(ControlPlaneState::Succeeded);
         run.gates.push(ControlPlaneStateSummary {
             id: Some("old-check".to_string()),
             state: "failed".to_string(),
         });
         let verdict = cook_verdict(&run);
+        assert_eq!(verdict.state, "succeeded");
         assert!(verdict.category().is_none());
         assert!(verdict.reason.is_none());
+        assert!(!verdict.is_stale());
     }
 
     #[test]

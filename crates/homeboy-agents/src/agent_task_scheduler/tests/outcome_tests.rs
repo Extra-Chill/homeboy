@@ -673,7 +673,7 @@ fn missing_only_review_form_is_deferred_to_the_cook_loop() {
         .iter()
         .any(|diagnostic| diagnostic.class == "agent_task.review_form_deferred_to_cook_loop"));
 
-    // A deferred outcome is no longer a provider failure, so the recoverable
+    // A deferred outcome is not a provider failure, so the recoverable
     // retention never parks its patch.
     AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(&mut outcome);
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);

@@ -44,6 +44,8 @@ fn a_traversal_shaped_remote_filename_is_sanitized_into_the_cache_directory() {
         "./../../etc/passwd",
         "a/b/c",
         "..\\..\\windows",
+        // `PathBuf::join` with an absolute path discards everything before it.
+        "/root/.ssh/authorized_keys",
     ] {
         let resolved = target(home.path(), "lab", "run-1", Some(hostile)).expect("resolve");
         assert_eq!(
@@ -64,25 +66,6 @@ fn a_traversal_shaped_remote_filename_is_sanitized_into_the_cache_directory() {
         assert!(!resolved.file_name.contains('\\'));
         assert_ne!(resolved.file_name, "..");
     }
-}
-
-#[test]
-fn an_absolute_remote_filename_cannot_replace_the_whole_path() {
-    // `PathBuf::join` with an absolute path discards everything before it, so
-    // an absolute `filename` was the shortest escape of all: no `..` needed.
-    let home = tempfile::tempdir().expect("home");
-    let resolved = target(
-        home.path(),
-        "lab",
-        "run-1",
-        Some("/root/.ssh/authorized_keys"),
-    )
-    .expect("resolve");
-
-    assert!(resolved
-        .file_path
-        .starts_with(home.path().join("runner").join("lab").join("run-1")));
-    assert_eq!(resolved.file_name, "root_.ssh_authorized_keys");
 }
 
 #[test]
@@ -146,6 +129,7 @@ fn the_file_name_falls_back_to_the_artifact_id_then_to_a_constant() {
     let fallback =
         resolve_runner_download_target(home.path(), "lab", "run-1", None, "___").expect("resolve");
     assert_eq!(fallback.file_name, FALLBACK_FILE_NAME);
+    assert_eq!(sanitize_artifact_file_name(""), FALLBACK_FILE_NAME);
 }
 
 #[test]
@@ -160,34 +144,6 @@ fn a_remote_can_never_name_the_marker_file() {
         sanitize_artifact_file_name(RUNNER_DOWNLOAD_MARKER_FILE),
         RUNNER_DOWNLOAD_MARKER_FILE
     );
-}
-
-#[test]
-fn sanitize_matches_the_pull_dir_helper_it_replaces() {
-    // Behaviour parity with the former `runs/handlers.rs::sanitize_artifact_filename`.
-    assert_eq!(
-        sanitize_artifact_file_name("finding-packets.json"),
-        "finding-packets.json"
-    );
-    assert_eq!(
-        sanitize_artifact_file_name("../../etc/passwd"),
-        "etc_passwd"
-    );
-    assert_eq!(sanitize_artifact_file_name("a/b\\c"), "a_b_c");
-    assert_eq!(sanitize_artifact_file_name("..."), FALLBACK_FILE_NAME);
-    assert_eq!(sanitize_artifact_file_name(""), FALLBACK_FILE_NAME);
-}
-
-#[test]
-fn an_untagged_cache_directory_reads_as_operator_owned() {
-    let home = tempfile::tempdir().expect("home");
-    let cache = home.path().join("runner").join("lab").join("run-1");
-    fs::create_dir_all(&cache).expect("cache");
-
-    let ownership = read_download_ownership(&cache);
-    assert_eq!(ownership, RunnerDownloadOwnership::Unrecorded);
-    assert!(!ownership.is_reclaimable());
-    assert!(ownership.retain_reason().is_some());
 }
 
 #[test]
@@ -247,10 +203,15 @@ fn the_reclaim_scope_moves_the_untagged_verdict_and_nothing_else() {
 }
 
 #[test]
-fn an_unparseable_marker_reads_as_operator_owned() {
+fn untagged_and_unparseable_markers_read_as_operator_owned() {
     let home = tempfile::tempdir().expect("home");
     let cache = home.path().join("runner").join("lab").join("run-1");
     fs::create_dir_all(&cache).expect("cache");
+
+    let ownership = read_download_ownership(&cache);
+    assert_eq!(ownership, RunnerDownloadOwnership::Unrecorded);
+    assert!(!ownership.is_reclaimable());
+
     fs::write(cache.join(RUNNER_DOWNLOAD_MARKER_FILE), b"{ not json").expect("marker");
 
     assert_eq!(
@@ -283,7 +244,7 @@ fn an_unparseable_marker_reads_as_operator_owned() {
 }
 
 #[test]
-fn only_an_explicit_internal_fetch_is_reclaimable() {
+fn only_an_explicit_internal_fetch_is_reclaimable_and_operator_ownership_sticks() {
     let home = tempfile::tempdir().expect("home");
     let cache = home.path().join("runner").join("lab").join("run-1");
     fs::create_dir_all(&cache).expect("cache");
@@ -296,22 +257,12 @@ fn only_an_explicit_internal_fetch_is_reclaimable() {
     assert!(read_download_ownership(&cache).is_reclaimable());
 
     record_download_intent(&cache, RunnerDownloadIntent::OperatorPull, "artifact-2");
-    assert!(!read_download_ownership(&cache).is_reclaimable());
-}
-
-#[test]
-fn operator_ownership_is_sticky_across_later_internal_fetches() {
-    let home = tempfile::tempdir().expect("home");
-    let cache = home.path().join("runner").join("lab").join("run-1");
-    fs::create_dir_all(&cache).expect("cache");
-
-    record_download_intent(&cache, RunnerDownloadIntent::OperatorPull, "artifact-1");
-    record_download_intent(&cache, RunnerDownloadIntent::InternalFetch, "artifact-2");
-
+    record_download_intent(&cache, RunnerDownloadIntent::InternalFetch, "artifact-3");
     assert_eq!(
         read_download_ownership(&cache),
         RunnerDownloadOwnership::Tagged(RunnerDownloadIntent::OperatorPull)
     );
+    assert!(!read_download_ownership(&cache).is_reclaimable());
 }
 
 #[test]

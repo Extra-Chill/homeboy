@@ -70,31 +70,23 @@ mod tests {
     }
 
     #[test]
-    fn post_deploy_smoke_is_noop_without_config() {
-        let project = Project {
-            id: "site".to_string(),
-            ..Project::default()
+    fn post_deploy_smoke_is_noop_when_missing_or_disabled() {
+        let disabled = SmokeCheckConfig {
+            enabled: false,
+            url: "https://example.test/".to_string(),
+            ..Default::default()
         };
-        let mut results = vec![deployed_result("plugin")];
+        for smoke_check in [None, Some(disabled)] {
+            let project = Project {
+                id: "site".to_string(),
+                smoke_check,
+                ..Project::default()
+            };
+            let mut results = vec![deployed_result("plugin")];
 
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
-        assert_eq!(results[0].status, "deployed");
-    }
-
-    #[test]
-    fn post_deploy_smoke_noop_when_disabled() {
-        let project = Project {
-            id: "site".to_string(),
-            smoke_check: Some(SmokeCheckConfig {
-                enabled: false,
-                url: "https://example.test/".to_string(),
-                ..Default::default()
-            }),
-            ..Project::default()
-        };
-        let mut results = vec![deployed_result("plugin")];
-
-        assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
+            assert_eq!(run_post_deploy_smoke(&project, &mut results), None);
+            assert!(results[0].error.is_none() && results[0].warnings.is_empty());
+        }
     }
 
     #[test]

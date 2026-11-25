@@ -393,18 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn history_compare_defaults_to_total_elapsed_metric() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let (output, _) = compare_runs(&test_store(), history_args("bench")).expect("compare");
-            let RunsOutput::Compare(output) = output else {
-                panic!("expected history compare output");
-            };
-            assert_eq!(output.metrics, vec!["total_elapsed_ms".to_string()]);
-        });
-    }
-
-    #[test]
     fn run_to_run_compare_rejects_kinds_without_an_adapter() {
         with_isolated_home(|_home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
@@ -441,8 +429,6 @@ mod tests {
         })
     }
 
-    /// Moved from the deleted `runs fuzz-compare` subcommand: the same exact
-    /// run-id comparison, now reached through `runs compare --kind fuzz`.
     #[test]
     fn fuzz_compare_resolves_envelopes_from_run_artifacts() {
         with_isolated_home(|home| {

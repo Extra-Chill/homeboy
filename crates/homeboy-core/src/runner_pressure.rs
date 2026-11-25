@@ -177,41 +177,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn psi_admission_recovers_despite_high_five_minute_pressure() {
-        let text = "some avg10=0.00 avg60=0.65 avg300=24.14 total=123456\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
-        let mut pressure = RunnerPressure {
-            cpu: parse_psi(text, "some "),
-            ..Default::default()
-        };
-        assert_eq!(pressure.cpu, Some(65));
-        pressure.apply_thresholds(&PressureThresholds::default());
-        assert!(pressure.admission_reason.is_none());
+    fn psi_parses_the_one_minute_window_and_unavailable_is_not_zero() {
+        let recovering = "some avg10=0.00 avg60=0.65 avg300=24.14 total=123456\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+        let full = "some avg10=30.00 avg60=20.00 avg300=10.00 total=123\nfull avg10=9.00 avg60=6.25 avg300=2.00 total=100\n";
+        for (text, kind, expected) in [
+            (recovering, "some ", Some(65)),
+            (full, "full ", Some(625)),
+            ("some avg300=20.00", "some ", None),
+            ("some avg60=invalid", "some ", None),
+            (full, "missing ", None),
+        ] {
+            assert_eq!(parse_psi(text, kind), expected, "{kind}{text}");
+        }
     }
 
     #[test]
-    fn psi_admission_refuses_high_one_minute_pressure() {
-        let text = "some avg10=0.00 avg60=12.50 avg300=4.14 total=123456\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
-        let mut pressure = RunnerPressure {
-            cpu: parse_psi(text, "some "),
-            ..Default::default()
-        };
-        assert_eq!(pressure.cpu, Some(1250));
-        pressure.apply_thresholds(&PressureThresholds::default());
-        assert_eq!(pressure.admission_reason.as_deref(), Some("pressure"));
-        pressure.apply_thresholds(&PressureThresholds {
+    fn admission_refuses_only_pressure_above_the_applied_thresholds() {
+        let defaults = PressureThresholds::default();
+        let relaxed_cpu = PressureThresholds {
             cpu: 20,
             ..Default::default()
-        });
-        assert!(pressure.admission_reason.is_none());
-    }
-
-    #[test]
-    fn psi_full_uses_the_same_window_and_unavailable_is_not_zero() {
-        let text = "some avg10=30.00 avg60=20.00 avg300=10.00 total=123\nfull avg10=9.00 avg60=6.25 avg300=2.00 total=100\n";
-        assert_eq!(parse_psi(text, "full "), Some(625));
-        assert_eq!(parse_psi("some avg300=20.00", "some "), None);
-        assert_eq!(parse_psi("some avg60=invalid", "some "), None);
-        assert_eq!(parse_psi(text, "missing "), None);
+        };
+        let pressure = |cpu, io, memory, load_fallback| RunnerPressure {
+            cpu,
+            io,
+            memory,
+            load_fallback,
+            ..Default::default()
+        };
+        for (mut sample, thresholds, refused) in [
+            (pressure(Some(65), None, None, false), &defaults, false),
+            (pressure(Some(1250), None, None, false), &defaults, true),
+            (pressure(Some(1250), None, None, false), &relaxed_cpu, false),
+            (pressure(None, Some(1001), None, false), &defaults, true),
+            (
+                pressure(Some(900), Some(900), Some(400), false),
+                &defaults,
+                false,
+            ),
+            (pressure(Some(10_000), None, None, true), &defaults, false),
+            (pressure(Some(10_001), None, None, true), &defaults, true),
+        ] {
+            sample.apply_thresholds(&defaults);
+            sample.apply_thresholds(thresholds);
+            assert_eq!(
+                sample.admission_reason.as_deref(),
+                refused.then_some("pressure"),
+                "{sample:?}"
+            );
+        }
     }
 
     #[test]
@@ -226,6 +240,8 @@ mod tests {
             sample(&PressureThresholds::default()),
             RunnerPressure::default()
         );
+        assert!(configured_sample(None).is_none());
+        assert!(configured_sample(Some("invalid")).is_none());
     }
 
     #[test]
@@ -251,73 +267,5 @@ mod tests {
         assert_eq!(output["pressure_thresholds"]["cpu"], 20);
         assert_eq!(output["pressure"]["cpu"], 1250);
         assert!(output["pressure"]["admission_reason"].is_null());
-    }
-
-    #[test]
-    fn fixed_pressure_sample_reapplies_thresholds() {
-        let mut pressure = configured_sample(Some(r#"{"cpu":2185}"#)).unwrap();
-        pressure.apply_thresholds(&PressureThresholds::default());
-        assert_eq!(pressure.admission_reason.as_deref(), Some("pressure"));
-        pressure.apply_thresholds(&PressureThresholds {
-            cpu: 30,
-            ..Default::default()
-        });
-        assert!(pressure.admission_reason.is_none());
-        let mut quiet = configured_sample(Some(r#"{}"#)).unwrap();
-        quiet.apply_thresholds(&PressureThresholds::default());
-        assert!(quiet.admission_reason.is_none());
-        assert!(configured_sample(None).is_none());
-        assert!(configured_sample(Some("invalid")).is_none());
-    }
-
-    #[test]
-    fn admission_refused_above_threshold() {
-        let mut pressure = RunnerPressure {
-            io: Some(1001),
-            ..Default::default()
-        };
-        pressure.apply_thresholds(&PressureThresholds::default());
-        assert_eq!(pressure.admission_reason.as_deref(), Some("pressure"));
-    }
-
-    #[test]
-    fn controller_thresholds_can_clear_a_default_pressure_verdict() {
-        let mut pressure = RunnerPressure {
-            cpu: Some(1100),
-            ..Default::default()
-        };
-        pressure.apply_thresholds(&PressureThresholds::default());
-        assert!(pressure.admission_reason.is_some());
-        pressure.apply_thresholds(&PressureThresholds {
-            cpu: 20,
-            ..Default::default()
-        });
-        assert!(pressure.admission_reason.is_none());
-    }
-
-    #[test]
-    fn load_fallback_uses_its_own_limit() {
-        let mut pressure = RunnerPressure {
-            cpu: Some(10_000),
-            load_fallback: true,
-            ..Default::default()
-        };
-        pressure.apply_thresholds(&PressureThresholds::default());
-        assert!(pressure.admission_reason.is_none());
-        pressure.cpu = Some(10_001);
-        pressure.apply_thresholds(&PressureThresholds::default());
-        assert!(pressure.admission_reason.is_some());
-    }
-
-    #[test]
-    fn admission_allowed_below_threshold() {
-        let mut pressure = RunnerPressure {
-            cpu: Some(900),
-            io: Some(900),
-            memory: Some(400),
-            ..Default::default()
-        };
-        pressure.apply_thresholds(&PressureThresholds::default());
-        assert!(pressure.admission_reason.is_none());
     }
 }

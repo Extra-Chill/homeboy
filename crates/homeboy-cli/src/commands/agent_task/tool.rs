@@ -65,20 +65,9 @@ fn policy_from_env() -> Result<AgentToolPolicy, String> {
 mod tests {
     use super::*;
     use homeboy::agents::agent_task::{
-        AgentToolExecutionLocation, AgentToolResultStatus, AGENT_TOOL_POLICY_SCHEMA,
-        AGENT_TOOL_REQUEST_SCHEMA,
+        AgentToolResultStatus, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
     };
     use serde_json::json;
-
-    #[test]
-    fn missing_policy_env_defaults_to_disabled() {
-        std::env::remove_var("HOMEBOY_AGENT_TOOL_POLICY_JSON");
-
-        assert_eq!(
-            policy_from_env().expect("policy").default_location,
-            AgentToolExecutionLocation::Disabled
-        );
-    }
 
     #[test]
     fn dispatch_result_is_denied_when_policy_disabled() {

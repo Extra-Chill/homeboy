@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_runtime_safe_diagnostics_without_parsing_runtime_state() {
+    fn classifies_diagnostics_and_inspection_commands_as_read_only() {
         for command in [
             args(&["homeboy", "--version"]),
             args(&["homeboy", "self", "identity"]),
@@ -175,14 +175,6 @@ mod tests {
                 "lab-offload",
             ]),
             args(&["homeboy", "agent-task", "retry", "--help"]),
-        ] {
-            assert_eq!(classify(&command), CommandCapability::ReadOnly);
-        }
-    }
-
-    #[test]
-    fn classifies_inspection_commands_as_read_only_during_active_controller_work() {
-        for command in [
             args(&["homeboy", "activity"]),
             args(&["homeboy", "activity", "list"]),
             args(&["homeboy", "activity", "list", "--limit", "1"]),
@@ -252,10 +244,7 @@ mod tests {
         assert!(requires_startup_reconciliation(&args(&[
             "homeboy", "runner", "exec", "lab", "--", "true",
         ])));
-    }
 
-    #[test]
-    fn other_mutations_do_not_own_runner_recovery() {
         let command = args(&[
             "homeboy",
             "daemon",
@@ -319,33 +308,7 @@ mod tests {
         // Only the first separator delimits; later ones belong to the remote.
         let nested = args(&["ssh", "host", "--", "sh", "-c", "--", "x"]);
         assert_eq!(homeboy_owned_args(&nested), &args(&["ssh", "host"])[..]);
-    }
-
-    #[test]
-    fn the_separator_primitive_names_only_the_first_boundary() {
-        assert_eq!(argv_separator_index(&args(&["runner", "status"])), None);
-        assert_eq!(
-            argv_separator_index(&args(&["ssh", "host", "--", "df"])),
-            Some(2)
-        );
-
-        // A nested separator is the forwarded command's own argument.
-        let nested = args(&["ssh", "host", "--", "sh", "-c", "--", "x"]);
         assert_eq!(argv_separator_index(&nested), Some(2));
-
-        // The two views agree by construction: the owned prefix ends exactly
-        // where the primitive says the boundary is.
-        for argv in [
-            args(&["runner", "status"]),
-            args(&["ssh", "host", "--", "df"]),
-            nested,
-        ] {
-            let owned = homeboy_owned_args(&argv);
-            assert_eq!(
-                owned.len(),
-                argv_separator_index(&argv).unwrap_or(argv.len())
-            );
-        }
     }
 }
 

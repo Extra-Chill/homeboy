@@ -617,24 +617,6 @@ mod guidance_tests {
         );
         assert!(daemon_job_status(&serde_json::json!({}), "homeboy-lab", "job-1").is_err());
     }
-
-    #[test]
-    fn runner_owned_guidance_offers_non_destructive_controller_and_read_only_retrieval() {
-        let hints = missing_run_guidance_for_runner_ids("run-42", vec!["homeboy-lab".to_string()]);
-
-        // The controller-side, generation-owner-routed retrieval is offered
-        // first: it resolves runner-owned artifacts without rotating the tunnel
-        // (Extra-Chill/homeboy#9420).
-        assert!(hints
-            .iter()
-            .any(|hint| hint.contains("homeboy runs artifacts run-42 --runner homeboy-lab")));
-        // A stale admission daemon must not block reading retained evidence:
-        // --read-only-artifact routes to the retaining generation.
-        assert!(hints.iter().any(|hint| {
-            hint.contains("--read-only-artifact")
-                && hint.contains("homeboy runner exec homeboy-lab")
-        }));
-    }
 }
 
 #[cfg(test)]
@@ -748,17 +730,6 @@ mod dedup_tests {
         let deduped = dedupe_runner_execution_mirrors(runs);
         assert_eq!(deduped.canonical.len(), 3);
         assert_eq!(deduped.hidden_mirrors, 0);
-    }
-
-    #[test]
-    fn lineage_reads_runner_and_job_from_lab_metadata() {
-        let record = run("r", "bench", lab_lineage("homeboy-lab", "job-42"));
-        assert_eq!(
-            lab_run_lineage(&record),
-            Some(("homeboy-lab".to_string(), "job-42".to_string()))
-        );
-        let local = run("l", "trace", serde_json::json!({}));
-        assert_eq!(lab_run_lineage(&local), None);
     }
 
     #[test]

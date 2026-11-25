@@ -244,37 +244,18 @@ mod tests {
     }
 
     #[test]
-    fn test_list_pins() {
-        let output = list_pins_output("site", &project());
+    fn list_pins_reports_display_name_falling_back_to_path() {
+        let items = list_pins_output("site", &project())
+            .items
+            .expect("list items");
 
-        assert_eq!(output.action, "list");
-        assert_eq!(output.project_id, "site");
-        let items = output.items.expect("list items");
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0].path, "wp-config.php");
+        assert_eq!(items[0].display_name, "Config");
         assert_eq!(items[1].display_name, "index.php");
     }
 
     #[test]
-    fn test_add_pin() {
-        let output = change_pin_output("add", "site", "wp-config.php");
-
-        assert_eq!(output.action, "add");
-        assert_eq!(output.added.expect("added pin").path, "wp-config.php");
-        assert!(output.removed.is_none());
-    }
-
-    #[test]
-    fn test_remove_pin() {
-        let output = change_pin_output("remove", "site", "index.php");
-
-        assert_eq!(output.action, "remove");
-        assert_eq!(output.removed.expect("removed pin").path, "index.php");
-        assert!(output.added.is_none());
-    }
-
-    #[test]
-    fn test_update_pin() {
+    fn update_pin_sets_label_and_failure_leaves_pins_intact() {
         let mut project = project();
 
         let updated = update_pin_in_project(
@@ -285,35 +266,13 @@ mod tests {
             },
         )
         .expect("update file pin");
-
-        assert_eq!(updated.path, "index.php");
-        assert_eq!(updated.label.as_deref(), Some("Front controller"));
+        assert_eq!(updated.display_name, "Front controller");
         assert_eq!(
             project.remote_files.pinned_files[1].label.as_deref(),
             Some("Front controller")
         );
-    }
 
-    #[test]
-    fn test_rename_pin() {
-        let mut project = project();
-
-        let updated = rename_pin_in_project(&mut project, "wp-config.php", "wp-config-local.php")
-            .expect("rename file pin");
-
-        assert_eq!(updated.path, "wp-config-local.php");
-        assert_eq!(updated.label.as_deref(), Some("Config"));
-        assert_eq!(
-            project.remote_files.pinned_files[0].path,
-            "wp-config-local.php"
-        );
-    }
-
-    #[test]
-    fn failed_update_leaves_previous_state_intact() {
-        let mut project = project();
         let before = project.clone();
-
         let err = update_pin_in_project(
             &mut project,
             "missing.php",
@@ -322,7 +281,6 @@ mod tests {
             },
         )
         .expect_err("missing pin update should fail");
-
         assert!(err.message.contains("file is not pinned"));
         assert_eq!(
             project.remote_files.pinned_files,
@@ -331,13 +289,21 @@ mod tests {
     }
 
     #[test]
-    fn failed_file_rename_leaves_previous_state_intact() {
+    fn rename_pin_keeps_label_and_rejects_duplicate_targets() {
         let mut project = project();
+
+        let updated = rename_pin_in_project(&mut project, "wp-config.php", "wp-config-local.php")
+            .expect("rename file pin");
+        assert_eq!(updated.path, "wp-config-local.php");
+        assert_eq!(updated.label.as_deref(), Some("Config"));
+        assert_eq!(
+            project.remote_files.pinned_files[0].path,
+            "wp-config-local.php"
+        );
+
         let before = project.clone();
-
-        let err = rename_pin_in_project(&mut project, "wp-config.php", "index.php")
+        let err = rename_pin_in_project(&mut project, "wp-config-local.php", "index.php")
             .expect_err("duplicate rename should fail");
-
         assert!(err.message.contains("File is already pinned"));
         assert_eq!(
             project.remote_files.pinned_files,

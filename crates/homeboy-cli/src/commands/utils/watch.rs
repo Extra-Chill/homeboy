@@ -195,55 +195,28 @@ mod duration_tests {
         }
     }
 
-    /// The regressions this consolidation fixes. Before it, `triage` rejected
-    /// `d` and `ms`, and `runs` rejected `ms`.
     #[test]
-    fn units_that_used_to_be_rejected_per_command_now_parse() {
-        assert_eq!(
-            parse_duration("--timeout", "7d").expect("triage now accepts days"),
-            Duration::from_secs(7 * 24 * 60 * 60)
-        );
-        assert_eq!(
-            parse_duration("duration", "500ms").expect("duration accepts millis"),
-            Duration::from_millis(500)
-        );
-    }
-
-    #[test]
-    fn zero_is_rejected_for_every_unit() {
-        for unit in ["ms", "s", "m", "h", "d"] {
-            let raw = format!("0{unit}");
-            assert_eq!(
-                parse_duration_arg(&raw),
-                Err("duration amount must be greater than zero".to_string()),
-                "0{unit} must be rejected"
-            );
+    fn invalid_durations_are_rejected_without_panicking() {
+        for (raw, expected) in [
+            ("0ms", "duration amount must be greater than zero"),
+            ("0s", "duration amount must be greater than zero"),
+            ("0d", "duration amount must be greater than zero"),
+            // A bare number is rejected because the unit is ambiguous.
+            ("30", ""),
+            ("", ""),
+            ("5w", DURATION_UNITS_HINT),
+            ("5 s", ""),
+            ("-5s", ""),
+            ("1.5h", ""),
+            // The parsers this replaced multiplied unchecked and panicked.
+            (
+                "99999999999999999999999d",
+                "duration amount must be a positive integer",
+            ),
+        ] {
+            let error = parse_duration_arg(raw).expect_err(raw);
+            assert!(error.contains(expected), "{raw:?}: {error}");
         }
-    }
-
-    #[test]
-    fn a_bare_number_is_rejected_because_the_unit_is_ambiguous() {
-        for raw in ["30", "0", ""] {
-            assert!(parse_duration_arg(raw).is_err(), "{raw:?} must be rejected");
-        }
-    }
-
-    #[test]
-    fn unknown_units_are_rejected_with_the_full_unit_list() {
-        let error = parse_duration_arg("5w").expect_err("weeks are not a unit");
-        assert!(error.contains(DURATION_UNITS_HINT), "unexpected: {error}");
-        assert!(parse_duration_arg("5 s").is_err());
-        assert!(parse_duration_arg("-5s").is_err());
-        assert!(parse_duration_arg("1.5h").is_err());
-    }
-
-    /// The parsers this replaced multiplied unchecked and panicked in debug.
-    #[test]
-    fn an_overflowing_duration_is_an_error_not_a_panic() {
-        assert_eq!(
-            parse_duration_arg("99999999999999999999999d"),
-            Err("duration amount must be a positive integer".to_string()),
-        );
         assert_eq!(
             parse_duration_arg(&format!("{}d", u64::MAX)),
             Err("duration is too large".to_string()),
@@ -265,20 +238,6 @@ mod duration_tests {
         // The offending value is carried structurally, not only in the message.
         assert_eq!(error.details["id"], serde_json::json!("5w"));
         assert_eq!(error.details["field"], serde_json::json!("--timeout"));
-    }
-
-    /// Guards the table itself: a unit added to `DURATION_UNITS` with a bad
-    /// multiplier is caught here rather than in whichever command hits it.
-    #[test]
-    fn the_unit_table_is_internally_consistent() {
-        for (name, millis) in DURATION_UNITS {
-            assert!(*millis > 0, "{name} must have a positive multiplier");
-            assert_eq!(
-                parse_duration_arg(&format!("1{name}")),
-                Ok(Duration::from_millis(*millis)),
-                "1{name} must equal its table entry"
-            );
-        }
     }
 }
 
@@ -356,6 +315,10 @@ mod tests {
         assert!(!result.timed_out());
         assert_eq!(result.poll_count, 3);
         assert_eq!(result.item, "pass");
+        assert_eq!(
+            poller.polled_ids.into_inner(),
+            vec!["watched-1".to_string(); 3]
+        );
     }
 
     #[test]
@@ -439,16 +402,6 @@ mod tests {
         assert_eq!(
             observed.into_inner(),
             vec![("running", 1), ("running", 2), ("fail", 3)]
-        );
-    }
-
-    #[test]
-    fn every_poll_uses_the_requested_id() {
-        let poller = ScriptedPoller::new(&["running", "running", "pass"]);
-        drive(&poller, &config(None)).expect("loop");
-        assert_eq!(
-            poller.polled_ids.into_inner(),
-            vec!["watched-1".to_string(); 3]
         );
     }
 

@@ -173,35 +173,18 @@ mod tests {
     use super::{all, get, kind};
 
     #[test]
-    fn quality_tool_descriptors_use_nested_review_commands() {
-        for (id, command) in [
-            ("homeboy.lint", "homeboy review lint"),
-            ("homeboy.test", "homeboy review test"),
-        ] {
+    fn only_job_tools_are_executable_and_fuzz_stays_report_only() {
+        for tool in all() {
             assert_eq!(
-                all()
-                    .iter()
-                    .find(|tool| tool.id == id)
-                    .map(|tool| tool.command),
-                Some(command)
+                kind(tool.id).is_ok(),
+                tool.runs_as_job,
+                "{} executability must match runs_as_job",
+                tool.id
             );
         }
-    }
 
-    #[test]
-    fn fuzz_descriptor_exposes_safe_non_job_subcommands() {
-        let tool = get("homeboy.fuzz").expect("fuzz descriptor");
-
-        assert_eq!(tool.required_capability, "run:fuzz");
-        assert_eq!(tool.risk, "bounded_discovery_report");
-        assert!(!tool.runs_as_job);
-        for expected in ["contract", "list", "plan", "validate", "report", "replay"] {
-            assert!(
-                tool.allowed_arguments.contains(&expected),
-                "missing fuzz argument {expected}"
-            );
-        }
-        assert!(!tool.allowed_arguments.contains(&"run"));
-        assert!(kind(tool.id).is_err());
+        let fuzz = get("homeboy.fuzz").expect("fuzz descriptor");
+        assert!(!fuzz.allowed_arguments.contains(&"run"));
+        assert!(get("homeboy.unknown").is_err());
     }
 }

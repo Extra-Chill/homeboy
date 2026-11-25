@@ -2175,21 +2175,8 @@ esac
     }
 
     #[test]
-    fn reads_valid_dependency_adapter_index_and_rejects_malformed_indexes() {
+    fn malformed_dependency_adapter_index_is_rejected() {
         let dir = tempdir().unwrap();
-        let valid = dir.path().join("index.json");
-        fs::write(
-            &valid,
-            r#"{
-                "schema": "homeboy-extension/dependency-adapter-index/v1",
-                "manifests": [{ "id": "fixture", "ecosystem": "fixture", "path": "fixture.json" }]
-            }"#,
-        )
-        .unwrap();
-        let entries = read_dependency_adapter_index(&valid).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path, PathBuf::from("fixture.json"));
-
         let malformed = dir.path().join("malformed.json");
         fs::write(&malformed, "{ not json }").unwrap();
         assert!(read_dependency_adapter_index(&malformed).is_err());

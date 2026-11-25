@@ -463,53 +463,36 @@ mod tests {
     }
 
     #[test]
-    fn find_prefix_match_version_suffix() {
-        let project = project_with_components(&["sample-plugin", "example-theme"]);
-        // Clone dir "sample-plugin-v0402-clean" → slugified inferred ID
-        assert_eq!(
-            find_prefix_match(&project, "sample-plugin-v0402-clean"),
-            Some("sample-plugin".to_string()),
-        );
-    }
-
-    #[test]
-    fn find_prefix_match_numeric_suffix() {
-        let project = project_with_components(&["sample-plugin"]);
-        // Clone dir "sample-plugin-0402" → numeric version suffix
-        assert_eq!(
-            find_prefix_match(&project, "sample-plugin-0402"),
-            Some("sample-plugin".to_string()),
-        );
-    }
-
-    #[test]
-    fn find_prefix_match_no_match_non_version_suffix() {
-        let project = project_with_components(&["sample-plugin"]);
-        // "sample-plugin-socials" is NOT a version suffix, it's a different component
-        assert_eq!(find_prefix_match(&project, "sample-plugin-socials"), None);
-    }
-
-    #[test]
-    fn find_prefix_match_exact_match_not_prefix() {
-        let project = project_with_components(&["sample-plugin"]);
-        // Exact match — not a prefix scenario
-        assert_eq!(find_prefix_match(&project, "sample-plugin"), None);
-    }
-
-    #[test]
-    fn find_prefix_match_prefers_longest() {
-        let project = project_with_components(&["data", "sample-plugin"]);
-        // Both "data" and "sample-plugin" are prefixes, but "sample-plugin" is longer
-        assert_eq!(
-            find_prefix_match(&project, "sample-plugin-v1"),
-            Some("sample-plugin".to_string()),
-        );
-    }
-
-    #[test]
-    fn find_prefix_match_no_components() {
-        let project = project_with_components(&[]);
-        assert_eq!(find_prefix_match(&project, "anything-v1"), None);
+    fn find_prefix_match_strips_only_version_suffixes_and_prefers_longest() {
+        for (components, inferred, expected) in [
+            // Clone dirs carrying a version suffix resolve to the base component.
+            (
+                &["sample-plugin", "example-theme"][..],
+                "sample-plugin-v0402-clean",
+                Some("sample-plugin"),
+            ),
+            (
+                &["sample-plugin"][..],
+                "sample-plugin-0402",
+                Some("sample-plugin"),
+            ),
+            // A non-version suffix names a different component.
+            (&["sample-plugin"][..], "sample-plugin-socials", None),
+            // An exact match is not a prefix match.
+            (&["sample-plugin"][..], "sample-plugin", None),
+            (
+                &["data", "sample-plugin"][..],
+                "sample-plugin-v1",
+                Some("sample-plugin"),
+            ),
+            (&[][..], "anything-v1", None),
+        ] {
+            assert_eq!(
+                find_prefix_match(&project_with_components(components), inferred).as_deref(),
+                expected,
+                "{inferred}"
+            );
+        }
     }
 
     #[test]

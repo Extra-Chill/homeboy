@@ -364,11 +364,9 @@ fn lab_git_workspace_sync_keeps_git_for_public_sources() {
     assert_eq!(mode, RunnerWorkspaceSyncMode::Git);
 }
 
-/// Regression for #16166: the sync-mode remote read used to fail as
-/// `git config --get remote.origin.url failed: ` — internal.unexpected, empty
-/// stderr, no directory — and was recorded as invalid input. A checkout that
-/// really has no origin must instead name the directory it checked and carry a
-/// fix hint.
+/// Regression for #16166: a checkout that has no origin must name the
+/// directory the sync-mode remote read checked and carry a fix hint, rather
+/// than surfacing an empty-stderr internal error.
 #[test]
 fn changed_since_git_sync_mode_names_checkout_without_origin() {
     let dir = tempfile::tempdir().expect("temp dir");

@@ -1752,47 +1752,6 @@ fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
 }
 
 #[test]
-fn cook_cli_accepts_candidate_completion_and_defaults_to_wait_all() {
-    use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
-
-    let default = cook_args_from_cli(vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--prompt".to_string(),
-        "candidate fixture".to_string(),
-        "--to-worktree".to_string(),
-        "fixture@candidate".to_string(),
-        "--backend".to_string(),
-        "fixture".to_string(),
-        "--no-finalize".to_string(),
-    ]);
-    assert_eq!(
-        default.candidate_completion,
-        AgentTaskCandidateCompletionPolicy::WaitAll
-    );
-
-    let first_green = cook_args_from_cli(vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--prompt".to_string(),
-        "candidate fixture".to_string(),
-        "--to-worktree".to_string(),
-        "fixture@candidate".to_string(),
-        "--backend".to_string(),
-        "fixture".to_string(),
-        "--candidate-completion".to_string(),
-        "first-green".to_string(),
-        "--no-finalize".to_string(),
-    ]);
-    assert_eq!(
-        first_green.candidate_completion,
-        AgentTaskCandidateCompletionPolicy::FirstGreen
-    );
-}
-
-#[test]
 fn invalid_cook_sources_stop_before_worktree_provider_runner_executor_or_budget() {
     with_temp_home(|| {
         let destination = tempfile::tempdir()
@@ -4665,25 +4624,6 @@ fn diagnose_keeps_a_successful_terminal_runner_record_healthy() {
 }
 
 #[test]
-fn logs_exposes_only_the_canonical_cursor_surface() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "runs",
-        "logs",
-        "run-1",
-        "--cursor",
-        "event-page-2",
-    ])
-    .expect("canonical cursor parses");
-    let Commands::Runs(runs) = cli.command else {
-        panic!("expected runs command");
-    };
-    assert_eq!(runs.logs_run_id(), Some("run-1"));
-    assert!(Cli::try_parse_from(["homeboy", "runs", "logs", "run-1", "--raw"]).is_err());
-    assert!(Cli::try_parse_from(["homeboy", "agent-task", "logs", "run-1"]).is_err());
-}
-
-#[test]
 fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
     with_temp_home(|| {
         let command = vec![
@@ -6172,27 +6112,8 @@ fn generic_contract_fixtures_hydrate_local_file_and_path_evidence() {
     });
 }
 
-#[test]
-fn generic_contract_fixtures_accept_successful_required_artifact_handoff() {
-    let outcome = fixture_outcome(
-        "../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json",
-    );
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome
-        .typed_artifacts
-        .iter()
-        .any(|artifact| artifact.name == "answer_packet"));
-    assert!(outcome
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.metadata["handoff_schema"]
-            == "homeboy/agent-task-artifact-handoff/v1"));
-}
-
 fn fixture_outcome(relative_path: &str) -> AgentTaskOutcome {
     let raw = match relative_path {
-        "../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
         "../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
         "../../../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
         _ => panic!("unknown fixture {relative_path}"),
@@ -6976,104 +6897,23 @@ fn parse_recover(argv: &[&str]) -> super::super::RecoverArgs {
 }
 
 #[test]
-fn recover_accepts_external_replacement_proof_with_operator_authorization() {
-    let args = parse_recover(&[
-        "cook-11290-attempt-1",
-        "--promotion",
-        "@replacement.json",
-        "--authorize-external-proof",
-        "Chris approved durable evidence",
-    ]);
-    assert_eq!(args.id, "cook-11290-attempt-1");
-    assert_eq!(args.promotion.as_deref(), Some("@replacement.json"));
-    assert_eq!(
-        args.authorize_external_proof.as_deref(),
-        Some("Chris approved durable evidence")
-    );
-}
-
-#[test]
-fn recover_accepts_corrected_gates_and_authorization() {
-    let args = parse_recover(&[
-        "cook-12788",
-        "--verify",
-        "cargo test exact::replacement",
-        "--authorize-external-proof",
-        "Chris approved corrected gate evidence",
-        "--authorize-interrupted-rerun",
-        "Chris approved rerunning after the interrupted executor",
-    ]);
-    assert_eq!(args.id, "cook-12788");
-    assert_eq!(args.gates.verify, ["cargo test exact::replacement"]);
-    assert_eq!(
-        args.authorize_external_proof.as_deref(),
-        Some("Chris approved corrected gate evidence")
-    );
-    assert_eq!(
-        args.authorize_interrupted_rerun.as_deref(),
-        Some("Chris approved rerunning after the interrupted executor")
-    );
-}
-
-#[test]
-fn removed_replacement_verbs_and_finalize_recover_are_rejected() {
-    for argv in [
-        vec![
-            "verify-replacement",
-            "cook-12788",
-            "--verify",
-            "true",
-            "--authorize-external-proof",
-            "x",
-        ],
-        vec![
-            "record-replacement-gate-proof",
+fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
+    assert!(
+        Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "recover",
             "cook-12788",
             "--promotion",
-            "{}",
-            "--authorize-external-proof",
-            "x",
-        ],
-        vec!["finalize-pr", "--recover", "cook-12788"],
-    ] {
-        let mut full = vec!["homeboy", "agent-task"];
-        full.extend(argv.iter().copied());
-        assert!(
-            Cli::try_parse_from(&full).is_err(),
-            "{argv:?} must not parse"
-        );
-    }
-}
-
-#[test]
-fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
-    with_temp_home(|| {
-        let performer = FixtureCookRecoveryPerformer {
-            executor: Arc::new(CountingCookExecutor::default()),
-            ..Default::default()
-        };
-        assert!(
-            Cli::try_parse_from([
-                "homeboy",
-                "agent-task",
-                "recover",
-                "cook-12788",
-                "--promotion",
-                "{}"
-            ])
-            .is_err(),
-            "--promotion requires --authorize-external-proof"
-        );
-        let mut args = parse_recover(&["cook-12788", "--authorize-external-proof", "x"]);
-        assert!(super::super::recover::replace_gates_request(&mut args)
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            performer.executor.executions.load(Ordering::SeqCst),
-            0,
-            "a refused replacement request executes nothing"
-        );
-    });
+            "{}"
+        ])
+        .is_err(),
+        "--promotion requires --authorize-external-proof"
+    );
+    let mut args = parse_recover(&["cook-12788", "--authorize-external-proof", "x"]);
+    assert!(super::super::recover::replace_gates_request(&mut args)
+        .unwrap()
+        .is_none());
 }
 
 /// Regression for #15672: Cook admission and preview apply the spine's

@@ -59,18 +59,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_record_is_residue_only_when_gone_and_unclaimed() {
-        assert!(RecordLiveness::new(true, true).live());
-        assert!(RecordLiveness::new(true, false).live());
-        assert!(RecordLiveness::new(false, true).live());
-        assert!(RecordLiveness::new(false, false).residue());
-        assert!(!RecordLiveness::new(false, false).live());
-    }
+    fn records_are_residue_only_when_gone_and_unclaimed() {
+        let records = [
+            (1, true, true),
+            (2, true, false),
+            (3, false, true),
+            (4, false, false),
+        ];
+        let liveness = |record: &(i32, bool, bool)| RecordLiveness::new(record.1, record.2);
 
-    #[test]
-    fn live_only_excludes_residue() {
-        let records = [1, 2, 3];
-        let kept = live_only(records, |record| RecordLiveness::new(*record != 2, false));
-        assert_eq!(kept, [1, 3]);
+        let live: Vec<i32> = live_only(records, liveness)
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        let residue: Vec<i32> = residue_only(records, liveness)
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+
+        assert_eq!(live, [1, 2, 3]);
+        assert_eq!(residue, [4]);
     }
 }

@@ -603,100 +603,39 @@ mod tests {
     }
 
     #[test]
-    fn append_missing_run_summaries_adds_active_runner_jobs_without_duplicates() {
-        let mut runs = vec![RunSummary {
-            id: "durable-run-1".to_string(),
-            kind: "bench".to_string(),
-            status: "running".to_string(),
-            started_at: "2026-07-06T00:00:00Z".to_string(),
-            finished_at: None,
-            component_id: Some("homeboy".to_string()),
-            rig_id: None,
-            git_sha: None,
-            command: Some("homeboy bench homeboy".to_string()),
-            cwd: None,
-            status_note: None,
-            artifact_index: None,
-            sub_runs: Vec::new(),
-        }];
-        let jobs = vec![
-            RunSummary {
-                id: "durable-run-1".to_string(),
-                kind: "runner.exec".to_string(),
-                status: "running".to_string(),
-                started_at: "2026-07-06T00:00:00Z".to_string(),
-                finished_at: None,
-                component_id: None,
-                rig_id: None,
-                git_sha: None,
-                command: Some("duplicate active job".to_string()),
-                cwd: None,
-                status_note: Some("active runner job".to_string()),
-                artifact_index: None,
-                sub_runs: Vec::new(),
-            },
-            RunSummary {
-                id: "runner-job-job-2".to_string(),
-                kind: "runner.exec".to_string(),
-                status: "running".to_string(),
-                started_at: "2026-07-06T00:00:01Z".to_string(),
-                finished_at: None,
-                component_id: None,
-                rig_id: None,
-                git_sha: None,
-                command: Some("new active job".to_string()),
-                cwd: Some("/srv/homeboy".to_string()),
-                status_note: Some("active runner job".to_string()),
-                artifact_index: None,
-                sub_runs: Vec::new(),
-            },
-        ];
+    fn append_missing_run_summaries_adds_new_jobs_without_duplicates_within_limit() {
+        let persisted = || {
+            vec![summary(
+                "durable-run-1",
+                "homeboy bench",
+                "2026-07-06T00:00:00Z",
+            )]
+        };
+        let jobs = || {
+            vec![
+                summary(
+                    "durable-run-1",
+                    "duplicate active job",
+                    "2026-07-06T00:00:00Z",
+                ),
+                RunSummary {
+                    cwd: Some("/srv/homeboy".to_string()),
+                    ..summary("runner-job-job-2", "new active job", "2026-07-06T00:00:01Z")
+                },
+            ]
+        };
 
-        append_missing_run_summaries(&mut runs, jobs, 20);
-
+        let mut runs = persisted();
+        append_missing_run_summaries(&mut runs, jobs(), 20);
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].id, "durable-run-1");
+        assert_eq!(runs[0].command.as_deref(), Some("homeboy bench"));
         assert_eq!(runs[1].id, "runner-job-job-2");
         assert_eq!(runs[1].cwd.as_deref(), Some("/srv/homeboy"));
-    }
 
-    #[test]
-    fn append_missing_run_summaries_honors_limit() {
-        let mut runs = vec![RunSummary {
-            id: "persisted-run".to_string(),
-            kind: "bench".to_string(),
-            status: "running".to_string(),
-            started_at: "2026-07-06T00:00:00Z".to_string(),
-            finished_at: None,
-            component_id: Some("homeboy".to_string()),
-            rig_id: None,
-            git_sha: None,
-            command: Some("homeboy bench homeboy".to_string()),
-            cwd: None,
-            status_note: None,
-            artifact_index: None,
-            sub_runs: Vec::new(),
-        }];
-        let jobs = vec![RunSummary {
-            id: "runner-job-job-2".to_string(),
-            kind: "bench".to_string(),
-            status: "queued".to_string(),
-            started_at: "2026-07-06T00:00:01Z".to_string(),
-            finished_at: None,
-            component_id: None,
-            rig_id: None,
-            git_sha: None,
-            command: Some("queued remote bench job".to_string()),
-            cwd: Some("/srv/homeboy".to_string()),
-            status_note: Some("active runner job".to_string()),
-            artifact_index: None,
-            sub_runs: Vec::new(),
-        }];
-
-        append_missing_run_summaries(&mut runs, jobs, 1);
-
+        let mut runs = persisted();
+        append_missing_run_summaries(&mut runs, jobs(), 1);
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].id, "persisted-run");
+        assert_eq!(runs[0].id, "durable-run-1");
     }
 
     #[test]
@@ -769,30 +708,29 @@ mod tests {
     }
 
     #[test]
-    fn remote_id_filter_excludes_non_matching_runs() {
+    fn remote_id_filter_matches_ids_and_command_embedded_run_labels() {
         // #9903: `--id` must filter remote runs, not be silently dropped.
-        let mut runs = vec![
+        let runs = vec![
             summary("run-alpha", "homeboy run alpha", "2026-07-22T00:00:00Z"),
             summary("run-beta", "homeboy run beta", "2026-07-22T00:00:00Z"),
+            summary(
+                "opaque-daemon-id",
+                "homeboy agent-task run --record-run-id homeboy-9899-fixture",
+                "2026-07-22T00:00:00Z",
+            ),
         ];
-        let mut args = list_args();
-        args.id = Some("beta".to_string());
-        apply_remote_list_filters(&mut runs, &args).expect("filter");
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].id, "run-beta");
-    }
-
-    #[test]
-    fn remote_id_filter_removes_all_when_no_match() {
-        let mut runs = vec![summary(
-            "run-alpha",
-            "homeboy run alpha",
-            "2026-07-22T00:00:00Z",
-        )];
-        let mut args = list_args();
-        args.id = Some("definitely-no-such-run-9899".to_string());
-        apply_remote_list_filters(&mut runs, &args).expect("filter");
-        assert!(runs.is_empty());
+        for (id, expected) in [
+            ("beta", vec!["run-beta"]),
+            ("homeboy-9899", vec!["opaque-daemon-id"]),
+            ("definitely-no-such-run-9899", vec![]),
+        ] {
+            let mut filtered = runs.clone();
+            let mut args = list_args();
+            args.id = Some(id.to_string());
+            apply_remote_list_filters(&mut filtered, &args).expect("filter");
+            let ids: Vec<_> = filtered.iter().map(|run| run.id.as_str()).collect();
+            assert_eq!(ids, expected, "{id}");
+        }
     }
 
     #[test]
@@ -828,18 +766,5 @@ mod tests {
         args.workspace = Some("/runner/work/wp-build".to_string());
         apply_remote_list_filters(&mut runs, &args).expect("workspace filter");
         assert!(runs.is_empty());
-    }
-
-    #[test]
-    fn remote_id_filter_matches_command_embedded_run_label() {
-        let mut runs = vec![summary(
-            "opaque-daemon-id",
-            "homeboy agent-task run --record-run-id homeboy-9899-fixture",
-            "2026-07-22T00:00:00Z",
-        )];
-        let mut args = list_args();
-        args.id = Some("homeboy-9899".to_string());
-        apply_remote_list_filters(&mut runs, &args).expect("label filter");
-        assert_eq!(runs.len(), 1);
     }
 }

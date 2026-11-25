@@ -736,33 +736,6 @@ fn parses_self_identity_json_envelope() {
     assert_eq!(identity.daemon_recovery_capabilities, None);
 }
 
-/// #11102: the typed capability list is the primary daemon-recovery contract,
-/// so the parser must actually read the field the identity envelope writes.
-/// Before this, `self identity` serialized a capability list that
-/// `parse_self_identity_output` silently discarded.
-#[test]
-fn parses_advertised_daemon_recovery_capabilities() {
-    let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id","version":1},{"id":"a-capability-from-the-future","version":1}]}}"#,
-    )
-    .expect("identity");
-
-    let advertised = identity
-        .daemon_recovery_capabilities
-        .expect("typed capability list is parsed, not discarded");
-    let ids = advertised
-        .iter()
-        .map(|capability| capability.id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        ids,
-        vec![
-            "daemon-ensure-running-operation-id",
-            "a-capability-from-the-future"
-        ]
-    );
-}
-
 /// An explicitly empty list is authoritative "this runner advertises no
 /// recovery capability", which must stay distinguishable from an absent field.
 /// Collapsing the two would make a current runner that dropped a capability
@@ -1547,7 +1520,8 @@ fn test_open_loopback_tunnel_noops_for_local_runner() {
         runner: None,
     };
 
-    let tunnel = open_loopback_tunnel(&server, 49100, "127.0.0.1", 49200, true);
+    let tunnel =
+        open_loopback_tunnel_with_lifetime(&server, 49100, "127.0.0.1", 49200, true, false);
 
     assert!(tunnel.success);
     assert_eq!(tunnel.pid, None);

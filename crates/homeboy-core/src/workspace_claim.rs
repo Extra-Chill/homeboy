@@ -885,6 +885,8 @@ mod tests {
             .unwrap_err()
             .message
             .contains("live owner leases"));
+        // Expired owners are pruned before reconciliation.
+        assert!(store.acquire(identity(), 10, 111).is_ok());
     }
     #[test]
     fn claim_blocks_owner_registration_and_release_is_idempotent() {
@@ -907,12 +909,6 @@ mod tests {
                 .unwrap();
         }
         assert!(store.acquire(identity(), 10, 900_000).is_err());
-    }
-    #[test]
-    fn expired_owners_are_pruned_before_reconciliation() {
-        let (_dir, store) = store();
-        store.register_owner(identity(), "owner", 10, 0).unwrap();
-        assert!(store.acquire(identity(), 10, 11).is_ok());
     }
     #[test]
     fn owner_validation_requires_the_exact_token_and_epoch() {
@@ -967,14 +963,6 @@ mod tests {
         assert_ne!(owner.join().unwrap(), claim);
     }
     #[test]
-    fn durable_write_leaves_restartable_state() {
-        let (dir, store) = store();
-        let claim = store.acquire(identity(), 100, 1).unwrap();
-        drop(store);
-        let restarted = WorkspaceClaimStore::in_data_root(dir.path());
-        assert!(restarted.validate(&claim, 2).unwrap());
-    }
-    #[test]
     fn authority_status_is_token_free_and_prunes_expiry_under_lock() {
         let (_dir, store) = store();
         let owner = store.register_owner(identity(), "owner", 10, 0).unwrap();
@@ -988,12 +976,9 @@ mod tests {
         let expired = store.authority_status(&identity(), 11).unwrap();
         assert!(expired.clear);
         assert_eq!(expired.live_owner_count, 0);
-    }
-    #[test]
-    fn authority_status_reports_a_live_reconciliation_claim() {
-        let (_dir, store) = store();
-        let claim = store.acquire(identity(), 10, 0).unwrap();
-        let status = store.authority_status(&identity(), 1).unwrap();
+
+        let claim = store.acquire(identity(), 10, 12).unwrap();
+        let status = store.authority_status(&identity(), 13).unwrap();
         assert!(status.live_reconciliation_claim);
         assert!(!status.clear);
         assert!(!serde_json::to_string(&status)

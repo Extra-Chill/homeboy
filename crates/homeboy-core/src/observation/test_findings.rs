@@ -69,11 +69,6 @@ fn homeboy_finding_from_failure_cluster(cluster: &FailureCluster) -> HomeboyFind
     normalized
 }
 
-#[cfg(test)]
-fn finding_record_from_failure_cluster(run_id: &str, cluster: &FailureCluster) -> NewFindingRecord {
-    NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_failure_cluster(cluster))
-}
-
 pub fn finding_records_from_failure_clusters(
     run_id: &str,
     clusters: &[FailureCluster],
@@ -186,7 +181,9 @@ mod tests {
             suggested_fix: Some("Add render()".to_string()),
         };
 
-        let record = finding_record_from_failure_cluster("run-1", &cluster);
+        let records = finding_records_from_failure_clusters("run-1", &[cluster]);
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
 
         assert_eq!(record.tool, "test");
         assert_eq!(record.rule.as_deref(), Some("cluster:missing_method"));

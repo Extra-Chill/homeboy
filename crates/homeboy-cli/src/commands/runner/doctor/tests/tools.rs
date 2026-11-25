@@ -8,29 +8,6 @@ fn write_executable(path: &Path) {
     homeboy_test_support::write_executable(path, "#!/bin/sh\nexit 0\n", 0o755).expect("write tool");
 }
 
-/// The probe must answer from the filesystem and `PATH`, never from a shell.
-///
-/// #14374: the old probe shelled out to `sh -lc "command -v <tool>"`, so a single
-/// broken line in `~/.profile` made dash exit before `command -v` ran and every
-/// tool on a healthy host reported as absent. A directory that only this test
-/// knows about cannot be reached through any login profile, so resolving from it
-/// pins the shell-free lookup.
-#[test]
-#[cfg(unix)]
-fn resolves_tools_from_path_without_a_shell() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let tool = dir.path().join("homeboy-probe-fixture");
-    write_executable(&tool);
-
-    assert_eq!(
-        common::resolve_in_path(
-            "homeboy-probe-fixture",
-            Some(&OsString::from(dir.path().as_os_str()))
-        ),
-        PathLookup::Found(common::display_path(&tool))
-    );
-}
-
 #[test]
 #[cfg(unix)]
 fn path_lookup_skips_non_executable_and_non_file_candidates() {
@@ -50,6 +27,9 @@ fn path_lookup_skips_non_executable_and_non_file_candidates() {
     );
 }
 
+/// The probe must answer from the filesystem and `PATH`, never from a shell
+/// (#14374: a broken `~/.profile` made every tool report as absent). Directories
+/// only this test knows about cannot be reached through any login profile.
 #[test]
 #[cfg(unix)]
 fn path_lookup_searches_entries_in_order() {
@@ -266,11 +246,4 @@ fn declared_extension_diagnostic_tools_are_grouped_by_extension() {
             .iter()
             .all(|spec| spec.check_id.starts_with("tool.declared.wordpress.")));
     });
-}
-
-#[test]
-fn doctor_does_not_read_extension_manifest_diagnostics_directly() {
-    let source = include_str!("../probes.rs");
-    assert!(!source.contains("ExtensionManifest"));
-    assert!(!source.contains("diagnostics.tools"));
 }

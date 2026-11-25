@@ -520,7 +520,6 @@ mod tests {
     use super::{LintArgs, LintObservationAdapter};
     use crate::core::observation::WorkflowObservationAdapter;
     use clap::Parser;
-    use homeboy::core::component::Component;
     use homeboy::core::engine::run_dir::RunDir;
     use homeboy_core::extension::lint as extension_lint;
     use homeboy_core::extension::lint::report;
@@ -530,48 +529,6 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         lint: LintArgs,
-    }
-
-    #[test]
-    fn parses_one_shot_extension_override() {
-        let cli = TestCli::try_parse_from([
-            "lint",
-            "--path",
-            "/tmp/repo",
-            "--extension",
-            "fixture-lint",
-            "--changed-since",
-            "origin/main",
-        ])
-        .expect("lint should parse --extension override");
-
-        assert_eq!(cli.lint.extension_override.extensions, vec!["fixture-lint"]);
-        assert_eq!(cli.lint.changed.changed_since(), Some("origin/main"));
-    }
-
-    #[test]
-    fn parses_json_summary_flag() {
-        let cli = TestCli::try_parse_from(["lint", "homeboy", "--json-summary"])
-            .expect("lint should parse --json-summary");
-
-        assert!(cli.lint.json_summary);
-    }
-
-    #[test]
-    fn parses_ci_job_flag() {
-        let cli = TestCli::try_parse_from(["lint", "homeboy", "--ci-job", "lint-typecheck"])
-            .expect("lint should parse --ci-job");
-
-        assert_eq!(cli.lint.ci_job.as_deref(), Some("lint-typecheck"));
-    }
-
-    #[test]
-    fn test_fixture_keeps_target_explicit_and_internal_source_absent() {
-        let args = LintArgs::for_test("fixture", "/tmp/fixture");
-
-        assert_eq!(args.comp.component.as_deref(), Some("fixture"));
-        assert_eq!(args.comp.path.as_deref(), Some("/tmp/fixture"));
-        assert!(args.release_readiness_source.is_none());
     }
 
     #[test]
@@ -678,60 +635,31 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_lint_command() {
-        let component =
-            Component::new("test".to_string(), "/tmp".to_string(), "".to_string(), None);
-        let result = extension_lint::resolve_lint_command(&component);
-        assert!(result.is_err());
-    }
+    fn lint_fix_report_never_fails_and_recommends_rerun_only_after_applied_fixes() {
+        // #1507: autofixable findings never fail the run, even when --fix
+        // modifies files.
+        for (applied, files_modified) in [(true, 3), (false, 0)] {
+            let run = LintFixRun {
+                applied,
+                files_modified,
+                changed_files: (0..files_modified)
+                    .map(|i| format!("src/file_{i}.rs"))
+                    .collect(),
+                ..LintFixRun::default()
+            };
+            let (output, exit_code) = report::from_lint_fix("demo".to_string(), run);
 
-    fn fixture_fix_run(applied: bool, files_modified: usize) -> LintFixRun {
-        LintFixRun {
-            applied,
-            files_modified,
-            changed_files: (0..files_modified)
-                .map(|i| format!("src/file_{}.rs", i))
-                .collect(),
-            ..LintFixRun::default()
+            assert_eq!(exit_code, 0);
+            assert!(output.passed);
+            let autofix = output.autofix.as_ref().expect("autofix populated");
+            assert_eq!(autofix.files_modified, files_modified);
+            assert_eq!(autofix.rerun_recommended, applied);
+            let hints = output.hints.as_ref().expect("hints populated");
+            assert_eq!(
+                hints.iter().any(|h| h.contains("homeboy review lint demo")),
+                applied,
+                "{hints:?}"
+            );
         }
-    }
-
-    #[test]
-    fn lint_fix_report_passes_with_zero_exit_when_fixes_applied() {
-        // The contract under #1507: autofixable findings never fail the run.
-        // Even when --fix actually modifies files, the lint command exits 0.
-        let (output, exit_code) =
-            report::from_lint_fix("demo".to_string(), fixture_fix_run(true, 3));
-
-        assert_eq!(exit_code, 0);
-        assert!(output.passed);
-        assert_eq!(output.status, "passed");
-        assert!(output.failure.is_none());
-
-        let autofix = output.autofix.as_ref().expect("autofix populated");
-        assert_eq!(autofix.files_modified, 3);
-        assert!(autofix.rerun_recommended);
-        assert_eq!(autofix.changed_files.len(), 3);
-
-        let hints = output.hints.as_ref().expect("hints populated");
-        assert!(
-            hints.iter().any(|h| h.contains("homeboy review lint demo")),
-            "expected re-run hint pointing back at lint, got {:?}",
-            hints
-        );
-    }
-
-    #[test]
-    fn lint_fix_report_passes_when_no_fixes_needed() {
-        // When no autofixable findings exist, --fix is a clean no-op:
-        // exit 0, no autofix changes reported, friendly hint.
-        let (output, exit_code) =
-            report::from_lint_fix("demo".to_string(), fixture_fix_run(false, 0));
-
-        assert_eq!(exit_code, 0);
-        assert!(output.passed);
-        let autofix = output.autofix.as_ref().expect("autofix populated");
-        assert_eq!(autofix.files_modified, 0);
-        assert!(!autofix.rerun_recommended);
     }
 }

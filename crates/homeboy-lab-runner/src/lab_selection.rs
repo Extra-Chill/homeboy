@@ -392,11 +392,10 @@ struct PlacementReadinessObservation {
 }
 
 pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
-    placement_readiness_with_transport(request, |request, source_path| {
+    placement_readiness_with_transport(request, |request, _source_path| {
         let runner = load(&request.runner_id)?;
         let status = status(&request.runner_id)?;
         let command_prefix = crate::lab_command::lab_offload_command_prefix(
-            source_path,
             super::remote_runner_homeboy_path(&runner, "placement readiness")?,
         );
         Ok(PlacementReadinessObservation {
@@ -1572,12 +1571,8 @@ fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String
 
 /// The one repair a caller may execute directly, when there is exactly one.
 ///
-/// #11104: this used to rebuild a `refresh-homeboy` action from scratch and
-/// then lift it only if it rendered to a byte-identical string to the plan's
-/// sole command. Five producers emit five different commands, so the equality
-/// guard threw away the argv the plan had already computed for four of them.
-/// Now the plan carries the action, so the action is simply read off the step.
-/// A multi-step plan is a plan, not one action, and still yields `None`; so
+/// Each repair plan step carries its typed action, so the action is read off
+/// the step rather than rebuilt from its rendered command (#11104). A multi-step plan is a plan, not one action, and still yields `None`; so
 /// does a step with no typed form, and so does the read-only diagnosis, which
 /// must not be presented as a repair the caller can apply.
 fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<ExecutableAction> {

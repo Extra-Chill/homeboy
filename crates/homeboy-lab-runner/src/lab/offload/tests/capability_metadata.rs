@@ -634,7 +634,7 @@ fn runner_homeboy_version_drift_reports_upgrade_guidance() {
 }
 
 /// Exercise the public handshake, including the real HTTP observation, rather
-/// than constructing the negotiation record that used to hide probe failures.
+/// than constructing a negotiation record that would hide probe failures.
 #[test]
 fn admission_distinguishes_unavailable_probe_from_missing_capability() {
     use homeboy_lab_contract::{negotiate_lab_capability_handshake, LabAdmissionRejection};

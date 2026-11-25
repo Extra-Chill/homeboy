@@ -90,71 +90,12 @@ pub struct DiagnoseArgs {
 }
 #[cfg(test)]
 mod tests {
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
 
     use crate::{
         cli_surface::{Cli, Commands},
         commands::agent_task::AgentTaskCommand,
     };
-
-    #[test]
-    fn manual_finalization_parses_component_selector_and_recovery_accepts_it_as_fallback() {
-        let help = Cli::command()
-            .find_subcommand("agent-task")
-            .expect("agent-task command")
-            .find_subcommand("finalize-pr")
-            .expect("finalize-pr command")
-            .clone()
-            .render_long_help()
-            .to_string();
-        assert!(help.contains("--component <COMPONENT_ID>"), "{help}");
-        assert!(help.contains("shared-repository worktree"), "{help}");
-
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "finalize-pr",
-            "--manual-finalization",
-            "--run-id",
-            "manual-component",
-            "--path",
-            "/tmp/manual-component",
-            "--component",
-            "nested-component",
-            "--title",
-            "Manual component",
-            "--commit-message",
-            "record component",
-        ])
-        .expect("manual finalization component parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
-            panic!("expected finalize-pr command");
-        };
-        assert_eq!(args.component.as_deref(), Some("nested-component"));
-
-        // #14728: the component fallback for a durable record that recorded no
-        // identity is a `recover` publication input.
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-a",
-            "--component",
-            "nested-component",
-        ])
-        .expect("recovery with a fallback --component parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Recover(args) = agent_task.command else {
-            panic!("expected recover command");
-        };
-        assert_eq!(args.id, "cook-a");
-        assert_eq!(args.component.as_deref(), Some("nested-component"));
-    }
 
     #[test]
     fn artifacts_can_show_a_selected_artifact_and_tail_its_lines() {

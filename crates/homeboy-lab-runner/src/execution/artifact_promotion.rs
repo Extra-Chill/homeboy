@@ -53,9 +53,8 @@ pub fn promote_runner_exec_artifact_dirs_in_store(
 
     // Every durable touch in this promotion follows the caller's store. The
     // directory checkpoint, the per-child idempotence guard, and the promotion
-    // write below used to open three further ambient stores beside this one, so
-    // the guard that decides whether a child is skipped answered about a row
-    // the write did not necessarily address (#7505).
+    // write below share this one store, so the guard that decides whether a
+    // child is skipped answers about the same row the write addresses (#7505).
     let store = lifecycle_store.open_observation_maintained()?;
     // Taken FROM the store, not resolved beside it. Downloaded bytes land under
     // this root and the records indexing them are written into that same store,

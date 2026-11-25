@@ -120,8 +120,6 @@ pub struct CiPlan {
     pub has_lint: bool,
 }
 
-impl CiPlan {}
-
 /// Filesystem-safe output stem for a command request.
 ///
 /// Collapses any run of non-`[alnum]._-` characters to a single `-`, trims
@@ -208,45 +206,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skip_lint_only_set_on_test_when_lint_present() {
-        let p = plan("test, lint, build", CiEventContext::Manual);
-        let test = p.quality.iter().find(|c| c.command == "test").unwrap();
-        assert!(test.skip_lint);
-        let build = p.quality.iter().find(|c| c.command == "build").unwrap();
-        assert!(!build.skip_lint);
-        let order: Vec<&str> = p.quality.iter().map(|c| c.command.as_str()).collect();
-        assert_eq!(order, vec!["lint", "test", "build"]);
+    fn quality_gates_are_ordered_and_only_test_skips_a_standalone_lint() {
+        // (request, expected quality order, has_lint, commands with skip_lint)
+        let cases: [(&str, &[&str], bool, &[&str]); 3] = [
+            (
+                "test, lint, build",
+                &["lint", "test", "build"],
+                true,
+                &["test"],
+            ),
+            ("build, test", &["test", "build"], false, &[]),
+            // `lint --summary` is not a standalone lint, so test still lints.
+            (
+                "test, lint --summary",
+                &["lint --summary", "test"],
+                false,
+                &[],
+            ),
+        ];
+
+        for (request, order, has_lint, skipping) in cases {
+            let p = plan(request, CiEventContext::Manual);
+            let actual: Vec<&str> = p.quality.iter().map(|c| c.command.as_str()).collect();
+            assert_eq!(actual, order, "{request}");
+            assert_eq!(p.has_lint, has_lint, "{request}");
+            let actual_skipping: Vec<&str> = p
+                .quality
+                .iter()
+                .filter(|c| c.skip_lint)
+                .map(|c| c.command.as_str())
+                .collect();
+            assert_eq!(actual_skipping, skipping, "{request}");
+        }
     }
 
     #[test]
-    fn no_skip_lint_when_lint_absent() {
-        let p = plan("build, test", CiEventContext::Manual);
-        let test = p.quality.iter().find(|c| c.command == "test").unwrap();
-        assert!(!test.skip_lint);
-        assert!(!p.has_lint);
-    }
+    fn planned_commands_carry_base_category_and_sanitized_output_stem() {
+        let p = plan("bench --rig pr, deploy", CiEventContext::Manual);
+        let bench = &p.quality[0];
+        assert_eq!(bench.base, "bench");
+        assert_eq!(bench.output_stem, "bench---rig-pr");
+        assert_eq!(bench.category, CommandCategory::Quality);
+        assert_eq!(p.operations.len(), 1);
+        assert_eq!(p.operations[0].category, CommandCategory::Operations);
 
-    #[test]
-    fn output_stem_sanitizes_and_falls_back() {
         assert_eq!(output_stem("lint"), "lint");
-        assert_eq!(output_stem("bench --rig pr"), "bench---rig-pr");
         assert_eq!(output_stem("   "), "homeboy-output");
         assert_eq!(output_stem("///"), "homeboy-output");
         assert_eq!(output_stem("-lint-"), "lint");
     }
 
     #[test]
-    fn planned_command_carries_base_and_stem() {
-        let p = plan("bench --rig pr", CiEventContext::Manual);
-        let cmd = &p.quality[0];
-        assert_eq!(cmd.base, "bench");
-        assert_eq!(cmd.output_stem, "bench---rig-pr");
-        assert_eq!(cmd.category, CommandCategory::Quality);
-    }
+    fn empty_request_infers_commands_from_context() {
+        let cases: [(&str, CiEventContext, &[&str]); 3] = [
+            ("   ", CiEventContext::Pr, &["lint", "test"]),
+            ("", CiEventContext::Cron, &["release"]),
+            ("", CiEventContext::parse("unknown"), &["lint", "test"]),
+        ];
 
-    #[test]
-    fn empty_request_with_whitespace_infers() {
-        let p = plan("   ", CiEventContext::Pr);
-        assert!(p.inferred);
+        for (request, context, expected) in cases {
+            let p = plan(request, context);
+            assert!(p.inferred, "{context:?}");
+            let commands: Vec<&str> = p.quality.iter().map(|c| c.command.as_str()).collect();
+            assert_eq!(commands, expected, "{context:?}");
+            assert!(p.operations.is_empty(), "deploy is never inferred");
+        }
+        assert!(!plan("lint", CiEventContext::Pr).inferred);
     }
 }
