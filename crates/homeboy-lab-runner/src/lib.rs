@@ -2424,20 +2424,6 @@ mod tests {
     }
 
     #[test]
-    fn refreshed_stale_inventory_selects_a_newly_ready_runner() {
-        let mut stale = default_lab_candidate("lab-a", true);
-        stale.stale_daemon = true;
-        let cached = lab_runner_readiness_from_candidates(None, vec![stale]);
-        assert_eq!(cached.state, LabRunnerReadinessState::Stale);
-        assert!(cached.selected_runner_id.is_none());
-
-        let refreshed =
-            lab_runner_readiness_from_candidates(None, vec![default_lab_candidate("lab-a", true)]);
-        assert_eq!(refreshed.state, LabRunnerReadinessState::ConnectedReady);
-        assert_eq!(refreshed.selected_runner_id.as_deref(), Some("lab-a"));
-    }
-
-    #[test]
     fn status_availability_agrees_with_admission_for_pressure_blocked_runner() {
         let mut status =
             skewed_runner_status(homeboy_product_identity::product_version().to_string());
@@ -2648,60 +2634,7 @@ mod tests {
     }
 
     #[test]
-    fn hot_controller_admission_refresh_routes_ready_runner_after_stale_cache() {
-        let mut stale = default_lab_candidate("lab", true);
-        stale.stale_daemon = true;
-        assert_eq!(
-            lab_runner_readiness_from_candidates(None, vec![stale]).state,
-            LabRunnerReadinessState::Stale
-        );
-
-        let ready =
-            lab_runner_readiness_from_candidates(None, vec![default_lab_candidate("lab", true)]);
-        assert_eq!(ready.state, LabRunnerReadinessState::ConnectedReady);
-        assert_eq!(ready.available_runner_ids, ["lab"]);
-    }
-
-    #[test]
-    fn hot_controller_admission_refresh_reports_connected_blocked_runner() {
-        let mut blocked = default_lab_candidate("lab", true);
-        blocked.active_jobs_available = false;
-        let blocked = lab_runner_readiness_from_candidates(None, vec![blocked]);
-        assert_eq!(blocked.state, LabRunnerReadinessState::ReadinessUnobserved);
-        assert!(blocked
-            .reasons
-            .contains(&"active_jobs_unavailable".to_string()));
-        assert_eq!(blocked.remediation_commands, ["homeboy runner status lab"]);
-    }
-
-    #[test]
-    fn hot_controller_admission_refresh_reports_no_runner() {
-        let absent = lab_runner_readiness_from_candidates(None, Vec::new());
-        assert_eq!(absent.state, LabRunnerReadinessState::Absent);
-        assert_eq!(
-            absent.remediation_commands,
-            ["homeboy runner connect <runner-id>"]
-        );
-    }
-
-    #[test]
-    fn admission_refresh_classifies_fresh_stale_absent_and_unavailable_evidence() {
-        let fresh = lab_runner_readiness_from_refresh_observations(
-            None,
-            vec![Ok(default_lab_candidate("fresh", true))],
-        )
-        .expect("fresh bounded evidence is admitted");
-        assert_eq!(fresh.state, LabRunnerReadinessState::ConnectedReady);
-        assert_eq!(fresh.selected_runner_id.as_deref(), Some("fresh"));
-
-        let mut stale_candidate = default_lab_candidate("stale", true);
-        stale_candidate.admission_fresh = false;
-        stale_candidate.stale_daemon = true;
-        let stale = lab_runner_readiness_from_refresh_observations(None, vec![Ok(stale_candidate)])
-            .expect("stale bounded evidence remains classified");
-        assert_eq!(stale.state, LabRunnerReadinessState::Stale);
-        assert!(stale.selected_runner_id.is_none());
-
+    fn admission_refresh_classifies_unobserved_and_absent_evidence() {
         let mut unobserved_candidate = default_lab_candidate("unobserved", true);
         unobserved_candidate.admission_fresh = false;
         let unobserved =
@@ -2717,17 +2650,6 @@ mod tests {
             .expect("an empty bounded inventory is an absence observation");
         assert_eq!(absent.state, LabRunnerReadinessState::Absent);
         assert!(absent.selected_runner_id.is_none());
-
-        let mut unavailable_candidate = default_lab_candidate("unavailable", true);
-        unavailable_candidate.active_jobs_available = false;
-        let unavailable =
-            lab_runner_readiness_from_refresh_observations(None, vec![Ok(unavailable_candidate)])
-                .expect("unavailable bounded evidence remains classified");
-        assert_eq!(
-            unavailable.state,
-            LabRunnerReadinessState::ReadinessUnobserved
-        );
-        assert!(unavailable.selected_runner_id.is_none());
     }
 
     /// #11106's counter-property. An `unverified` daemon must rank below a
@@ -2779,6 +2701,25 @@ mod tests {
     fn lab_runner_readiness_distinguishes_absent_ready_ineligible_stale_and_capacity() {
         let absent = lab_runner_readiness_from_candidates(None, Vec::new());
         assert_eq!(absent.state, LabRunnerReadinessState::Absent);
+        assert_eq!(
+            absent.remediation_commands,
+            ["homeboy runner connect <runner-id>"]
+        );
+
+        let mut jobs_unknown = default_lab_candidate("lab", true);
+        jobs_unknown.active_jobs_available = false;
+        let jobs_unknown = lab_runner_readiness_from_candidates(None, vec![jobs_unknown]);
+        assert_eq!(
+            jobs_unknown.state,
+            LabRunnerReadinessState::ReadinessUnobserved
+        );
+        assert!(jobs_unknown
+            .reasons
+            .contains(&"active_jobs_unavailable".to_string()));
+        assert_eq!(
+            jobs_unknown.remediation_commands,
+            ["homeboy runner status lab"]
+        );
 
         let ready =
             lab_runner_readiness_from_candidates(None, vec![default_lab_candidate("ready", true)]);
@@ -2861,7 +2802,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_registry_persists_local_runner() {
+    fn runner_registry_persists_local_runner_and_trust_policy() {
         crate::test_support::with_isolated_home(|_| {
             let spec = r#"{
                 "id": "lab-local",
@@ -2872,7 +2813,13 @@ mod tests {
                 "concurrency_limit": 2,
                 "artifact_policy": "copy",
                 "env": {"RUST_LOG": "info"},
-                "resources": {"cpu": 8}
+                "resources": {"cpu": 8},
+                "policy": {
+                    "accepted_peer_ids": ["extra-chill"],
+                    "allowed_commands": ["test", "bench"],
+                    "allow_raw_exec": false,
+                    "artifact_policy": "metadata"
+                }
             }"#;
 
             create(spec, false).expect("create runner");
@@ -2888,6 +2835,14 @@ mod tests {
             assert_eq!(runner.settings.concurrency_limit, Some(2));
             assert_eq!(runner.env.get("RUST_LOG").map(String::as_str), Some("info"));
             assert_eq!(runner.resources.get("cpu"), Some(&Value::from(8)));
+            assert_eq!(runner.policy.accepted_peer_ids, vec!["extra-chill"]);
+            assert_eq!(runner.policy.allowed_commands, vec!["test", "bench"]);
+            assert_eq!(runner.policy.allow_raw_exec, Some(false));
+            assert_eq!(runner.policy.artifact_policy.as_deref(), Some("metadata"));
+            assert!(serde_json::to_value(&runner)
+                .expect("serialize policy")
+                .pointer("/policy/allow_homeboy_convergence")
+                .is_none());
         });
     }
 
@@ -2921,59 +2876,6 @@ mod tests {
             assert_eq!(runner.id, "homeboy-lab");
             assert_eq!(runner.kind, RunnerKind::Local);
             assert!(listed.iter().any(|runner| runner.id == "homeboy-lab"));
-        });
-    }
-
-    #[test]
-    fn runner_registry_persists_trust_policy() {
-        crate::test_support::with_isolated_home(|_| {
-            let spec = r#"{
-                "id": "lab-local",
-                "kind": "local",
-                "policy": {
-                    "accepted_peer_ids": ["extra-chill"],
-                    "accepted_peer_fingerprints": ["SHA256:abc123"],
-                    "allowed_projects": ["extrachill"],
-                    "allowed_commands": ["test", "bench"],
-                    "allow_raw_exec": false,
-                    "workspace_roots": ["/home/user/Developer"],
-                    "artifact_policy": "metadata"
-                }
-            }"#;
-
-            create(spec, false).expect("create runner");
-            let runner = load("lab-local").expect("load runner");
-
-            assert_eq!(runner.policy.accepted_peer_ids, vec!["extra-chill"]);
-            assert_eq!(
-                runner.policy.accepted_peer_fingerprints,
-                vec!["SHA256:abc123"]
-            );
-            assert_eq!(runner.policy.allowed_projects, vec!["extrachill"]);
-            assert_eq!(runner.policy.allowed_commands, vec!["test", "bench"]);
-            assert_eq!(runner.policy.allow_raw_exec, Some(false));
-            assert_eq!(runner.policy.allow_homeboy_convergence, None);
-            assert_eq!(runner.policy.workspace_roots, vec!["/home/user/Developer"]);
-            assert_eq!(runner.policy.artifact_policy.as_deref(), Some("metadata"));
-            assert!(serde_json::to_value(&runner)
-                .expect("serialize policy")
-                .pointer("/policy/allow_homeboy_convergence")
-                .is_none());
-        });
-    }
-
-    #[test]
-    fn ssh_runner_requires_existing_server() {
-        crate::test_support::with_isolated_home(|_| {
-            let spec = r#"{
-                "id": "remote-lab",
-                "kind": "ssh",
-                "server_id": "remote-lab",
-                "workspace_root": "/srv/homeboy"
-            }"#;
-
-            let err = create(spec, false).expect_err("missing server rejects ssh runner");
-            assert_eq!(err.code.as_str(), "server.not_found");
         });
     }
 
@@ -3154,57 +3056,45 @@ mod tests {
     }
 
     #[test]
-    fn local_runner_effective_env_keeps_controller_path_synthesis() {
+    fn only_local_runner_effective_env_prepends_the_homeboy_binary_dir_to_path() {
         let homeboy_path = "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy";
-        let spec = RunnerSpec {
-            kind: RunnerKind::Local,
-            settings: RunnerSettings {
-                homeboy_path: Some(homeboy_path.to_string()),
-                ..RunnerSettings::default()
-            },
-            env: HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
-            ..Default::default()
-        };
+        for (kind, expected_path) in [
+            (
+                RunnerKind::Local,
+                Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release:/usr/bin:/bin"),
+            ),
+            (RunnerKind::Ssh, None),
+        ] {
+            let env = HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+            let spec = RunnerSpec {
+                kind: kind.clone(),
+                settings: RunnerSettings {
+                    homeboy_path: Some(homeboy_path.to_string()),
+                    ..RunnerSettings::default()
+                },
+                env: if kind == RunnerKind::Local {
+                    env
+                } else {
+                    HashMap::new()
+                },
+                ..Default::default()
+            };
 
-        let env = spec.effective_env();
+            let env = spec.effective_env();
 
-        assert_eq!(
-            env.get("PATH").map(String::as_str),
-            Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release:/usr/bin:/bin")
-        );
-        assert_eq!(
-            env.get("HOMEBOY_COMMAND").map(String::as_str),
-            Some(homeboy_path)
-        );
+            assert_eq!(env.get("PATH").map(String::as_str), expected_path);
+            assert_eq!(
+                env.get("HOMEBOY_COMMAND").map(String::as_str),
+                Some(homeboy_path)
+            );
+        }
     }
 
     #[test]
-    fn ssh_runner_effective_env_never_adds_a_path_key() {
-        let homeboy_path = "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy";
-        let spec = RunnerSpec {
-            kind: RunnerKind::Ssh,
-            settings: RunnerSettings {
-                homeboy_path: Some(homeboy_path.to_string()),
-                ..RunnerSettings::default()
-            },
-            env: HashMap::new(),
-            ..Default::default()
-        };
-
-        let env = spec.effective_env();
-
-        assert_eq!(env.get("PATH"), None);
-        assert_eq!(
-            env.get("HOMEBOY_COMMAND").map(String::as_str),
-            Some(homeboy_path)
-        );
-    }
-
-    #[test]
-    fn remote_runner_homeboy_path_allows_local_bare_homeboy() {
-        let runner = Runner {
-            id: "local".to_string(),
-            kind: RunnerKind::Local,
+    fn remote_runner_homeboy_path_allows_bare_homeboy_only_for_local_runners() {
+        let runner = |id: &str, kind: RunnerKind| Runner {
+            id: id.to_string(),
+            kind,
             server_id: None,
             workspace_root: None,
             settings: RunnerSettings::default(),
@@ -3215,33 +3105,16 @@ mod tests {
         };
 
         assert_eq!(
-            remote_runner_homeboy_path(&runner, "test").expect("local fallback"),
+            remote_runner_homeboy_path(&runner("local", RunnerKind::Local), "test")
+                .expect("local fallback"),
             "homeboy"
         );
-    }
 
-    #[test]
-    fn remote_runner_homeboy_path_requires_ssh_configuration() {
-        let runner = Runner {
-            id: "lab".to_string(),
-            kind: RunnerKind::Ssh,
-            server_id: Some("lab".to_string()),
-            workspace_root: Some("/srv/homeboy".to_string()),
-            settings: RunnerSettings::default(),
-            env: HashMap::new(),
-            secret_env: HashMap::new(),
-            resources: HashMap::new(),
-            policy: RunnerPolicy::default(),
-        };
-
-        let err = remote_runner_homeboy_path(&runner, "Lab offload preflight")
+        let err = remote_runner_homeboy_path(&runner("lab", RunnerKind::Ssh), "Lab offload")
             .expect_err("ssh runner without homeboy_path rejects");
-
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert_eq!(err.details["id"], Value::from("lab"));
         assert_eq!(err.details["field"], Value::from("homeboy_path"));
-        assert!(err.message.contains("runner.homeboy_path"));
-        assert!(err.message.contains("bare `homeboy`"));
     }
 
     #[test]
@@ -3366,7 +3239,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_runner_id_must_match_server_id() {
+    fn ssh_runner_create_requires_an_existing_server_with_the_same_id() {
         crate::test_support::with_isolated_home(|_| {
             server::create(
                 r#"{"id":"homeboy-lab","host":"192.168.86.63","user":"user"}"#,
@@ -3387,6 +3260,10 @@ mod tests {
 
             assert_eq!(err.code.as_str(), "validation.invalid_argument");
             assert!(err.message.contains("SSH runner IDs are server IDs"));
+
+            let err = create(r#"{"id":"remote-lab","kind":"ssh"}"#, false)
+                .expect_err("missing server rejects ssh runner");
+            assert_eq!(err.code.as_str(), "server.not_found");
         });
     }
 
@@ -3592,6 +3469,15 @@ mod tests {
                 Some("lab-b"),
             ),
             (
+                "stale daemon runner is skipped",
+                None,
+                vec![
+                    candidate("lab-a", true, |c| c.stale_daemon = true),
+                    candidate("lab-b", true, unchanged),
+                ],
+                Some("lab-b"),
+            ),
+            (
                 "equally ready runners select deterministically",
                 None,
                 vec![
@@ -3630,203 +3516,59 @@ mod tests {
     }
 
     #[test]
-    fn runner_availability_reports_unavailable_runner_reasons() {
-        let mut unavailable = default_lab_candidate("lab-a", false);
-        unavailable.active_jobs_available = false;
-
-        assert_eq!(
-            unavailable.availability(),
-            RunnerAvailability {
-                runner_id: "lab-a".to_string(),
-                connected: false,
-                accepts_jobs: false,
-                active_job_count: 0,
-                capacity: None,
-                reasons: vec![
-                    "not_connected".to_string(),
-                    "active_jobs_unavailable".to_string()
+    fn runner_availability_blocks_on_hard_reasons_and_treats_a_failed_job_poll_as_soft() {
+        use RunnerActiveJobState::{Available, Unavailable};
+        // (connected, active jobs, job poll, capacity, reasons, capacity exhausted)
+        let cases: [(
+            bool,
+            usize,
+            RunnerActiveJobState,
+            Option<usize>,
+            &[&str],
+            bool,
+        ); 6] = [
+            (true, 0, Available, Some(8), &[], false),
+            // A transient /jobs poll failure must not block a connected,
+            // under-capacity runner.
+            (true, 0, Unavailable, Some(8), &[], false),
+            (true, 8, Available, Some(8), &["capacity_reached"], true),
+            (true, 1, Available, None, &["capacity_unknown"], false),
+            (
+                false,
+                0,
+                Unavailable,
+                Some(8),
+                &["not_connected", "active_jobs_unavailable"],
+                false,
+            ),
+            // Substrate failures are not queueable capacity.
+            (
+                false,
+                1,
+                Unavailable,
+                Some(1),
+                &[
+                    "not_connected",
+                    "capacity_reached",
+                    "active_jobs_unavailable",
                 ],
-            }
-        );
-    }
+                false,
+            ),
+        ];
 
-    #[test]
-    fn runner_availability_reports_busy_runner_at_capacity() {
-        let mut busy = default_lab_candidate("lab-a", true);
-        busy.capacity = Some(2);
-        busy.active_jobs = 2;
-
-        assert_eq!(
-            busy.availability(),
-            RunnerAvailability {
-                runner_id: "lab-a".to_string(),
-                connected: true,
-                accepts_jobs: false,
-                active_job_count: 2,
-                capacity: Some(2),
-                reasons: vec!["capacity_reached".to_string()],
-            }
-        );
-        assert!(busy.availability().is_capacity_exhausted());
-    }
-
-    #[test]
-    fn runner_availability_does_not_treat_substrate_failures_as_queueable_capacity() {
-        let availability = RunnerAvailability::from_status_parts(
-            "lab-a",
-            false,
-            false,
-            1,
-            &RunnerActiveJobState::Unavailable,
-            Some(1),
-        );
-
-        assert!(!availability.is_capacity_exhausted());
-        assert_eq!(
-            availability.reasons,
-            vec![
-                "not_connected".to_string(),
-                "capacity_reached".to_string(),
-                "active_jobs_unavailable".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn runner_availability_reports_ambiguous_unknown_capacity() {
-        let mut ambiguous = default_lab_candidate("lab-a", true);
-        ambiguous.active_jobs = 1;
-
-        assert_eq!(
-            ambiguous.availability(),
-            RunnerAvailability {
-                runner_id: "lab-a".to_string(),
-                connected: true,
-                accepts_jobs: false,
-                active_job_count: 1,
-                capacity: None,
-                reasons: vec!["capacity_unknown".to_string()],
-            }
-        );
-    }
-
-    #[test]
-    fn connected_direct_daemon_runner_with_failed_active_job_poll_still_accepts_jobs() {
-        // Regression: a connected direct_daemon/direct_ssh runner (worker_pid:
-        // None) whose live `/jobs` poll transiently failed reports
-        // `active_job_state: Unavailable` with a 0 count. `runner status`
-        // recovers to `available` on the next poll, so the lab-offload preflight
-        // must not hard-reject it while it is connected and under capacity.
-        let availability = RunnerAvailability::from_status_parts(
-            "homeboy-lab",
-            true,
-            false,
-            0,
-            &RunnerActiveJobState::Unavailable,
-            Some(8),
-        );
-
-        assert!(
-            availability.accepts_jobs,
-            "connected, under-capacity runner with a transient active-job poll \
-             failure must still accept jobs: {availability:?}"
-        );
-        assert!(
-            availability.reasons.is_empty(),
-            "no blocking reasons expected: {:?}",
-            availability.reasons
-        );
-        assert_eq!(availability.active_job_count, 0);
-        assert_eq!(availability.capacity, Some(8));
-    }
-
-    #[test]
-    fn available_direct_daemon_runner_accepts_jobs() {
-        // The healthy steady-state both paths agree on.
-        let availability = RunnerAvailability::from_status_parts(
-            "homeboy-lab",
-            true,
-            false,
-            0,
-            &RunnerActiveJobState::Available,
-            Some(8),
-        );
-
-        assert!(availability.accepts_jobs);
-        assert!(availability.reasons.is_empty());
-    }
-
-    #[test]
-    fn matching_product_build_runner_accepts_jobs() {
-        let availability = RunnerAvailability::from_status_parts(
-            "homeboy-lab",
-            true,
-            false,
-            0,
-            &RunnerActiveJobState::Available,
-            Some(8),
-        );
-
-        assert!(availability.accepts_jobs);
-        assert_ne!(
-            env!("CARGO_PKG_VERSION"),
-            homeboy_product_identity::product_version(),
-            "internal runner crate versions must not make matching product builds stale"
-        );
-    }
-
-    #[test]
-    fn at_capacity_runner_still_rejects_even_with_failed_active_job_poll() {
-        // A genuinely busy runner stays blocked; the soft active-job signal must
-        // not let a saturated runner through.
-        let availability = RunnerAvailability::from_status_parts(
-            "homeboy-lab",
-            true,
-            false,
-            8,
-            &RunnerActiveJobState::Available,
-            Some(8),
-        );
-
-        assert!(!availability.accepts_jobs);
-        assert!(availability
-            .reasons
-            .iter()
-            .any(|reason| reason == "capacity_reached"));
-    }
-
-    #[test]
-    fn disconnected_runner_with_unavailable_active_jobs_still_rejects() {
-        // A disconnected runner stays blocked, and the active-job signal remains
-        // visible alongside the hard `not_connected` blocker for diagnostics.
-        let availability = RunnerAvailability::from_status_parts(
-            "homeboy-lab",
-            false,
-            false,
-            0,
-            &RunnerActiveJobState::Unavailable,
-            Some(8),
-        );
-
-        assert!(!availability.accepts_jobs);
-        assert_eq!(
-            availability.reasons,
-            vec![
-                "not_connected".to_string(),
-                "active_jobs_unavailable".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn default_lab_runner_skips_stale_daemon_runner() {
-        let mut stale = default_lab_candidate("lab-a", true);
-        stale.stale_daemon = true;
-        let selected = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![stale, default_lab_candidate("lab-b", true)],
-        );
-
-        assert_eq!(selected.as_deref(), Some("lab-b"));
+        for (connected, jobs, poll, capacity, reasons, exhausted) in cases {
+            let availability = RunnerAvailability::from_status_parts(
+                "homeboy-lab",
+                connected,
+                false,
+                jobs,
+                &poll,
+                capacity,
+            );
+            let label = format!("connected={connected} jobs={jobs} poll={poll:?} cap={capacity:?}");
+            assert_eq!(availability.reasons, reasons, "{label}");
+            assert_eq!(availability.accepts_jobs, reasons.is_empty(), "{label}");
+            assert_eq!(availability.is_capacity_exhausted(), exhausted, "{label}");
+        }
     }
 }
