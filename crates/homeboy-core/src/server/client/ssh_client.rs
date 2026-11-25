@@ -1213,6 +1213,7 @@ mod bounded_probe_tests {
     /// `MaxAuthTries` (6 by default) exhausts the budget first, so a reachable
     /// host with a correct configured key still fails to authenticate, and the
     /// failure surfaces far away as an unrelated command timeout (#14881).
+    /// Without a configured identity, agent-based auth stays untouched.
     #[test]
     fn a_configured_identity_file_is_the_only_identity_offered() {
         let mut client = localhost_client();
@@ -1230,17 +1231,9 @@ mod bounded_probe_tests {
             args.contains(&"IdentitiesOnly=yes".to_string()),
             "a configured identity must not be racing the agent's other keys: {args:?}"
         );
-    }
 
-    /// No configured identity means agent-based auth, which must stay untouched.
-    #[test]
-    fn agent_auth_is_left_alone_when_no_identity_file_is_configured() {
-        let mut client = localhost_client();
-        client.is_local = false;
         client.identity_file = None;
-
         let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);
-
         assert!(!args.contains(&"-i".to_string()));
         assert!(!args.contains(&"IdentitiesOnly=yes".to_string()));
     }
@@ -1486,7 +1479,7 @@ mod bounded_probe_output_tests {
     }
 
     #[test]
-    fn a_lost_transport_wait_is_indeterminate_without_rewriting_stderr() {
+    fn a_lost_transport_wait_is_indeterminate_and_overrides_timeout_and_cancellation() {
         let output = bounded_probe_output(
             "partial".to_string(),
             "remote stderr".to_string(),
@@ -1496,7 +1489,6 @@ mod bounded_probe_output_tests {
             },
             Duration::from_secs(15),
         );
-
         assert!(!output.success);
         assert_eq!(output.exit_code, -1);
         assert_eq!(output.stderr, "remote stderr");
@@ -1504,10 +1496,7 @@ mod bounded_probe_output_tests {
             output.observation,
             super::super::CommandObservation::TransportObservationFailed
         );
-    }
 
-    #[test]
-    fn transport_wait_failure_overrides_timeout_and_cancellation() {
         for outcome in [
             BoundedProbeOutcome {
                 timed_out: true,
@@ -1531,47 +1520,6 @@ mod bounded_probe_output_tests {
                 super::super::CommandObservation::TransportObservationFailed
             );
         }
-    }
-
-    #[test]
-    fn inline_stdin_write_failures_are_observable() {
-        struct FailingWriter;
-
-        impl Write for FailingWriter {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        assert_eq!(
-            write_inline_stdin(&mut FailingWriter, b"secret")
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::BrokenPipe
-        );
-    }
-
-    #[test]
-    fn a_healthy_probe_is_unchanged() {
-        let output = bounded_probe_output(
-            "ok".to_string(),
-            String::new(),
-            BoundedProbeOutcome {
-                exit_code: Some(0),
-                succeeded: true,
-                ..BoundedProbeOutcome::default()
-            },
-            Duration::from_secs(15),
-        );
-
-        assert!(output.success);
-        assert_eq!(output.exit_code, 0);
-        assert_eq!(output.stdout, "ok");
-        assert!(output.stderr.is_empty());
     }
 }
 

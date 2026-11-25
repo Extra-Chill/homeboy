@@ -315,86 +315,79 @@ mod tests {
     }
 
     #[test]
-    fn a_remaining_interactive_factor_is_not_a_rejected_credential() {
-        // The shape a host with a second factor produces: publickey already
-        // succeeded, so it is absent from what the server will still accept.
-        assert_eq!(
-            ssh_auth_failure("user@host: Permission denied (keyboard-interactive)."),
-            Some(SshAuthFailure::SecondFactorRequired)
-        );
+    fn ssh_auth_failure_classifies_by_the_methods_the_server_still_accepts() {
+        for (output, expected) in [
+            // A second factor remains: publickey already succeeded, so it is
+            // absent from what the server will still accept.
+            (
+                "user@host: Permission denied (keyboard-interactive).",
+                Some(SshAuthFailure::SecondFactorRequired),
+            ),
+            (
+                "user@host: Permission denied (publickey,keyboard-interactive).",
+                Some(SshAuthFailure::CredentialRejected),
+            ),
+            (
+                "git@example: Permission denied (publickey).",
+                Some(SshAuthFailure::CredentialRejected),
+            ),
+            ("kex_exchange_identification: reset", None),
+            // A remote command printing the phrase is not the SSH client's
+            // denial: OpenSSH always names the methods it would still accept.
+            ("find: '/srv': Permission denied", None),
+        ] {
+            assert_eq!(ssh_auth_failure(output), expected, "{output}");
+        }
     }
 
     #[test]
-    fn an_unaccepted_key_is_reported_as_a_rejected_credential() {
-        assert_eq!(
-            ssh_auth_failure("user@host: Permission denied (publickey,keyboard-interactive)."),
-            Some(SshAuthFailure::CredentialRejected)
-        );
-        assert_eq!(
-            ssh_auth_failure("git@example: Permission denied (publickey)."),
-            Some(SshAuthFailure::CredentialRejected)
-        );
-    }
+    fn only_a_hostname_resolving_solely_to_loopback_is_local_transport() {
+        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let remote = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        for (addresses, expected) in [(vec![loopback], true), (vec![loopback, remote], false)] {
+            assert_eq!(
+                server_host_resolves_only_to_loopback_with("alias", 22, |_, _| Ok(
+                    addresses.clone()
+                ))
+                .expect("resolve alias"),
+                expected,
+                "{addresses:?}"
+            );
+        }
 
-    #[test]
-    fn output_without_a_denial_is_not_classified_as_an_auth_failure() {
-        assert_eq!(ssh_auth_failure("kex_exchange_identification: reset"), None);
-        // A remote command printing the phrase is not the SSH client's denial:
-        // OpenSSH always names the methods it would still accept.
-        assert_eq!(ssh_auth_failure("find: '/srv': Permission denied"), None);
-    }
-
-    #[test]
-    fn loopback_only_hostname_alias_is_local_transport() {
-        assert!(
-            server_host_resolves_only_to_loopback_with("loopback-alias", 22, |_, _| Ok(vec![
-                IpAddr::V4(Ipv4Addr::LOCALHOST)
-            ]))
-            .expect("resolve alias")
-        );
-    }
-
-    #[test]
-    fn hostname_with_any_non_loopback_address_requires_ssh_transport() {
-        assert!(
-            !server_host_resolves_only_to_loopback_with("mixed-alias", 22, |_, _| {
-                Ok(vec![
-                    IpAddr::V4(Ipv4Addr::LOCALHOST),
-                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
-                ])
-            })
-            .expect("resolve alias")
-        );
-    }
-
-    #[test]
-    fn hostname_resolution_failure_rejects_local_transport_classification() {
         let error = server_host_resolves_only_to_loopback_with("unresolved", 22, |_, _| {
             Err("name service unavailable".to_string())
         })
         .expect_err("failed resolution is not loopback evidence");
-
         assert!(error.contains("name service unavailable"));
     }
 
     #[test]
-    fn ssh_config_alias_to_remote_host_requires_a_tunnel() {
-        let config = "hostname 192.0.2.1\nport 22\nproxyjump none\nproxycommand none\n";
-        assert!(
-            !server_uses_loopback_transport_from_ssh_config(config, |_, _| Ok(false))
-                .expect("classify")
-        );
-    }
-
-    #[test]
-    fn ssh_config_true_local_alias_bypasses_a_tunnel() {
-        let config = "hostname 127.0.0.1\nport 2222\nproxyjump none\nproxycommand none\n";
-        assert!(
-            server_uses_loopback_transport_from_ssh_config(config, |host, port| {
-                Ok(host == "127.0.0.1" && port == 2222)
-            })
-            .expect("classify")
-        );
+    fn ssh_config_bypasses_a_tunnel_only_for_a_true_local_destination() {
+        for (config, expected) in [
+            (
+                "hostname 192.0.2.1\nport 22\nproxyjump none\nproxycommand none\n",
+                false,
+            ),
+            (
+                "hostname 127.0.0.1\nport 2222\nproxyjump none\nproxycommand none\n",
+                true,
+            ),
+            // Proxy semantics require a tunnel even for a loopback destination.
+            (
+                "hostname 127.0.0.1\nport 22\nproxyjump bastion.example\nproxycommand none\n",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                server_uses_loopback_transport_from_ssh_config(config, |host, port| {
+                    Ok(host == "127.0.0.1" && (port == 2222 || port == 22))
+                })
+                .expect("classify"),
+                expected,
+                "{config}"
+            );
+        }
     }
 
     #[test]
@@ -414,15 +407,6 @@ mod tests {
             255,
             "user@host: Permission denied (publickey)."
         ));
-    }
-
-    #[test]
-    fn ssh_proxy_semantics_require_a_tunnel_even_for_loopback_destination() {
-        let config = "hostname 127.0.0.1\nport 22\nproxyjump bastion.example\nproxycommand none\n";
-        assert!(
-            !server_uses_loopback_transport_from_ssh_config(config, |_, _| Ok(true))
-                .expect("classify")
-        );
     }
 }
 
