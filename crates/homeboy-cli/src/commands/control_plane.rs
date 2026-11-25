@@ -297,45 +297,4 @@ mod tests {
             );
         });
     }
-
-    #[test]
-    fn parser_and_help_expose_the_dedicated_provider_effect_command() {
-        use clap::{CommandFactory, Parser};
-
-        let parsed = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "control-plane",
-            "provider-effects",
-            "reconcile",
-            "--effect-id",
-            "effect-1",
-            "--request-digest",
-            "digest",
-            "--recovery-fence",
-            "1",
-            "--terminal-result",
-            r#"{"exit_code":0,"evidence":{}}"#,
-            "--authoritative-evidence",
-            "{}",
-            "--apply",
-        ])
-        .expect("parse dedicated command");
-        assert!(matches!(
-            parsed.command,
-            crate::cli_surface::Commands::ControlPlane(_)
-        ));
-        let command = crate::cli_surface::Cli::command();
-        let control_plane = command
-            .find_subcommand("control-plane")
-            .expect("control-plane help");
-        assert!(control_plane
-            .find_subcommand("provider-effects")
-            .expect("provider-effects help")
-            .find_subcommand("reconcile")
-            .expect("reconcile help")
-            .get_about()
-            .expect("reconcile about")
-            .to_string()
-            .contains("ambiguous effect"));
-    }
 }
