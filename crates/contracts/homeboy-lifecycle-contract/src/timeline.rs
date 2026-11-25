@@ -623,32 +623,22 @@ mod tests {
     }
 
     #[test]
-    fn test_summarize_spans() {
+    fn test_summarize_spans_measures_or_reports_missing_endpoints() {
+        let definitions = [ObservationSpanDefinition {
+            id: "total".to_string(),
+            from: "runner.start".to_string(),
+            to: "runner.done".to_string(),
+        }];
+
         let results = summarize_spans(
             &[event(10, "runner", "start"), event(35, "runner", "done")],
-            &[ObservationSpanDefinition {
-                id: "total".to_string(),
-                from: "runner.start".to_string(),
-                to: "runner.done".to_string(),
-            }],
+            &definitions,
         );
-
         assert_eq!(results[0].status, ObservationSpanStatus::Ok);
         assert_eq!(results[0].duration_ms, Some(25));
         assert!(results[0].is_ok());
-    }
 
-    #[test]
-    fn test_summarize_spans_reports_missing_endpoints() {
-        let results = summarize_spans(
-            &[event(10, "runner", "start")],
-            &[ObservationSpanDefinition {
-                id: "total".to_string(),
-                from: "runner.start".to_string(),
-                to: "runner.done".to_string(),
-            }],
-        );
-
+        let results = summarize_spans(&[event(10, "runner", "start")], &definitions);
         assert_eq!(results[0].status, ObservationSpanStatus::Skipped);
         assert_eq!(results[0].missing, vec!["runner.done"]);
     }

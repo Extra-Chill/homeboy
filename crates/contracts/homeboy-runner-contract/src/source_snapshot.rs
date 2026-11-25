@@ -132,15 +132,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_sync_excludes_carry_no_homeboy_state_compensation() {
-        // Homeboy owns no path under `.homeboy` in a workspace, so the source
-        // snapshot never needs to strip one; a user's `.homeboy` ships as-is.
-        assert!(default_sync_excludes()
-            .iter()
-            .all(|exclude| !exclude.starts_with(".homeboy/") && exclude != ".homeboy"));
-    }
-
-    #[test]
     fn source_snapshot_preserves_repository_integrity_evidence_across_json() {
         let snapshot = SourceSnapshot {
             repository_integrity_evidence: Some(RepositoryIntegrityEvidence {

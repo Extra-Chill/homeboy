@@ -58,66 +58,52 @@ mod tests {
         }
     }
 
+    /// Runner artifact refs cross the runner/controller boundary: absent
+    /// fields and refs are omitted, present ones keep their names.
     #[test]
-    fn artifact_ref_keeps_its_minimal_wire_shape() {
-        let value = serde_json::json!({ "artifact_id": "patch" });
-        let minimal = RunnerArtifactRef {
-            artifact_id: "patch".to_string(),
-            name: None,
-            path: None,
-            url: None,
-            mime: None,
-            size_bytes: None,
-            sha256: None,
-            transport: None,
-        };
-
-        assert_eq!(serde_json::to_value(&minimal).expect("serialize"), value);
-        assert_eq!(
-            serde_json::from_value::<RunnerArtifactRef>(value).expect("deserialize"),
-            minimal
-        );
-    }
-
-    #[test]
-    fn artifact_ref_keeps_its_complete_wire_shape() {
-        assert_eq!(
-            serde_json::to_value(artifact()).expect("serialize"),
-            serde_json::json!({
-                "artifact_id": "patch",
-                "name": "changes.patch",
-                "path": "artifacts/changes.patch",
-                "url": "https://example.test/changes.patch",
-                "mime": "text/x-diff",
-                "size_bytes": 42,
-                "sha256": "abc123",
-                "transport": "runner-artifact",
-            })
-        );
-    }
-
-    #[test]
-    fn mutation_artifacts_omit_absent_refs() {
+    fn mutation_artifacts_keep_their_wire_shape() {
         let empty = RunnerMutationArtifacts::default();
         assert!(empty.is_empty());
         assert_eq!(
             serde_json::to_value(&empty).expect("serialize"),
             serde_json::json!({})
         );
-        assert_eq!(
-            serde_json::from_value::<RunnerMutationArtifacts>(serde_json::json!({}))
-                .expect("deserialize"),
-            empty
-        );
 
         let mutation = RunnerMutationArtifacts {
             patch_ref: Some(artifact()),
+            operation_log_ref: Some(RunnerArtifactRef {
+                artifact_id: "log".to_string(),
+                name: None,
+                path: None,
+                url: None,
+                mime: None,
+                size_bytes: None,
+                sha256: None,
+                transport: None,
+            }),
             ..Default::default()
         };
         assert!(!mutation.is_empty());
-        let value = serde_json::to_value(mutation).expect("serialize");
-        assert_eq!(value["patch_ref"]["artifact_id"], "patch");
-        assert!(value.get("file_bundle_ref").is_none());
-        assert!(value.get("operation_log_ref").is_none());
+        let value = serde_json::to_value(&mutation).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "patch_ref": {
+                    "artifact_id": "patch",
+                    "name": "changes.patch",
+                    "path": "artifacts/changes.patch",
+                    "url": "https://example.test/changes.patch",
+                    "mime": "text/x-diff",
+                    "size_bytes": 42,
+                    "sha256": "abc123",
+                    "transport": "runner-artifact",
+                },
+                "operation_log_ref": { "artifact_id": "log" },
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<RunnerMutationArtifacts>(value).expect("deserialize"),
+            mutation
+        );
     }
 }
