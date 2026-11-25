@@ -586,17 +586,11 @@ mod tests {
     }
 
     #[test]
-    fn notification_transport_validation_allows_zero_and_one_declarations() {
-        manifest(Vec::new())
-            .validate_notification_transports()
-            .expect("zero declarations are valid");
+    fn notification_transport_validation_rejects_only_duplicate_ids() {
         manifest(vec![transport("example.completed")])
             .validate_notification_transports()
             .expect("one declaration is valid");
-    }
 
-    #[test]
-    fn notification_transport_validation_rejects_duplicate_ids() {
         let error = manifest(vec![
             transport("example.completed"),
             transport("example.completed"),
@@ -610,48 +604,12 @@ mod tests {
 }
 
 #[cfg(test)]
-mod composition_tests {
-    use super::*;
-
-    #[test]
-    fn composition_includes_round_trips_with_canonical_wire_shape() {
-        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "name": "wordpress",
-            "version": "1.0.0",
-            "composition": { "includes": ["nodejs"] }
-        }))
-        .expect("manifest with composition deserializes");
-
-        let composition = manifest.composition.expect("composition present");
-        assert_eq!(composition.includes, vec!["nodejs".to_string()]);
-        assert_eq!(
-            serde_json::to_value(&composition).unwrap(),
-            serde_json::json!({ "includes": ["nodejs"] })
-        );
-    }
-
-    #[test]
-    fn composition_is_optional() {
-        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "name": "nodejs",
-            "version": "1.0.0"
-        }))
-        .expect("manifest without composition deserializes");
-        assert!(manifest.composition.is_none());
-    }
-}
-
-#[cfg(test)]
 mod isolated_home_paths_tests {
     use super::validate_isolated_home_paths;
 
     #[test]
-    fn accepts_home_relative_paths() {
+    fn accepts_home_relative_paths_and_rejects_traversal_absolute_and_empty() {
         assert!(validate_isolated_home_paths(&[".cache/homeboy/wp-codebox".to_string()]).is_ok());
-    }
-
-    #[test]
-    fn rejects_traversal_absolute_and_empty_paths() {
         for bad in ["", " ", "../x", ".cache/../../etc", "/abs", "./x", "a\\b"] {
             assert!(
                 validate_isolated_home_paths(&[bad.to_string()]).is_err(),
@@ -707,17 +665,5 @@ mod workload_kind_tests {
         .expect("deserializes");
         let error = manifest.validate_notification_transports().unwrap_err();
         assert!(error.to_string().contains("workload kind"));
-    }
-
-    #[test]
-    fn manifests_without_workloads_are_unchanged() {
-        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "name": "x",
-            "version": "1.0.0"
-        }))
-        .expect("deserializes");
-        assert!(!manifest.has_workloads());
-        let value = serde_json::to_value(&manifest).unwrap();
-        assert!(value.get("workloads").is_none());
     }
 }

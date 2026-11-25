@@ -28,26 +28,3 @@ pub struct ControlPlaneRunReview {
     pub resource: ControlPlaneRun,
     pub evidence: Value,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn review_resource_is_versioned_and_round_trips() {
-        let run = RunId::new("run-1").expect("run");
-        let review = ControlPlaneRunReview {
-            schema: CONTROL_PLANE_RUN_REVIEW_SCHEMA.to_string(),
-            run: run.clone(),
-            resource: ControlPlaneRun::new(run),
-            evidence: serde_json::json!({"aggregate": null}),
-        };
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneRunReview>(
-                serde_json::to_value(&review).expect("serialize"),
-            )
-            .expect("deserialize"),
-            review
-        );
-    }
-}

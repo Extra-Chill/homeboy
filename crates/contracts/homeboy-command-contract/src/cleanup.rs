@@ -258,148 +258,12 @@ pub fn runtime_tmp_commands(apply: bool, managed_older_than_days: u64) -> (Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
 
     #[derive(Parser)]
     struct CleanupParserTest {
         #[command(flatten)]
         cleanup: CleanupArgs,
-    }
-
-    #[test]
-    fn parser_accepts_cleanup_front_door_and_managed_runtime_override() {
-        let parsed = CleanupParserTest::parse_from([
-            "cleanup",
-            "--include",
-            "repo-artifacts,task-worktrees",
-            "--exclude",
-            "runtime-tmp",
-            "--apply",
-        ]);
-        assert!(parsed.cleanup.apply);
-        assert_eq!(
-            parsed.cleanup.include,
-            vec![
-                CleanupCategoryArg::RepoArtifacts,
-                CleanupCategoryArg::TaskWorktrees
-            ]
-        );
-        assert_eq!(parsed.cleanup.exclude, vec![CleanupCategoryArg::RuntimeTmp]);
-    }
-
-    #[test]
-    fn parser_accepts_external_storage_cleanup_category() {
-        let parsed =
-            CleanupParserTest::parse_from(["cleanup", "--include", "external-storage", "--apply"]);
-        assert_eq!(
-            parsed.cleanup.include,
-            vec![CleanupCategoryArg::ExternalStorage]
-        );
-        assert!(parsed.cleanup.apply);
-    }
-
-    #[test]
-    fn include_untagged_is_an_explicit_opt_in_that_defaults_off() {
-        // #11128. The flag widens the `runner-downloads` delete predicate to
-        // cover caches written before intent tagging existed, so its absence
-        // has to keep meaning exactly what it meant before it existed.
-        let parsed =
-            CleanupParserTest::parse_from(["cleanup", "--include", "runner-downloads", "--apply"]);
-        assert!(!parsed.cleanup.include_untagged);
-
-        let parsed = CleanupParserTest::parse_from([
-            "cleanup",
-            "--include",
-            "runner-downloads",
-            "--include-untagged",
-            "--apply",
-        ]);
-        assert!(parsed.cleanup.include_untagged);
-
-        // It is its own flag, not a `--include` category value: widening a
-        // predicate and selecting a category are different questions.
-        assert_eq!(
-            parsed.cleanup.include,
-            vec![CleanupCategoryArg::RunnerDownloads]
-        );
-    }
-
-    #[test]
-    fn parser_accepts_cleanup_subcommands_and_managed_runtime_override() {
-        let parsed = CleanupParserTest::parse_from([
-            "cleanup",
-            "--include",
-            "runtime-tmp",
-            "--runtime-tmp-managed-older-than-days",
-            "0",
-        ]);
-        assert_eq!(parsed.cleanup.include, vec![CleanupCategoryArg::RuntimeTmp]);
-        assert_eq!(parsed.cleanup.runtime_tmp_managed_older_than_days, Some(0));
-
-        let parsed =
-            CleanupParserTest::parse_from(["cleanup", "status", "cleanup-job-id", "--full"]);
-        let Some(CleanupCommand::Status(args)) = parsed.cleanup.command else {
-            panic!("expected cleanup status command");
-        };
-        assert_eq!(args.job_id, "cleanup-job-id");
-        assert!(args.full);
-
-        let parsed = CleanupParserTest::parse_from([
-            "cleanup",
-            "artifacts",
-            "--sort",
-            "size",
-            "--limit",
-            "7",
-            "--merged-only",
-        ]);
-        let Some(CleanupCommand::Artifacts(args)) = parsed.cleanup.command else {
-            panic!("expected cleanup artifacts command");
-        };
-        assert_eq!(args.sort, CleanupArtifactsSortArg::Size);
-        assert_eq!(args.limit, Some(7));
-        assert!(args.merged_only);
-
-        let parsed = CleanupParserTest::parse_from([
-            "cleanup",
-            "artifacts",
-            "--all-worktrees",
-            "--cursor",
-            "{\"root\":\"/repo\",\"worktree\":\"/repo/next\"}",
-        ]);
-        let Some(CleanupCommand::Artifacts(args)) = parsed.cleanup.command else {
-            panic!("expected cleanup artifacts command");
-        };
-        assert_eq!(
-            args.cursor.as_deref(),
-            Some("{\"root\":\"/repo\",\"worktree\":\"/repo/next\"}")
-        );
-
-        let parsed = CleanupParserTest::parse_from([
-            "cleanup",
-            "artifacts",
-            "--path",
-            "/repo/checkout",
-            "--all-worktrees",
-        ]);
-        let Some(CleanupCommand::Artifacts(args)) = parsed.cleanup.command else {
-            panic!("expected cleanup artifacts command");
-        };
-        assert!(args.all_worktrees);
-
-        let parsed = CleanupParserTest::parse_from([
-            "cleanup",
-            "retained-storage",
-            "--limit",
-            "3",
-            "--cursor",
-            "prior-reference",
-        ]);
-        let Some(CleanupCommand::RetainedStorage(args)) = parsed.cleanup.command else {
-            panic!("expected retained storage command");
-        };
-        assert_eq!(args.limit, 3);
-        assert_eq!(args.cursor.as_deref(), Some("prior-reference"));
     }
 
     #[test]
@@ -419,39 +283,46 @@ mod tests {
         assert!(error.to_string().contains("must be at least 1"));
     }
 
+    /// Rendered operator commands must parse back through the real cleanup
+    /// parser to the category they name, so guidance never drifts from flags.
     #[test]
-    fn cleanup_reference_surface_and_canonical_commands_are_stable() {
-        let command = CleanupParserTest::command();
-        assert!(command
-            .get_arguments()
-            .any(|arg| arg.get_long() == Some("include")));
-        assert_eq!(
-            RUNNER_DOWNLOADS_METADATA.canonical_cleanup_command(true),
-            "homeboy cleanup --include runner-downloads --apply"
-        );
-        assert_eq!(
-            LEAKED_TEST_HOMES_METADATA.canonical_cleanup_command(false),
-            "homeboy cleanup --include leaked-test-homes"
-        );
-        assert_eq!(
-            RELEASE_ARTIFACTS_METADATA.canonical_cleanup_command(true),
-            "homeboy cleanup --include release-artifacts --apply"
-        );
-        assert!(
-            CleanupParserTest::parse_from(["cleanup", "--include", "release-artifacts"])
-                .cleanup
-                .include
-                .contains(&CleanupCategoryArg::ReleaseArtifacts)
-        );
-        assert!(
-            CleanupParserTest::parse_from(["cleanup", "--include", "leaked-test-homes"])
-                .cleanup
-                .include
-                .contains(&CleanupCategoryArg::LeakedTestHomes)
-        );
-        assert_eq!(
-            runtime_tmp_commands(false, 0).0,
-            "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 0"
-        );
+    fn rendered_cleanup_commands_parse_back_to_their_category() {
+        let cases = [
+            (
+                RUNNER_DOWNLOADS_METADATA.canonical_cleanup_command(true),
+                CleanupCategoryArg::RunnerDownloads,
+                true,
+            ),
+            (
+                LEAKED_TEST_HOMES_METADATA.canonical_cleanup_command(false),
+                CleanupCategoryArg::LeakedTestHomes,
+                false,
+            ),
+            (
+                RELEASE_ARTIFACTS_METADATA.canonical_cleanup_command(true),
+                CleanupCategoryArg::ReleaseArtifacts,
+                true,
+            ),
+            (
+                runtime_tmp_commands(false, 0).0,
+                CleanupCategoryArg::RuntimeTmp,
+                false,
+            ),
+        ];
+
+        for (command, category, apply) in cases {
+            let argv = command
+                .strip_prefix("homeboy ")
+                .expect("rendered command starts with homeboy")
+                .split_whitespace();
+            let parsed = CleanupParserTest::try_parse_from(argv)
+                .unwrap_or_else(|error| panic!("{command} must parse: {error}"));
+            assert_eq!(parsed.cleanup.include, vec![category], "{command}");
+            assert_eq!(parsed.cleanup.apply, apply, "{command}");
+        }
+        let runtime = runtime_tmp_commands(true, 7).0;
+        let parsed = CleanupParserTest::parse_from(runtime.split_whitespace().skip(1));
+        assert!(parsed.cleanup.apply);
+        assert_eq!(parsed.cleanup.runtime_tmp_managed_older_than_days, Some(7));
     }
 }

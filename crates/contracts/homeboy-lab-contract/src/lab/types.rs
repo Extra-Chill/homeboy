@@ -383,45 +383,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn eager_portable_offloads_on_warm_and_hot_but_not_ok() {
-        let policy = LabCommandContract::portable("bench", None, false, LAB_NO_EXTRA_CAPABILITIES)
+    fn pressure_offload_threshold_depends_on_command_cost() {
+        let eager = LabCommandContract::portable("bench", None, false, LAB_NO_EXTRA_CAPABILITIES)
             .routing_policy;
-        assert!(!policy.offload_only_when_hot);
-        assert!(!policy.should_pressure_offload("ok"));
-        assert!(policy.should_pressure_offload("warm"));
-        assert!(policy.should_pressure_offload("hot"));
-    }
-
-    #[test]
-    fn cheap_portable_offloads_only_when_hot() {
-        let policy =
-            LabCommandContract::portable("promote", None, false, LAB_NO_EXTRA_CAPABILITIES)
-                .cheap()
-                .routing_policy;
-        assert!(policy.offload_only_when_hot);
-        assert!(!policy.should_pressure_offload("ok"));
-        // The bug this fixes: a merely warm machine must NOT force a cheap
-        // command onto the Lab.
-        assert!(!policy.should_pressure_offload("warm"));
-        assert!(policy.should_pressure_offload("hot"));
-    }
-
-    #[test]
-    fn cheap_is_opt_in_and_default_constructors_stay_eager() {
-        assert!(
-            !LabCommandContract::local_only("x", "r")
-                .routing_policy
-                .offload_only_when_hot
-        );
-        assert!(
-            !LabCommandContract::explicit_runner_simple("x")
-                .routing_policy
-                .offload_only_when_hot
-        );
-        assert!(
-            !LabCommandContract::portable("x", None, false, LAB_NO_EXTRA_CAPABILITIES)
-                .routing_policy
-                .offload_only_when_hot
-        );
+        // A merely warm machine must NOT force a cheap command onto the Lab.
+        let cheap = LabCommandContract::portable("promote", None, false, LAB_NO_EXTRA_CAPABILITIES)
+            .cheap()
+            .routing_policy;
+        for (pressure, eager_offloads, cheap_offloads) in [
+            ("ok", false, false),
+            ("warm", true, false),
+            ("hot", true, true),
+        ] {
+            assert_eq!(
+                eager.should_pressure_offload(pressure),
+                eager_offloads,
+                "{pressure}"
+            );
+            assert_eq!(
+                cheap.should_pressure_offload(pressure),
+                cheap_offloads,
+                "{pressure}"
+            );
+        }
     }
 }

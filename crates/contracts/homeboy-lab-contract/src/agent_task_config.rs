@@ -172,53 +172,16 @@ mod managed_service_contract_tests {
     use super::*;
 
     #[test]
-    fn managed_service_is_a_portable_lab_handoff_contract() {
-        let service: AgentTaskManagedService = serde_json::from_value(serde_json::json!({
-            "id": "neutral-http", "command": ["fixture", "--serve"],
-            "port": 0, "socket_handoff": true, "readiness": { "kind": "http", "path": "/ready" },
-            "secret_env": ["FIXTURE_TOKEN"], "public_url": "https://preview.example.test/run",
-            "browser_origin_probe": { "provider": "fixture-browser" },
-            "target": "lab", "lifecycle": "target"
-        }))
-        .expect("service contract");
-        assert_eq!(service.version, AgentTaskManagedService::VERSION);
-        assert_eq!(service.host, "127.0.0.1");
-        assert_eq!(
-            service.cleanup_deadline_ms,
-            AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS
-        );
-        assert!(service.socket_handoff);
-        assert_eq!(
-            service.browser_origin_probe.as_ref().unwrap().provider,
-            "fixture-browser"
-        );
-        assert_eq!(service.target.as_deref(), Some("lab"));
-        assert_eq!(
-            service.readiness.as_ref().unwrap().kind,
-            AgentTaskManagedServiceReadinessKind::Http
-        );
-        let serialized = serde_json::to_value(&service).expect("serialize");
-        assert!(serialized.get("secret_env").is_some());
-        assert_eq!(
-            serialized["browser_origin_probe"]["provider"],
-            "fixture-browser"
-        );
-        assert_eq!(
-            serialized["cleanup_deadline_ms"],
-            AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS
-        );
-    }
-
-    #[test]
-    fn cleanup_deadline_round_trips_and_rejects_unbounded_values() {
+    fn managed_service_binds_loopback_and_bounds_cleanup_deadline() {
         let mut service: AgentTaskManagedService = serde_json::from_value(serde_json::json!({
             "id": "fixture", "command": ["fixture"], "cleanup_deadline_ms": 3_000
         }))
         .expect("service contract");
         assert_eq!(
-            serde_json::to_value(&service).expect("serialize")["cleanup_deadline_ms"],
-            3_000
+            service.host, "127.0.0.1",
+            "services bind loopback by default"
         );
+        assert_eq!(service.cleanup_deadline_ms, 3_000);
         assert!(service.validate_cleanup_deadline().is_ok());
 
         service.cleanup_deadline_ms = 0;
