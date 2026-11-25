@@ -212,23 +212,6 @@ esac
     }
 }
 
-#[test]
-fn retains_digest_matching_assets_without_uploading_or_publishing() {
-    let fixture = Fixture::new();
-    let output = fixture.run(&[
-        inventory(&fixture.digests, &[]),
-        inventory(&fixture.digests, &[]),
-    ]);
-
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fixture.calls(), ["view", "view"]);
-}
-
 /// Recovery against an already-announced, already-complete release is a no-op.
 ///
 /// This is the exact shape that failed in production: v0.345.0 was published
@@ -243,6 +226,16 @@ fn accepts_a_complete_announced_inventory_without_uploading_or_republishing() {
         complete.contains(ANNOUNCE_ASSET),
         "the fixture inventory must carry the announce asset for this to regress"
     );
+    // cargo-dist never lists bootstrap assets in `sha256.sum` (#12701); a
+    // clean reconcile proves they are not demanded to carry checksum coverage.
+    let aggregate = fs::read_to_string(fixture.artifact_dir().join("sha256.sum"))
+        .expect("read aggregate sidecar");
+    for asset in [INSTALLER_ASSET, FORMULA_ASSET] {
+        assert!(
+            !aggregate.contains(asset),
+            "{asset} must stay outside the checksum contract for this to regress"
+        );
+    }
 
     let output = fixture.run(&[complete.clone(), complete]);
 
@@ -274,87 +267,17 @@ fn accepts_an_inventory_without_the_announce_asset_before_announce() {
     assert_eq!(fixture.calls(), ["view", "view"]);
 }
 
-/// Bootstrap assets are digest-verified but never checksum-covered (#12701).
-///
-/// cargo-dist plans `homeboy-installer.sh` and the Homebrew formula, and never
-/// lists either in `sha256.sum`. A coverage assertion that demanded a sidecar
-/// for every non-sidecar asset was therefore unsatisfiable in production: every
-/// release from v0.350.22 onward failed publish with "No rebuilt checksum
-/// contract covers homeboy-installer.sh" while the release itself published
-/// complete with all 14 assets.
-///
-/// Both halves matter, so both are pinned here. Narrowing the coverage rule
-/// must not narrow what gets verified: these assets still reconcile against
-/// GitHub's digest of the rebuilt local bytes.
-#[test]
-fn bootstrap_assets_are_digest_verified_without_requiring_checksum_coverage() {
-    let fixture = Fixture::new();
-    let aggregate = fs::read_to_string(fixture.artifact_dir().join("sha256.sum"))
-        .expect("read aggregate sidecar");
-    for asset in [INSTALLER_ASSET, FORMULA_ASSET] {
-        assert!(
-            !aggregate.contains(asset),
-            "{asset} must stay outside the checksum contract for this to regress"
-        );
-    }
-
-    // Half one: uncovered bootstrap assets do not block a clean reconcile.
-    let output = fixture.run(&[
-        inventory(&fixture.digests, &[]),
-        inventory(&fixture.digests, &[]),
-    ]);
-    assert!(
-        output.status.success(),
-        "assets cargo-dist never checksums must not be demanded to carry a checksum contract.\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(fixture.calls(), ["view", "view"]);
-
-    // Half two: their bytes are still proven against the remote digest.
-    for asset in [INSTALLER_ASSET, FORMULA_ASSET] {
-        let fixture = Fixture::new();
-        let output = fixture.run(&[
-            inventory(
-                &fixture.digests,
-                &[(
-                    asset,
-                    "uploaded",
-                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                    1,
-                )],
-            ),
-            inventory(&fixture.digests, &[]),
-        ]);
-        assert!(
-            output.status.success(),
-            "{asset}: stdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            fixture.calls(),
-            vec![
-                "view".to_owned(),
-                format!("upload:{asset}"),
-                "view".to_owned()
-            ],
-            "{asset} must be replaced when the remote digest disagrees with the rebuilt bytes"
-        );
-    }
-}
-
+/// Bootstrap assets (installer, formula) are not checksum-covered but are
+/// still replaced when GitHub's digest disagrees with the rebuilt bytes.
 #[test]
 fn replaces_missing_empty_and_digest_mismatched_assets_then_revalidates_remote_bytes() {
+    const ZERO: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
     for (asset, state, remote_digest, size) in [
         ("payload.tar.gz", "absent", "", 0),
         ("payload.tar.gz.sha256", "uploaded", "", 0),
-        (
-            "sha256.sum",
-            "uploaded",
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-            1,
-        ),
+        ("sha256.sum", "uploaded", ZERO, 1),
+        (INSTALLER_ASSET, "uploaded", ZERO, 1),
+        (FORMULA_ASSET, "uploaded", ZERO, 1),
     ] {
         let fixture = Fixture::new();
         let output = fixture.run(&[
@@ -458,22 +381,10 @@ fn rejects_invalid_local_artifacts_before_any_upload_or_publication() {
             .success());
         assert_eq!(fixture.calls(), ["view"]);
     }
-
-    let fixture = Fixture::new();
-    fs::write(
-        fixture.artifact_dir().join("payload.tar.gz.sha256"),
-        "not a checksum\n",
-    )
-    .expect("corrupt checksum sidecar");
-    assert!(!fixture
-        .run(&[inventory(&fixture.digests, &[])])
-        .status
-        .success());
-    assert_eq!(fixture.calls(), ["view"]);
 }
 
 #[test]
-fn rejects_checksum_sidecars_without_one_newline_terminated_record() {
+fn rejects_checksum_sidecars_without_exactly_one_newline_terminated_record() {
     let fixture = Fixture::new();
     let sidecar = fixture.artifact_dir().join("payload.tar.gz.sha256");
     let contents = fs::read_to_string(&sidecar).expect("read payload sidecar");
@@ -496,15 +407,11 @@ fn rejects_checksum_sidecars_without_one_newline_terminated_record() {
         .status
         .success());
     assert_eq!(fixture.calls(), ["view"]);
-}
 
-#[test]
-fn rejects_multiple_checksum_records_before_reconciliation() {
     let fixture = Fixture::new();
     let sidecar = fixture.artifact_dir().join("payload.tar.gz.sha256");
     let contents = fs::read_to_string(&sidecar).expect("read payload sidecar");
     fs::write(&sidecar, format!("{contents}{contents}")).expect("append second checksum record");
-
     let output = fixture.run(&[inventory(&fixture.digests, &[])]);
     assert!(!output.status.success());
     assert!(
