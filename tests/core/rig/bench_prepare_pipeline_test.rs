@@ -85,47 +85,31 @@ fn log_lines(log_path: &std::path::Path) -> Vec<String> {
 }
 
 #[test]
-fn bench_prepare_runs_before_check_and_workload() {
-    with_isolated_home(|home| {
-        let component = tempfile::TempDir::new().expect("component");
-        let log_dir = tempfile::TempDir::new().expect("log dir");
-        let log_path = log_dir.path().join("order.log");
-        write_logging_bench_extension(home, &log_path);
-        write_pipeline_rig(
-            home,
-            "bench-prep-rig",
-            component.path(),
-            &log_path,
-            Some(format!("printf 'prepare\\n' >> '{}'", log_path.display())),
-        );
+fn bench_prepare_runs_before_check_and_workload_when_declared() {
+    for (rig_id, with_prepare, expected) in [
+        ("bench-prep-rig", true, vec!["prepare", "check", "workload"]),
+        ("plain-rig", false, vec!["check", "workload"]),
+    ] {
+        with_isolated_home(|home| {
+            let component = tempfile::TempDir::new().expect("component");
+            let log_dir = tempfile::TempDir::new().expect("log dir");
+            let log_path = log_dir.path().join("order.log");
+            write_logging_bench_extension(home, &log_path);
+            write_pipeline_rig(
+                home,
+                rig_id,
+                component.path(),
+                &log_path,
+                with_prepare.then(|| format!("printf 'prepare\\n' >> '{}'", log_path.display())),
+            );
 
-        let (_output, exit_code) = run(run_args(
-            None,
-            vec!["bench-prep-rig".to_string()],
-            Vec::new(),
-        ))
-        .expect("bench should run");
+            let (_output, exit_code) = run(run_args(None, vec![rig_id.to_string()], Vec::new()))
+                .expect("bench should run");
 
-        assert_eq!(exit_code, 0);
-        assert_eq!(log_lines(&log_path), vec!["prepare", "check", "workload"]);
-    });
-}
-
-#[test]
-fn rig_without_bench_prepare_preserves_existing_check_then_workload_flow() {
-    with_isolated_home(|home| {
-        let component = tempfile::TempDir::new().expect("component");
-        let log_dir = tempfile::TempDir::new().expect("log dir");
-        let log_path = log_dir.path().join("order.log");
-        write_logging_bench_extension(home, &log_path);
-        write_pipeline_rig(home, "plain-rig", component.path(), &log_path, None);
-
-        let (_output, exit_code) = run(run_args(None, vec!["plain-rig".to_string()], Vec::new()))
-            .expect("bench should run");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(log_lines(&log_path), vec!["check", "workload"]);
-    });
+            assert_eq!(exit_code, 0, "{rig_id}");
+            assert_eq!(log_lines(&log_path), expected, "{rig_id}");
+        });
+    }
 }
 
 #[test]

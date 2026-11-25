@@ -1,6 +1,5 @@
 use crate::extension::lint::baseline as lint_baseline;
 use homeboy_core::finding::HomeboyFinding;
-use std::path::Path;
 
 fn lint_finding(id: &str, category: &str, message: &str) -> HomeboyFinding {
     HomeboyFinding::builder("lint", message)
@@ -22,40 +21,15 @@ fn full_scope() -> lint_baseline::LintBaselineProvenance {
 }
 
 #[test]
-fn test_save_baseline() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let findings = vec![
-        lint_finding("a", "cat1", "m1"),
-        lint_finding("b", "cat2", "m2"),
-    ];
-
-    let saved =
-        lint_baseline::save_baseline_for_scope(dir.path(), "homeboy", &findings, &full_scope())
-            .expect("save baseline should succeed");
-    assert!(saved.exists());
-}
-
-#[test]
-fn test_load_baseline() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let findings = vec![lint_finding("a", "cat1", "m1")];
-    lint_baseline::save_baseline_for_scope(dir.path(), "homeboy", &findings, &full_scope())
-        .expect("baseline saved");
-
-    let loaded = lint_baseline::load_baseline_for_scope(dir.path(), &full_scope())
-        .expect("baseline should load");
-    assert_eq!(loaded.context_id, "homeboy");
-    assert_eq!(loaded.item_count, 1);
-}
-
-#[test]
-fn test_compare() {
+fn test_saved_baseline_reloads_and_flags_new_findings() {
     let dir = tempfile::tempdir().expect("temp dir");
     let base = vec![lint_finding("a", "cat1", "m1")];
     lint_baseline::save_baseline_for_scope(dir.path(), "homeboy", &base, &full_scope())
         .expect("baseline saved");
     let loaded = lint_baseline::load_baseline_for_scope(dir.path(), &full_scope())
         .expect("baseline should load");
+    assert_eq!(loaded.context_id, "homeboy");
+    assert_eq!(loaded.item_count, 1);
 
     let current = vec![base[0].clone(), lint_finding("b", "cat2", "m2")];
 
@@ -65,7 +39,7 @@ fn test_compare() {
 }
 
 #[test]
-fn test_parse_findings_file() {
+fn test_parse_findings_file_reads_sidecar_and_treats_missing_as_empty() {
     let dir = tempfile::tempdir().expect("temp dir");
     let file = dir.path().join("lint-findings.json");
     std::fs::write(
@@ -85,13 +59,8 @@ fn test_parse_findings_file() {
         Some("custom")
     );
     assert_eq!(parsed[0].metadata["source_sidecar"], "lint-findings");
-}
 
-#[test]
-fn test_parse_findings_file_missing() {
-    let parsed = lint_baseline::parse_findings_file(Path::new(
-        "/tmp/definitely-missing-lint-baseline-test.json",
-    ))
-    .expect("missing file should parse to empty");
-    assert!(parsed.is_empty());
+    let missing = lint_baseline::parse_findings_file(&dir.path().join("missing.json"))
+        .expect("missing file should parse to empty");
+    assert!(missing.is_empty());
 }
