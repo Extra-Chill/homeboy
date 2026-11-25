@@ -278,11 +278,6 @@ fn fixture_program(extension: &std::path::Path, fixture_mode_env: &str) -> Strin
     name.to_string()
 }
 
-#[cfg(all(feature = "test-support", target_os = "linux"))]
-pub(super) fn test_inherited_pipe_holder_cleanup() {
-    homeboy_core::extension::external_check_detail_api::test_inherited_pipe_holder_cleanup();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

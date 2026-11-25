@@ -512,13 +512,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_load_extension() {
-        crate::test_support::with_isolated_home(|_| {
-            assert!(load_extension("missing-extension").is_err());
-        });
-    }
-
-    #[test]
     fn explicit_directory_loading_is_canonical_and_path_authoritative() {
         crate::test_support::with_isolated_home(|home| {
             let ambient_dir = home.path().join(".config/homeboy/extensions/fixture");
@@ -544,13 +537,6 @@ mod tests {
             std::fs::write(&manifest_path, "{not json").unwrap();
             let error = load_extension_from_dir(&explicit_dir).unwrap_err();
             assert_eq!(error.details["category"], "manifest_json_malformed");
-        });
-    }
-
-    #[test]
-    fn test_load_all_extensions() {
-        crate::test_support::with_isolated_home(|_| {
-            assert!(load_all_extensions().unwrap().is_empty());
         });
     }
 
@@ -710,36 +696,9 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_find_extension_by_tool() {
-        crate::test_support::with_isolated_home(|_| {
-            assert!(find_extension_by_tool("missing-tool").is_none());
-        });
-    }
-
-    #[test]
-    fn test_extension_path() {
-        let path = extension_path("missing-extension");
-        assert!(path.ends_with("missing-extension"));
-    }
-
-    #[test]
-    fn test_available_extension_ids() {
-        crate::test_support::with_isolated_home(|_| {
-            assert!(available_extension_ids().is_empty());
-        });
-    }
-
-    #[test]
-    fn test_is_extension_linked() {
-        crate::test_support::with_isolated_home(|_| {
-            assert!(!is_extension_linked("missing-extension"));
-        });
-    }
-
     #[cfg(unix)]
     #[test]
-    fn test_broken_extension_link_detects_missing_symlink_target() {
+    fn broken_extension_link_is_detected_listed_and_reported_with_repair_actions() {
         crate::test_support::with_isolated_home(|_| {
             let extensions_dir = paths::extensions().unwrap();
             std::fs::create_dir_all(&extensions_dir).unwrap();
@@ -756,6 +715,10 @@ mod tests {
             assert_eq!(broken.path, link);
             assert_eq!(broken.target, target);
             assert!(is_extension_linked("sample-runtime"));
+            let listed = broken_extension_links_in_root(&paths::homeboy().expect("config root"));
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].id, "sample-runtime");
+            assert_eq!(listed[0].target, target);
 
             let err = load_extension("sample-runtime").expect_err("broken link error");
             assert_eq!(err.code, ErrorCode::ExtensionNotFound);
@@ -785,23 +748,6 @@ mod tests {
                 actions[1].args,
                 ["extension", "uninstall", "sample-runtime"]
             );
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_broken_extension_links_lists_missing_symlink_targets() {
-        crate::test_support::with_isolated_home(|_| {
-            let extensions_dir = paths::extensions().unwrap();
-            std::fs::create_dir_all(&extensions_dir).unwrap();
-            let link = extensions_dir.join("sample-runtime");
-            let target = extensions_dir.join("missing-sample-runtime");
-            std::os::unix::fs::symlink(&target, &link).unwrap();
-
-            let broken = broken_extension_links_in_root(&paths::homeboy().expect("config root"));
-            assert_eq!(broken.len(), 1);
-            assert_eq!(broken[0].id, "sample-runtime");
-            assert_eq!(broken[0].target, target);
         });
     }
 

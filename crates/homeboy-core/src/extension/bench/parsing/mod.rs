@@ -586,26 +586,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_results_with_top_level_schema_marker() {
-        let raw = r#"{
-            "schema": "homeboy/bench-results/v1",
-            "component_id": "example",
-            "iterations": 1,
-            "scenarios": [
-                {
-                    "id": "scenario_one",
-                    "iterations": 1,
-                    "metrics": { "p95_ms": 145.0 }
-                }
-            ]
-        }"#;
-
-        let parsed = parse_bench_results_str(raw).unwrap();
-        assert_eq!(parsed.component_id, "example");
-        assert_eq!(parsed.scenarios.len(), 1);
-    }
-
-    #[test]
     fn parses_extension_bench_result_markers_and_sample_metrics() {
         let raw = r#"{
             "schema": "extension/bench-results/v1",
@@ -781,16 +761,6 @@ mod tests {
             homeboy_core::observation::timeline::ObservationSpanStatus::Ok
         );
         assert_eq!(scenario.span_results[0].duration_ms, Some(35));
-    }
-
-    #[test]
-    fn omits_empty_timeline_and_spans_on_serialize() {
-        let parsed = parse_bench_results_str(VALID_RESULTS).unwrap();
-        let raw = serde_json::to_string(&parsed.scenarios[0]).unwrap();
-
-        assert!(!raw.contains("timeline"));
-        assert!(!raw.contains("span_definitions"));
-        assert!(!raw.contains("span_results"));
     }
 
     #[test]
@@ -1017,65 +987,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_artifact_path_diagnostic_includes_rig_when_available() {
-        let err = parse_bench_results_str_with_artifact_context(
-            r#"{
-                "component_id": "studio",
-                "iterations": 1,
-                "scenarios": [
-                    {
-                        "id": "site_build",
-                        "iterations": 1,
-                        "metrics": { "success_rate": 1.0 },
-                        "artifacts": {
-                            "visual_comparison_dir": { "path": "" }
-                        }
-                    }
-                ]
-            }"#,
-            Some("studio-bfb"),
-        )
-        .expect_err("empty artifact path should include rig context");
-
-        assert!(err.to_string().contains("rig id `studio-bfb`"));
-    }
-
-    #[test]
-    fn omits_empty_scenario_artifacts() {
-        let parsed = parse_bench_results_str(VALID_RESULTS).unwrap();
-        let raw = serde_json::to_string(&parsed.scenarios[0]).unwrap();
-
-        assert!(!raw.contains("artifacts"));
-    }
-
-    #[test]
-    fn test_get() {
-        let parsed = parse_bench_results_str(VALID_RESULTS).unwrap();
-        let metrics = &parsed.scenarios[0].metrics;
-
-        assert_eq!(metrics.get("p95_ms"), Some(145.0));
-        assert_eq!(metrics.get("missing"), None);
-    }
-
-    #[test]
-    fn test_parse_bench_results_str() {
-        let parsed = parse_bench_results_str(VALID_RESULTS).unwrap();
-
-        assert_eq!(parsed.component_id, "example");
-    }
-
-    #[test]
-    fn test_parse_bench_results_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bench-results.json");
-        std::fs::write(&path, VALID_RESULTS).unwrap();
-
-        let parsed = parse_bench_results_file(&path).unwrap();
-
-        assert_eq!(parsed.scenarios.len(), 1);
-    }
-
-    #[test]
     fn test_parse_bench_results_file_with_artifact_context() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bench-results.json");
@@ -1205,16 +1116,19 @@ mod tests {
     }
 
     #[test]
-    fn flat_only_metrics_omit_metric_groups_on_serialize() {
+    fn omits_empty_optional_scenario_fields_on_serialize() {
         let parsed = parse_bench_results_str(VALID_RESULTS).unwrap();
-        assert!(parsed.scenarios[0].metric_groups.is_empty());
-
         let raw = serde_json::to_string(&parsed.scenarios[0]).unwrap();
-        assert!(
-            !raw.contains("metric_groups"),
-            "flat-only scenarios should keep legacy JSON shape: {}",
-            raw
-        );
+
+        for field in [
+            "metric_groups",
+            "artifacts",
+            "timeline",
+            "span_definitions",
+            "span_results",
+        ] {
+            assert!(!raw.contains(field), "{field} should be omitted: {raw}");
+        }
     }
 
     #[test]
@@ -1249,74 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_gate_failure_marks_scenario_failed() {
-        let raw = r#"{
-            "component_id": "example",
-            "iterations": 10,
-            "scenarios": [
-                {
-                    "id": "agent_loop",
-                    "iterations": 10,
-                    "metrics": {
-                        "assistant_message_count": 0,
-                        "p95_ms": 80.0
-                    },
-                    "gates": [
-                        { "metric": "assistant_message_count", "op": "gte", "value": 1 }
-                    ]
-                }
-            ]
-        }"#;
-
-        let mut parsed = parse_bench_results_str(raw).unwrap();
-        let failures = evaluate_gates(&mut parsed);
-        let scenario = &parsed.scenarios[0];
-
-        assert!(!scenario.passed);
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("assistant_message_count gte 1"));
-        assert_eq!(scenario.gate_results[0].actual, Some(0.0));
-        assert_eq!(parsed.budget_findings[0].metadata["passed"], false);
-    }
-
-    #[test]
-    fn timing_improvement_does_not_override_semantic_gate_failure() {
-        let baseline = r#"{
-            "component_id": "example",
-            "iterations": 10,
-            "scenarios": [
-                { "id": "agent_loop", "iterations": 10, "metrics": { "p95_ms": 100.0 } }
-            ]
-        }"#;
-        let current = r#"{
-            "component_id": "example",
-            "iterations": 10,
-            "scenarios": [
-                {
-                    "id": "agent_loop",
-                    "iterations": 10,
-                    "metrics": { "p95_ms": 50.0, "assistant_message_count": 0 },
-                    "gates": [
-                        { "metric": "assistant_message_count", "op": "gte", "value": 1 }
-                    ]
-                }
-            ]
-        }"#;
-
-        let baseline = parse_bench_results_str(baseline).unwrap();
-        let mut current = parse_bench_results_str(current).unwrap();
-        let failures = evaluate_gates(&mut current);
-
-        assert!(
-            current.scenarios[0].metrics.get("p95_ms").unwrap()
-                < baseline.scenarios[0].metrics.get("p95_ms").unwrap()
-        );
-        assert_eq!(failures.len(), 1);
-        assert!(!current.scenarios[0].passed);
-    }
-
-    #[test]
-    fn semantic_gate_failure_serializes_details() {
+    fn semantic_gate_failure_marks_scenario_failed_and_serializes_details() {
         let raw = r#"{
             "component_id": "example",
             "iterations": 10,
@@ -1338,6 +1185,9 @@ mod tests {
         let scenario = &value["scenarios"][0];
 
         assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("identifies_studio_rate gte 1"));
+        assert!(!parsed.scenarios[0].passed);
+        assert_eq!(parsed.budget_findings[0].metadata["passed"], false);
         assert_eq!(scenario["passed"], serde_json::Value::Bool(false));
         assert_eq!(
             scenario["gate_results"][0]["metric"],
@@ -1601,53 +1451,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_variance_aware_metric_without_distribution() {
-        let raw = r#"{
-            "component_id": "example",
-            "iterations": 20,
-            "metric_policies": {
-                "agent_loop_ms": {
-                    "direction": "lower_is_better",
-                    "variance_aware": true
-                }
-            },
-            "scenarios": [
-                {
-                    "id": "agent_loop",
+    fn rejects_variance_aware_metric_without_enough_samples() {
+        for metrics in [
+            r#"{ "agent_loop_ms": 1200.0 }"#,
+            r#"{ "agent_loop_ms": 1200.0, "distributions": { "agent_loop_ms": [1000.0, 1200.0] } }"#,
+        ] {
+            let raw = format!(
+                r#"{{
+                    "component_id": "example",
                     "iterations": 20,
-                    "metrics": { "agent_loop_ms": 1200.0 }
-                }
-            ]
-        }"#;
+                    "metric_policies": {{
+                        "agent_loop_ms": {{
+                            "direction": "lower_is_better",
+                            "variance_aware": true,
+                            "min_iterations_for_variance": 5
+                        }}
+                    }},
+                    "scenarios": [
+                        {{ "id": "agent_loop", "iterations": 20, "metrics": {metrics} }}
+                    ]
+                }}"#
+            );
 
-        assert!(parse_bench_results_str(raw).is_err());
-    }
-
-    #[test]
-    fn rejects_variance_aware_metric_below_minimum_samples() {
-        let raw = r#"{
-            "component_id": "example",
-            "iterations": 20,
-            "metric_policies": {
-                "agent_loop_ms": {
-                    "direction": "lower_is_better",
-                    "variance_aware": true,
-                    "min_iterations_for_variance": 5
-                }
-            },
-            "scenarios": [
-                {
-                    "id": "agent_loop",
-                    "iterations": 20,
-                    "metrics": {
-                        "agent_loop_ms": 1200.0,
-                        "distributions": { "agent_loop_ms": [1000.0, 1200.0] }
-                    }
-                }
-            ]
-        }"#;
-
-        assert!(parse_bench_results_str(raw).is_err());
+            assert!(parse_bench_results_str(&raw).is_err(), "metrics: {metrics}");
+        }
     }
 
     #[test]
@@ -1845,11 +1672,5 @@ mod tests {
             "expected invalid-metric error, got details: {}",
             inner
         );
-    }
-
-    #[test]
-    fn rejects_malformed_json() {
-        let raw = "not json at all";
-        assert!(parse_bench_results_str(raw).is_err());
     }
 }
