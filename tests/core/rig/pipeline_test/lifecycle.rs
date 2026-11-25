@@ -273,87 +273,6 @@ fn test_lifecycle_teardown_reaps_the_handles_its_step_owns() {
 }
 
 #[test]
-fn test_lifecycle_step_rejects_unknown_contract_schema() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-schema",
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "lifecycle": {
-                        "schema": "homeboy/lifecycle-contract/v0",
-                        "phases": [{ "id": "prepare", "phase": "prepare", "command": "true" }]
-                    }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    assert_eq!(out.steps[0].kind, "lifecycle");
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(
-        error.contains("expected schema homeboy/lifecycle-contract/v1"),
-        "{error}"
-    );
-}
-
-#[test]
-fn test_lifecycle_step_fails_when_op_has_no_declared_phase() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-missing-phase",
-            "pipeline": {
-                "down": [{
-                    "kind": "lifecycle",
-                    "op": "teardown",
-                    "lifecycle": {
-                        "phases": [{ "id": "prepare", "phase": "prepare", "command": "true" }]
-                    }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "down", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("declares no 'teardown' phase"), "{error}");
-}
-
-#[test]
-fn test_lifecycle_step_rejects_phase_without_hook_or_command() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-empty-phase",
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "lifecycle": {
-                        "phases": [{ "id": "prepare", "phase": "prepare" }]
-                    }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(
-        error.contains("neither extension_hook nor command"),
-        "{error}"
-    );
-}
-
-#[test]
 fn test_lifecycle_step_fails_on_required_phase_failure() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let marker = tmp.path().join("never.txt");
@@ -417,93 +336,9 @@ fn test_lifecycle_step_continues_past_optional_phase_failure() {
     assert!(marker.exists(), "an optional phase failure is not fatal");
 }
 
-#[test]
-fn test_lifecycle_step_fails_on_undeclared_component() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-component",
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "component": "missing",
-                    "lifecycle": {
-                        "phases": [{ "id": "prepare", "phase": "prepare", "command": "true" }]
-                    }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("missing"), "{error}");
-}
-
-#[test]
-fn test_lifecycle_step_rejects_malformed_extension_hook() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-hook",
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "lifecycle": {
-                        "phases": [{
-                            "id": "prepare",
-                            "phase": "prepare",
-                            "extension_hook": "notqualified"
-                        }]
-                    }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("<extension-id>.<action-id>"), "{error}");
-}
-
-/// Non-breaking guarantee: a pipeline with no lifecycle step behaves exactly
-/// as it did before the variant existed.
-#[test]
-fn test_pipeline_without_lifecycle_step_is_unchanged() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let marker = tmp.path().join("plain.txt");
-    let marker_arg = marker.to_string_lossy();
-
-    let rig = rig_from_json(&format!(
-        r#"{{
-            "id": "no-lifecycle",
-            "pipeline": {{
-                "up": [{{ "kind": "command", "command": "printf x > {marker}" }}]
-            }}
-        }}"#,
-        marker = marker_arg
-    ));
-
-    let out =
-        run_pipeline(&crate::state::test_state_store(), &rig, "up", true).expect("pipeline runs");
-
-    assert!(out.is_success(), "outcomes: {:?}", out.steps);
-    assert_eq!(out.steps[0].kind, "command");
-    assert!(marker.exists());
-}
-
 // ------------------------------------------------------------------
-// Workload-referenced contracts (#10317)
-//
-// `WorkloadSpec.lifecycle` was parsed and serialized but had no reader: no
-// call site anywhere in the workspace read the field or the accessor. These
-// tests are that reader's contract. The point of the reference form is that
-// one declaration on the workload serves every op the rig runs against it —
-// an inline contract has to be restated per op, and two copies drift.
+// Workload-referenced contracts: one declaration on the workload serves
+// every op the rig runs against it.
 // ------------------------------------------------------------------
 
 #[test]
@@ -643,205 +478,136 @@ fn test_lifecycle_workload_ref_disambiguates_by_path() {
     assert_eq!(fs::read_to_string(&marker).expect("marker"), "b");
 }
 
-/// Ambiguity is never resolved by guessing.
+/// Every malformed lifecycle step fails the pipeline with an actionable error;
+/// ambiguity and missing contracts are never resolved by guessing or no-op.
 #[test]
-fn test_lifecycle_workload_ref_rejects_ambiguous_selection() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-workload-ambiguous",
-            "fuzz_workloads": {
-                "generic": [
-                    {
-                        "path": "fuzz/a.workload.json",
-                        "lifecycle": { "phases": [{ "id": "a", "phase": "prepare", "command": "true" }] }
-                    },
-                    {
-                        "path": "fuzz/b.workload.json",
-                        "lifecycle": { "phases": [{ "id": "b", "phase": "prepare", "command": "true" }] }
-                    }
-                ]
-            },
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "workload": { "kind": "fuzz", "extension": "generic" }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("workload.path"), "{error}");
-    assert!(error.contains("fuzz/a.workload.json"), "{error}");
-    assert!(error.contains("fuzz/b.workload.json"), "{error}");
-}
-
-#[test]
-fn test_lifecycle_workload_ref_rejects_unknown_extension() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-workload-unknown-extension",
-            "fuzz_workloads": {
-                "generic": [{
+fn test_lifecycle_step_rejects_invalid_declarations() {
+    let one_fuzz_workload = r#""fuzz_workloads": {
+        "generic": [{
+            "path": "fuzz/a.workload.json",
+            "lifecycle": { "phases": [{ "id": "a", "phase": "prepare", "command": "true" }] }
+        }]
+    },"#;
+    let cases: [(&str, &str, String, &[&str]); 11] = [
+        (
+            "unknown-schema",
+            "up",
+            r#""pipeline": { "up": [{ "kind": "lifecycle", "lifecycle": {
+                "schema": "homeboy/lifecycle-contract/v0",
+                "phases": [{ "id": "prepare", "phase": "prepare", "command": "true" }]
+            } }] }"#
+                .to_string(),
+            &["expected schema homeboy/lifecycle-contract/v1"],
+        ),
+        (
+            "missing-phase",
+            "down",
+            r#""pipeline": { "down": [{ "kind": "lifecycle", "op": "teardown", "lifecycle": {
+                "phases": [{ "id": "prepare", "phase": "prepare", "command": "true" }]
+            } }] }"#
+                .to_string(),
+            &["declares no 'teardown' phase"],
+        ),
+        (
+            "empty-phase",
+            "up",
+            r#""pipeline": { "up": [{ "kind": "lifecycle", "lifecycle": {
+                "phases": [{ "id": "prepare", "phase": "prepare" }]
+            } }] }"#
+                .to_string(),
+            &["neither extension_hook nor command"],
+        ),
+        (
+            "undeclared-component",
+            "up",
+            r#""pipeline": { "up": [{ "kind": "lifecycle", "component": "missing", "lifecycle": {
+                "phases": [{ "id": "prepare", "phase": "prepare", "command": "true" }]
+            } }] }"#
+                .to_string(),
+            &["missing"],
+        ),
+        (
+            "malformed-hook",
+            "up",
+            r#""pipeline": { "up": [{ "kind": "lifecycle", "lifecycle": {
+                "phases": [{ "id": "prepare", "phase": "prepare", "extension_hook": "notqualified" }]
+            } }] }"#
+                .to_string(),
+            &["<extension-id>.<action-id>"],
+        ),
+        (
+            "ambiguous-workload",
+            "up",
+            r#""fuzz_workloads": { "generic": [
+                {
                     "path": "fuzz/a.workload.json",
                     "lifecycle": { "phases": [{ "id": "a", "phase": "prepare", "command": "true" }] }
-                }]
-            },
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "workload": { "kind": "fuzz", "extension": "missing" }
-                }]
-            }
-        }"#,
-    );
+                },
+                {
+                    "path": "fuzz/b.workload.json",
+                    "lifecycle": { "phases": [{ "id": "b", "phase": "prepare", "command": "true" }] }
+                }
+            ] },
+            "pipeline": { "up": [{ "kind": "lifecycle",
+                "workload": { "kind": "fuzz", "extension": "generic" } }] }"#
+                .to_string(),
+            &["workload.path", "fuzz/a.workload.json", "fuzz/b.workload.json"],
+        ),
+        (
+            "unknown-workload-extension",
+            "up",
+            format!(
+                r#"{one_fuzz_workload} "pipeline": {{ "up": [{{ "kind": "lifecycle",
+                    "workload": {{ "kind": "fuzz", "extension": "missing" }} }}] }}"#
+            ),
+            &["fuzz_workloads", "generic"],
+        ),
+        (
+            "unknown-workload-path",
+            "up",
+            format!(
+                r#"{one_fuzz_workload} "pipeline": {{ "up": [{{ "kind": "lifecycle",
+                    "workload": {{ "kind": "fuzz", "extension": "generic", "path": "fuzz/typo.workload.json" }} }}] }}"#
+            ),
+            &["fuzz/typo.workload.json", "fuzz/a.workload.json"],
+        ),
+        (
+            "workload-without-contract",
+            "up",
+            r#""fuzz_workloads": { "generic": [{ "path": "fuzz/a.workload.json" }] },
+            "pipeline": { "up": [{ "kind": "lifecycle",
+                "workload": { "kind": "fuzz", "extension": "generic" } }] }"#
+                .to_string(),
+            &["declares a lifecycle contract"],
+        ),
+        (
+            "both-sources",
+            "up",
+            format!(
+                r#"{one_fuzz_workload} "pipeline": {{ "up": [{{ "kind": "lifecycle",
+                    "lifecycle": {{ "phases": [{{ "id": "inline", "phase": "prepare", "command": "true" }}] }},
+                    "workload": {{ "kind": "fuzz", "extension": "generic" }} }}] }}"#
+            ),
+            &["not both"],
+        ),
+        (
+            "no-source",
+            "up",
+            r#""pipeline": { "up": [{ "kind": "lifecycle", "op": "prepare" }] }"#.to_string(),
+            &["declares neither `lifecycle` nor `workload`"],
+        ),
+    ];
 
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
+    for (name, phase, body, needles) in cases {
+        let rig = rig_from_json(&format!(r#"{{ "id": "lifecycle-{name}", {body} }}"#));
+        let out = run_pipeline(&crate::state::test_state_store(), &rig, phase, true)
+            .expect("pipeline reports failure");
 
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("fuzz_workloads"), "{error}");
-    assert!(error.contains("generic"), "{error}");
-}
-
-#[test]
-fn test_lifecycle_workload_ref_rejects_unknown_path() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-workload-unknown-path",
-            "fuzz_workloads": {
-                "generic": [{
-                    "path": "fuzz/a.workload.json",
-                    "lifecycle": { "phases": [{ "id": "a", "phase": "prepare", "command": "true" }] }
-                }]
-            },
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "workload": {
-                        "kind": "fuzz",
-                        "extension": "generic",
-                        "path": "fuzz/typo.workload.json"
-                    }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("fuzz/typo.workload.json"), "{error}");
-    assert!(error.contains("fuzz/a.workload.json"), "{error}");
-}
-
-/// A workload that exists but declares nothing is not silently a no-op.
-#[test]
-fn test_lifecycle_workload_ref_rejects_workload_without_contract() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-workload-no-contract",
-            "fuzz_workloads": {
-                "generic": [{ "path": "fuzz/a.workload.json" }]
-            },
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "workload": { "kind": "fuzz", "extension": "generic" }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("declares a lifecycle contract"), "{error}");
-}
-
-#[test]
-fn test_lifecycle_step_rejects_both_inline_and_workload_sources() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-both-sources",
-            "fuzz_workloads": {
-                "generic": [{
-                    "path": "fuzz/a.workload.json",
-                    "lifecycle": { "phases": [{ "id": "a", "phase": "prepare", "command": "true" }] }
-                }]
-            },
-            "pipeline": {
-                "up": [{
-                    "kind": "lifecycle",
-                    "lifecycle": { "phases": [{ "id": "inline", "phase": "prepare", "command": "true" }] },
-                    "workload": { "kind": "fuzz", "extension": "generic" }
-                }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(error.contains("not both"), "{error}");
-}
-
-#[test]
-fn test_lifecycle_step_rejects_neither_inline_nor_workload_source() {
-    let rig = rig_from_json(
-        r#"{
-            "id": "lifecycle-no-source",
-            "pipeline": {
-                "up": [{ "kind": "lifecycle", "op": "prepare" }]
-            }
-        }"#,
-    );
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-        .expect("pipeline reports failure");
-
-    assert!(!out.is_success());
-    let error = out.steps[0].error.as_deref().unwrap_or_default();
-    assert!(
-        error.contains("declares neither `lifecycle` nor `workload`"),
-        "{error}"
-    );
-}
-
-/// Pre-existing inline-contract specs keep parsing and running untouched:
-/// making `lifecycle` optional is additive, and `PipelineStep` does not use
-/// `deny_unknown_fields`, so no already-authored rig file changes meaning.
-#[test]
-fn test_inline_lifecycle_specs_round_trip_unchanged() {
-    let json = r#"{
-        "id": "lifecycle-roundtrip",
-        "pipeline": {
-            "up": [{
-                "kind": "lifecycle",
-                "op": "seed",
-                "lifecycle": { "phases": [{ "id": "seed", "phase": "seed", "command": "true" }] }
-            }]
+        assert!(!out.is_success(), "{name} should fail");
+        assert_eq!(out.steps[0].kind, "lifecycle", "{name}");
+        let error = out.steps[0].error.as_deref().unwrap_or_default();
+        for needle in needles {
+            assert!(error.contains(needle), "{name}: {error}");
         }
-    }"#;
-
-    let rig = rig_from_json(json);
-    let reserialized = serde_json::to_value(&rig).expect("serialize");
-    let step = &reserialized["pipeline"]["up"][0];
-
-    assert_eq!(step["kind"], "lifecycle");
-    assert_eq!(step["op"], "seed");
-    assert_eq!(step["lifecycle"]["phases"][0]["id"], "seed");
-    // An absent workload reference stays absent on the way out.
-    assert!(step.get("workload").is_none());
+    }
 }
