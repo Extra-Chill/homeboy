@@ -62,6 +62,10 @@ pub(crate) fn run_package_lint_at_with_ignores(
     declared_ignores.extend(package_manifest_ignores(root)?);
     let ignore_policy = IgnorePolicy::new(&declared_ignores);
     collect_files(root, &mut files, &ignore_policy)?;
+    // Never raw-open a live SQLite database (or its sidecars). On POSIX,
+    // closing any descriptor for its inode releases SQLite's process locks,
+    // even when the descriptor belongs to an unrelated text scan.
+    files.retain(|path| !sqlite_runtime_file(path));
 
     let materialized = collect_materialized_rigs(root, &files)?;
     let conflict_failures = conflict_marker_failures(root, &files)?;
@@ -543,6 +547,15 @@ fn collect_git_authored_files(
         .filter(|path| !has_ignored_directory(root.as_path(), path, ignore_policy))
         .collect();
     Ok(Some(files))
+}
+
+fn sqlite_runtime_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+    [".sqlite", ".sqlite3", ".db"].iter().any(|extension| {
+        name.ends_with(extension)
+            || name.contains(&format!("{extension}-"))
+            || name.contains(&format!("{extension}."))
+    })
 }
 
 fn collect_files_inner(
@@ -1723,6 +1736,29 @@ mod tests {
             .iter()
             .find(|step| step.label.contains("paths are portable"))
             .expect("portability step")
+    }
+
+    #[test]
+    fn package_text_scan_excludes_sqlite_databases_and_sidecars() {
+        for name in [
+            "homeboy-v32.sqlite",
+            "cache.db",
+            "cache.sqlite3",
+            "cache.db-wal",
+            "homeboy-v32.sqlite-shm",
+            "homeboy-v32.sqlite.metadata-payloads.lock",
+        ] {
+            assert!(
+                sqlite_runtime_file(Path::new(name)),
+                "must not raw-open {name}"
+            );
+        }
+        for name in ["rig.json", "setup.sh", "README.md"] {
+            assert!(
+                !sqlite_runtime_file(Path::new(name)),
+                "authored file {name}"
+            );
+        }
     }
 
     fn conflict_marker_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
