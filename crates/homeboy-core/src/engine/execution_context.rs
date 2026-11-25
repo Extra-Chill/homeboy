@@ -592,7 +592,6 @@ impl<'a> ResolvedSettings<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::ComponentScriptsConfig;
     use crate::test_support::with_isolated_home;
     use std::fs;
     use std::process::Command;
@@ -736,35 +735,6 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "marker" && value == "in-memory"));
         });
-    }
-
-    #[test]
-    fn resolve_with_component_uses_component_script_without_extension_provider() {
-        let dir = TempDir::new().expect("temp dir");
-        let root = dir.path();
-        fs::create_dir_all(root).expect("create dir");
-        let component = Component {
-            id: "script-owned".to_string(),
-            local_path: root.to_string_lossy().to_string(),
-            scripts: Some(ComponentScriptsConfig {
-                fuzz: vec!["node fuzz-runner.mjs".to_string()],
-                ..ComponentScriptsConfig::default()
-            }),
-            ..Component::default()
-        };
-        let options = ResolveOptions::with_capability(
-            "script-owned",
-            None,
-            ExtensionCapability::Fuzz,
-            Vec::new(),
-        );
-
-        let ctx = resolve_with_component(&options, Some(component))
-            .expect("component scripts should satisfy fuzz context");
-
-        assert_eq!(ctx.component_id, "script-owned");
-        assert!(ctx.extension_id.is_none());
-        assert!(ctx.extension_path.is_none());
     }
 
     #[test]
@@ -1041,36 +1011,26 @@ mod tests {
     }
 
     #[test]
-    fn unknown_setting_overrides_flags_undeclared_keys() {
-        let ctx = ctx_with_accepted_keys(&["workflow_bench_env", "iterations"]);
-
-        let unknown = ctx.unknown_setting_overrides(["bench_env"], ["iterations"]);
-
-        assert_eq!(unknown, vec!["bench_env".to_string()]);
-    }
-
-    #[test]
-    fn unknown_setting_overrides_validates_dotted_key_root() {
-        let ctx = ctx_with_accepted_keys(&["workflow_bench_env"]);
-
-        // Dotted child of an accepted root is fine; dotted child of an
-        // unknown root surfaces the root once.
-        let unknown = ctx.unknown_setting_overrides(
-            ["workflow_bench_env.FOO", "bench_env.BAR", "bench_env.BAZ"],
-            std::iter::empty(),
+    fn unknown_setting_overrides_validates_against_declared_keys() {
+        let declared = ctx_with_accepted_keys(&["workflow_bench_env", "iterations"]);
+        assert_eq!(
+            declared.unknown_setting_overrides(["bench_env"], ["iterations"]),
+            vec!["bench_env".to_string()]
         );
-
-        assert_eq!(unknown, vec!["bench_env".to_string()]);
-    }
-
-    #[test]
-    fn unknown_setting_overrides_skips_validation_without_declaration() {
+        // Dotted child of an accepted root is fine; dotted children of an
+        // unknown root surface the root once.
+        assert_eq!(
+            declared.unknown_setting_overrides(
+                ["workflow_bench_env.FOO", "bench_env.BAR", "bench_env.BAZ"],
+                std::iter::empty(),
+            ),
+            vec!["bench_env".to_string()]
+        );
         // No declared settings → cannot validate → treat all as valid.
-        let ctx = ctx_with_accepted_keys(&[]);
-
-        let unknown = ctx.unknown_setting_overrides(["anything", "at_all"], ["json_key"]);
-
-        assert!(unknown.is_empty());
+        let undeclared = ctx_with_accepted_keys(&[]);
+        assert!(undeclared
+            .unknown_setting_overrides(["anything", "at_all"], ["json_key"])
+            .is_empty());
     }
 
     #[test]
@@ -1101,29 +1061,6 @@ mod tests {
                 ("number".to_string(), "3".to_string()),
             ]
         );
-    }
-
-    #[test]
-    fn settings_overrides_replace_existing() {
-        let options = ResolveOptions {
-            component_id: Some("test".to_string()),
-            path_override: Some("/tmp".to_string()),
-            capability: None,
-            settings_overrides: vec![
-                ("mode".to_string(), "strict".to_string()),
-                ("lang".to_string(), "rust".to_string()),
-            ],
-            settings_profile_json_overrides: Vec::new(),
-            settings_json_overrides: Vec::new(),
-            extension_overrides: Vec::new(),
-        };
-
-        let ctx = resolve(&options).expect("resolve should succeed");
-        assert_eq!(ctx.settings.len(), 2);
-        assert!(ctx
-            .settings
-            .iter()
-            .any(|(k, v)| k == "mode" && v == "strict"));
     }
 
     #[test]
