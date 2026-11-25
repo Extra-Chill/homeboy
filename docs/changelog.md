@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.7] - 2026-11-25
+
+### Changed
+- prune route, json_output, lint and command tests to behavioral regressions
+- prune fuzz, git and infra command tests file by file
+- prune and fold low-value runner/runs command tests (homeboy-cli 12/16)
+
 ## [0.497.6] - 2026-11-25
 
 ### Changed
