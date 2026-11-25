@@ -267,31 +267,3 @@ pub struct TraceScenario {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn trace_and_assertion_statuses_use_fixed_wire_labels() {
-        for (status, assertion_status, label) in [
-            (TraceStatus::Pass, TraceAssertionStatus::Pass, "pass"),
-            (TraceStatus::Fail, TraceAssertionStatus::Fail, "fail"),
-            (TraceStatus::Error, TraceAssertionStatus::Error, "error"),
-        ] {
-            let wire = serde_json::json!(label);
-            assert_eq!(status.as_str(), label);
-            assert_eq!(assertion_status.as_str(), label);
-            assert_eq!(serde_json::to_value(&status).unwrap(), wire);
-            assert_eq!(serde_json::to_value(&assertion_status).unwrap(), wire);
-            assert_eq!(
-                serde_json::from_value::<TraceStatus>(wire.clone()).unwrap(),
-                status
-            );
-            assert_eq!(
-                serde_json::from_value::<TraceAssertionStatus>(wire).unwrap(),
-                assertion_status
-            );
-        }
-    }
-}

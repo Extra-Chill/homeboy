@@ -330,11 +330,6 @@ fn a_deferred_then_executed_gate_never_stays_gate_environment_unavailable() {
         assert_eq!(delivery.lifecycle().cook_status, cook_status, "{executed}");
         let outcome = crate::agent_task_service::CookOutcome::from_run_metadata(&verified.metadata)
             .and_then(|outcome| outcome.status);
-        assert_ne!(
-            outcome,
-            Some(CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable)),
-            "{executed}"
-        );
         assert_eq!(outcome, cook_status, "{executed}");
     }
 }

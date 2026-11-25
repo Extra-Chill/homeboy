@@ -15,9 +15,6 @@ use sha2::Digest;
 use std::process::Command;
 use std::sync::Mutex;
 
-/// The tests below drive the store-rooted entry points. Resolving the store
-/// once here keeps the ambient lookup in one place and lets the ambient
-/// wrappers be deleted (#7505).
 fn test_lifecycle_store() -> AgentTaskLifecycleStore {
     AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
@@ -765,12 +762,9 @@ fn stamped_controller_build(run_id: &str) -> String {
 
 #[test]
 fn retry_stamps_replacement_run_with_current_runtime_not_stale_source() {
-    // #8550: a Lab cook created under an older controller runtime left the durable
-    // run pinned to that obsolete build. After controller and runner were upgraded
-    // to the same current build, a clean lifecycle retry produced a fresh run ID
-    // but retained the obsolete runtime provenance, so the runner refused it with
-    // `Invalid argument controller_runtime`. A replacement run must be owned by the
-    // runtime that creates it.
+    // A replacement run is owned by the runtime that creates it, not the
+    // obsolete runtime its source was pinned to; a runner refuses the stale
+    // pin with `Invalid argument controller_runtime` (#8550).
     with_isolated_home(|_| {
         let plan = test_plan();
         let current_identity = homeboy_core::build_identity::current().display;
@@ -795,7 +789,7 @@ fn retry_stamps_replacement_run_with_current_runtime_not_stale_source() {
             Some(source.run_id.as_str())
         );
 
-        // (3) A same-runtime retry retains current behavior: the replacement is
+        // (2) A same-runtime retry retains current behavior: the replacement is
         //     owned by the current runtime and the source is untouched.
         let same_runtime_source =
             submit_plan(&plan, Some("cook-8550-fresh")).expect("fresh source submitted");
@@ -924,13 +918,6 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The planned proxy, the plan and log projections read back off it,
-/// and the accepted child that binds it are one operation on one home — the
-/// binding is only evidence of anything if the record it advances is the record
-/// the proxy was written into. The acceptance below cannot reach the default
-/// Lab-offload submission because the planned proxy has already written the
-/// record.
 #[test]
 fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -1004,14 +991,6 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
     );
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The whole point of this write is that an operator can find the run
-/// holding a reservation, so the reservation and the run it names have to be
-/// one home — a reservation named in one installation while the run lives in
-/// another is exactly the unfindable state #9163 forced manual job-ID
-/// cancellation for. The cancellation half follows the same store, so "a
-/// terminal run is never reopened" is asserted about the record the reservation
-/// was written onto.
 #[test]
 fn reserved_lab_admission_is_named_on_the_durable_run_before_acceptance() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -1094,13 +1073,6 @@ fn reserved_lab_admission_is_named_on_the_durable_run_before_acceptance() {
     );
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Double-acceptance is the failure this guards: an acceptance
-/// validated against one home's record and committed into another's would let
-/// two runners own the same run, and the handoff lock would have excluded
-/// neither. Every acceptance below — and the read back that proves the first
-/// one is retained — names `lifecycle_store`. The planned handoff writes the
-/// record first, so no acceptance here reaches the default submission.
 #[test]
 fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -1156,12 +1128,8 @@ fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
     assert_eq!(stored.runner_job_id(), Some("job-immutable"));
 }
 
-/// Deliberately still on `with_isolated_home` (#7505), and not because a rooted
-/// sibling is missing — `reconcile_transport_proxy_snapshot_in_store` exists and
-/// every other call here has one.
-///
-/// The blocker is the closing `reconcile_status()`. Unlike its migrated siblings, this
-/// test reads status back over a record the reconciliation left *Running* and
+/// Stays on `with_isolated_home`: the closing `reconcile_status()` reads
+/// status back over a record the reconciliation left *Running* and
 /// runner-backed, so `runner_probe_plan` returns `performed: true` and
 /// `reconcile_status_in_store` reaches `reconcile_runner_job_state_in_store` ->
 /// `with_runner_continuation`. That provider slot is process-global by design
@@ -1220,13 +1188,6 @@ fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The planned proxy, the recovery-state write that strips the pending
-/// handoff, and the reconciliation that has to bind from what is left are one
-/// operation on one durable row: "the runner identity survives only on the
-/// planned execution record" is a claim about a specific record, so the record
-/// the fixture mutilates and the record the binder reads must be the same one.
-///
 /// `reconcile_transport_proxy_snapshot_in_store` is a pure alias for
 /// `reconcile_runner_job_snapshot_in_store`, whose binding write, aggregate
 /// idempotence read, and terminal commit are all rooted. The bind reaches
@@ -1263,8 +1224,7 @@ fn preacceptance_snapshot_binds_replacement_job_from_planned_execution_record() 
     // Simulate the post-interruption recovery state: the pending controller
     // handoff is gone (deadline/recovery cleared it) AND the metadata
     // runner_id was not persisted, so the runner identity survives only on
-    // the planned execution record. Without the #9382 fix the binder has no
-    // runner source and validation rejects the replacement job.
+    // the planned execution record.
     record.lab_handoff = None;
     record
         .metadata
@@ -1301,14 +1261,6 @@ fn preacceptance_snapshot_binds_replacement_job_from_planned_execution_record() 
     );
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). "The controller job" the snapshot is refused against is the one the
-/// acceptance above persisted, so the acceptance and the validation that reads
-/// it back name one home. The run does not exist yet, so the acceptance is
-/// spelled with its explicit submission rather than the default one, which would
-/// reach the machine-global controller-runtime admission queue — see
-/// `stub_lab_offload_submission`.
-///
 /// The refusal happens before any durable write: the record already carries an
 /// accepted `runner_job_id`, so `bind_pending_lab_handoff_snapshot_in_store`
 /// returns immediately and `validate_runner_job_snapshot` rejects.
@@ -1343,10 +1295,6 @@ fn runner_snapshot_rejects_conflicting_bound_lab_job_identity() {
     assert!(error.message.contains("does not match controller job"));
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). "Without mutation" is a claim about what did *not* change on disk,
-/// so the record read back has to be the one the refused acceptance would have
-/// mutated — the same store the pending handoff was written into.
 #[test]
 fn pending_handoff_rejects_acceptance_from_a_different_runner_without_mutation() {
     with_isolated_home(|_| {
@@ -1374,10 +1322,6 @@ fn pending_handoff_rejects_acceptance_from_a_different_runner_without_mutation()
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). "Without rewriting the legacy projection" is a claim about what the
-/// refused resume left on disk, so the accepted record read back has to be the
-/// one the resume would have rewritten.
 #[test]
 fn accepted_proxy_resume_rejects_a_different_runner_without_rewriting_legacy_projection() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -1437,10 +1381,6 @@ fn accepted_proxy_resume_rejects_a_different_runner_without_rewriting_legacy_pro
     );
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). "The same attempt advanced" is only assertable when the
-/// pre-acceptance record and the accepted one are the same durable row, so the
-/// phase write and the acceptance name one store.
 #[test]
 fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -1748,139 +1688,60 @@ fn reserved_lab_admission_recovers_runner_job_after_client_loss() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). "Binds before validation" is a claim about one durable row: the
-/// pre-acceptance phase record the binder reads its runner from and the accepted
-/// handoff it commits back are the same record in the same home. The stub
-/// admission keeps submission off the machine-global controller-runtime queue;
-/// nothing here asserts on runtime provenance.
-///
-/// The bind reaches `record_detached_lab_run_in_store`, which carries the
-/// default Lab offload submission — but the phase write above has already
-/// created the record, so acceptance reads it instead of falling through.
+/// A pre-acceptance phase record binds the polled daemon job before identity
+/// validation, whether or not the job has been claimed yet: a daemon job gains
+/// its `target_runner_id` only once claimed, so a pre-claim snapshot has none
+/// and the expected-Lab controller handoff is the binding authority. The phase
+/// write has already created the record, so the bind never reaches the default
+/// Lab offload submission.
 #[test]
 fn preacceptance_snapshot_binds_planned_runner_job_before_validation() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "cook-preacceptance-snapshot";
-    let plan = test_plan();
-    let mut record = record_lab_offload_phase_with_submission_in_store(
-        &lifecycle_store,
-        LabOffloadPhaseRecord {
-            requested_run_id: run_id,
-            runner_id: "homeboy-lab",
-            phase: "lab_handoff_preacceptance",
-            remote_workspace: Some("/runner/workspace/homeboy"),
-            source_checkout: None,
-            provider_rotation: None,
-            durable_plan: Some(&plan),
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("persist planned controller execution");
-    assert!(record.lab_handoff.is_none());
-    assert_eq!(record.metadata["runner_id"], "homeboy-lab");
-    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
-    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-    snapshot.job.target_runner_id = Some("homeboy-lab".to_string());
-    snapshot.events.clear();
+    for (run_id, target_runner_id) in [
+        (
+            "cook-preacceptance-snapshot",
+            Some("homeboy-lab".to_string()),
+        ),
+        ("cook-preacceptance-no-target", None),
+    ] {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let lifecycle_store =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+        let plan = test_plan();
+        let mut record = record_lab_offload_phase_with_submission_in_store(
+            &lifecycle_store,
+            LabOffloadPhaseRecord {
+                requested_run_id: run_id,
+                runner_id: "homeboy-lab",
+                phase: "lab_handoff_preacceptance",
+                remote_workspace: Some("/runner/workspace/homeboy"),
+                source_checkout: None,
+                provider_rotation: None,
+                durable_plan: Some(&plan),
+            },
+            &stub_lab_offload_submission,
+        )
+        .expect("persist planned controller execution");
+        assert!(record.lab_handoff.is_none());
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.job.target_runner_id = target_runner_id;
+        snapshot.events.clear();
 
-    reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
-        .expect("accepted daemon snapshot binds before validation");
-
-    let accepted_job_id = snapshot.job.id.to_string();
-    assert_eq!(record.runner_job_id(), Some(accepted_job_id.as_str()));
-    assert_eq!(
-        record.lab_handoff.as_ref().expect("handoff").state,
-        AgentTaskLabHandoffState::Accepted
-    );
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Same shape as its sibling above: the pre-acceptance phase record
-/// supplies the binding authority and receives the accepted handoff, so both
-/// halves have to name one home. The stub admission keeps submission off the
-/// machine-global controller-runtime queue.
-#[test]
-fn preacceptance_snapshot_binds_a_pre_claim_job_without_a_target_runner() {
-    // A daemon job is created with `target_runner_id: None` and only gains a
-    // runner once claimed, so a snapshot polled before the claim legitimately
-    // has no target. The expected-Lab controller handoff is the binding
-    // authority: an absent target must still bind (regression for a strict
-    // `!=` check that silently skipped this pre-claim window).
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "cook-preacceptance-no-target";
-    let plan = test_plan();
-    let mut record = record_lab_offload_phase_with_submission_in_store(
-        &lifecycle_store,
-        LabOffloadPhaseRecord {
-            requested_run_id: run_id,
-            runner_id: "homeboy-lab",
-            phase: "lab_handoff_preacceptance",
-            remote_workspace: Some("/runner/workspace/homeboy"),
-            source_checkout: None,
-            provider_rotation: None,
-            durable_plan: Some(&plan),
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("persist planned controller execution");
-    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
-    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-    snapshot.job.target_runner_id = None;
-    snapshot.events.clear();
-
-    reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
-        .expect("pre-claim daemon snapshot binds before validation");
-
-    let accepted_job_id = snapshot.job.id.to_string();
-    assert_eq!(record.runner_job_id(), Some(accepted_job_id.as_str()));
-    assert_eq!(
-        record.lab_handoff.as_ref().expect("handoff").state,
-        AgentTaskLabHandoffState::Accepted
-    );
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). "Fails closed against the *bound* daemon job" only means anything
-/// when the acceptance that bound it and the validation that refuses the
-/// mismatch read one record. The run does not exist yet, so the acceptance is
-/// spelled with its explicit submission rather than the default one, which would
-/// reach the machine-global controller-runtime admission queue — see
-/// `stub_lab_offload_submission`.
-#[test]
-fn preacceptance_snapshot_rejects_a_different_bound_daemon_job() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-    let mut record = record_detached_lab_run_with_submission_in_store(
-        &lifecycle_store,
-        DetachedLabRunRecord {
-            run_id: "cook-preacceptance-mismatch",
-            runner_id: "homeboy-lab",
-            runner_job_id: "00000000-0000-0000-0000-000000000123",
-            remote_workspace: "/runner/workspace/homeboy",
-            remote_command: &command,
-        },
-        &stub_lab_offload_submission,
-    )
-    .expect("persist accepted controller handoff");
-    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
-    snapshot.job.id =
-        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000456").expect("snapshot job id");
-    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
-    snapshot.events.clear();
-
-    let error =
         reconcile_transport_proxy_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
-            .expect_err("different accepted daemon job fails closed");
+            .expect("accepted daemon snapshot binds before validation");
 
-    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    assert!(error.message.contains("does not match controller job"));
+        let accepted_job_id = snapshot.job.id.to_string();
+        assert_eq!(
+            record.runner_job_id(),
+            Some(accepted_job_id.as_str()),
+            "{run_id}"
+        );
+        assert_eq!(
+            record.lab_handoff.as_ref().expect("handoff").state,
+            AgentTaskLabHandoffState::Accepted,
+            "{run_id}"
+        );
+    }
 }
 
 #[test]
@@ -1891,13 +1752,6 @@ fn foreground_terminal_projection_binds_a_pending_handoff_before_validation() {
     // controller handoff to that snapshot's daemon job before validating
     // identity, rather than rejecting a valid terminal snapshot against an empty
     // controller job id.
-    //
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). The pending handoff, the bind the terminal snapshot performs, and
-    // the terminal record read back are one home: `project_terminal_runner_result_in_store`
-    // decides idempotence by comparing against the aggregate in the store it was
-    // handed, so a projection decided against another home's aggregate would
-    // either re-project a durable result or skip one.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -1949,12 +1803,6 @@ fn foreground_terminal_projection_binds_a_pending_handoff_before_validation() {
     assert_eq!(bound.state(), RunExecutionState::Succeeded);
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). "The matching aggregate was already projected" is decided by
-/// comparing the snapshot against the aggregate this store holds, so the
-/// aggregate write, the terminalizing status read, and the projection have to
-/// name one home — comparing against another installation's aggregate would
-/// skip a projection that was never made here, and would do so without failing.
 #[test]
 fn terminal_aggregate_binds_runner_job_before_snapshot_validation() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2022,13 +1870,6 @@ fn snapshot_validation_reports_missing_controller_identity_distinctly() {
     // surface the missing identity as its own diagnostic instead of comparing a
     // valid runner UUID against an empty string and presenting it as a spurious
     // "does not match controller job " mismatch.
-    //
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). "There is no controller identity to validate against" is a
-    // property of one record in one home, so the submission and the projection
-    // that refuses it name the same store. The stub admission keeps submission
-    // off the machine-global controller-runtime queue; nothing here asserts on
-    // runtime provenance.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -2061,13 +1902,6 @@ fn snapshot_validation_reports_missing_controller_identity_distinctly() {
     );
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The plan files this deletes are the ones the injected store owns
-/// (`record.plan_path` is that store's controller plan path), and the recovery,
-/// the refused handoff, and the terminal record read back all follow it — so
-/// "the plan was recovered" and "the handoff failed closed" are properties of
-/// one home rather than of whichever plan directory the process environment
-/// happened to point at.
 #[test]
 fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2140,14 +1974,6 @@ fn missing_lab_attempt_plan_is_recovered_before_handoff_or_terminalized() {
     assert!(terminal.metadata.get("runner_job_id").is_none());
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The whole claim is that a *runner-projected* plan path in the
-/// record is display evidence and the controller keeps reading its own durable
-/// plan — which is only meaningful when "its own" names one installation. The
-/// handoff, the mirrored aggregate, every read back (status, logs, artifacts),
-/// the retry that must reuse the durable plan, and the missing-plan fixture all
-/// follow `lifecycle_store`.
-///
 /// The retry is spelled as `retry_with_runtime_admission_in_store(.., false,
 /// false, None, ..)`, which is exactly what the ambient `retry` reduces to
 /// (`retry_in_store` -> `retry_with_force_inner_in_store` with `force: false,
@@ -2181,20 +2007,10 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
     let aggregate = succeeded_aggregate(&plan);
     record_run_aggregate_in_store(&lifecycle_store, &record.run_id, &plan, &aggregate)
         .expect("runner result mirrored to the controller");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(&record.run_id, |record| {
-            record.plan_path =
-                "/home/chubes/.local/share/homeboy/agent-task-runs/cook-lab-attempt/plan.json"
-                    .to_string();
-        })
+    rewrite_record_in_store(&lifecycle_store, &record.run_id, |record| {
+        record.plan_path =
+            "/home/chubes/.local/share/homeboy/agent-task-runs/cook-lab-attempt/plan.json"
+                .to_string();
     })
     .expect("runner transport projection replaces display path");
 
@@ -2250,18 +2066,8 @@ fn cook_lab_handoff_controller_reads_ignore_runner_plan_projection() {
         &stub_lab_offload_submission,
     )
     .expect("missing-plan fixture persists its controller plan");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(&missing_plan.run_id, |record| {
-            record.plan_path = "/runner/workspace/plan.json".to_string();
-        })
+    rewrite_record_in_store(&lifecycle_store, &missing_plan.run_id, |record| {
+        record.plan_path = "/runner/workspace/plan.json".to_string();
     })
     .expect("project runner-local plan path");
     std::fs::remove_file(missing_plan.plan_path)
@@ -2325,13 +2131,6 @@ fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() 
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The acceptance is written into, and the reconciliation commits back
-/// into, one store, so the liveness the snapshot clears is the liveness this
-/// home recorded. The run does not exist yet, so the acceptance is spelled with
-/// its explicit submission rather than the default one, which would reach the
-/// machine-global controller-runtime admission queue — see
-/// `stub_lab_offload_submission`.
 #[test]
 fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2366,10 +2165,6 @@ fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat(
     assert_ne!(record.lifecycle.heartbeat, disconnected_heartbeat);
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The live progress the reconciliation commits and the log projection
-/// read back out are the same home, so "the provider handle and its log event
-/// are durable" is asserted about the record the snapshot was applied to.
 #[test]
 fn running_child_snapshot_persists_provider_handle_and_live_log_progress() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2426,10 +2221,6 @@ fn running_child_snapshot_persists_provider_handle_and_live_log_progress() {
         .is_some_and(|message| message.contains("provider dispatch accepted"))));
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). "The stale running writer is ignored" is a claim about one durable
-/// row: the write that must lose, the terminal state that must win, and the
-/// status read that adjudicates between them all name `lifecycle_store`.
 #[test]
 fn terminal_runner_reconciliation_never_resurrects_a_controller_record() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2479,10 +2270,6 @@ fn terminal_runner_reconciliation_never_resurrects_a_controller_record() {
     assert_eq!(record, terminal_record);
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Only the acceptance is durable here — `annotate_runner_disconnected`
-/// is an in-memory record mutation — so rooting the acceptance is the whole
-/// isolation this test needs.
 #[test]
 fn disconnected_runner_marks_nonterminal_proxy_stale_without_advancing_heartbeat() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2541,13 +2328,6 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
 
 #[test]
 fn terminal_reconciliation_rejects_conflicting_directly_imported_artifact() {
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). The conflicting artifact is imported into, and the terminal
-    // projection is read back out of, this store's own observation database and
-    // artifact root — so the refusal asserted below is a property of one home.
-    // `test_plan()` carries no workspace root, so `record_aggregate_in_store`
-    // (reached through `record_run_aggregate_in_store`) skips the still-ambient
-    // automatic artifact-retention pass.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -2623,20 +2403,6 @@ fn terminal_reconciliation_rejects_conflicting_directly_imported_artifact() {
         .is_some_and(|error| error.contains("conflicts with terminal artifact projection")));
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The Cook index, the two attempts it names, and the alias resolution
-/// that has to land on the second one are one home — an index read in one
-/// installation while the attempts live in another would resolve a "latest" that
-/// this store never recorded.
-///
-/// `record_completed_run` is spelled out as its own two rooted halves —
-/// submission then `record_aggregate_in_store`. The difference is the admission: that
-/// sibling submits through `submit_plan_in_store`, which resolves the
-/// controller-runtime admission queue under `paths::controller_runtimes_store()`.
-/// That store is machine-global by design, so calling it from a test that no
-/// longer mutates HOME would enqueue against the real operator runtime store.
-/// `test_plan()` carries no workspace root, so `record_aggregate_in_store` skips
-/// the still-ambient automatic artifact-retention pass.
 #[test]
 fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2691,7 +2457,7 @@ fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
     assert!(path.display().to_string().contains(&second_run_id));
 }
 
-/// (#14579). SQLite owns the Cook index and there is no file beside it.
+/// SQLite owns the Cook index and there is no file beside it (#14579).
 /// Attempt validation reads the canonical projection, so one run can never
 /// claim two different attempt numbers.
 #[test]
@@ -2737,24 +2503,11 @@ fn cook_attempt_validation_reads_the_canonical_projection() {
     assert_eq!(index.attempts[0].attempt, 1);
 }
 
+/// The Lab retry handoff guards on `run_record_exists_resolved`; a resolvable
+/// cook id must report present so the handoff does not ship an unrunnable
+/// `agent-task retry <id>` to the runner (#8390).
 #[test]
 fn run_record_exists_resolves_a_cook_id_to_its_latest_run() {
-    // #8390: the Lab retry handoff guarded on the exact-match `run_record_exists`,
-    // so a resolvable id (e.g. a cook id) reported absent even though `retry`
-    // would succeed, and the handoff silently fell through to ship an unrunnable
-    // `agent-task retry <id>` to the runner. `run_record_exists_resolved` must
-    // report present for a cook id that resolves to a real run.
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). `record_completed_run` is spelled out as its own two rooted
-    // halves — submission then `record_aggregate_in_store` — which is exactly
-    // the body of `record_completed_run`. The difference is the
-    // admission: that sibling submits through `submit_plan_in_store`, which
-    // resolves the controller-runtime admission queue under
-    // `paths::controller_runtimes_store()`. That store is machine-global by
-    // design, so calling it from a test that no longer mutates HOME would
-    // enqueue against the real operator runtime store. `test_plan()` carries no
-    // workspace root, so `record_aggregate_in_store` skips the still-ambient
-    // automatic artifact-retention pass.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -2890,7 +2643,6 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
         assert_eq!(record.run_id, "local-run");
         assert_eq!(loaded.state(), RunExecutionState::Failed);
         assert_eq!(loaded.tasks[0].task_id, "task-a");
-        assert_ne!(loaded.tasks[0].task_id, "agent-task-predispatch");
         assert_eq!(
             loaded.metadata["kind"],
             "lab_offload_remote_dispatch_failure"
@@ -2915,24 +2667,9 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The completed run is written and read back through one injected
-/// store, so the executor evidence and the artifact report asserted below are
-/// projections of the same home.
-///
-/// `record_completed_run` is spelled out as its own two rooted halves —
-/// submission then `record_aggregate_in_store`. The difference is the admission: that
-/// sibling submits through `submit_plan_in_store`, which resolves the
-/// controller-runtime admission queue under `paths::controller_runtimes_store()`.
-/// That store is machine-global by design, so calling it from a test that no
-/// longer mutates HOME would enqueue against the real operator runtime store and
-/// block on its cross-process lock. The stub admission is the same one every
-/// other rooted test in this crate passes.
-///
-/// The plan carries no workspace root, so `record_aggregate_in_store` skips the
-/// automatic artifact-retention pass — which is still ambient, and is why the
-/// sibling test that asserts on `automatic_artifact_retention` was left on
-/// `with_isolated_home`.
+/// Submits with the stub admission because the default one enqueues against the
+/// machine-global controller-runtime store. The plan has no workspace root, so
+/// the ambient artifact-retention pass is skipped.
 #[test]
 fn completed_run_exposes_latest_executor_input_output_and_expectations() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -3057,9 +2794,6 @@ fn completed_run_exposes_latest_executor_input_output_and_expectations() {
 
 #[test]
 fn failed_provider_run_exposes_workflow_evidence_refs() {
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). See `run_record_exists_resolves_a_cook_id_to_its_latest_run` for
-    // why `record_completed_run` is spelled out as its two rooted halves.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -3149,11 +2883,6 @@ fn failed_provider_run_exposes_workflow_evidence_refs() {
 
 #[test]
 fn status_marks_running_run_without_owner_as_stale() {
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). The stub admission keeps submission off the machine-global
-    // controller-runtime queue; `reconcile_status_in_store` reads its admission from this
-    // store's own controller-runtime root, so the staleness classification and
-    // the record it is persisted onto are projections of the same home.
     // Submission reads the supervising Cook's own job id from the process; a
     // gate that runs this suite under a local Cook inherits one, so pin it absent.
     let _env = homeboy_core::test_support::env_lock();
@@ -3333,7 +3062,6 @@ fn planned_lab_proxy_stamps_heartbeat_without_a_runner_pid() {
         })
         .expect("initiating client ended");
 
-        assert!(recorded.updated_at.is_some(), "{recorded:?}");
         assert!(recorded.has_planned_runner_execution(), "{recorded:?}");
         assert!(recorded.is_controller_pre_provider_phase(), "{recorded:?}");
 
@@ -3349,16 +3077,6 @@ fn planned_lab_proxy_stamps_heartbeat_without_a_runner_pid() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Cancellation resolves the alias, mutates the record and then reads
-/// it back; all three name `lifecycle_store`, so the durable cancellation
-/// asserted below is the one this test committed rather than a state some other
-/// home happened to hold. The stub admission keeps submission off the
-/// machine-global controller-runtime queue.
-///
-/// The daemon cancellation hook stays where it is: `test_cancel_hook` is a
-/// `thread_local!`, not a process-global, so it was never protected by the
-/// hermetic-home mutex and is unaffected by dropping it.
 #[test]
 fn cancel_run_marks_queued_record_cancelled() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -3444,11 +3162,6 @@ fn cancel_run_marks_queued_record_cancelled() {
 
 #[test]
 fn list_records_skips_malformed_observation_records() {
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). The malformed row is inserted through this store's own
-    // observation database — the same one `list_records_in_store` scans — so the
-    // skip asserted below is a property of one home rather than of whichever
-    // observation DB the process environment happened to point at.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -3520,14 +3233,6 @@ fn persisted_wire_state_round_trip_and_active_discovery() {
     }
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The malformed rows are inserted through this store's own
-/// observation database — the same one `list_records_with_health_in_store` counts
-/// — so `health.malformed == malformed_count` is an exact equality about one
-/// home. Counted ambiently it would be an equality against whichever
-/// observation DB the process environment pointed at, which on a developer or
-/// operator machine holds unrelated malformed rows and would make the assertion
-/// either fail or pass for the wrong reason.
 #[test]
 fn record_health_summary_stays_bounded_with_many_malformed_records() {
     // A state directory full of historical malformed agent-task records must
@@ -3587,41 +3292,7 @@ fn record_health_summary_stays_bounded_with_many_malformed_records() {
 }
 
 #[test]
-fn artifact_refs_omit_evidence_refs_with_empty_uri() {
-    let outcomes = vec![outcome_with_refs(
-        "task-a",
-        Vec::new(),
-        vec![
-            AgentTaskEvidenceRef {
-                kind: "sample-runtime-command-log".to_string(),
-                uri: "".to_string(),
-                label: Some("command log".to_string()),
-            },
-            AgentTaskEvidenceRef {
-                kind: "sample-runtime-command-evidence".to_string(),
-                uri: "   ".to_string(),
-                label: None,
-            },
-            AgentTaskEvidenceRef {
-                kind: "transcript".to_string(),
-                uri: "file:///tmp/transcript.json".to_string(),
-                label: Some("provider transcript".to_string()),
-            },
-        ],
-    )];
-
-    let refs = artifact_refs_for_outcomes(&outcomes);
-
-    assert_eq!(refs.len(), 1, "empty/whitespace evidence URIs are dropped");
-    assert_eq!(refs[0].kind, "transcript");
-    assert_eq!(refs[0].uri, "file:///tmp/transcript.json");
-}
-
-#[test]
 fn status_filters_empty_uri_artifact_refs() {
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). See `run_record_exists_resolves_a_cook_id_to_its_latest_run` for
-    // why `record_completed_run` is spelled out as its two rooted halves.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -3650,6 +3321,11 @@ fn status_filters_empty_uri_artifact_refs() {
                     kind: "sample-runtime-command-log".to_string(),
                     uri: "".to_string(),
                     label: Some("command log".to_string()),
+                },
+                AgentTaskEvidenceRef {
+                    kind: "sample-runtime-command-evidence".to_string(),
+                    uri: "   ".to_string(),
+                    label: None,
                 },
                 AgentTaskEvidenceRef {
                     kind: "transcript".to_string(),
@@ -3690,7 +3366,7 @@ fn status_filters_empty_uri_artifact_refs() {
         .map(|r| r.uri.as_str())
         .collect();
     assert!(
-        uris.iter().all(|uri| !uri.is_empty()),
+        uris.iter().all(|uri| !uri.trim().is_empty()),
         "no empty-URI refs leak into status output: {uris:?}"
     );
     let kinds: Vec<&str> = durable_status

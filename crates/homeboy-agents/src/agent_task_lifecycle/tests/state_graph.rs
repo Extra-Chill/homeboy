@@ -16,10 +16,9 @@ use serde_json::json;
 
 const RUN_ID: &str = "state-graph-run";
 
-fn finished(
+fn running(
     context: &homeboy_core::test_support::HermeticTestContext,
-    outcome: RunExecutionState,
-) -> AgentTaskLifecycleStore {
+) -> (AgentTaskLifecycleStore, AgentTaskRunRecord) {
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     let plan = test_plan();
     store
@@ -38,6 +37,14 @@ fn finished(
     set_run_state(&mut record, RunExecutionState::Running);
     store.write_record(&record).expect("commit running record");
     let running = store.read_record(RUN_ID).expect("running");
+    (store, running)
+}
+
+fn finished(
+    context: &homeboy_core::test_support::HermeticTestContext,
+    outcome: RunExecutionState,
+) -> AgentTaskLifecycleStore {
+    let (store, running) = running(context);
     store
         .transition(
             RUN_ID,
@@ -91,43 +98,30 @@ fn assert_refused(
     );
 }
 
-/// A mutation decided from a finished record cannot resume it in place. On
-/// main the SQL terminal-row guard dropped the write and `mutate_record`
-/// reported the stored `Succeeded` record as if the resumption committed.
+/// A mutation decided from a finished record cannot resume it in place, and a
+/// cancellation is final: a cancelled run cannot be re-projected as a success.
+/// The SQL terminal-row guard alone dropped the first write while reporting it
+/// committed, and admitted the second because both states are terminal.
 #[test]
-fn a_mutation_cannot_resume_a_finished_run_in_place() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = finished(&context, RunExecutionState::Succeeded);
-    let before = store.read_record(RUN_ID).unwrap();
-    assert_eq!(before.state(), RunExecutionState::Succeeded);
+fn a_mutation_cannot_take_an_illegal_edge_from_a_finished_run() {
+    for (finished_as, target) in [
+        (RunExecutionState::Succeeded, RunExecutionState::Running),
+        (RunExecutionState::Cancelled, RunExecutionState::Succeeded),
+    ] {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = finished(&context, finished_as);
+        let before = store.read_record(RUN_ID).unwrap();
 
-    let committed = store.mutate_record(RUN_ID, |record| {
-        set_run_state(record, RunExecutionState::Running);
-        true
-    });
+        let committed = store.mutate_record(RUN_ID, |record| {
+            if let Some(metadata) = record.metadata.as_object_mut() {
+                metadata.remove("cancellation_provenance");
+            }
+            set_run_state(record, target);
+            true
+        });
 
-    assert_refused(&store, committed, &before);
-}
-
-/// A cancellation is final. On main a mutation could re-project a cancelled
-/// run as `Succeeded`: the terminal-row guard admits any terminal status, so
-/// the run's immutable `run.cancelled` receipt and its stored state disagreed.
-#[test]
-fn a_cancelled_run_cannot_be_reprojected_as_a_success() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = finished(&context, RunExecutionState::Cancelled);
-    let before = store.read_record(RUN_ID).unwrap();
-    assert_eq!(before.state(), RunExecutionState::Cancelled);
-
-    let committed = store.mutate_record(RUN_ID, |record| {
-        if let Some(metadata) = record.metadata.as_object_mut() {
-            metadata.remove("cancellation_provenance");
-        }
-        set_run_state(record, RunExecutionState::Succeeded);
-        true
-    });
-
-    assert_refused(&store, committed, &before);
+        assert_refused(&store, committed, &before);
+    }
 }
 
 /// The same edge through a typed terminal commit: `CommitRecord` checked only
@@ -180,22 +174,7 @@ fn a_finished_run_is_still_reprojected_from_later_evidence() {
 #[test]
 fn a_second_cancellation_commit_keeps_the_first_cause() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let plan = test_plan();
-    store.write_controller_plan(RUN_ID, &plan).unwrap();
-    let mut record: AgentTaskRunRecord = serde_json::from_value(json!({
-        "schema": crate::agent_task_lifecycle::records::schemas::RUN,
-        "run_id": RUN_ID,
-        "plan_id": plan.plan_id,
-        "state": "queued",
-        "submitted_at": "2026-10-20T00:00:00Z",
-        "plan_path": store.controller_plan_path(RUN_ID).display().to_string(),
-    }))
-    .unwrap();
-    record.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Queued);
-    set_run_state(&mut record, RunExecutionState::Running);
-    store.write_record(&record).unwrap();
-    let running = store.read_record(RUN_ID).unwrap();
+    let (store, running) = running(&context);
     let cancelled_by = |actor: &str| {
         let mut prepared = running.clone();
         set_run_state(&mut prepared, RunExecutionState::Cancelled);

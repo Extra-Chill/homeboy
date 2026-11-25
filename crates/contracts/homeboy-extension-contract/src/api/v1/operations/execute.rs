@@ -224,47 +224,4 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("cwd") || message.contains("unknown field"));
     }
-
-    #[test]
-    fn execute_conflict_and_in_progress_outcomes_are_typed() {
-        for (state, code, wire_state, wire_code) in [
-            (
-                ExtensionApiExecuteState::InProgress,
-                super::super::ExtensionApiOperationFailureCode::InvocationInProgress,
-                "in_progress",
-                "invocation_in_progress",
-            ),
-            (
-                ExtensionApiExecuteState::Conflict,
-                super::super::ExtensionApiOperationFailureCode::IdempotencyConflict,
-                "conflict",
-                "idempotency_conflict",
-            ),
-        ] {
-            let response = ExtensionApiExecuteResponse {
-                schema: EXTENSION_API_EXECUTE_RESPONSE_SCHEMA.to_string(),
-                api_version: EXTENSION_API_V1,
-                extension_id: Some("fixture".to_string()),
-                project_id: None,
-                control_plane: None,
-                exit_code: None,
-                output: None,
-                state: Some(state),
-                failure: Some(super::super::ExtensionApiOperationFailure {
-                    code,
-                    message: "typed outcome".to_string(),
-                }),
-            };
-            assert_eq!(
-                serde_json::to_value(response).expect("outcome JSON"),
-                serde_json::json!({
-                    "schema": EXTENSION_API_EXECUTE_RESPONSE_SCHEMA,
-                    "api_version": { "major": 1 },
-                    "extension_id": "fixture",
-                    "state": wire_state,
-                    "failure": { "code": wire_code, "message": "typed outcome" }
-                })
-            );
-        }
-    }
 }

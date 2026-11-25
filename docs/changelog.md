@@ -4,6 +4,52 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.17] - 2026-11-25
+
+### Changed
+- prune redundant tests in remaining contract files
+- prune and fold low-value tests in small crates (homeboy-error, paths, redaction, review, product-identity)
+
+## [0.497.16] - 2026-11-25
+
+### Changed
+- prune homeboy-agents agent_task tests file-by-file (1/15)
+
+## [0.497.15] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in rig, daemon, deps, installer, release and report suites (tests 5/6)
+
+## [0.497.14] - 2026-11-25
+
+### Changed
+- prune and fold low-value homeboy-core git tests file-by-file
+
+## [0.497.13] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in tests/core/rig (tests 4/6)
+
+## [0.497.12] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in homeboy-core src/extension (9/22)
+- prune and fold daemon, invocation, bench and component-script tests (tests 2/6)
+- prune redundant tests in the tests/ wave 6 slice
+- prune and fold src/extension invoke/lifecycle/lint tests
+- prune and fold low-value tests in tests 1/6 slice
+- prune and fold low-value contract-crate tests
+- prune and fold homeboy-upgrade tests file by file (1/2)
+- prune and fold homeboy-engine-primitives tests file-by-file
+- prune and fold homeboy-version unit tests
+- prune and fold homeboy-upgrade upgrade tests file-by-file (2/2)
+- prune and fold low-value release planning tests (homeboy-release 3/4)
+- prune workflow, workflow_recover and workspace tests
+
+### Fixed
+- Prune tests file-by-file: homeboy-deploy 1/2 (crates/homeboy-deploy/src, 199 tests)
+- Prune tests file-by-file: homeboy-deploy 2/2 (crates/homeboy-deploy/src, 191 tests)
+
 ## [0.497.11] - 2026-11-25
 
 ### Changed

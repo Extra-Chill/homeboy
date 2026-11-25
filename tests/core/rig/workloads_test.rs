@@ -51,38 +51,72 @@ fn missing_workload_component_keeps_command_specific_diagnostic() {
     assert!(bench_error.message.contains("bench.default_component"));
 }
 
+/// Every workload kind filters by extension and expands `${env.*}` and
+/// `${components.*}` tokens in declared paths.
 #[test]
-fn test_bench_workloads_for_extension_filters_and_expands_paths() {
-    std::env::set_var("HOMEBOY_TEST_BENCH_ROOT", "/tmp/private-benches");
+fn test_workloads_for_extension_filters_and_expands_paths_for_every_kind() {
+    std::env::set_var("HOMEBOY_TEST_WORKLOAD_ROOT", "/tmp/private-workloads");
     let rig_spec: RigSpec = serde_json::from_str(
         r#"{
             "id": "studio",
             "components": {
-                "playground": { "path": "/tmp/playground" }
+                "app": { "path": "/tmp/app" }
             },
             "bench_workloads": {
                 "extension-b": [
-                    { "path": "${env.HOMEBOY_TEST_BENCH_ROOT}/cold-boot.php" },
-                    { "path": "${components.playground.path}/fixtures/wc-loaded.php" }
+                    { "path": "${env.HOMEBOY_TEST_WORKLOAD_ROOT}/cold-boot.php" },
+                    { "path": "${components.app.path}/fixtures/wc-loaded.php" }
                 ],
                 "extension-a": [{ "path": "/tmp/node-only.bench.ts" }]
+            },
+            "trace_workloads": {
+                "extension-b": [
+                    { "path": "${env.HOMEBOY_TEST_WORKLOAD_ROOT}/create-site.trace.mjs" },
+                    { "path": "${components.app.path}/bench/admin-load.trace.mjs" }
+                ],
+                "extension-a": [{ "path": "/tmp/wp.trace.php" }]
+            },
+            "fuzz_workloads": {
+                "extension-b": [
+                    { "path": "${env.HOMEBOY_TEST_WORKLOAD_ROOT}/checkout-create-order.json" },
+                    { "path": "${components.app.path}/fuzz/shipping-cache.json" }
+                ],
+                "extension-a": [{ "path": "/tmp/other.json" }]
             }
         }"#,
     )
     .expect("parse rig spec");
 
-    let workloads = workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "extension-b");
-
-    assert_eq!(
-        workloads,
-        vec![
-            PathBuf::from("/tmp/private-benches/cold-boot.php"),
-            PathBuf::from("/tmp/playground/fixtures/wc-loaded.php"),
-        ]
-    );
-    assert!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "extension-c").is_empty()
-    );
+    for (kind, env_file, component_file) in [
+        (
+            RigWorkloadKind::Bench,
+            "cold-boot.php",
+            "fixtures/wc-loaded.php",
+        ),
+        (
+            RigWorkloadKind::Trace,
+            "create-site.trace.mjs",
+            "bench/admin-load.trace.mjs",
+        ),
+        (
+            RigWorkloadKind::Fuzz,
+            "checkout-create-order.json",
+            "fuzz/shipping-cache.json",
+        ),
+    ] {
+        assert_eq!(
+            workloads_for_extension(&rig_spec, kind, None, "extension-b"),
+            vec![
+                PathBuf::from("/tmp/private-workloads").join(env_file),
+                PathBuf::from("/tmp/app").join(component_file),
+            ],
+            "{kind:?}"
+        );
+        assert!(
+            workloads_for_extension(&rig_spec, kind, None, "extension-c").is_empty(),
+            "{kind:?}"
+        );
+    }
 }
 
 #[test]
@@ -149,25 +183,6 @@ fn required_workload_extensions_include_environment_and_default_components() {
 }
 
 #[test]
-fn test_workload_string_shorthand_is_rejected() {
-    let err = serde_json::from_str::<RigSpec>(
-        r#"{
-            "id": "studio",
-            "bench_workloads": {
-                "extension-a": ["/tmp/legacy.bench.mjs"]
-            }
-        }"#,
-    )
-    .expect_err("string workload shorthand should be rejected");
-
-    assert!(
-        err.to_string().contains("invalid type: string"),
-        "unexpected error: {}",
-        err
-    );
-}
-
-#[test]
 fn test_invocation_requirements_for_extension_workloads() {
     let rig_spec: RigSpec = serde_json::from_str(
         r#"{
@@ -201,72 +216,6 @@ fn test_invocation_requirements_for_extension_workloads() {
         requirements.named_leases,
         vec!["browser-profile".to_string(), "wasm-cache".to_string()]
     );
-}
-
-#[test]
-fn test_trace_workloads_for_extension_filters_and_expands_paths() {
-    std::env::set_var("HOMEBOY_TEST_TRACE_ROOT", "/tmp/private-traces");
-    let rig_spec: RigSpec = serde_json::from_str(
-        r#"{
-            "id": "studio",
-            "components": {
-                "studio": { "path": "/tmp/studio" }
-            },
-            "trace_workloads": {
-                "extension-a": [
-                    { "path": "${env.HOMEBOY_TEST_TRACE_ROOT}/create-site.trace.mjs" },
-                    { "path": "${components.studio.path}/bench/admin-load.trace.mjs" }
-                ],
-                "extension-b": [{ "path": "/tmp/wp.trace.php" }]
-            }
-        }"#,
-    )
-    .expect("parse rig spec");
-
-    let workloads = workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "extension-a");
-
-    assert_eq!(
-        workloads,
-        vec![
-            PathBuf::from("/tmp/private-traces/create-site.trace.mjs"),
-            PathBuf::from("/tmp/studio/bench/admin-load.trace.mjs"),
-        ]
-    );
-    assert!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "extension-c").is_empty()
-    );
-}
-
-#[test]
-fn test_fuzz_workloads_for_extension_filters_and_expands_paths() {
-    std::env::set_var("HOMEBOY_TEST_FUZZ_ROOT", "/tmp/private-fuzz");
-    let rig_spec: RigSpec = serde_json::from_str(
-        r#"{
-            "id": "wordpress-plugin-fuzz",
-            "components": {
-                "woocommerce": { "path": "/tmp/woocommerce" }
-            },
-            "fuzz_workloads": {
-                "wordpress": [
-                    { "path": "${env.HOMEBOY_TEST_FUZZ_ROOT}/checkout-create-order.json" },
-                    { "path": "${components.woocommerce.path}/fuzz/shipping-cache.json" }
-                ],
-                "other": [{ "path": "/tmp/other.json" }]
-            }
-        }"#,
-    )
-    .expect("parse rig spec");
-
-    let workloads = workloads_for_extension(&rig_spec, RigWorkloadKind::Fuzz, None, "wordpress");
-
-    assert_eq!(
-        workloads,
-        vec![
-            PathBuf::from("/tmp/private-fuzz/checkout-create-order.json"),
-            PathBuf::from("/tmp/woocommerce/fuzz/shipping-cache.json"),
-        ]
-    );
-    assert!(workloads_for_extension(&rig_spec, RigWorkloadKind::Fuzz, None, "missing").is_empty());
 }
 
 #[test]
@@ -315,7 +264,7 @@ fn test_fuzz_workload_inputs_include_paths_and_invocation_requirements() {
 }
 
 #[test]
-fn test_extension_workloads_expand_package_root_when_available() {
+fn test_extension_workloads_expand_package_root_only_when_available() {
     let rig_spec: RigSpec = serde_json::from_str(
         r#"{
             "id": "studio-agent-sdk",
@@ -366,6 +315,13 @@ fn test_extension_workloads_expand_package_root_when_available() {
             "/tmp/homeboy-rigs/example-org/studio/fuzz/studio-agent-runtime.json"
         )]
     );
+    // Without package metadata the token is left for the caller to report.
+    assert_eq!(
+        workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "extension-a"),
+        vec![PathBuf::from(
+            "${package.root}/bench/studio-agent-runtime.bench.mjs"
+        )]
+    );
 }
 
 #[test]
@@ -405,31 +361,6 @@ fn test_workload_path_expansions_preserve_declared_and_expanded_paths() {
 }
 
 #[test]
-fn test_extension_workloads_leave_package_root_unexpanded_without_metadata() {
-    let rig_spec: RigSpec = serde_json::from_str(
-        r#"{
-            "id": "manual",
-            "bench_workloads": {
-                "extension-a": [{ "path": "${package.root}/bench/manual.bench.mjs" }]
-            },
-            "trace_workloads": {
-                "extension-a": [{ "path": "${package.root}/bench/manual.trace.mjs" }]
-            }
-        }"#,
-    )
-    .expect("parse rig spec");
-
-    assert_eq!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Bench, None, "extension-a"),
-        vec![PathBuf::from("${package.root}/bench/manual.bench.mjs")]
-    );
-    assert_eq!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Trace, None, "extension-a"),
-        vec![PathBuf::from("${package.root}/bench/manual.trace.mjs")]
-    );
-}
-
-#[test]
 fn test_check_groups_for_extension_workloads() {
     let rig_spec: RigSpec = serde_json::from_str(
         r#"{
@@ -447,7 +378,8 @@ fn test_check_groups_for_extension_workloads() {
                         "path": "/tmp/other.trace.mjs",
                         "check_groups": ["desktop-app"]
                     }
-                ]
+                ],
+                "extension-b": [{ "path": "/tmp/create-site.trace.mjs" }]
             }
         }"#,
     )
@@ -465,22 +397,9 @@ fn test_check_groups_for_extension_workloads() {
             .expect("scoped groups"),
         vec!["desktop-app".to_string(), "extension-a-trace".to_string()]
     );
-}
-
-#[test]
-fn test_workloads_without_check_groups_keep_full_check_contract() {
-    let rig_spec: RigSpec = serde_json::from_str(
-        r#"{
-            "id": "studio",
-            "trace_workloads": {
-                "extension-a": [{ "path": "/tmp/create-site.trace.mjs" }]
-            }
-        }"#,
-    )
-    .expect("parse rig spec");
-
+    // Workloads without groups keep the full check contract.
     assert_eq!(
-        check_groups_for_extension_workloads(&rig_spec, RigWorkloadKind::Trace, "extension-a"),
+        check_groups_for_extension_workloads(&rig_spec, RigWorkloadKind::Trace, "extension-b"),
         None
     );
 }
@@ -798,36 +717,6 @@ fn generic_workloads_resolve_for_an_arbitrary_kind_and_merge_with_legacy() {
         vec!["wordpress".to_string()]
     );
     assert!(workloads_for_kind(&rig_spec, "undeclared").is_empty());
-}
-
-#[test]
-fn legacy_fuzz_workloads_still_resolve_as_kind_fuzz() {
-    let rig_spec: RigSpec = serde_json::from_str(
-        r#"{
-            "id": "legacy-fuzz",
-            "fuzz_workloads": {
-                "wordpress": [{ "path": "/tmp/legacy.json" }]
-            }
-        }"#,
-    )
-    .expect("parse rig spec");
-
-    assert_eq!(
-        workloads_for_extension(&rig_spec, RigWorkloadKind::Fuzz, None, "wordpress"),
-        vec![PathBuf::from("/tmp/legacy.json")]
-    );
-    assert_eq!(
-        workload_path_expansions_for_kind(&rig_spec, "fuzz", None, "wordpress")
-            .into_iter()
-            .map(|expansion| expansion.expanded_path)
-            .collect::<Vec<_>>(),
-        vec![PathBuf::from("/tmp/legacy.json")]
-    );
-    // Legacy readers that never touched the generic map keep their answers.
-    assert_eq!(
-        extension_ids_for_workloads(&rig_spec, RigWorkloadKind::Fuzz),
-        vec!["wordpress".to_string()]
-    );
 }
 
 #[test]

@@ -293,26 +293,22 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn cook_ci_green() {
-        assert_eq!(poll("SUCCESS").status, "verified");
-    }
-    #[test]
-    fn cook_ci_red_feedback() {
-        let evidence = poll("FAILURE");
-        assert_eq!(evidence.status, "ci_gate_failed");
-        assert_eq!(evidence.feedback, ["candidate: https://ci/log"]);
-    }
-    #[test]
-    fn cook_ci_infra_cancelled_timeout() {
-        for state in ["CANCELLED", "TIMED_OUT"] {
+    fn cook_ci_check_states_map_to_evidence_status() {
+        for (state, status, feedback) in [
+            ("SUCCESS", "verified", vec![]),
+            (
+                "FAILURE",
+                "ci_gate_failed",
+                vec!["candidate: https://ci/log".to_string()],
+            ),
+            ("CANCELLED", "ci_infrastructure", vec![]),
+            ("TIMED_OUT", "ci_infrastructure", vec![]),
+            ("IN_PROGRESS", "awaiting_ci", vec![]),
+        ] {
             let evidence = poll(state);
-            assert_eq!(evidence.status, "ci_infrastructure");
-            assert!(evidence.feedback.is_empty());
+            assert_eq!(evidence.status, status, "{state}");
+            assert_eq!(evidence.feedback, feedback, "{state}");
         }
-    }
-    #[test]
-    fn cook_ci_empty_and_running_wait() {
-        assert_eq!(poll("IN_PROGRESS").status, "awaiting_ci");
         assert_eq!(
             poll_cook_ci(&Fake(vec![]), "pr").unwrap().status,
             "awaiting_ci"

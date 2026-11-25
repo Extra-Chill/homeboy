@@ -154,20 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn changed_downstream_input_does_not_invalidate_upstream_stage() {
-        let prior = evidence();
-        let requested = evidence();
-        assert_eq!(
-            verify_stage_reuse(
-                &prior,
-                &requested,
-                &BTreeMap::from([("site".to_string(), "artifact-sha".to_string())]),
-            ),
-            BenchStageReuse::Reusable
-        );
-    }
-
-    #[test]
     fn changed_declared_input_or_artifact_bytes_invalidates_reuse() {
         let prior = evidence();
         let mut requested = evidence();

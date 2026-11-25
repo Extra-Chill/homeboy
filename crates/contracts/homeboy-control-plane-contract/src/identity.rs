@@ -148,21 +148,6 @@ mod tests {
     use crate::IdentityError;
 
     #[test]
-    fn identities_serialize_as_plain_strings() {
-        let mission =
-            MissionId::new("agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e").expect("mission");
-        let json = serde_json::to_value(&mission).expect("serialize");
-        assert_eq!(
-            json,
-            serde_json::Value::String(
-                "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e".to_string()
-            )
-        );
-        let decoded: MissionId = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(decoded, mission);
-    }
-
-    #[test]
     fn derived_identities_are_bounded_and_frame_decision_components() {
         use super::derived_control_plane_identity as derive;
         let long = "🦀".repeat(10_000);

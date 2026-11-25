@@ -541,30 +541,23 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_signature_changes_ignores_signature_formatting_only() {
-        let diff = r#"
+    fn unsafe_signature_changes_flags_parameter_changes_not_formatting() {
+        let formatting_only = r#"
 diff --git a/src/lib.php b/src/lib.php
 @@ -1 +1 @@
 -public function warm( $args){
 +public function warm( $args ) {
 "#;
+        assert!(unsafe_signature_changes(formatting_only).is_empty());
 
-        assert!(unsafe_signature_changes(diff).is_empty());
-    }
-
-    #[test]
-    fn unsafe_signature_changes_detects_removed_parameter() {
-        let diff = r#"
+        let removed_parameter = r#"
 diff --git a/src/lib.php b/src/lib.php
 @@ -1 +1 @@
 -public function warm( $args, $assoc_args ) {
 +public function warm( $args) {
 "#;
-
-        let violations = unsafe_signature_changes(diff);
-
         assert_eq!(
-            violations,
+            unsafe_signature_changes(removed_parameter),
             vec!["public function warm( $args, $assoc_args ) {"]
         );
     }

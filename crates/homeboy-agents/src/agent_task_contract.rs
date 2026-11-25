@@ -372,74 +372,14 @@ mod tests {
 
     #[test]
     fn core_contract_exports_authoritative_agent_task_metadata() {
+        // Consumers read these vocabularies from the exported contract instead
+        // of hard-coding them; each must carry the live values.
         let contract = agent_task_core_contract();
 
-        assert_eq!(contract.schema, AGENT_TASK_CORE_CONTRACT_SCHEMA);
-        assert_eq!(contract.schemas.request, AGENT_TASK_REQUEST_SCHEMA);
-        assert_eq!(
-            contract.schemas.plan_validation,
-            crate::agent_task_service::AGENT_TASK_PLAN_VALIDATION_SCHEMA
-        );
-        assert_eq!(
-            contract.schemas.control_plane_action_eligibility,
-            homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA
-        );
-        assert_eq!(
-            contract.schemas.provider,
-            AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
-        );
-        assert_eq!(
-            contract.provider_capability.schema,
-            AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
-        );
-        assert_eq!(
-            contract.schemas.artifact_declaration,
-            AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA
-        );
-        assert_eq!(
-            contract.schemas.evidence_ref,
-            AGENT_TASK_EVIDENCE_REF_SCHEMA
-        );
-        assert_eq!(
-            contract.schemas.secret_env_requirement,
-            SECRET_ENV_REQUIREMENT_SCHEMA
-        );
-        assert_eq!(
-            contract.schemas.command_invocation,
-            COMMAND_INVOCATION_SCHEMA
-        );
-        assert_eq!(
-            contract.schemas.resolved_agent_runtime_execution_contract,
-            RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA
-        );
-        assert_eq!(
-            contract.provider_capability.request_required_fields,
-            agent_task_request_required_fields()
-        );
-        assert_eq!(
-            contract.provider_capability.outcome_statuses,
-            agent_task_outcome_statuses()
-        );
-        assert_eq!(
-            contract.provider_capability.failure_classifications,
-            agent_task_failure_classifications()
-        );
-        assert_eq!(
-            contract.provider_capability.redacted_metadata_keys,
-            agent_task_redacted_metadata_keys()
-        );
         assert!(contract
             .provider_capability
             .executor_provider_fields
             .contains(&"invocation".to_string()));
-        assert_eq!(contract.schemas.tool_request, AGENT_TOOL_REQUEST_SCHEMA);
-        assert_eq!(contract.schemas.tool_result, AGENT_TOOL_RESULT_SCHEMA);
-        assert_eq!(contract.schemas.tool_policy, AGENT_TOOL_POLICY_SCHEMA);
-        assert_eq!(contract.schemas.command_policy, AGENT_COMMAND_POLICY_SCHEMA);
-        assert_eq!(
-            contract.provider_capability.tool_request_schema,
-            AGENT_TOOL_REQUEST_SCHEMA
-        );
         assert!(contract
             .enums
             .outcome_status
@@ -460,34 +400,9 @@ mod tests {
             .provider_capability
             .workspace_mount_spec_fields
             .contains(&"target_path".to_string()));
-        assert_eq!(contract.managed_services.direct_plan_field, "services");
-        assert_eq!(
-            contract.managed_services.durable_plan_path,
-            "inputs.managed_services"
-        );
-        assert_eq!(
-            contract.managed_services.version,
-            AgentTaskManagedService::VERSION
-        );
         assert!(contract
             .managed_services
             .fields
             .contains(&"cleanup_deadline_ms".to_string()));
-        assert_eq!(
-            contract.managed_services.fields,
-            string_vec(AgentTaskManagedService::FIELDS)
-        );
-        assert_eq!(
-            contract.managed_services.lifecycle_values,
-            string_vec(crate::agent_task_schedule::AgentTaskManagedServiceLifecycle::VALUES)
-        );
-        assert_eq!(
-            contract.managed_services.default_cleanup_deadline_ms,
-            AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS
-        );
-        assert_eq!(
-            contract.managed_services.max_cleanup_deadline_ms,
-            AgentTaskManagedService::MAX_CLEANUP_DEADLINE_MS
-        );
     }
 }

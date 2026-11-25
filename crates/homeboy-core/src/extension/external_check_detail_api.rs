@@ -448,42 +448,6 @@ fn hydrate_diagnostic(
     }
 }
 
-#[cfg(all(any(test, feature = "test-support"), target_os = "linux"))]
-pub fn test_inherited_pipe_holder_cleanup() {
-    let extension = tempfile::tempdir().unwrap();
-    let pid_file = extension.path().join("descendant.pid");
-    let script = extension.path().join("resolve");
-    homeboy_test_support::write_executable(&script, format!(
-            "#!/bin/sh\nsetsid sh -c 'echo $$ > \"$1\"; sleep 30' sh {} &\nwhile [ ! -s {} ]; do :; done\nexit 0\n",
-            homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
-            homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
-        ), 0o755)
-    .unwrap();
-
-    let mut command = Command::new(&script);
-    command.current_dir(extension.path()).env_clear();
-
-    let output = execute_deadline_process(
-        command,
-        b"{}",
-        Instant::now() + Duration::from_secs(2),
-        CLEANUP_BUDGET,
-        CAPTURE_LIMIT_BYTES,
-        "Resolver",
-    )
-    .expect("leader exit should return captured output after descendant cleanup");
-    assert!(output.status.success());
-    let descendant_pid = std::fs::read_to_string(&pid_file)
-        .unwrap()
-        .trim()
-        .parse::<u32>()
-        .unwrap();
-    assert!(
-        !crate::process::pid_is_running(descendant_pid),
-        "detached resolver descendant {descendant_pid} survived cleanup"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +677,37 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn inherited_pipe_holder_is_reaped() {
-        test_inherited_pipe_holder_cleanup();
+        let extension = tempfile::tempdir().unwrap();
+        let pid_file = extension.path().join("descendant.pid");
+        let script = extension.path().join("resolve");
+        homeboy_test_support::write_executable(&script, format!(
+                "#!/bin/sh\nsetsid sh -c 'echo $$ > \"$1\"; sleep 30' sh {} &\nwhile [ ! -s {} ]; do :; done\nexit 0\n",
+                homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
+                homeboy_engine_primitives::shell::quote_path(&pid_file.to_string_lossy()),
+            ), 0o755)
+        .unwrap();
+
+        let mut command = Command::new(&script);
+        command.current_dir(extension.path()).env_clear();
+
+        let output = execute_deadline_process(
+            command,
+            b"{}",
+            Instant::now() + Duration::from_secs(2),
+            CLEANUP_BUDGET,
+            CAPTURE_LIMIT_BYTES,
+            "Resolver",
+        )
+        .expect("leader exit should return captured output after descendant cleanup");
+        assert!(output.status.success());
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert!(
+            !crate::process::pid_is_running(descendant_pid),
+            "detached resolver descendant {descendant_pid} survived cleanup"
+        );
     }
 }

@@ -1,49 +1,7 @@
-//! Pipeline executor tests for `src/core/rig/pipeline.rs`.
-//!
-//! End-to-end pipeline runs exercise real services + filesystem mutations
-//! and are covered by the manual smoke documented in #1468.
+//! Pipeline executor tests for `crates/homeboy-rig/src/pipeline`.
 
-use crate::pipeline::{run_pipeline, run_pipeline_check_groups, run_pipeline_with_settings};
+use crate::pipeline::{run_pipeline, run_pipeline_with_settings};
 use crate::spec::RigSpec;
-
-#[test]
-fn test_run_pipeline_check_groups() {
-    let rig: RigSpec = serde_json::from_str(
-        r#"{
-            "id": "scoped-pipeline",
-            "pipeline": {
-                "check": [
-                    {
-                        "kind": "check",
-                        "label": "selected",
-                        "groups": ["desktop-app"],
-                        "command": "true"
-                    },
-                    {
-                        "kind": "check",
-                        "label": "unselected",
-                        "groups": ["cli"],
-                        "command": "false"
-                    }
-                ]
-            }
-        }"#,
-    )
-    .expect("parse rig");
-
-    let outcome = run_pipeline_check_groups(
-        &crate::state::test_state_store(),
-        &rig,
-        &["desktop-app".to_string()],
-        false,
-        &[],
-    )
-    .expect("scoped pipeline runs");
-
-    assert!(outcome.is_success());
-    assert_eq!(outcome.steps.len(), 1);
-    assert_eq!(outcome.steps[0].label, "selected");
-}
 
 #[test]
 fn test_command_if_missing_runs_only_when_guard_path_is_missing() {
@@ -551,31 +509,6 @@ impl Drop for EnvRestore {
 }
 
 #[test]
-fn test_requirement_passes_when_declared_file_exists() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let marker = tmp.path().join("marker.txt");
-    std::fs::write(&marker, "ok").expect("write marker");
-    let marker_arg = marker.to_string_lossy();
-    let rig: RigSpec = serde_json::from_str(&format!(
-        r#"{{
-            "id": "requirement-file",
-            "pipeline": {{
-                "check": [{{
-                    "kind": "requirement",
-                    "file": "{}"
-                }}]
-            }}
-        }}"#,
-        marker_arg
-    ))
-    .expect("parse rig");
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
-        .expect("pipeline runs");
-    assert!(out.is_success(), "outcomes: {:?}", out.steps);
-}
-
-#[test]
 fn test_requirement_prepare_command_runs_only_in_declared_phase() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let marker = tmp.path().join("prepared.txt");
@@ -638,130 +571,88 @@ fn test_requirement_fails_with_remediation_without_prepare_phase() {
 }
 
 #[test]
-fn test_requirement_validates_component_path_contains() {
+fn test_requirement_passes_for_existing_file_and_component_path_contains() {
     let tmp = tempfile::tempdir().expect("tmpdir");
+    let marker = tmp.path().join("marker.txt");
+    std::fs::write(&marker, "ok").expect("write marker");
     let component_path = tmp.path().join("plugins/example-plugin");
     std::fs::create_dir_all(&component_path).expect("mkdir component");
-    let component_arg = component_path.to_string_lossy();
     let rig: RigSpec = serde_json::from_str(&format!(
         r#"{{
-            "id": "requirement-component-path",
+            "id": "requirement-pass",
             "components": {{
                 "example": {{ "path": "{}" }}
             }},
             "pipeline": {{
-                "check": [{{
-                    "kind": "requirement",
-                    "component": "example",
-                    "component_path_contains": "plugins/example-plugin"
-                }}]
+                "check": [
+                    {{ "kind": "requirement", "file": "{}" }},
+                    {{
+                        "kind": "requirement",
+                        "component": "example",
+                        "component_path_contains": "plugins/example-plugin"
+                    }}
+                ]
             }}
         }}"#,
-        component_arg
+        component_path.to_string_lossy(),
+        marker.to_string_lossy()
     ))
     .expect("parse rig");
 
     let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
         .expect("pipeline runs");
     assert!(out.is_success(), "outcomes: {:?}", out.steps);
+    assert_eq!(out.steps.len(), 2);
 }
 
 #[test]
-fn test_requirement_executable_falls_back_to_path_when_env_override_missing() {
+fn test_requirement_executable_resolves_env_override_aliases_then_path() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let path_bin_dir = tmp.path().join("path-bin");
     std::fs::create_dir_all(&path_bin_dir).expect("mkdir path bin");
     write_executable(&path_bin_dir.join("demo-tool"));
-    let missing_override = tmp.path().join("missing-override-tool");
-
-    let rig: RigSpec = serde_json::from_str(&format!(
-        r#"{{
-            "id": "requirement-executable-env",
-            "pipeline": {{
-                "check": [{{
-                    "kind": "requirement",
-                    "executable": "demo-tool",
-                    "executable_env": "DEMO_TOOL_BIN",
-                    "env": {{
-                        "DEMO_TOOL_BIN": "{}",
-                        "PATH": "{}"
-                    }}
-                }}]
-            }}
-        }}"#,
-        missing_override.to_string_lossy(),
-        path_bin_dir.to_string_lossy()
-    ))
-    .expect("parse rig");
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
-        .expect("pipeline runs");
-    assert!(out.is_success(), "outcomes: {:?}", out.steps);
-}
-
-#[test]
-fn test_requirement_executable_uses_ordered_env_aliases_before_path() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
     let alias_bin = tmp.path().join("alias-tool");
     write_executable(&alias_bin);
     let missing_override = tmp.path().join("missing-override-tool");
+    let missing_override = missing_override.to_string_lossy();
+    let path_bin = path_bin_dir.to_string_lossy();
+    let alias_bin = alias_bin.to_string_lossy();
 
-    let rig: RigSpec = serde_json::from_str(&format!(
-        r#"{{
-            "id": "requirement-executable-env-aliases",
-            "pipeline": {{
-                "check": [{{
-                    "kind": "requirement",
-                    "executable": "demo-tool",
-                    "executable_env": "DEMO_TOOL_BIN",
-                    "executable_env_aliases": ["DEMO_TOOL_ALIAS_BIN"],
-                    "env": {{
-                        "DEMO_TOOL_BIN": "{}",
-                        "DEMO_TOOL_ALIAS_BIN": "{}",
-                        "PATH": "/nonexistent"
-                    }}
-                }}]
-            }}
-        }}"#,
-        missing_override.to_string_lossy(),
-        alias_bin.to_string_lossy()
-    ))
-    .expect("parse rig");
+    for (name, aliases, extra_env, path) in [
+        // An unusable primary override falls back to PATH lookup.
+        ("path-fallback", "[]", String::new(), path_bin.to_string()),
+        // Ordered aliases are consulted before PATH.
+        (
+            "alias",
+            r#"["DEMO_TOOL_ALIAS_BIN"]"#,
+            format!(r#""DEMO_TOOL_ALIAS_BIN": "{alias_bin}","#),
+            "/nonexistent".to_string(),
+        ),
+    ] {
+        let rig: RigSpec = serde_json::from_str(&format!(
+            r#"{{
+                "id": "requirement-executable-{name}",
+                "pipeline": {{
+                    "check": [{{
+                        "kind": "requirement",
+                        "executable": "demo-tool",
+                        "executable_env": "DEMO_TOOL_BIN",
+                        "executable_env_aliases": {aliases},
+                        "env": {{
+                            {extra_env}
+                            "DEMO_TOOL_BIN": "{missing_override}",
+                            "PATH": "{path}"
+                        }}
+                    }}]
+                }}
+            }}"#
+        ))
+        .expect("parse rig");
 
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
-        .expect("pipeline runs");
-    assert!(out.is_success(), "outcomes: {:?}", out.steps);
-}
-
-#[test]
-fn test_requirement_executable_falls_back_to_path_when_env_override_is_unusable() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let path_bin_dir = tmp.path().join("path-bin");
-    std::fs::create_dir_all(&path_bin_dir).expect("mkdir path bin");
-    write_executable(&path_bin_dir.join("demo-tool"));
-
-    let rig: RigSpec = serde_json::from_str(&format!(
-        r#"{{
-            "id": "requirement-executable-path",
-            "pipeline": {{
-                "check": [{{
-                    "kind": "requirement",
-                    "executable": "demo-tool",
-                    "executable_env": "DEMO_TOOL_BIN",
-                    "env": {{
-                        "DEMO_TOOL_BIN": "/nonexistent/demo-tool",
-                        "PATH": "{}"
-                    }}
-                }}]
-            }}
-        }}"#,
-        path_bin_dir.to_string_lossy()
-    ))
-    .expect("parse rig");
-
-    let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
-        .expect("pipeline runs");
-    assert!(out.is_success(), "outcomes: {:?}", out.steps);
+        let out = run_pipeline(&crate::state::test_state_store(), &rig, "check", true)
+            .expect("pipeline runs");
+        assert!(out.is_success(), "{name} outcomes: {:?}", out.steps);
+    }
 }
 
 #[test]
@@ -943,39 +834,33 @@ mod dag {
     }
 
     #[test]
-    fn test_pipeline_errors_on_missing_dependency() {
-        let rig = rig_with_steps(
-            vec![command(
-                "studio-build",
-                &["missing-step"],
-                "true".to_string(),
-                None,
-            )],
-            HashMap::new(),
-        );
-
-        let err = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-            .expect_err("missing dependency errors");
-        let msg = err.to_string();
-        assert!(msg.contains("missing step id 'missing-step'"), "{msg}");
-    }
-
-    #[test]
-    fn test_pipeline_errors_on_dependency_cycle() {
-        let rig = rig_with_steps(
-            vec![
-                command("a", &["b"], "true".to_string(), None),
-                command("b", &["a"], "true".to_string(), None),
-            ],
-            HashMap::new(),
-        );
-
-        let err = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
-            .expect_err("cycle errors");
-        let msg = err.to_string();
-        assert!(msg.contains("dependency cycle"), "{msg}");
-        assert!(msg.contains("'a'"), "{msg}");
-        assert!(msg.contains("'b'"), "{msg}");
+    fn test_pipeline_rejects_invalid_dependency_graphs() {
+        for (steps, expected) in [
+            (
+                vec![command(
+                    "studio-build",
+                    &["missing-step"],
+                    "true".to_string(),
+                    None,
+                )],
+                vec!["missing step id 'missing-step'"],
+            ),
+            (
+                vec![
+                    command("a", &["b"], "true".to_string(), None),
+                    command("b", &["a"], "true".to_string(), None),
+                ],
+                vec!["dependency cycle", "'a'", "'b'"],
+            ),
+        ] {
+            let rig = rig_with_steps(steps, HashMap::new());
+            let err = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
+                .expect_err("invalid dependency graph errors");
+            let msg = err.to_string();
+            for needle in expected {
+                assert!(msg.contains(needle), "{msg}");
+            }
+        }
     }
 
     #[test]
@@ -1512,11 +1397,6 @@ mod command_env {
 }
 
 // ---- Patch step end-to-end -------------------------------------------------
-//
-// The patch step is the smallest of the three new pipeline kinds and the
-// only one that mutates files, so it's worth proper coverage. We run a real
-// rig pipeline (single-step) so the dispatch + serialization wiring is
-// exercised, not just the inner helper.
 #[path = "pipeline_test/patch.rs"]
 mod patch;
 

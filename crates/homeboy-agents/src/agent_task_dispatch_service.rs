@@ -854,14 +854,10 @@ mod tests {
     fn explicit_models_require_confirmation_even_when_configured() {
         require_model_override_acknowledgement(&model_override_request("operator-model", true))
             .expect("explicit acknowledgement admits the override");
-        require_model_override_acknowledgement(&model_override_request("configured-model", false))
-            .expect_err("a configured-model pin still disables fallback");
-    }
-
-    #[test]
-    fn configured_alternative_model_pin_requires_confirmation() {
-        require_model_override_acknowledgement(&model_override_request("fallback-model", false))
-            .expect_err("selecting an alternative must not silently disable fallback");
+        for configured in ["configured-model", "fallback-model"] {
+            require_model_override_acknowledgement(&model_override_request(configured, false))
+                .expect_err("a configured-model pin still disables fallback");
+        }
     }
 
     #[test]
@@ -1036,38 +1032,26 @@ mod tests {
 
     #[test]
     fn policy_model_does_not_self_authorize_an_unconfigured_override() {
-        let mut request = model_override_request("operator-model", false);
-        request
-            .core
-            .resolved_provider_policy
-            .as_mut()
-            .expect("resolved policy")
-            .model = Some("operator-model".to_string());
+        for keep_rotation in [true, false] {
+            let mut request = model_override_request("operator-model", false);
+            let policy = request
+                .core
+                .resolved_provider_policy
+                .as_mut()
+                .expect("resolved policy");
+            policy.model = Some("operator-model".to_string());
+            if !keep_rotation {
+                policy.rotation = None;
+            }
 
-        let error = require_model_override_acknowledgement(&request)
-            .expect_err("a changed policy model cannot self-authorize");
-        assert_eq!(error.details["confirmation_required"], true);
-    }
+            let error = require_model_override_acknowledgement(&request)
+                .expect_err("a selected policy model must not authorize itself");
 
-    #[test]
-    fn explicit_policy_model_without_configured_routes_requires_acknowledgement() {
-        let mut request = model_override_request("operator-model", false);
-        let policy = request
-            .core
-            .resolved_provider_policy
-            .as_mut()
-            .expect("resolved policy");
-        policy.model = Some("operator-model".to_string());
-        policy.rotation = None;
-
-        let error = require_model_override_acknowledgement(&request)
-            .expect_err("a selected policy model must not authorize itself");
-
-        assert_eq!(
-            error.details["schema"],
-            "homeboy/agent-task-model-override-confirmation-required/v1"
-        );
-        assert_eq!(error.details["configured_models"], serde_json::json!([]));
+            assert_eq!(error.details["confirmation_required"], true);
+            if !keep_rotation {
+                assert_eq!(error.details["configured_models"], serde_json::json!([]));
+            }
+        }
     }
 
     #[test]
@@ -1356,55 +1340,48 @@ mod tests {
     }
 
     #[test]
-    fn builtin_pi_backend_is_selected_when_no_policy_names_one() {
-        let request = resolve_dispatch_request_with_default(command_with_backend(None), || None)
-            .expect("pi is declared");
-
-        assert_eq!(request.backend, "pi");
-        let selection = request.backend_selection.expect("selection");
-        assert_eq!(selection.source, BackendSelectionSource::Builtin);
-        assert!(!selection.overrides_default);
-    }
-
-    #[test]
-    fn explicit_backend_is_attributed_to_cli_source() {
-        let request = resolve_dispatch_request_with_default(
-            command_with_backend(Some("claude-code")),
-            || Some("pi".to_string()),
-        )
-        .expect("request");
-
-        let selection = request.backend_selection.expect("selection");
-        assert_eq!(selection.backend, "claude-code");
-        assert_eq!(selection.source, BackendSelectionSource::Cli);
-        assert_eq!(selection.default_backend.as_deref(), Some("pi"));
-        assert!(selection.overrides_default);
-    }
-
-    #[test]
-    fn explicit_backend_matching_default_does_not_warn() {
-        let request =
-            resolve_dispatch_request_with_default(command_with_backend(Some("pi")), || {
-                Some("pi".to_string())
+    fn backend_selection_is_attributed_to_its_source() {
+        // (cli backend, configured default, selected backend, source, overrides default)
+        let cases = [
+            (None, None, "pi", BackendSelectionSource::Builtin, false),
+            (
+                Some("claude-code"),
+                Some("pi"),
+                "claude-code",
+                BackendSelectionSource::Cli,
+                true,
+            ),
+            (
+                Some("pi"),
+                Some("pi"),
+                "pi",
+                BackendSelectionSource::Cli,
+                false,
+            ),
+            (
+                None,
+                Some("pi"),
+                "pi",
+                BackendSelectionSource::Config,
+                false,
+            ),
+        ];
+        for (cli, default, backend, source, overrides_default) in cases {
+            let request = resolve_dispatch_request_with_default(command_with_backend(cli), || {
+                default.map(str::to_string)
             })
             .expect("request");
 
-        let selection = request.backend_selection.expect("selection");
-        assert_eq!(selection.source, BackendSelectionSource::Cli);
-        assert!(!selection.overrides_default);
-    }
-
-    #[test]
-    fn config_default_backend_is_attributed_to_config_source() {
-        let request = resolve_dispatch_request_with_default(command_with_backend(None), || {
-            Some("pi".to_string())
-        })
-        .expect("request");
-
-        let selection = request.backend_selection.expect("selection");
-        assert_eq!(selection.backend, "pi");
-        assert_eq!(selection.source, BackendSelectionSource::Config);
-        assert!(!selection.overrides_default);
+            assert_eq!(request.backend, backend, "{cli:?}/{default:?}");
+            let selection = request.backend_selection.expect("selection");
+            assert_eq!(selection.backend, backend, "{cli:?}/{default:?}");
+            assert_eq!(selection.source, source, "{cli:?}/{default:?}");
+            assert_eq!(
+                selection.overrides_default, overrides_default,
+                "{cli:?}/{default:?}"
+            );
+            assert_eq!(selection.default_backend.as_deref(), default);
+        }
     }
 
     #[test]

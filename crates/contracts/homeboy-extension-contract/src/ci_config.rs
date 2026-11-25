@@ -106,26 +106,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rolling_cache_defaults_off_and_is_omitted_when_off() {
-        let spec: CiCacheSpec = serde_json::from_str(
+    fn rolling_cache_is_opt_in_omitted_when_off_and_drops_key_file_requirement() {
+        let keyed: CiCacheSpec = serde_json::from_str(
             r#"{"namespace":"cargo","key_files":["Cargo.lock"],"paths":[{"root":"home","path":".cargo/registry"}]}"#,
         )
         .expect("parse lockfile-keyed cache");
-        assert!(!spec.rolling);
-        let value = serde_json::to_value(&spec).expect("serialize");
-        assert!(value.get("rolling").is_none());
-    }
+        assert!(!keyed.rolling);
+        assert!(serde_json::to_value(&keyed)
+            .expect("serialize")
+            .get("rolling")
+            .is_none());
 
-    #[test]
-    fn rolling_cache_round_trips_without_key_files() {
-        let spec: CiCacheSpec = serde_json::from_str(
+        let rolling: CiCacheSpec = serde_json::from_str(
             r#"{"namespace":"downloads","rolling":true,"paths":[{"root":"home","path":".cache/store","env":"STORE_DIR"}]}"#,
         )
-        .expect("parse rolling cache");
-        assert!(spec.rolling);
-        assert!(spec.key_files.is_empty());
-        assert_eq!(spec.paths[0].root, CiCachePathRoot::Home);
-        let value = serde_json::to_value(&spec).expect("serialize");
-        assert_eq!(value["rolling"], serde_json::Value::Bool(true));
+        .expect("parse rolling cache without key files");
+        assert!(rolling.key_files.is_empty());
+        assert_eq!(
+            serde_json::to_value(&rolling).expect("serialize")["rolling"],
+            true
+        );
     }
 }

@@ -1114,31 +1114,6 @@ mod tests {
     }
 
     #[test]
-    fn test_stderr_passthrough() {
-        let runner = ExtensionRunner::for_context(context()).stderr_passthrough(true);
-
-        assert!(runner.stderr_passthrough);
-    }
-
-    #[test]
-    fn passthrough_defaults_on_and_summary_mode_disables_it() {
-        // The runner streams child output to the terminal by default, but
-        // summary-mode callers pass `passthrough(false)` so large child streams
-        // are captured to evidence instead of flooding the terminal (#9845).
-        let default_runner = ExtensionRunner::for_context(context());
-        assert!(
-            default_runner.is_passthrough(),
-            "passthrough is on by default so non-summary runs still stream live output"
-        );
-
-        let summary_runner = ExtensionRunner::for_context(context()).passthrough(false);
-        assert!(
-            !summary_runner.is_passthrough(),
-            "summary mode must disable passthrough so the child stream is captured, not streamed"
-        );
-    }
-
-    #[test]
     fn writes_test_failure_sidecar_when_runner_fails_before_counts() {
         let run_dir = RunDir::create().expect("run dir");
         let output = CommandOutput {
@@ -1176,6 +1151,12 @@ mod tests {
     #[test]
     fn writes_lint_failure_sidecar_as_infrastructure_producer() {
         let run_dir = RunDir::create().expect("run dir");
+        // A malformed findings file left by the failed runner is replaced.
+        std::fs::write(
+            run_dir.step_file(run_dir::files::LINT_FINDINGS),
+            "{ malformed",
+        )
+        .expect("malformed findings file");
         let output = CommandOutput {
             stdout: String::new(),
             stderr: "formatter missing".to_string(),
@@ -1253,31 +1234,22 @@ mod tests {
         run_dir.cleanup();
     }
 
-    /// The declaration is what drives seeding now. An extension that does not
-    /// declare `lint.findings` is not handed one, which is the half of #11123
-    /// that stops core from manufacturing a file the manifest disclaims — and,
-    /// paired with the gate in `lint::run::workflow`, stops it from then
-    /// failing the run for that file's absence.
-    #[test]
-    fn seeds_nothing_when_the_manifest_declares_no_sidecars() {
-        let run_dir = RunDir::create().expect("run dir");
-
-        initialize_structured_sidecars(run_dir.path(), &[]).expect("initialize");
-
-        assert!(!run_dir.step_file(run_dir::files::LINT_FINDINGS).exists());
-        assert!(!run_dir.step_file(run_dir::files::LINT_PRODUCERS).exists());
-
-        run_dir.cleanup();
-    }
-
-    /// Seeding is registry-driven, not "every declared key". `test.results`
-    /// declares itself but must never be pre-seeded: `test::run` treats a
-    /// missing results file as the signal to parse counts out of the declared
-    /// parser's stdout, so an empty `{}` here would silently suppress a real
-    /// result path.
+    /// Seeding is declaration- and registry-driven, not "every declared key".
+    /// Nothing is seeded for an empty manifest (#11123), vendor keys get no
+    /// invented shape, and `test.results` must never be pre-seeded: `test::run`
+    /// treats a missing results file as the signal to parse counts out of the
+    /// declared parser's stdout.
     #[test]
     fn does_not_seed_sidecars_whose_absence_is_load_bearing() {
         let run_dir = RunDir::create().expect("run dir");
+
+        initialize_structured_sidecars(run_dir.path(), &[]).expect("initialize");
+        assert!(!run_dir.step_file(run_dir::files::LINT_FINDINGS).exists());
+        assert!(!run_dir.step_file(run_dir::files::LINT_PRODUCERS).exists());
+
+        initialize_structured_sidecars(run_dir.path(), &[declaration("vendor.custom")])
+            .expect("initialize");
+        assert!(!run_dir.path().join("vendor.custom").exists());
 
         initialize_structured_sidecars(
             run_dir.path(),
@@ -1336,42 +1308,9 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_non_array_test_failures_without_losing_runner_diagnosis() {
+    fn normalizes_non_array_test_failures_to_an_array() {
         let run_dir = RunDir::create().expect("run dir");
         let failures = run_dir.step_file(run_dir::files::TEST_FAILURES);
-        let output = CommandOutput {
-            stdout: "PHPUNIT_ZERO_TESTS cause=changed_file_filter_mismatch".to_string(),
-            stderr: String::new(),
-            success: true,
-            exit_code: 0,
-            timed_out: false,
-            observation: CommandObservation::Complete,
-            child_resource: None,
-        };
-        std::fs::write(
-            &failures,
-            serde_json::to_string(&json!({
-                "failures": [{"message": "legacy failure"}],
-                "total": 0,
-                "passed": 0,
-            }))
-            .expect("serialize fixture"),
-        )
-        .expect("write legacy failure envelope");
-
-        normalize_declared_test_failures(run_dir.path(), &[declaration("test.failures")])
-            .expect("normalize failures");
-
-        let payload: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&failures).expect("normalized failures"))
-                .expect("failure array");
-        // The envelope's failure records survive; only the counts are dropped.
-        assert_eq!(payload, json!([{"message": "legacy failure"}]));
-        homeboy_core::structured_sidecar::validate_payload("test.failures", &payload)
-            .expect("schema-valid failure array");
-        assert!(output
-            .stdout
-            .contains("PHPUNIT_ZERO_TESTS cause=changed_file_filter_mismatch"));
 
         for input in [
             json!([{"message": "failure"}]),
@@ -1404,19 +1343,6 @@ mod tests {
         run_dir.cleanup();
     }
 
-    /// A key core has no registry contract for gets no invented empty shape.
-    #[test]
-    fn ignores_declared_sidecars_the_registry_does_not_know() {
-        let run_dir = RunDir::create().expect("run dir");
-
-        initialize_structured_sidecars(run_dir.path(), &[declaration("vendor.custom")])
-            .expect("initialize");
-
-        assert!(!run_dir.path().join("vendor.custom").exists());
-
-        run_dir.cleanup();
-    }
-
     /// A declared sidecar's payload is checked against the registry contract
     /// after a successful run. Declaring `lint.findings` and then writing an
     /// object where the contract says array is a producer bug that nothing
@@ -1441,8 +1367,10 @@ mod tests {
 
     /// Validation judges an extension on what it declared, and only where core
     /// has a contract. An undeclared file and a vendor key are both left alone.
+    /// Absence is not a violation either: several sidecars are legitimately
+    /// never written, and some declared paths are directories.
     #[test]
-    fn validation_ignores_undeclared_and_registry_unknown_sidecars() {
+    fn validation_ignores_undeclared_unknown_absent_and_directory_sidecars() {
         let run_dir = RunDir::create().expect("run dir");
         std::fs::write(
             run_dir.step_file(run_dir::files::LINT_FINDINGS),
@@ -1456,18 +1384,6 @@ mod tests {
             .expect("a manifest declaring nothing is judged on nothing");
         validate_declared_structured_sidecars(run_dir.path(), &[declaration("vendor.custom")])
             .expect("core has no contract for a vendor key");
-
-        run_dir.cleanup();
-    }
-
-    /// Absence is not a violation. Several sidecars are legitimately never
-    /// written (a missing `test.results` is what engages the stdout fallback),
-    /// and two declared paths are directories rather than JSON documents —
-    /// failing a run for any of those is the mistake that made the lint
-    /// evidence gate fail passing lints.
-    #[test]
-    fn validation_does_not_fail_on_absent_or_directory_sidecars() {
-        let run_dir = RunDir::create().expect("run dir");
 
         validate_declared_structured_sidecars(
             run_dir.path(),
@@ -1513,58 +1429,17 @@ mod tests {
     }
 
     #[test]
-    fn replaces_malformed_lint_findings_sidecar_with_infrastructure_producer() {
-        let run_dir = RunDir::create().expect("run dir");
-        std::fs::write(
-            run_dir.step_file(run_dir::files::LINT_FINDINGS),
-            "{ malformed",
-        )
-        .expect("malformed findings file");
-        let output = CommandOutput {
-            stdout: String::new(),
-            stderr: "runner failed".to_string(),
-            success: false,
-            exit_code: 1,
-            timed_out: false,
-            observation: CommandObservation::Complete,
-            child_resource: None,
-        };
-
-        write_structured_failure_sidecar(
-            run_dir.path(),
-            ExtensionCapability::Lint,
-            "./lint.sh",
-            &output,
-        )
-        .expect("write fallback");
-
-        assert_eq!(
-            std::fs::read_to_string(run_dir.step_file(run_dir::files::LINT_FINDINGS))
-                .expect("findings file")
-                .trim(),
-            "[]"
-        );
-        assert!(run_dir.step_file(run_dir::files::LINT_PRODUCERS).is_file());
-
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn detects_stale_validation_dependency_warning() {
+    fn detects_only_stale_validation_dependency_warnings() {
         let stderr = "Resolved validation dependency 'sample-plugin' to local checkout '/tmp/sample-plugin', but it is behind origin/main by 3 commit(s). Update the checkout or pass an explicit dependency path.";
 
         let message = stale_validation_dependency_message("", stderr).expect("stale dependency");
 
         assert!(message.contains("sample-plugin"));
         assert!(message.contains("behind origin/main by 3 commit(s)"));
-    }
 
-    #[test]
-    fn ignores_non_stale_validation_dependency_output() {
-        let stderr =
+        let fresh =
             "Resolved validation dependency 'sample-plugin' to local checkout '/tmp/sample-plugin'.";
-
-        assert!(stale_validation_dependency_message("", stderr).is_none());
+        assert!(stale_validation_dependency_message("", fresh).is_none());
     }
 
     #[test]

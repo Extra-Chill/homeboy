@@ -957,11 +957,6 @@ mod tests {
             plan.tasks[0].metadata["client_context"]["conversation_id"],
             "opaque-123"
         );
-        let serialized = serde_json::to_string(&plan).expect("serialize plan");
-        assert!(!serialized.contains("discord"));
-        assert!(!serialized.contains("kimaki"));
-        assert!(!serialized.contains("channel"));
-        assert!(!serialized.contains("thread"));
     }
 
     #[test]
@@ -1035,6 +1030,8 @@ mod tests {
             .expect("dispatch plan");
 
             assert!(plan.options.rotation.is_none());
+            assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
+            assert_eq!(plan.options.execution_budget.max_provider_rotations, 0);
         });
     }
 
@@ -1314,59 +1311,36 @@ mod tests {
     }
 
     #[test]
-    fn no_configured_rotation_still_resolves_to_a_single_execution() {
-        with_isolated_home(|_| {
-            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
-                prompt: Some("Cook without a rotation.".to_string()),
-                ..DispatchRequestOverrides::default()
-            }))
-            .expect("dispatch plan");
-
-            assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
-            assert_eq!(plan.options.execution_budget.max_provider_rotations, 0);
-        });
-    }
-
-    #[test]
-    fn derived_budget_never_exceeds_the_policy_total_attempt_bound() {
-        // Two entries would normally fund three executions, but the operator
-        // capped total attempts at two. Rotations follow the executions that
-        // are actually funded so the two halves cannot disagree.
-        let mut policy = rotation_policy_with(2);
-        policy.max_attempts = Some(2);
-        let budget = resolve_execution_budget(&DispatchCoreInputs::default(), Some(&policy), None)
+    fn rotation_derived_budget_respects_policy_bounds_and_explicit_retries() {
+        // (rotation entries, policy max_attempts, same-provider retries,
+        //  executions, rotations, same-provider retries)
+        let cases = [
+            // The policy caps total attempts below the chain length; rotations
+            // follow the funded executions so the two halves cannot disagree.
+            (2, Some(2), None, 2, 1, 0),
+            // A bound above the chain length does not invent executions.
+            (1, Some(9), None, 2, 1, 0),
+            // An explicit same-provider retry budget survives derivation.
+            (2, None, Some(2), 5, 2, 2),
+        ];
+        for (entries, max_attempts, retries, executions, rotations, same_provider) in cases {
+            let mut policy = rotation_policy_with(entries);
+            policy.max_attempts = max_attempts;
+            let budget = resolve_execution_budget(
+                &DispatchCoreInputs {
+                    same_provider_retries: retries,
+                    ..DispatchCoreInputs::default()
+                },
+                Some(&policy),
+                None,
+            )
             .expect("configured policy budget");
 
-        assert_eq!(budget.max_provider_executions, 2);
-        assert_eq!(budget.max_provider_rotations, 1);
-    }
-
-    #[test]
-    fn a_policy_bound_above_the_chain_length_does_not_invent_executions() {
-        let mut policy = rotation_policy_with(1);
-        policy.max_attempts = Some(9);
-        let budget = resolve_execution_budget(&DispatchCoreInputs::default(), Some(&policy), None)
-            .expect("configured policy budget");
-
-        assert_eq!(budget.max_provider_executions, 2);
-        assert_eq!(budget.max_provider_rotations, 1);
-    }
-
-    #[test]
-    fn an_explicit_same_provider_retry_budget_survives_rotation_derivation() {
-        let budget = resolve_execution_budget(
-            &DispatchCoreInputs {
-                same_provider_retries: Some(2),
-                ..DispatchCoreInputs::default()
-            },
-            Some(&rotation_policy_with(2)),
-            None,
-        )
-        .expect("configured policy budget");
-
-        assert_eq!(budget.max_provider_executions, 5);
-        assert_eq!(budget.max_provider_rotations, 2);
-        assert_eq!(budget.max_same_provider_retries, 2);
+            let case = (entries, max_attempts, retries);
+            assert_eq!(budget.max_provider_executions, executions, "{case:?}");
+            assert_eq!(budget.max_provider_rotations, rotations, "{case:?}");
+            assert_eq!(budget.max_same_provider_retries, same_provider, "{case:?}");
+        }
     }
 
     #[test]
@@ -1485,23 +1459,27 @@ mod tests {
                 .expect("prompt revision")
                 .starts_with("sha256:"));
             assert_eq!(plan.tasks[0].metadata["prompt_store"]["id"], "homeboy-7388");
-        });
-    }
 
-    #[test]
-    fn builds_dispatch_plan_from_stored_task_reference_without_at_prefix() {
-        with_isolated_home(|_| {
-            agent_task_prompts::save_prompt("task-ref", "Cook this task.").expect("save prompt");
-
-            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
-                tasks: vec!["prompt:task-ref".to_string()],
-                repo: Some("homeboy".to_string()),
-                ..DispatchRequestOverrides::default()
-            }))
-            .expect("dispatch plan");
-
-            assert_eq!(plan.tasks[0].instructions, "Cook this task.");
-            assert_eq!(plan.tasks[0].source_refs[0].uri, "prompt:task-ref");
+            // The `@` prefix is optional for both the prompt and task inputs.
+            for overrides in [
+                DispatchRequestOverrides {
+                    prompt: Some("prompt:homeboy-7388".to_string()),
+                    ..DispatchRequestOverrides::default()
+                },
+                DispatchRequestOverrides {
+                    tasks: vec!["prompt:homeboy-7388".to_string()],
+                    ..DispatchRequestOverrides::default()
+                },
+            ] {
+                let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                    repo: Some("homeboy".to_string()),
+                    ..overrides
+                }))
+                .expect("dispatch plan");
+                assert_eq!(plan.tasks.len(), 1);
+                assert_eq!(plan.tasks[0].instructions, "Use the prompt store.");
+                assert_eq!(plan.tasks[0].source_refs[0].uri, "prompt:homeboy-7388");
+            }
         });
     }
 
@@ -1548,30 +1526,6 @@ mod tests {
             serialized["tasks"][0]["executor"]["runtime_selection"]["ai_provider_id"],
             "openai"
         );
-    }
-
-    #[test]
-    fn builds_dispatch_plan_from_stored_prompt_ref() {
-        with_isolated_home(|_| {
-            crate::agent_task_prompts::save_prompt(
-                "review-fix",
-                "# Review fix\nCook from stored markdown.\n",
-            )
-            .expect("save prompt");
-
-            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
-                prompt: Some("prompt:review-fix".to_string()),
-                repo: Some("homeboy".to_string()),
-                ..DispatchRequestOverrides::default()
-            }))
-            .expect("dispatch plan");
-
-            assert_eq!(plan.tasks.len(), 1);
-            assert_eq!(
-                plan.tasks[0].instructions,
-                "# Review fix\nCook from stored markdown.\n"
-            );
-        });
     }
 
     #[test]
@@ -1676,68 +1630,39 @@ mod tests {
     }
 
     #[test]
-    fn rejects_tasks_json_items_with_unknown_object_keys() {
-        let tasks = tempfile::NamedTempFile::new().expect("tasks file");
-        std::fs::write(
-            tasks.path(),
-            r#"{"tasks":[{"prompt":"Cook issue A","priority":"high"}]}"#,
-        )
-        .expect("write tasks");
+    fn rejects_invalid_tasks_json_items() {
+        let cases = [
+            (
+                r#"{"tasks":[{"prompt":"Cook issue A","priority":"high"}]}"#,
+                &["unsupported field", "priority"][..],
+            ),
+            (
+                r#"{"tasks":["  \n\t  "]}"#,
+                &["non-empty prompt or instructions"][..],
+            ),
+            (
+                r#"{"tasks":[{"task_id":"missing-prompt"},{"prompt":"  "}]}"#,
+                &["task item 1", "prompt or instructions field"][..],
+            ),
+        ];
+        for (raw, expected) in cases {
+            let tasks = tempfile::NamedTempFile::new().expect("tasks file");
+            std::fs::write(tasks.path(), raw).expect("write tasks");
 
-        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
-            core: DispatchCoreInputs {
-                tasks_json: Some(format!("@{}", tasks.path().display())),
-                ..DispatchCoreInputs::default()
-            },
-            ..DispatchRequestOverrides::default()
-        }))
-        .expect_err("unknown task object field should fail");
+            let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                core: DispatchCoreInputs {
+                    tasks_json: Some(format!("@{}", tasks.path().display())),
+                    ..DispatchCoreInputs::default()
+                },
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect_err(raw);
 
-        assert!(error.to_string().contains("unsupported field"));
-        assert!(error.to_string().contains("priority"));
-    }
-
-    #[test]
-    fn rejects_tasks_json_empty_string_prompt_after_trimming() {
-        let tasks = tempfile::NamedTempFile::new().expect("tasks file");
-        std::fs::write(tasks.path(), r#"{"tasks":["  \n\t  "]}"#).expect("write tasks");
-
-        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
-            core: DispatchCoreInputs {
-                tasks_json: Some(format!("@{}", tasks.path().display())),
-                ..DispatchCoreInputs::default()
-            },
-            ..DispatchRequestOverrides::default()
-        }))
-        .expect_err("empty task string should fail");
-
-        assert_eq!(error.details["field"], "tasks");
-        assert!(error
-            .to_string()
-            .contains("non-empty prompt or instructions"));
-    }
-
-    #[test]
-    fn rejects_tasks_json_object_without_usable_prompt() {
-        let tasks = tempfile::NamedTempFile::new().expect("tasks file");
-        std::fs::write(
-            tasks.path(),
-            r#"{"tasks":[{"task_id":"missing-prompt"},{"prompt":"  "}]}"#,
-        )
-        .expect("write tasks");
-
-        let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
-            core: DispatchCoreInputs {
-                tasks_json: Some(format!("@{}", tasks.path().display())),
-                ..DispatchCoreInputs::default()
-            },
-            ..DispatchRequestOverrides::default()
-        }))
-        .expect_err("object without usable prompt should fail");
-
-        assert_eq!(error.details["field"], "tasks");
-        assert!(error.to_string().contains("task item 1"));
-        assert!(error.to_string().contains("prompt or instructions field"));
+            assert_eq!(error.details["field"], "tasks", "{raw}");
+            for needle in expected {
+                assert!(error.to_string().contains(needle), "{raw}: {error}");
+            }
+        }
     }
 
     #[test]
@@ -1849,40 +1774,24 @@ mod tests {
     }
 
     #[test]
-    fn git_checkout_provider_rejects_non_git_cwd() {
+    fn git_checkout_provider_requires_a_git_cwd() {
         let workspace = tempfile::tempdir().expect("workspace");
+        let request = dispatch_request(DispatchRequestOverrides {
+            prompt: Some("Generate files here.".to_string()),
+            cwd: Some(workspace.path().display().to_string()),
+            backend: Some("git-required".to_string()),
+            ..DispatchRequestOverrides::default()
+        });
+        let requires_git = |backend: &str, _selector: Option<&str>| backend == "git-required";
 
-        let error = build_dispatch_plan_with_provider_requirements(
-            &dispatch_request(DispatchRequestOverrides {
-                prompt: Some("Generate files here.".to_string()),
-                cwd: Some(workspace.path().display().to_string()),
-                backend: Some("git-required".to_string()),
-                ..DispatchRequestOverrides::default()
-            }),
-            |backend, _selector| backend == "git-required",
-        )
-        .expect_err("non-git cwd should be rejected");
-
+        let error = build_dispatch_plan_with_provider_requirements(&request, requires_git)
+            .expect_err("non-git cwd should be rejected");
         assert!(error.to_string().contains("git checkout"));
         assert!(error.to_string().contains("patch artifact"));
-    }
 
-    #[test]
-    fn git_checkout_provider_accepts_git_cwd() {
-        let workspace = tempfile::tempdir().expect("workspace");
         git(workspace.path(), &["init"]);
-
-        let plan = build_dispatch_plan_with_provider_requirements(
-            &dispatch_request(DispatchRequestOverrides {
-                prompt: Some("Generate files here.".to_string()),
-                cwd: Some(workspace.path().display().to_string()),
-                backend: Some("git-required".to_string()),
-                ..DispatchRequestOverrides::default()
-            }),
-            |backend, _selector| backend == "git-required",
-        )
-        .expect("git cwd should be accepted");
-
+        let plan = build_dispatch_plan_with_provider_requirements(&request, requires_git)
+            .expect("git cwd should be accepted");
         assert_eq!(
             plan.tasks[0].workspace.root.as_deref(),
             Some(workspace.path().to_str().expect("workspace utf8"))

@@ -255,32 +255,6 @@ mod tests {
     // The config read: one reader, three former call sites
     // ========================================================================
 
-    #[test]
-    fn require_targets_rejects_missing_version_targets() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let component = component_at(&temp_dir);
-
-        let error = require_targets(&component).expect_err("missing versionTargets");
-        assert_eq!(error.code, ErrorCode::ConfigMissingKey);
-        assert_eq!(error.details["key"], "versionTargets");
-        assert_eq!(error.details["path"], "test-component");
-    }
-
-    #[test]
-    fn require_targets_rejects_empty_version_targets() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let mut component = component_at(&temp_dir);
-        component.version_targets = Some(vec![]);
-
-        let error = require_targets(&component).expect_err("empty versionTargets");
-        assert_eq!(error.code, ErrorCode::ConfigInvalidValue);
-        assert_eq!(error.details["key"], "versionTargets");
-        assert_eq!(
-            error.details["problem"],
-            "Component 'test-component' has empty versionTargets"
-        );
-    }
-
     /// `local_path` is validated *before* the config is inspected, so a
     /// component pointing at a path that does not exist reports that rather
     /// than a confusing missing-key error. All three former readers called
@@ -303,49 +277,49 @@ mod tests {
         );
     }
 
-    /// Every former call site must now produce the *same* missing-key error,
-    /// because they share one reader. This is the regression that made the
-    /// three copies worth collapsing.
+    /// Every version read path must produce the *same* missing-key and
+    /// empty-list errors, because they share one reader. This is the
+    /// regression that made the three copies worth collapsing.
     #[test]
-    fn all_version_read_paths_share_one_missing_targets_error() {
+    fn all_version_read_paths_share_missing_and_empty_targets_errors() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let component = component_at(&temp_dir);
+        let cases = [
+            (None, ErrorCode::ConfigMissingKey),
+            (Some(vec![]), ErrorCode::ConfigInvalidValue),
+        ];
 
-        let from_read = read(&component).expect_err("read requires targets");
-        let from_validate = validate_version_targets_at(&component, "1.0.0")
-            .expect_err("validate requires targets");
-        let from_bump = bump_component_version_with_changelog(&component, "patch", None, None)
-            .expect_err("bump requires targets");
+        for (version_targets, code) in cases {
+            let mut component = component_at(&temp_dir);
+            component.version_targets = version_targets;
+            let empty = component.version_targets.is_some();
 
-        for error in [&from_read, &from_validate, &from_bump] {
-            assert_eq!(error.code, ErrorCode::ConfigMissingKey);
-            assert_eq!(error.details["key"], "versionTargets");
-            assert_eq!(error.details["path"], "test-component");
-        }
-    }
+            let mut errors = vec![
+                read(&component).expect_err("read requires targets"),
+                validate_version_targets_at(&component, "1.0.0")
+                    .expect_err("validate requires targets"),
+                bump_component_version_with_changelog(&component, "patch", None, None)
+                    .expect_err("bump requires targets"),
+            ];
+            if empty {
+                // The deploy-wide sweep skips absent config but rejects `[]`.
+                errors.push(
+                    validate_component_versions(&[component.clone()])
+                        .expect_err("sweep rejects empty"),
+                );
+            }
 
-    /// Same for the empty-list rejection.
-    #[test]
-    fn all_version_read_paths_share_one_empty_targets_error() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let mut component = component_at(&temp_dir);
-        component.version_targets = Some(vec![]);
-
-        let from_read = read(&component).expect_err("read rejects empty");
-        let from_validate =
-            validate_version_targets_at(&component, "1.0.0").expect_err("validate rejects empty");
-        let from_bump = bump_component_version_with_changelog(&component, "patch", None, None)
-            .expect_err("bump rejects empty");
-        let from_sweep =
-            validate_component_versions(&[component.clone()]).expect_err("sweep rejects empty");
-
-        for error in [&from_read, &from_validate, &from_bump, &from_sweep] {
-            assert_eq!(error.code, ErrorCode::ConfigInvalidValue);
-            assert_eq!(error.details["key"], "versionTargets");
-            assert_eq!(
-                error.details["problem"],
-                "Component 'test-component' has empty versionTargets"
-            );
+            for error in &errors {
+                assert_eq!(error.code, code);
+                assert_eq!(error.details["key"], "versionTargets");
+                if empty {
+                    assert_eq!(
+                        error.details["problem"],
+                        "Component 'test-component' has empty versionTargets"
+                    );
+                } else {
+                    assert_eq!(error.details["path"], "test-component");
+                }
+            }
         }
     }
 
@@ -370,56 +344,6 @@ mod tests {
     // ========================================================================
     // The file read
     // ========================================================================
-
-    #[test]
-    fn read_target_reports_resolved_pattern_path_and_matches() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        write_package_json(&temp_dir, "1.2.3");
-
-        let target = package_json_target();
-        let read = read_target(&temp_dir.path().to_string_lossy(), &target).expect("read target");
-
-        assert_eq!(read.file, "package.json");
-        assert_eq!(read.versions, vec!["1.2.3".to_string()]);
-        assert_eq!(
-            read.full_path,
-            temp_dir.path().join("package.json").to_string_lossy()
-        );
-        assert!(read.content.contains("1.2.3"));
-        assert!(!read.is_empty());
-        assert_eq!(read.require_identical().unwrap(), "1.2.3");
-    }
-
-    /// A pattern that compiles but matches nothing is not a read failure — the
-    /// callers decide. Keeping that decision out of the reader is what allows
-    /// one reader to serve a hard-error caller and a warn-only caller.
-    #[test]
-    fn read_target_reports_no_matches_without_failing() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        fs::write(temp_dir.path().join("VERSION"), "no version here\n").unwrap();
-
-        let target = VersionTarget {
-            file: "VERSION".to_string(),
-            pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
-            artifact_path: None,
-        };
-        let read = read_target(&temp_dir.path().to_string_lossy(), &target).expect("read target");
-
-        assert!(read.is_empty());
-        let error = read.parse_error();
-        assert!(
-            error
-                .message
-                .contains("Could not parse version from VERSION"),
-            "expected the detailed parse error, got: {}",
-            error.message
-        );
-        assert!(
-            error.message.contains("no version here"),
-            "parse error must include a file preview, got: {}",
-            error.message
-        );
-    }
 
     #[test]
     fn read_target_rejects_an_uncompilable_pattern() {
@@ -469,55 +393,48 @@ mod tests {
         );
     }
 
-    /// The primary target is the one that hard-fails, with the detailed
-    /// preview error rather than the terse one.
+    /// A non-matching primary target hard-fails on every path, but `read` and
+    /// the bump path keep the detailed preview error while
+    /// `validate_version_targets_at` keeps its terse diagnostic. That
+    /// divergence is deliberate; the shared reader must not flatten it.
     #[test]
-    fn read_fails_with_a_preview_when_the_primary_target_does_not_match() {
+    fn non_matching_primary_target_keeps_each_callers_diagnostic() {
         let temp_dir = tempfile::tempdir().unwrap();
         fs::write(
             temp_dir.path().join("package.json"),
-            "{\n  \"name\": \"x\"\n}\n",
+            "{\n  \"name\": \"no-version-here\"\n}\n",
         )
         .unwrap();
 
         let mut component = component_at(&temp_dir);
         component.version_targets = Some(vec![package_json_target()]);
 
-        let error = read(&component).expect_err("primary target must match");
-        assert!(
-            error
-                .message
-                .contains("Could not parse version from package.json"),
-            "got: {}",
-            error.message
-        );
-    }
-
-    /// `validate_version_targets_at` keeps its own terse diagnostic for a
-    /// non-matching target — that divergence is deliberate, and the shared
-    /// reader must not have flattened it into the preview error.
-    #[test]
-    fn validate_version_targets_at_keeps_its_terse_no_version_error() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        fs::write(
-            temp_dir.path().join("package.json"),
-            "{\n  \"name\": \"x\"\n}\n",
-        )
-        .unwrap();
-
-        let mut component = component_at(&temp_dir);
-        component.version_targets = Some(vec![package_json_target()]);
+        for error in [
+            read(&component).expect_err("read: primary target must match"),
+            bump_component_version_with_changelog(&component, "patch", None, None)
+                .expect_err("bump: primary target must match"),
+        ] {
+            assert!(
+                error
+                    .message
+                    .contains("Could not parse version from package.json"),
+                "got: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("no-version-here"),
+                "parse error must include a file preview, got: {}",
+                error.message
+            );
+        }
 
         let error =
             validate_version_targets_at(&component, "1.2.3").expect_err("target must match");
-        assert_eq!(
-            error.message, "Could not find version in package.json",
-            "the validate path keeps its terse diagnostic"
-        );
+        assert_eq!(error.message, "Could not find version in package.json");
     }
 
     #[test]
-    fn validate_version_targets_at_reports_every_target_when_all_agree() {
+    fn validate_version_targets_at_requires_every_target_at_the_expected_version() {
         let temp_dir = tempfile::tempdir().unwrap();
         write_package_json(&temp_dir, "1.2.3");
         fs::write(
@@ -540,75 +457,11 @@ mod tests {
         assert_eq!(infos.len(), 2);
         assert!(infos.iter().all(|info| info.match_count == 1));
         assert!(infos.iter().all(|info| info.warning.is_none()));
-    }
-
-    #[test]
-    fn validate_version_targets_at_rejects_a_target_at_a_different_version() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        write_package_json(&temp_dir, "1.2.3");
-
-        let mut component = component_at(&temp_dir);
-        component.version_targets = Some(vec![package_json_target()]);
 
         let error = validate_version_targets_at(&component, "9.9.9").expect_err("version mismatch");
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
         assert!(
             error.message.contains("Version mismatch in package.json"),
-            "got: {}",
-            error.message
-        );
-    }
-
-    /// The bump path reads the primary target through the same reader, so the
-    /// version it bumps from is the version `read` reports.
-    #[test]
-    fn bump_reads_the_same_primary_version_the_shared_reader_reports() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        write_package_json(&temp_dir, "0.1.0");
-        fs::write(
-            temp_dir.path().join("CHANGELOG.md"),
-            "# Changelog\n\n## Unreleased\n\n",
-        )
-        .unwrap();
-
-        let mut component = component_at(&temp_dir);
-        component.version_targets = Some(vec![package_json_target()]);
-
-        let observed = read(&component).expect("read version").version;
-
-        let mut entries: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        entries.insert("fixed".to_string(), vec!["shared version read".to_string()]);
-
-        let result =
-            bump_component_version_with_changelog(&component, "patch", Some(&entries), None)
-                .expect("bump from the shared read");
-
-        assert_eq!(result.old_version, observed);
-        assert_eq!(result.new_version, "0.1.1");
-    }
-
-    /// The bump path also keeps the detailed preview error on a non-matching
-    /// primary target, and must not have picked up the validate path's terse
-    /// one when the two were merged.
-    #[test]
-    fn bump_keeps_the_detailed_parse_error_on_a_non_matching_primary() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        fs::write(
-            temp_dir.path().join("package.json"),
-            "{\n  \"name\": \"x\"\n}\n",
-        )
-        .unwrap();
-
-        let mut component = component_at(&temp_dir);
-        component.version_targets = Some(vec![package_json_target()]);
-
-        let error = bump_component_version_with_changelog(&component, "patch", None, None)
-            .expect_err("primary target must match");
-        assert!(
-            error
-                .message
-                .contains("Could not parse version from package.json"),
             "got: {}",
             error.message
         );

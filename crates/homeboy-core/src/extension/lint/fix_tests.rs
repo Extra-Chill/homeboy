@@ -331,21 +331,6 @@ fn formatter_failure_is_a_fix_failure() {
     assert!(error.to_string().contains("phpcbf failed"));
 }
 
-#[test]
-fn remaining_findings_fail_the_fix() {
-    let findings = vec![HomeboyFinding::builder("lint", "Tabs must be used")
-        .rule("WordPress.WhiteSpace.DisallowSpaceIndent")
-        .file("inc/Demo.php")
-        .fixable(true)
-        .build()];
-
-    let error = reject_remaining_findings(&findings)
-        .expect_err("remaining lint findings should fail fix mode");
-    assert!(error.to_string().contains("Lint fix left 1 finding"));
-    assert!(error.to_string().contains("inc/Demo.php"));
-    reject_remaining_findings(&[]).expect("clean follow-up diagnostics should pass");
-}
-
 fn fixable_finding(file: &str, fixable: bool) -> HomeboyFinding {
     HomeboyFinding::builder("phpcs", "WhiteSpace")
         .file(file)

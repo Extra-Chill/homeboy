@@ -121,35 +121,27 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn discover_changelog_prefers_root_when_both_exist() {
-        let dir = TempDir::new().expect("temp dir");
-        fs::create_dir_all(dir.path().join("docs")).unwrap();
-        fs::write(dir.path().join("CHANGELOG.md"), "# Changelog\n").unwrap();
-        fs::write(dir.path().join("docs/CHANGELOG.md"), "# Changelog\n").unwrap();
+    fn discover_changelog_relative_path_follows_candidate_preference() {
+        // docs-only is the html-to-blocks-converter scenario from #1128.
+        let cases: &[(&[&str], Option<&str>)] = &[
+            (&["CHANGELOG.md", "docs/CHANGELOG.md"], Some("CHANGELOG.md")),
+            (&["docs/CHANGELOG.md"], Some("docs/CHANGELOG.md")),
+            (&[], None),
+        ];
 
-        assert_eq!(
-            discover_changelog_relative_path(dir.path()),
-            Some("CHANGELOG.md".to_string())
-        );
-    }
+        for (existing, expected) in cases {
+            let dir = TempDir::new().expect("temp dir");
+            for file in *existing {
+                let path = dir.path().join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, "# Changelog\n").unwrap();
+            }
 
-    #[test]
-    fn discover_changelog_finds_docs_path_when_root_absent() {
-        // This is the html-to-blocks-converter scenario from #1128: the file
-        // lives at docs/CHANGELOG.md but nothing at the repo root.
-        let dir = TempDir::new().expect("temp dir");
-        fs::create_dir_all(dir.path().join("docs")).unwrap();
-        fs::write(dir.path().join("docs/CHANGELOG.md"), "# Changelog\n").unwrap();
-
-        assert_eq!(
-            discover_changelog_relative_path(dir.path()),
-            Some("docs/CHANGELOG.md".to_string())
-        );
-    }
-
-    #[test]
-    fn discover_changelog_returns_none_when_nothing_exists() {
-        let dir = TempDir::new().expect("temp dir");
-        assert_eq!(discover_changelog_relative_path(dir.path()), None);
+            assert_eq!(
+                discover_changelog_relative_path(dir.path()).as_deref(),
+                *expected,
+                "existing={existing:?}"
+            );
+        }
     }
 }

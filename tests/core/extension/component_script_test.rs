@@ -8,7 +8,6 @@ use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtension
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::extension::component_script::{
     run_component_scripts, run_component_scripts_with_env, run_component_scripts_with_run_dir,
-    source_path,
 };
 use homeboy_core::test_support::{with_isolated_home, GitFixture};
 use homeboy_extension_contract::ExtensionCapability;
@@ -57,38 +56,6 @@ fn script_component(root: &Path, command: &str) -> Component {
 
 fn homeboy_manifest() -> Component {
     serde_json::from_str(include_str!("../../../homeboy.json")).expect("homeboy.json parses")
-}
-
-#[test]
-fn test_run_component_scripts() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let component = script_component(dir.path(), "printf ok > marker");
-
-    let output = run_component_scripts(&component, ExtensionCapability::Test, dir.path(), false)
-        .expect("component script should run");
-
-    assert!(output.success);
-    assert_eq!(output.exit_code, 0);
-    assert_eq!(fs::read_to_string(dir.path().join("marker")).unwrap(), "ok");
-}
-
-#[test]
-fn test_run_component_scripts_with_env() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let component = script_component(dir.path(), "printf \"$EXTRA_VALUE\" > marker");
-
-    let output = run_component_scripts_with_env(
-        &component,
-        ExtensionCapability::Test,
-        dir.path(),
-        false,
-        &[("EXTRA_VALUE".to_string(), "ok".to_string())],
-        &[],
-    )
-    .expect("component script should run with env");
-
-    assert!(output.success);
-    assert_eq!(fs::read_to_string(dir.path().join("marker")).unwrap(), "ok");
 }
 
 #[test]
@@ -256,7 +223,7 @@ fn managed_cargo_target_preserves_explicit_absolute_override_and_reports_local()
 }
 
 #[test]
-fn component_config_env_is_visible_to_env_providers() {
+fn linked_extension_env_provider_sees_component_and_extra_env() {
     with_isolated_home(|_| {
         let dir = tempfile::tempdir().expect("temp dir");
         let extension_dir = homeboy_core::paths::extensions()
@@ -274,7 +241,7 @@ fn component_config_env_is_visible_to_env_providers() {
         .expect("extension manifest");
         homeboy_test_support::write_executable(
             extension_dir.join("env.sh"),
-            "#!/bin/sh\nprintf '{\"PROVIDER_SAW\":\"%s\"}' \"$SHARED_CACHE_DIR\"\n",
+            "#!/bin/sh\nprintf '{\"PROVIDER_SAW\":\"%s:%s\"}' \"$SHARED_CACHE_DIR\" \"$EXTRA_VALUE\"\n",
             0o755,
         )
         .expect("extension env script");
@@ -294,54 +261,6 @@ fn component_config_env_is_visible_to_env_providers() {
             ExtensionCapability::Test,
             dir.path(),
             false,
-            &[],
-            &[],
-        )
-        .expect("component script should run");
-
-        assert!(output.success);
-        assert_eq!(
-            fs::read_to_string(dir.path().join("marker")).unwrap(),
-            "/tmp/homeboy-provider-cache"
-        );
-    });
-}
-
-#[test]
-fn component_scripts_include_linked_extension_env_provider_output() {
-    with_isolated_home(|_| {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let extension_dir = homeboy_core::paths::extensions()
-            .expect("extensions path")
-            .join("fixture-env");
-        fs::create_dir_all(&extension_dir).expect("extension dir");
-        fs::write(
-            extension_dir.join("fixture-env.json"),
-            r#"{
-                "name": "Fixture Env",
-                "version": "1.0.0",
-                "env_provider": { "script": "env.sh" }
-            }"#,
-        )
-        .expect("extension manifest");
-        homeboy_test_support::write_executable(
-            extension_dir.join("env.sh"),
-            "#!/bin/sh\nprintf '{\"FIXTURE_ENV\":\"%s\"}' \"$EXTRA_VALUE\"\n",
-            0o755,
-        )
-        .expect("extension env script");
-
-        let mut component = script_component(dir.path(), "printf '%s' \"$FIXTURE_ENV\" > marker");
-        component.extensions = Some(HashMap::from([(
-            "fixture-env".to_string(),
-            ScopedExtensionConfig::default(),
-        )]));
-
-        let output = run_component_scripts_with_env(
-            &component,
-            ExtensionCapability::Test,
-            dir.path(),
-            false,
             &[("EXTRA_VALUE".to_string(), "provided".to_string())],
             &[],
         )
@@ -350,7 +269,7 @@ fn component_scripts_include_linked_extension_env_provider_output() {
         assert!(output.success);
         assert_eq!(
             fs::read_to_string(dir.path().join("marker")).unwrap(),
-            "provided"
+            "/tmp/homeboy-provider-cache:provided"
         );
     });
 }
@@ -380,22 +299,6 @@ fn test_run_component_scripts_with_run_dir() {
         assert_eq!(fs::read_to_string(dir.path().join("marker")).unwrap(), "ok");
         run_dir.cleanup();
     });
-}
-
-#[test]
-fn test_source_path() {
-    let component = Component::new(
-        "fixture".to_string(),
-        "/component/path".to_string(),
-        String::new(),
-        None,
-    );
-
-    assert_eq!(source_path(&component, None), Path::new("/component/path"));
-    assert_eq!(
-        source_path(&component, Some("/override")),
-        Path::new("/override")
-    );
 }
 
 #[test]

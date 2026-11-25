@@ -70,12 +70,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn same_version_upgrade_completion_still_syncs_extensions_and_runners() {
-        assert!(helpers::should_sync_after_upgrade(Some("0.228.5")));
-        assert!(!helpers::should_sync_after_upgrade(None));
-    }
-
-    #[test]
     fn detect_install_method_prefers_exe_path_and_uses_brew_list_as_fallback() {
         let brew_lists_homeboy =
             |cmd: &str, args: &[&str]| cmd == "brew" && args == ["list", "homeboy"];

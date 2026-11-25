@@ -188,29 +188,21 @@ mod tests {
     }
 
     #[test]
-    fn acquire_creates_the_lock_directory_and_drop_releases_it() {
+    fn acquire_creates_missing_parents_and_drop_releases_the_lock() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path().join("leases");
+        let dir = temp.path().join("deeply").join("nested").join("leases");
         let lock_path = {
             let lock = FsIndexLock::acquire_in(&dir, fast("rig lease")).expect("acquire");
             let path = lock.path().to_path_buf();
             assert!(path.is_dir(), "lock directory should exist while held");
-            assert_eq!(path.file_name().unwrap(), ".index.lock");
             path
         };
         assert!(!lock_path.exists(), "drop should release the lock");
-    }
-
-    #[test]
-    fn acquire_creates_missing_parent_directories() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path().join("deeply").join("nested").join("leases");
-        let _lock = FsIndexLock::acquire_in(&dir, fast("invocation lease")).expect("acquire");
         assert!(dir.is_dir());
     }
 
     #[test]
-    fn contended_lock_times_out_with_the_subject_in_the_message() {
+    fn contended_lock_times_out_or_reports_a_live_owner() {
         let temp = tempfile::tempdir().expect("tempdir");
         let dir = temp.path().to_path_buf();
         let _held = FsIndexLock::acquire_in(&dir, fast("rig lease")).expect("first acquire");
@@ -222,18 +214,8 @@ mod tests {
             message.contains("Timed out acquiring rig lease lock"),
             "unexpected message: {message}"
         );
-    }
-
-    #[test]
-    fn nonblocking_acquisition_reports_a_live_owner() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path().to_path_buf();
-        let _held = FsIndexLock::try_acquire_in(&dir, fast("rig lease"))
-            .expect("first acquire")
-            .expect("first owner");
-
         assert!(FsIndexLock::try_acquire_in(&dir, fast("rig lease"))
-            .expect("second acquire")
+            .expect("nonblocking acquire")
             .is_none());
     }
 

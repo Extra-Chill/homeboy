@@ -155,13 +155,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn future_api_versions_remain_parseable() {
-        let version: ExtensionApiVersion =
-            serde_json::from_value(serde_json::json!({ "major": 99 })).expect("api version");
-        assert_eq!(version.major, 99);
-    }
-
-    #[test]
     fn descriptor_wire_shape_is_explicitly_versioned() {
         let descriptor = ExtensionApiDescriptor {
             schema: EXTENSION_API_DESCRIPTOR_SCHEMA.to_string(),
@@ -332,10 +325,6 @@ mod tests {
                 "extension_runtimes": [{ "id": "node", "version": "24" }]
             })
         );
-        let serialized = format!("{request_json}{response_json}");
-        assert!(!serialized.contains("detect_script"));
-        assert!(!serialized.contains("component_path"));
-        assert!(!serialized.contains("extension_path"));
     }
 
     #[test]

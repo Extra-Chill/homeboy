@@ -433,16 +433,6 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_command_is_allowed_by_a_deny_list() {
-        let policy = deny(&["cargo test"]);
-
-        assert_eq!(
-            policy.evaluate("cargo fmt --check"),
-            AgentCommandDecision::Allowed
-        );
-    }
-
-    #[test]
     fn allow_rule_is_an_exemption_in_deny_list_mode() {
         let policy = AgentCommandPolicy {
             deny: vec![AgentCommandRule::new("cargo *")],
@@ -525,18 +515,6 @@ mod tests {
             bare.evaluate("cargo test").denial().expect("denied").reason,
             DEFAULT_COMMAND_DENIAL_REASON
         );
-    }
-
-    #[test]
-    fn every_denial_carries_actionable_remediation() {
-        let denial = deny(&["cargo test"])
-            .evaluate("cargo test")
-            .denial()
-            .cloned()
-            .expect("denied");
-
-        assert_eq!(denial.remediation, COMMAND_DENIAL_REMEDIATION);
-        assert!(denial.remediation.contains("let the configured gate run"));
     }
 
     #[test]

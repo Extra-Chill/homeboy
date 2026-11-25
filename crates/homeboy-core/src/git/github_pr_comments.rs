@@ -587,11 +587,6 @@ mod tests {
         let got = parse_comments_list_json(raw, "ci:x").unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, 1);
-    }
-
-    #[test]
-    fn parse_comments_list_empty_input_is_ok() {
-        let got = parse_comments_list_json("", "ci:x").unwrap();
-        assert!(got.is_empty());
+        assert!(parse_comments_list_json("", "ci:x").unwrap().is_empty());
     }
 }

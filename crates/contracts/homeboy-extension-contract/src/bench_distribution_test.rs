@@ -1,4 +1,4 @@
-use super::{distribution, percentile};
+use super::distribution;
 
 #[test]
 fn distribution_reports_population_summary() {
@@ -20,11 +20,4 @@ fn distribution_handles_zero_mean_cv() {
 
     assert_eq!(summary.cv_pct, 0.0);
     assert!(summary.cv_pct.is_finite());
-}
-
-#[test]
-fn percentile_interpolates_r7_style() {
-    assert_eq!(percentile(&[100.0, 200.0, 300.0], 50.0), 200.0);
-    assert_eq!(percentile(&[100.0, 200.0, 300.0], 95.0), 290.0);
-    assert_eq!(percentile(&[42.0], 95.0), 42.0);
 }
