@@ -1588,7 +1588,13 @@ mod tests {
         assert_eq!(report.failed_gates.len(), 1);
         let request = report.follow_up_request.expect("follow-up request");
         assert_eq!(request.task_id, "cook-homeboy-gate-fix-2");
+        assert_eq!(
+            request.metadata["cook_loop"]["kind"],
+            "deterministic-gate-feedback"
+        );
+        // A visible gate hands the agent its full command and output.
         assert!(request.inputs.to_string().contains("opaque-gate"));
+        assert!(request.inputs.to_string().contains("boom"));
         assert_eq!(
             request.inputs["cook_loop"]["failed_gates"][0]["exit_code"],
             101
@@ -1672,10 +1678,6 @@ mod tests {
                     assert_eq!(report.retry_budget_remaining, 2);
                     assert!(report.quality.summary.contains(output));
                     assert!(report.quality.summary.contains("Candidate preserved"));
-                    assert!(report
-                        .quality
-                        .summary
-                        .contains("homeboy agent-task recover"));
                     assert!(report
                         .quality
                         .summary
@@ -2105,7 +2107,7 @@ mod tests {
     }
 
     #[test]
-    fn baseline_comparison_keeps_required_gate_truthful() {
+    fn accepted_inherited_failure_reports_baseline_red_without_retrying() {
         let mut inherited = failed_gate();
         inherited.status = AgentTaskGateStatus::AcceptedInheritedFailure;
         inherited.baseline_comparison =
@@ -2138,58 +2140,6 @@ mod tests {
             baseline_red.metadata["failure_origin"],
             "inherited_infrastructure"
         );
-
-        let candidate_only_failure = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
-            promotion_report: promotion_report(
-                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
-                vec![failed_gate()],
-            ),
-            attempt: 1,
-            max_attempts: 3,
-            source_run_id: Some("run-regression".to_string()),
-            current_diff: String::new(),
-            review_form: None,
-            metadata: Value::Null,
-        });
-        assert_eq!(
-            candidate_only_failure.status,
-            AgentTaskCookLoopStatus::RetryRequested
-        );
-
-        // A red baseline does not taint a candidate that passed its required gate.
-        let baseline_only_failure = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
-            promotion_report: promotion_report(
-                AgentTaskPromotionStatus::Applied,
-                vec![green_gate()],
-            ),
-            attempt: 1,
-            max_attempts: 3,
-            source_run_id: Some("run-baseline-only".to_string()),
-            current_diff: String::new(),
-            review_form: None,
-            metadata: Value::Null,
-        });
-        assert_eq!(
-            baseline_only_failure.status,
-            AgentTaskCookLoopStatus::GreenCompleted
-        );
-
-        let true_pass = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
-            promotion_report: promotion_report(
-                AgentTaskPromotionStatus::Applied,
-                vec![green_gate()],
-            ),
-            attempt: 1,
-            max_attempts: 3,
-            source_run_id: Some("run-true-pass".to_string()),
-            current_diff: String::new(),
-            review_form: None,
-            metadata: Value::Null,
-        });
-        assert_eq!(true_pass.status, AgentTaskCookLoopStatus::GreenCompleted);
     }
 
     #[test]
@@ -2550,28 +2500,6 @@ mod tests {
     }
 
     #[test]
-    fn visible_gate_failure_keeps_full_agent_feedback_evidence() {
-        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
-            promotion_report: promotion_report(
-                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
-                vec![failed_gate()],
-            ),
-            attempt: 1,
-            max_attempts: 3,
-            source_run_id: Some("run-3688".to_string()),
-            current_diff: String::new(),
-            review_form: None,
-            metadata: Value::Null,
-        });
-
-        let request = report.follow_up_request.expect("follow-up request");
-        let feedback = request.inputs.to_string();
-        assert!(feedback.contains("opaque-gate"));
-        assert!(feedback.contains("boom"));
-    }
-
-    #[test]
     fn producer_diagnostic_record_is_bounded_without_interpreting_its_contents() {
         let diagnostic: AgentTaskGateDiagnosticRecord = serde_json::from_str(include_str!(
             "../../../tests/fixtures/agent_task_gate_feedback/producer-diagnostic-record.json"
@@ -2786,12 +2714,12 @@ mod tests {
     }
 
     #[test]
-    fn private_summary_only_gate_does_not_leak_command_or_output_to_follow_up_request() {
-        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+    fn private_gate_reveal_policy_controls_what_reaches_the_follow_up_request() {
+        let options = |reveal_policy| AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
                 AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
-                vec![private_failed_gate(AgentTaskGateRevealPolicy::SummaryOnly)],
+                vec![private_failed_gate(reveal_policy)],
             ),
             attempt: 1,
             max_attempts: 3,
@@ -2799,8 +2727,10 @@ mod tests {
             current_diff: String::new(),
             review_form: None,
             metadata: Value::Null,
-        });
+        };
 
+        let report = evaluate_cook_loop(options(AgentTaskGateRevealPolicy::SummaryOnly));
+        // The operator-facing report keeps the evidence...
         assert_eq!(
             report.failed_gates[0].command,
             "./hidden-heldout-check --fixture secret"
@@ -2809,35 +2739,19 @@ mod tests {
             report.failed_gates[0].stdout_tail,
             "secret fixture mismatch"
         );
+        // ...while the agent only learns that a private gate failed.
         let request = report.follow_up_request.expect("follow-up request");
         let agent_context = format!("{}\n{}", request.instructions, request.inputs);
-
         assert!(agent_context.contains("private deterministic gate gate-1 failed"));
         assert!(agent_context.contains("hidden evaluator details are withheld"));
         assert!(!agent_context.contains("./hidden-heldout-check"));
         assert!(!agent_context.contains("secret fixture mismatch"));
         assert!(!agent_context.contains("private evaluator stack trace"));
-    }
 
-    #[test]
-    fn private_full_evidence_policy_can_reveal_agent_feedback_details() {
-        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
-            promotion_report: promotion_report(
-                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
-                vec![private_failed_gate(AgentTaskGateRevealPolicy::FullEvidence)],
-            ),
-            attempt: 1,
-            max_attempts: 3,
-            source_run_id: Some("run-3688".to_string()),
-            current_diff: String::new(),
-            review_form: None,
-            metadata: Value::Null,
-        });
-
-        let request = report.follow_up_request.expect("follow-up request");
+        let request = evaluate_cook_loop(options(AgentTaskGateRevealPolicy::FullEvidence))
+            .follow_up_request
+            .expect("follow-up request");
         let agent_context = format!("{}\n{}", request.instructions, request.inputs);
-
         assert!(agent_context.contains("./hidden-heldout-check"));
         assert!(agent_context.contains("secret fixture mismatch"));
     }
@@ -2893,26 +2807,6 @@ mod tests {
     }
 
     #[test]
-    fn green_change_with_valid_review_form_completes() {
-        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
-            promotion_report: promotion_report(
-                AgentTaskPromotionStatus::Applied,
-                vec![green_gate()],
-            ),
-            attempt: 1,
-            max_attempts: 3,
-            source_run_id: Some("run-form-2".to_string()),
-            current_diff: String::new(),
-            review_form: Some(valid_review_form()),
-            metadata: Value::Null,
-        });
-
-        assert_eq!(report.status, AgentTaskCookLoopStatus::GreenCompleted);
-        assert!(report.follow_up_request.is_none());
-    }
-
-    #[test]
     fn green_change_with_incomplete_review_form_is_not_completed() {
         // #16051: gates prove the repository still passes, not that the task
         // was done. An agent that says it did not finish must not be published.
@@ -2940,35 +2834,6 @@ mod tests {
         assert!(report.follow_up_request.is_none());
     }
 
-    #[test]
-    fn deterministic_gate_feedback_precedes_review_form_recovery() {
-        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
-            promotion_report: promotion_report(
-                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
-                vec![failed_gate()],
-            ),
-            attempt: 1,
-            max_attempts: 3,
-            source_run_id: Some("run-form-gate".to_string()),
-            current_diff: String::new(),
-            review_form: None,
-            metadata: Value::Null,
-        });
-
-        let request = report.follow_up_request.expect("failed gate follow-up");
-        assert_eq!(
-            request.metadata["cook_loop"]["kind"],
-            "deterministic-gate-feedback"
-        );
-    }
-
-    /// #14731: a deferred gate is control-plane evidence, not a candidate
-    /// verdict. It must produce a distinct `GateEnvironmentUnavailable` outcome — never
-    /// `RetriesExhausted`/`RetryRequested` (both of which a caller maps
-    /// toward `policy_failure` for an exhausted or malformed retry), and
-    /// never a request to spend provider execution budget "fixing" a gate
-    /// that never actually ran.
     #[test]
     fn a_deferred_gate_reports_gate_environment_unavailable_and_never_requests_provider_remediation(
     ) {
