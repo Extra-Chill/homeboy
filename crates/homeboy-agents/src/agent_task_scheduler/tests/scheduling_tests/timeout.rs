@@ -154,67 +154,11 @@ mod timeout_tests {
         assert_eq!(aggregate.totals.candidate_recoverable, 0);
     }
 
+    /// A provider that edits its workspace and then times out leaves an
+    /// incomplete recoverable candidate, pinned at the producing run's ref,
+    /// rather than discarding a non-empty attempt diff.
     #[test]
-    fn timeout_after_workspace_edits_preserves_an_incomplete_recoverable_candidate() {
-        struct EditThenTimeout;
-
-        impl AgentTaskExecutorAdapter for EditThenTimeout {
-            fn execute(
-                &self,
-                request: AgentTaskRequest,
-                _context: AgentTaskExecutionContext,
-            ) -> AgentTaskOutcome {
-                let workspace = request.workspace.root.expect("attempt workspace");
-                fs::write(
-                    std::path::Path::new(&workspace).join("provider-change.txt"),
-                    "partial work survives timeout\n",
-                )
-                .expect("write attempt workspace change");
-                thread::sleep(Duration::from_millis(25));
-                outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
-            }
-        }
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source = temp.path().join("source");
-        init_git_workspace(&source);
-        let scheduler = AgentTaskScheduler::new(Arc::new(EditThenTimeout));
-        let mut plan = plan_with_tasks(1);
-        plan.tasks[0].workspace.root = Some(source.display().to_string());
-        plan.tasks[0].executor.config = json!({
-            "workspace": { "root": source.display().to_string() },
-            "workspace_root": source.display().to_string(),
-        });
-        plan.tasks[0].limits.timeout_ms = Some(1);
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(
-            aggregate.status(),
-            RunExecutionState::CandidateRecoverable,
-            "a non-empty attempt diff is recoverable rather than discarded"
-        );
-        let outcome = &aggregate.outcomes[0];
-        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
-        assert_eq!(
-            outcome.metadata["timeout_recovery"]["incomplete"],
-            Value::Bool(true)
-        );
-        let candidate = outcome.candidate.as_ref().expect("immutable candidate");
-        assert_retained_candidate_patch(outcome, candidate);
-        assert!(git_output(
-            &source,
-            &[
-                "show",
-                &format!("{}:provider-change.txt", candidate.candidate_sha)
-            ]
-        )
-        .unwrap()
-        .contains("partial work"));
-    }
-
-    #[test]
-    fn timeout_after_dirty_worktree_pins_the_producing_run_commit() {
+    fn timeout_after_workspace_edits_preserves_a_recoverable_candidate_pinned_to_its_run() {
         struct EditThenTimeout;
 
         impl AgentTaskExecutorAdapter for EditThenTimeout {
@@ -255,10 +199,24 @@ mod timeout_tests {
             let aggregate =
                 crate::agent_task_lifecycle::read_aggregate("timeout-dirty-fingerprint")
                     .expect("persisted aggregate");
+            assert_eq!(aggregate.status(), RunExecutionState::CandidateRecoverable);
             let outcome = &aggregate.outcomes[0];
             assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+            assert_eq!(
+                outcome.metadata["timeout_recovery"]["incomplete"],
+                Value::Bool(true)
+            );
             let candidate = outcome.candidate.as_ref().expect("immutable candidate");
             assert_retained_candidate_patch(outcome, candidate);
+            assert!(git_output(
+                &source,
+                &[
+                    "show",
+                    &format!("{}:provider-change.txt", candidate.candidate_sha)
+                ]
+            )
+            .unwrap()
+            .contains("partial work"));
             assert_eq!(
                 git_output(
                     &source,

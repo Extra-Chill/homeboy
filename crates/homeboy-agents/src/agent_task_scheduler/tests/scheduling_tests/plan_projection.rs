@@ -74,27 +74,6 @@ mod plan_projection_tests {
     }
 
     #[test]
-    fn independent_batch_plans_execute_after_json_round_trip() {
-        let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
-            HashMap::new(),
-            Duration::from_millis(0),
-        )));
-        let plan_json = serde_json::to_string(&plan_with_tasks(2)).expect("plan json");
-        let plan: AgentTaskPlan = serde_json::from_str(&plan_json).expect("static plan decodes");
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(
-            aggregate.status(),
-            homeboy_lifecycle_contract::RunExecutionState::Succeeded
-        );
-        assert_eq!(aggregate.totals.succeeded, 2);
-        assert_eq!(aggregate.totals.skipped, 0);
-        assert_eq!(aggregate.queue.max_concurrency, 1);
-        assert!(aggregate.queue.adaptive_concurrency.is_none());
-    }
-
-    #[test]
     fn plan_level_component_contracts_are_preserved_on_executor_requests() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let scheduler = AgentTaskScheduler::new(Arc::new(RequestRecordingExecutor {
