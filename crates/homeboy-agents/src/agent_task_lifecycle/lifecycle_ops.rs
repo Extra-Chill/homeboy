@@ -202,13 +202,15 @@ pub fn record_detached_cook_handoff_parent_in_store(
     }
 
     let mut record = submit_detached_handoff_placeholder_in_store(lifecycle_store, &cook_id)?;
-    record.metadata["detached_cook_handoff"] = json!({
+    let mut handoff = json!({
         "admission_state": "pre_supervisor",
-        "admission_deadline_at": (chrono::Utc::now()
-            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
-            .to_rfc3339(),
         "cook_id": cook_id,
     });
+    // The process writing the placeholder is the one about to claim it. Its
+    // observed liveness, not the bare lease, guards the window until the
+    // claim lands, which can exceed the lease under concurrent launches.
+    record_launcher_custody(&mut handoff);
+    record.metadata["detached_cook_handoff"] = handoff;
     lifecycle_store.commit_record_without_events(&mut record)?;
     record_cook_progress_in_store(
         lifecycle_store,
@@ -258,6 +260,17 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         Some("a live launcher owns the handoff and is materializing the first attempt"),
     )?;
     Ok(claimed)
+}
+
+/// Bind a handoff's launcher liveness to this process, with the lease as the
+/// fallback when its identity cannot be observed.
+fn record_launcher_custody(handoff: &mut Value) {
+    let pid = std::process::id();
+    let identity = process_start_identity(pid).ok().flatten();
+    handoff["launcher_pid"] = json!(pid);
+    handoff["launcher_start_identity"] = json!(identity);
+    let lease = chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS);
+    handoff["admission_deadline_at"] = json!((chrono::Utc::now() + lease).to_rfc3339());
 }
 
 fn detached_cook_launcher_is_live(
@@ -1068,13 +1081,8 @@ pub(crate) fn apply_cook_handoff_event(
     };
     let write = |handoff: &mut Value| match event {
         Claim(launcher_id) => {
-            let pid = std::process::id();
-            let identity = process_start_identity(pid).ok().flatten();
             handoff["launcher_id"] = json!(launcher_id);
-            handoff["launcher_pid"] = json!(pid);
-            handoff["launcher_start_identity"] = json!(identity);
-            let lease = chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS);
-            handoff["admission_deadline_at"] = json!((chrono::Utc::now() + lease).to_rfc3339());
+            record_launcher_custody(handoff);
         }
         Supervise(_, child_pid, child_start_identity, job_id) => {
             handoff["child_pid"] = json!(child_pid);

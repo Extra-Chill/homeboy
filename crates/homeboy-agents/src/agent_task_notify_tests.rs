@@ -651,8 +651,10 @@ fn expired_detached_parent_does_not_announce_a_handoff_failure() {
             .unwrap();
         store
             .mutate_record(cook_id, |record| {
-                record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
-                    serde_json::json!("2020-01-01T00:00:00Z");
+                // The writer is gone; only the lease decides.
+                let handoff = &mut record.metadata["detached_cook_handoff"];
+                handoff["admission_deadline_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+                handoff.as_object_mut().unwrap().remove("launcher_pid");
                 true
             })
             .unwrap();
