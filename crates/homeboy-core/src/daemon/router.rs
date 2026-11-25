@@ -104,6 +104,10 @@ where
             }),
             artifact: None,
         },
+        ("GET", "/exec-owners") => daemon_endpoint_response(
+            "daemon.exec_owners",
+            json!({"jobs": job_store.attached_exec_diagnostics()}),
+        ),
         ("GET", "/capacity") => daemon_endpoint_response(
             "daemon.capacity",
             json!({
