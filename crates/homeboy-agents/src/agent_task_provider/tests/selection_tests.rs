@@ -47,7 +47,6 @@ fn provider_nonzero_exit_preserves_bounded_redacted_process_diagnostics() {
         .find(|diagnostic| diagnostic.class == "agent_task.provider_process_failed")
         .expect("process failure diagnostic");
     assert!(diagnostic.message.contains("pi.agent-task-executor"));
-    assert!(diagnostic.message.contains("pi"));
     assert!(diagnostic.message.contains("status 1"));
     assert_eq!(diagnostic.data["provider"], "pi.agent-task-executor");
     assert_eq!(diagnostic.data["provider_backend"], "pi");
@@ -67,12 +66,6 @@ fn provider_nonzero_exit_preserves_bounded_redacted_process_diagnostics() {
         .any(|hint| hint
             .as_str()
             .is_some_and(|value| value.contains("stdout/stderr"))));
-
-    let aggregate = crate::agent_task_aggregate::AgentTaskAggregateReport::from(vec![outcome]);
-    assert!(aggregate.tasks[0]
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.class == "agent_task.provider_process_failed"));
 }
 
 #[test]

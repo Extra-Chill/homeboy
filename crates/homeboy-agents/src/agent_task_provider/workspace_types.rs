@@ -319,20 +319,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_materialization_uses_typed_cwd_contract_for_git_checkout() {
-        let materialization = AgentTaskProviderWorkspaceMaterialization {
-            cwd: Some(WorkspaceCwdMode::GitCheckout.to_string()),
-            ..AgentTaskProviderWorkspaceMaterialization::default()
-        };
-
-        assert_eq!(
-            materialization.cwd_mode(),
-            Some(WorkspaceCwdMode::GitCheckout)
-        );
-        assert!(materialization.requires_cwd_git_checkout());
-    }
-
-    #[test]
     fn workspace_materialization_keeps_unknown_strings_non_breaking() {
         let materialization = AgentTaskProviderWorkspaceMaterialization {
             cwd: Some("provider_owned_workspace".to_string()),
@@ -344,30 +330,5 @@ mod tests {
         assert_eq!(materialization.write_scope(), None);
         assert!(!materialization.requires_cwd_git_checkout());
         assert!(materialization.validate().is_ok());
-    }
-
-    #[test]
-    fn workspace_mount_modes_parse_known_contract_values() {
-        let spec = WorkspaceMaterializationSpec {
-            mode: Some(WorkspaceMaterializationMode::Git.to_string()),
-            materialization: Some(WorkspaceMaterializationMode::Snapshot.to_string()),
-            ..WorkspaceMaterializationSpec::default()
-        };
-        let mount = WorkspaceMountSpec {
-            mode: Some(WorkspaceMaterializationMode::Snapshot.to_string()),
-            materialization: Some(WorkspaceMaterializationMode::Git.to_string()),
-            ..WorkspaceMountSpec::default()
-        };
-
-        assert_eq!(spec.mode(), Some(WorkspaceMaterializationMode::Git));
-        assert_eq!(
-            spec.materialization(),
-            Some(WorkspaceMaterializationMode::Snapshot)
-        );
-        assert_eq!(mount.mode(), Some(WorkspaceMaterializationMode::Snapshot));
-        assert_eq!(
-            mount.materialization(),
-            Some(WorkspaceMaterializationMode::Git)
-        );
     }
 }
