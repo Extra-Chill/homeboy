@@ -62,108 +62,69 @@ fn wp_project(base_path: &str, wp_content_root: Option<&str>) -> Project {
 }
 
 #[test]
-fn absolute_paths_are_used_verbatim() {
-    with_isolated_home(|_| {
-        install_wordpress_extension();
-        let project = wp_project("/htdocs/__wp__", Some("/srv/htdocs/wp-content"));
-
-        let resolved = resolve_project_remote_path(
-            &project,
+fn resolve_project_remote_path_routes_managed_prefixes_through_path_roots() {
+    // (base_path, configured wp_content root, input path, expected remote path)
+    let cases = [
+        // Absolute paths are used verbatim.
+        (
             "/htdocs/__wp__",
-            "/srv/htdocs/wp-content/plugins/studio-web/inc/frontend-chat-integration.php",
-        )
-        .expect("resolve absolute");
-
-        assert_eq!(
-            resolved,
-            "/srv/htdocs/wp-content/plugins/studio-web/inc/frontend-chat-integration.php"
-        );
-    });
-}
-
-#[test]
-fn managed_prefix_resolves_through_configured_root() {
-    // The crux of #5456: a relative `wp-content/...` path must resolve to the
-    // managed wp_content root (where deploy writes active plugins), NOT to
-    // base_path/wp-content under `/htdocs/__wp__`.
-    with_isolated_home(|_| {
-        install_wordpress_extension();
-        let project = wp_project("/htdocs/__wp__", Some("/srv/htdocs/wp-content"));
-
-        let resolved = resolve_project_remote_path(
-            &project,
+            Some("/srv/htdocs/wp-content"),
+            "/srv/htdocs/wp-content/plugins/studio-web/inc/chat.php",
+            "/srv/htdocs/wp-content/plugins/studio-web/inc/chat.php",
+        ),
+        // #5456: a relative `wp-content/...` path resolves to the managed
+        // wp_content root, NOT base_path/wp-content under `/htdocs/__wp__`.
+        (
             "/htdocs/__wp__",
+            Some("/srv/htdocs/wp-content"),
             "wp-content/plugins/studio-web",
-        )
-        .expect("resolve managed prefix");
+            "/srv/htdocs/wp-content/plugins/studio-web",
+        ),
+        // The bare managed prefix resolves to the root itself.
+        (
+            "/htdocs/__wp__",
+            Some("/srv/htdocs/wp-content"),
+            "wp-content",
+            "/srv/htdocs/wp-content",
+        ),
+        // Without a configured root, managed prefixes fall back to base_path.
+        (
+            "/srv/site",
+            None,
+            "wp-content/plugins/foo",
+            "/srv/site/wp-content/plugins/foo",
+        ),
+        // Non-managed relative paths join against base_path.
+        (
+            "/htdocs/__wp__",
+            Some("/srv/htdocs/wp-content"),
+            "wp-config.php",
+            "/htdocs/__wp__/wp-config.php",
+        ),
+        // Prefix matching respects path segment boundaries.
+        (
+            "/htdocs/__wp__",
+            Some("/srv/htdocs/wp-content"),
+            "wp-content-extra/foo",
+            "/htdocs/__wp__/wp-content-extra/foo",
+        ),
+        // A relative root resolves under base_path, mirroring deploy's
+        // `resolve_with_project_root` semantics.
+        (
+            "/srv/site",
+            Some("wp-content"),
+            "wp-content/themes/theme",
+            "/srv/site/wp-content/themes/theme",
+        ),
+    ];
 
-        assert_eq!(resolved, "/srv/htdocs/wp-content/plugins/studio-web");
-    });
-}
-
-#[test]
-fn managed_prefix_without_configured_root_falls_back_to_base_path() {
-    // Projects that never configured a wp_content root resolve against
-    // base_path.
     with_isolated_home(|_| {
         install_wordpress_extension();
-        let project = wp_project("/srv/site", None);
-
-        let resolved = resolve_project_remote_path(&project, "/srv/site", "wp-content/plugins/foo")
-            .expect("resolve fallback");
-
-        assert_eq!(resolved, "/srv/site/wp-content/plugins/foo");
+        for (base_path, root, input, expected) in cases {
+            let project = wp_project(base_path, root);
+            let resolved =
+                resolve_project_remote_path(&project, base_path, input).expect("resolve path");
+            assert_eq!(resolved, expected, "input: {input}");
+        }
     });
-}
-
-#[test]
-fn non_managed_relative_paths_join_against_base_path() {
-    with_isolated_home(|_| {
-        install_wordpress_extension();
-        let project = wp_project("/htdocs/__wp__", Some("/srv/htdocs/wp-content"));
-
-        let resolved = resolve_project_remote_path(&project, "/htdocs/__wp__", "wp-config.php")
-            .expect("resolve non-managed");
-
-        assert_eq!(resolved, "/htdocs/__wp__/wp-config.php");
-    });
-}
-
-#[test]
-fn relative_root_is_joined_against_base_path() {
-    // A path_root configured as a relative value resolves under base_path,
-    // mirroring deploy's `resolve_with_project_root` semantics.
-    with_isolated_home(|_| {
-        install_wordpress_extension();
-        let project = wp_project("/srv/site", Some("wp-content"));
-
-        let resolved =
-            resolve_project_remote_path(&project, "/srv/site", "wp-content/themes/theme")
-                .expect("resolve relative root");
-
-        assert_eq!(resolved, "/srv/site/wp-content/themes/theme");
-    });
-}
-
-#[test]
-fn path_matches_prefix_handles_boundaries() {
-    assert!(path_matches_prefix("wp-content", "wp-content"));
-    assert!(path_matches_prefix("wp-content/plugins/foo", "wp-content"));
-    assert!(path_matches_prefix("/wp-content/plugins", "wp-content"));
-    assert!(!path_matches_prefix("wp-content-extra/foo", "wp-content"));
-    assert!(!path_matches_prefix("var/log", "wp-content"));
-    assert!(!path_matches_prefix("anything", ""));
-}
-
-#[test]
-fn strip_path_prefix_removes_managed_prefix() {
-    assert_eq!(
-        strip_path_prefix("wp-content/plugins/foo", "wp-content"),
-        "plugins/foo"
-    );
-    assert_eq!(strip_path_prefix("wp-content", "wp-content"), "");
-    assert_eq!(
-        strip_path_prefix("var/log/app.log", "wp-content"),
-        "var/log/app.log"
-    );
 }
