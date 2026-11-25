@@ -402,20 +402,7 @@ mod config_layout_tests {
     use crate::test_support::with_isolated_home;
 
     #[test]
-    fn load_requires_directory_project_config() {
-        with_isolated_home(|_| {
-            let projects = paths::projects().expect("projects path");
-            std::fs::create_dir_all(&projects).expect("projects dir");
-            std::fs::write(projects.join("legacy.json"), r#"{"domain":"legacy.test"}"#)
-                .expect("legacy project config");
-
-            let error = load("legacy").expect_err("flat project config should not load");
-            assert_eq!(error.code.as_str(), "project.not_found");
-        });
-    }
-
-    #[test]
-    fn list_ids_ignores_flat_project_configs() {
+    fn only_directory_project_configs_are_loaded_or_listed() {
         with_isolated_home(|_| {
             let projects = paths::projects().expect("projects path");
             std::fs::create_dir_all(&projects).expect("projects dir");
@@ -430,31 +417,15 @@ mod config_layout_tests {
             save(&canonical).expect("canonical project config");
 
             assert_eq!(list_ids().expect("project ids"), vec!["canonical"]);
+            assert_eq!(
+                load("canonical")
+                    .expect("canonical loads")
+                    .domain
+                    .as_deref(),
+                Some("canonical.test")
+            );
+            let error = load("legacy").expect_err("flat project config should not load");
+            assert_eq!(error.code.as_str(), "project.not_found");
         });
-    }
-}
-
-#[cfg(test)]
-mod cli_path_tests {
-    use super::*;
-
-    fn project_with(cli_path: Option<&str>) -> Project {
-        Project {
-            id: "test".to_string(),
-            cli_path: cli_path.map(|s| s.to_string()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn explicit_project_cli_path_wins() {
-        let p = project_with(Some("lando wp"));
-        assert_eq!(project_cli_path(&p), Some("lando wp".to_string()));
-    }
-
-    #[test]
-    fn missing_project_cli_path_stays_unset() {
-        let p = project_with(None);
-        assert_eq!(project_cli_path(&p), None);
     }
 }

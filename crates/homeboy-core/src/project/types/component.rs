@@ -74,51 +74,24 @@ pub type ProjectComponentOverrides = crate::component::ComponentOverrideConfig;
 mod attachment_construction_tests {
     use super::ProjectComponentAttachment;
 
-    /// Adding an optional field must not require touching any call site.
-    ///
-    /// This is the contract that broke twice in one day. If a new field is not
-    /// `Option`-with-a-`Default`, this stops compiling and the author learns it
-    /// here rather than from a red build on an unrelated PR.
+    /// A stored attachment written before optional fields existed must still
+    /// load, and a checkout-less GitHub-Release-asset attachment (#14782) may
+    /// omit `local_path` entirely (#14795).
     #[test]
-    fn an_attachment_is_constructible_from_identity_alone() {
-        let attachment = ProjectComponentAttachment {
-            id: "plugin".to_string(),
-            local_path: "/src/plugin".to_string(),
-            ..Default::default()
-        };
-
-        assert_eq!(attachment.id, "plugin");
-        assert_eq!(attachment.local_path, "/src/plugin");
-        assert!(
-            attachment.remote_path.is_none()
-                && attachment.deployment_provider.is_none()
-                && attachment.deployment_provider_input.is_none(),
-            "every field beyond identity must default to absent, so `..Default::default()` \
-             is always a safe construction"
-        );
-    }
-
-    /// A stored attachment written before a field existed must still load.
-    #[test]
-    fn an_attachment_missing_optional_fields_still_deserializes() {
-        let attachment: ProjectComponentAttachment =
-            serde_json::from_str(r#"{"id":"plugin","local_path":"/src/plugin"}"#)
-                .expect("identity-only attachment must deserialize");
-
-        assert_eq!(attachment.id, "plugin");
-        assert!(attachment.deployment_provider_input.is_none());
-    }
-
-    /// A checkout-less GitHub-Release-asset attachment (#14782) has nothing to
-    /// set `local_path` to, so checked-in project config may omit the key
-    /// entirely rather than round-tripping an empty string (#14795).
-    #[test]
-    fn an_attachment_with_no_local_path_key_deserializes() {
-        let attachment: ProjectComponentAttachment = serde_json::from_str(r#"{"id":"plugin"}"#)
-            .expect("an attachment with no local_path key must still deserialize");
-
-        assert_eq!(attachment.id, "plugin");
-        assert_eq!(attachment.local_path, "");
+    fn stored_attachments_with_only_an_id_still_deserialize() {
+        for raw in [
+            r#"{"id":"plugin","local_path":"/src/plugin"}"#,
+            r#"{"id":"plugin"}"#,
+        ] {
+            let attachment: ProjectComponentAttachment =
+                serde_json::from_str(raw).unwrap_or_else(|err| panic!("{raw}: {err}"));
+            assert_eq!(attachment.id, "plugin");
+            assert!(attachment.remote_path.is_none());
+            assert!(attachment.deployment_provider_input.is_none());
+        }
+        let checkout_less: ProjectComponentAttachment =
+            serde_json::from_str(r#"{"id":"plugin"}"#).expect("checkout-less attachment");
+        assert_eq!(checkout_less.local_path, "");
     }
 }
 

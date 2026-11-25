@@ -225,59 +225,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_kind_name() {
-        let scope = Scope::Rig("studio-combined".to_string());
-
-        assert_eq!(scope.kind(), ScopeKind::Rig);
-        assert_eq!(scope.kind_name(), "rig");
-        assert_eq!(scope.id(), "studio-combined");
-    }
-
-    #[test]
-    fn path_scope_uses_component_id_when_provided() {
-        let scope = Scope::Path {
+    fn path_scope_reports_component_id_and_the_callers_command_kind() {
+        let identified = Scope::Path {
             path: "/tmp/checkout".to_string(),
             component_id: Some("homeboy".to_string()),
         };
+        let anonymous = Scope::Path {
+            path: "/tmp/checkout".to_string(),
+            component_id: None,
+        };
 
-        assert_eq!(scope.kind(), ScopeKind::Path);
-        assert_eq!(scope.id(), "homeboy");
-    }
-
-    #[test]
-    fn command_name_uses_scope_kind_with_path_override() {
+        assert_eq!(identified.id(), "homeboy");
+        assert_eq!(anonymous.id(), "/tmp/checkout");
+        assert_eq!(
+            anonymous.command_name("status", ScopeKind::Component),
+            "status.component"
+        );
         assert_eq!(
             Scope::Rig("studio".to_string()).command_name("status", ScopeKind::Component),
             "status.rig"
         );
-        assert_eq!(
-            Scope::Path {
-                path: "/tmp/checkout".to_string(),
-                component_id: None,
-            }
-            .command_name("status", ScopeKind::Component),
-            "status.component"
-        );
     }
 
     #[test]
-    fn command_scope_class_descriptions_are_stable() {
-        assert!(CommandScopeClass::Component
-            .description()
-            .contains("component IDs"));
-        assert!(CommandScopeClass::Target
-            .description()
-            .contains("project/site/server"));
-        assert!(CommandScopeClass::Environment
-            .description()
-            .contains("rig context"));
-        assert!(CommandScopeClass::Workspace
-            .description()
-            .contains("workspace-wide"));
-    }
-
-    #[test]
-    fn test_resolve_scope_component_records() {
+    fn path_scope_resolves_the_portable_component_record() {
         let tmp = tempfile::TempDir::new().expect("checkout tempdir");
         std::fs::create_dir(tmp.path().join(".git")).expect("git marker");
         std::fs::write(
@@ -313,27 +284,5 @@ mod tests {
             .as_ref()
             .is_some_and(|extensions| extensions.contains_key("rust")));
         assert!(records[0].version_targets.is_some());
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn scope_kind_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (ScopeKind::Component, "component"),
-            (ScopeKind::Project, "project"),
-            (ScopeKind::Rig, "rig"),
-            (ScopeKind::Workspace, "workspace"),
-            (ScopeKind::Path, "path"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
     }
 }

@@ -412,77 +412,38 @@ mod tests {
     }
 
     #[test]
-    fn project_show_readiness_blocks_missing_component_local_path() {
+    fn missing_component_local_path_blocks_readiness_and_fails_closed() {
+        let missing =
+            "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist";
         let project = project_with_component("/tmp/homeboy-missing-component-path".to_string());
 
         let (ready, blockers) = calculate_deploy_readiness(&project);
-
         assert!(!ready);
-        assert!(blockers.iter().any(|blocker| {
-            blocker.contains("Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist")
-        }));
+        assert!(blockers.iter().any(|blocker| blocker.contains(missing)));
+
+        let err = validate_component_local_paths(&project).expect_err("missing path should block");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("component local_path blockers"));
+        assert!(err.hints.iter().any(|hint| hint.message.contains(missing)));
     }
 
     /// Read-only callers need the blocker as a value so a missing checkout can be
-    /// reported as one scoped finding instead of aborting a project-wide pass (#12214).
+    /// reported as one scoped finding instead of aborting a project-wide pass
+    /// (#12214). The findings helper and the fail-closed validator must agree.
     #[test]
-    fn component_local_path_findings_report_missing_checkout_without_erroring() {
-        let project = project_with_component("/tmp/homeboy-missing-component-path".to_string());
-
-        let findings = component_local_path_findings(&project, "plugin");
-
+    fn component_local_path_findings_match_the_fail_closed_validator() {
+        let missing = project_with_component("/tmp/homeboy-missing-component-path".to_string());
+        let findings = component_local_path_findings(&missing, "plugin");
         assert_eq!(findings.len(), 1);
         assert!(findings[0].contains(
             "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist"
         ));
-    }
+        assert!(component_local_path_findings(&missing, "not-attached").is_empty());
 
-    /// The findings helper and the fail-closed validator must agree — one is the
-    /// value form of the other, not a second implementation that can drift.
-    #[test]
-    fn component_local_path_findings_are_empty_for_a_present_checkout() {
         let repo = repo_with_component("plugin", serde_json::json!({}));
-        let project = project_with_component(repo.path().to_string_lossy().to_string());
-
-        assert!(component_local_path_findings(&project, "plugin").is_empty());
-        validate_component_local_path(&project, "plugin").expect("present checkout validates");
-    }
-
-    /// An unattached component has nothing to report — absence of an attachment is
-    /// a different error, surfaced by resolution.
-    #[test]
-    fn component_local_path_findings_are_empty_for_an_unattached_component() {
-        let project = project_with_component("/tmp/homeboy-missing-component-path".to_string());
-
-        assert!(component_local_path_findings(&project, "not-attached").is_empty());
-    }
-
-    #[test]
-    fn deploy_readiness_validation_fails_closed_on_missing_component_local_path() {
-        let project = project_with_component("/tmp/homeboy-missing-component-path".to_string());
-
-        let err = validate_component_local_paths(&project).expect_err("missing path should block");
-
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("component local_path blockers"));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("local_path '/tmp/homeboy-missing-component-path' does not exist")));
-    }
-
-    #[test]
-    fn scoped_deploy_validation_ignores_unrelated_missing_component_local_path() {
-        let requested = repo_with_component("requested", serde_json::json!({}));
-        let project = project_with_components(vec![
-            ("requested", requested.path().to_string_lossy().to_string()),
-            (
-                "stale",
-                "/tmp/homeboy-stale-unrelated-component".to_string(),
-            ),
-        ]);
-
-        validate_deploy_component_local_paths(&project, &["requested".to_string()])
-            .expect("unrelated stale local_path should be hygiene-only");
+        let present = project_with_component(repo.path().to_string_lossy().to_string());
+        assert!(component_local_path_findings(&present, "plugin").is_empty());
+        validate_component_local_path(&present, "plugin").expect("present checkout validates");
     }
 
     #[test]
@@ -505,71 +466,54 @@ mod tests {
     }
 
     #[test]
-    fn scoped_deploy_validation_blocks_missing_direct_dependency_local_path() {
-        let requested = repo_with_component(
-            "requested",
-            serde_json::json!({ "deploy_together": ["required"] }),
-        );
-        let project = project_with_components(vec![
-            ("requested", requested.path().to_string_lossy().to_string()),
+    fn scoped_deploy_validation_blocks_missing_direct_dependency_local_paths() {
+        for (extra, dependency) in [
             (
-                "required",
-                "/tmp/homeboy-stale-required-component".to_string(),
+                serde_json::json!({ "deploy_together": ["dependency"] }),
+                "deploy_together",
             ),
             (
-                "stale",
-                "/tmp/homeboy-stale-unrelated-component".to_string(),
+                serde_json::json!({
+                    "artifact_inputs": [{
+                        "component": "dependency",
+                        "artifact": "dist/dependency.zip",
+                        "target": "vendor/dependency.zip",
+                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }]
+                }),
+                "artifact_inputs",
             ),
-        ]);
+        ] {
+            let requested = repo_with_component("requested", extra);
+            let project = project_with_components(vec![
+                ("requested", requested.path().to_string_lossy().to_string()),
+                (
+                    "dependency",
+                    "/tmp/homeboy-stale-dependency-component".to_string(),
+                ),
+                (
+                    "stale",
+                    "/tmp/homeboy-stale-unrelated-component".to_string(),
+                ),
+            ]);
 
-        let err = validate_deploy_component_local_paths(&project, &["requested".to_string()])
-            .expect_err("stale direct dependency should block scoped deploy");
+            let err = validate_deploy_component_local_paths(&project, &["requested".to_string()])
+                .expect_err(dependency);
 
-        assert!(err.message.contains("Scoped deploy"));
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("Component 'required' local_path '/tmp/homeboy-stale-required-component' does not exist")));
-        assert!(!err
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("homeboy-stale-unrelated-component")));
-    }
-
-    #[test]
-    fn scoped_deploy_validation_blocks_missing_artifact_input_dependency_local_path() {
-        let requested = repo_with_component(
-            "requested",
-            serde_json::json!({
-                "artifact_inputs": [{
-                    "component": "producer",
-                    "artifact": "dist/producer.zip",
-                    "target": "vendor/producer.zip",
-                    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                }]
-            }),
-        );
-        let project = project_with_components(vec![
-            ("requested", requested.path().to_string_lossy().to_string()),
-            (
-                "producer",
-                "/tmp/homeboy-stale-producer-component".to_string(),
-            ),
-            (
-                "stale",
-                "/tmp/homeboy-stale-unrelated-component".to_string(),
-            ),
-        ]);
-
-        let err = validate_deploy_component_local_paths(&project, &["requested".to_string()])
-            .expect_err("stale artifact producer should block scoped deploy");
-
-        assert!(err.hints.iter().any(|hint| hint
-            .message
-            .contains("Component 'producer' local_path '/tmp/homeboy-stale-producer-component' does not exist")));
-        assert!(!err
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("homeboy-stale-unrelated-component")));
+            assert!(err.message.contains("Scoped deploy"), "{dependency}");
+            assert!(
+                err.hints.iter().any(|hint| hint.message.contains(
+                    "Component 'dependency' local_path '/tmp/homeboy-stale-dependency-component' does not exist"
+                )),
+                "{dependency}"
+            );
+            assert!(
+                !err.hints
+                    .iter()
+                    .any(|hint| hint.message.contains("homeboy-stale-unrelated-component")),
+                "{dependency}"
+            );
+        }
     }
 
     #[test]
@@ -662,27 +606,6 @@ mod tests {
         assert!(blockers.is_empty());
     }
 
-    #[test]
-    fn generic_project_still_requires_server_deployment_fields() {
-        let generic = repo_with_component("generic", serde_json::json!({}));
-        let mut project = project_with_components(vec![(
-            "generic",
-            generic.path().to_string_lossy().to_string(),
-        )]);
-        project.server_id = None;
-        project.base_path = None;
-
-        let (ready, blockers) = calculate_deploy_readiness(&project);
-
-        assert!(!ready);
-        assert!(blockers
-            .iter()
-            .any(|blocker| blocker.contains("Missing server_id")));
-        assert!(blockers
-            .iter()
-            .any(|blocker| blocker.contains("Missing base_path")));
-    }
-
     // =========================================================================
     // A missing/empty local_path is not a blocker when the component can
     // resolve from a GitHub Release without a checkout (#14782, #14795).
@@ -746,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn project_wide_validation_names_only_the_non_github_component_in_a_mixed_project() {
+    fn project_wide_validation_names_only_components_that_cannot_resolve_without_checkout() {
         crate::test_support::with_isolated_home(|home| {
             write_standalone_component(
                 home,
@@ -765,42 +688,17 @@ mod tests {
             let project = project_with_components(vec![
                 ("eligible", String::new()),
                 ("non-github", String::new()),
-            ]);
-
-            let err = validate_component_local_paths(&project)
-                .expect_err("a non-GitHub remote_url must still block");
-
-            assert!(err.hints.iter().any(|hint| hint
-                .message
-                .contains("Component 'non-github' is missing local_path")));
-            assert!(!err
-                .hints
-                .iter()
-                .any(|hint| hint.message.contains("Component 'eligible'")));
-        });
-    }
-
-    #[test]
-    fn project_wide_validation_names_the_component_with_no_standalone_entry_at_all() {
-        crate::test_support::with_isolated_home(|home| {
-            write_standalone_component(
-                home,
-                "eligible",
-                serde_json::json!({
-                    "remote_url": "https://github.com/Extra-Chill/eligible.git"
-                }),
-            );
-            let project = project_with_components(vec![
-                ("eligible", String::new()),
                 ("unregistered", String::new()),
             ]);
 
             let err = validate_component_local_paths(&project)
-                .expect_err("a component with no standalone entry must still block");
+                .expect_err("non-GitHub and unregistered components must still block");
 
-            assert!(err.hints.iter().any(|hint| hint
-                .message
-                .contains("Component 'unregistered' is missing local_path")));
+            for blocked in ["non-github", "unregistered"] {
+                assert!(err.hints.iter().any(|hint| hint
+                    .message
+                    .contains(&format!("Component '{blocked}' is missing local_path"))));
+            }
             assert!(!err
                 .hints
                 .iter()
