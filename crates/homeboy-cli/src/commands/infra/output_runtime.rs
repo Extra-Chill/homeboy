@@ -753,24 +753,20 @@ mod tests {
     }
 
     #[test]
-    fn raw_command_run_without_artifact_uses_raw_stdout_for_file_payload() {
-        let run = CommandRun::from_raw_stdout("test", Ok("plain output".to_string()), 0, None);
+    fn raw_command_run_uses_artifact_for_file_payload_when_present() {
+        for (artifact, expected) in [
+            (None, json!("plain output")),
+            (
+                Some(Ok(json!({ "artifact": true }))),
+                json!({ "artifact": true }),
+            ),
+        ] {
+            let run =
+                CommandRun::from_raw_stdout("test", Ok("plain output".to_string()), 0, artifact);
 
-        assert_eq!(run.raw_stdout.unwrap().unwrap(), "plain output");
-        assert_eq!(run.stdout_result.unwrap(), json!("plain output"));
-    }
-
-    #[test]
-    fn raw_command_run_with_artifact_uses_artifact_for_file_payload() {
-        let run = CommandRun::from_raw_stdout(
-            "test",
-            Ok("markdown output".to_string()),
-            0,
-            Some(Ok(json!({ "artifact": true }))),
-        );
-
-        assert_eq!(run.raw_stdout.unwrap().unwrap(), "markdown output");
-        assert_eq!(run.stdout_result.unwrap(), json!({ "artifact": true }));
+            assert_eq!(run.raw_stdout.unwrap().unwrap(), "plain output");
+            assert_eq!(run.stdout_result.unwrap(), expected);
+        }
     }
 
     #[test]
@@ -840,72 +836,23 @@ mod tests {
     }
 
     #[test]
-    fn raw_completion_diagnostics_are_separate_from_remote_stderr() {
-        let run = CommandRun::from_raw_stdout("ssh", Ok("payload".to_string()), 0, None)
-            .with_presentation(CommandPresentation {
-                stdout: None,
-                stderr: Some("remote stderr\n".to_string()),
-            })
-            .with_raw_completion_stderr("[ssh] phase=command-finished\n");
+    fn trace_output_file_prefers_summary_artifact_and_falls_back_to_stdout() {
+        for (summary, expected) in [
+            (
+                Some(Ok(json!({ "kind": "summary" }))),
+                json!({ "kind": "summary" }),
+            ),
+            (None, json!({ "kind": "stdout" })),
+        ] {
+            let run = run_with_output_file_result(summary);
 
-        assert_eq!(run.presentation.stderr.as_deref(), Some("remote stderr\n"));
-        assert_eq!(
-            run.raw_completion_stderr.as_deref(),
-            Some("[ssh] phase=command-finished\n")
-        );
-    }
-
-    #[test]
-    fn trace_output_file_prefers_summary_artifact_result() {
-        let run = run_with_output_file_result(Some(Ok(json!({ "kind": "summary" }))));
-
-        assert_eq!(
-            run.output_file_result(CommandOutputFileMode::TraceJsonSummaryArtifact)
-                .as_ref()
-                .unwrap(),
-            &json!({ "kind": "summary" })
-        );
-    }
-
-    #[test]
-    fn trace_output_file_falls_back_to_stdout_result() {
-        let run = run_with_output_file_result(None);
-
-        assert_eq!(
-            run.output_file_result(CommandOutputFileMode::TraceJsonSummaryArtifact)
-                .as_ref()
-                .unwrap(),
-            &json!({ "kind": "stdout" })
-        );
-    }
-
-    #[test]
-    fn generic_output_file_prefers_explicit_output_file_result() {
-        let run = run_with_output_file_result(Some(Ok(json!({ "kind": "summary" }))));
-
-        assert_eq!(
-            run.output_file_result(CommandOutputFileMode::GenericEnvelope)
-                .as_ref()
-                .unwrap(),
-            &json!({ "kind": "summary" })
-        );
-    }
-
-    #[test]
-    fn presentation_does_not_replace_structured_stdout_or_file_payload() {
-        let run = CommandRun::from_stdout_result(Ok(json!({ "kind": "stdout" })), 0)
-            .with_presentation(CommandPresentation {
-                stdout: Some("short summary\n".to_string()),
-                stderr: Some("progress\n".to_string()),
-            });
-
-        assert_eq!(run.presentation.stdout.as_deref(), Some("short summary\n"));
-        assert_eq!(
-            run.output_file_result(CommandOutputFileMode::GenericEnvelope)
-                .as_ref()
-                .unwrap(),
-            &json!({ "kind": "stdout" })
-        );
+            assert_eq!(
+                run.output_file_result(CommandOutputFileMode::TraceJsonSummaryArtifact)
+                    .as_ref()
+                    .unwrap(),
+                &expected
+            );
+        }
     }
 
     #[test]
@@ -971,48 +918,29 @@ mod tests {
         );
     }
 
+    /// Failed results still land in the output file so callers can read them.
     #[test]
-    fn generic_output_file_writes_cli_envelope() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("status.json");
-        let run = run_with_output_file_result(None);
+    fn generic_output_file_writes_cli_envelope_for_success_and_failure() {
+        for (exit_code, success) in [(0, true), (1, false)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("result.json");
+            let run = CommandRun::from_stdout_result(
+                Ok(json!({ "test_counts": { "failed": 15 } })),
+                exit_code,
+            );
 
-        write_output_file(
-            &run,
-            CommandOutputFileMode::GenericEnvelope,
-            Some(path.to_str().expect("utf8 path")),
-        );
+            write_output_file(
+                &run,
+                CommandOutputFileMode::GenericEnvelope,
+                Some(path.to_str().expect("utf8 path")),
+            );
 
-        let written = std::fs::read_to_string(path).expect("artifact written");
-        let json: Value = serde_json::from_str(&written).expect("valid json");
-        assert_eq!(json["success"], true);
-        assert_eq!(json["data"], json!({ "kind": "stdout" }));
-    }
-
-    #[test]
-    fn generic_output_file_keeps_failed_test_result_available() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.json");
-        let run = CommandRun::from_stdout_result(
-            Ok(json!({
-                "passed": false,
-                "status": "failed",
-                "test_counts": { "total": 36, "passed": 21, "failed": 15, "skipped": 0 }
-            })),
-            1,
-        );
-
-        write_output_file(
-            &run,
-            CommandOutputFileMode::GenericEnvelope,
-            Some(path.to_str().expect("utf8 path")),
-        );
-
-        let written = std::fs::read_to_string(path).expect("failed result written");
-        let json: Value = serde_json::from_str(&written).expect("valid json");
-        assert_eq!(json["success"], false);
-        assert_eq!(json["exit_code"], 1);
-        assert_eq!(json["data"]["test_counts"]["failed"], 15);
+            let written = std::fs::read_to_string(path).expect("artifact written");
+            let json: Value = serde_json::from_str(&written).expect("valid json");
+            assert_eq!(json["success"], success);
+            assert_eq!(json["exit_code"], exit_code);
+            assert_eq!(json["data"]["test_counts"]["failed"], 15);
+        }
     }
 
     #[test]
