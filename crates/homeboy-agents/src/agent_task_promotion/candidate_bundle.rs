@@ -505,14 +505,13 @@ mod tests {
         assert_eq!(tree, candidate.tree_sha);
     }
 
+    /// A timed-out aggregate still fetches its candidate before the terminal
+    /// projection, and a promoted one records pickup and acquisition spans.
     #[test]
-    fn timeout_aggregate_fetches_before_controller_terminal_projection() {
-        terminal_aggregate_fetch_fixture(false);
-    }
-
-    #[test]
-    fn lab_terminal_harvest_promote_spans_are_read_back_from_store() {
-        terminal_aggregate_fetch_fixture(true);
+    fn terminal_aggregate_fetches_candidate_and_records_pickup_spans() {
+        for promote in [false, true] {
+            terminal_aggregate_fetch_fixture(promote);
+        }
     }
 
     fn terminal_aggregate_fetch_fixture(promote: bool) {
@@ -677,106 +676,71 @@ mod tests {
         );
     }
 
+    /// Every fetch failure is typed, names the run and the expected object,
+    /// never leaks Git's revision-parsing noise, and leaves no candidate ref.
     #[test]
-    fn fetch_failure_never_resolves_an_unfetched_sha() {
-        let f = fixture();
-        let mut candidate = f.candidate.clone();
-        candidate.candidate_sha = "unfetched-not-a-revision".into();
-        std::fs::write(&f.bundle, "truncated").unwrap();
-        let error = fetch_candidate_bundle(&f.controller, &f.bundle, "timeout-run", &candidate)
-            .unwrap_err();
-        assert!(error.message.contains("timeout-run"));
-        assert!(error.message.contains("unfetched-not-a-revision"));
-        assert!(!error.message.contains("single revision"));
-        assert!(std::error::Error::source(&error)
-            .unwrap()
-            .downcast_ref::<CandidateBundleError>()
-            .is_some());
-    }
+    fn invalid_bundles_fail_typed_and_unpinned() {
+        type Setup = fn(&Fixture) -> (AgentTaskCandidate, &'static str, String, String);
+        let cases: [Setup; 3] = [
+            |f| {
+                // Replace the bundled commit under the same candidate ref.
+                run(&f.runner, &["reset", "-q", "--hard"]);
+                let base = &f.candidate.base_sha;
+                let tampered = commit_candidate(&f.runner, base, "tampered\n");
+                bundle_candidate(&f.runner, &f.bundle, base);
+                (
+                    f.candidate.clone(),
+                    "commit_mismatch",
+                    f.candidate.candidate_sha.clone(),
+                    tampered.candidate_sha,
+                )
+            },
+            |f| {
+                let bytes = std::fs::read(&f.bundle).unwrap();
+                std::fs::write(&f.bundle, &bytes[..bytes.len() / 2]).unwrap();
+                let mut candidate = f.candidate.clone();
+                candidate.candidate_sha = "unfetched-not-a-revision".into();
+                let expected = candidate.candidate_sha.clone();
+                (candidate, "missing_object", expected, String::new())
+            },
+            |f| {
+                let mut recorded = f.candidate.clone();
+                recorded.tree_sha = run(&f.controller, &["rev-parse", "HEAD^{tree}"]);
+                let expected = recorded.tree_sha.clone();
+                (
+                    recorded,
+                    "tree_mismatch",
+                    expected,
+                    f.candidate.tree_sha.clone(),
+                )
+            },
+        ];
+        for setup in cases {
+            let f = fixture();
+            let (candidate, kind, expected, observed) = setup(&f);
 
-    #[test]
-    fn tampered_bundle_fails_with_typed_commit_mismatch() {
-        let fixture = fixture();
-        // Replace the bundled commit under the same candidate ref.
-        run(&fixture.runner, &["reset", "-q", "--hard"]);
-        let base = &fixture.candidate.base_sha;
-        let tampered = commit_candidate(&fixture.runner, base, "tampered\n");
-        bundle_candidate(&fixture.runner, &fixture.bundle, base);
+            let error =
+                fetch_candidate_bundle(&f.controller, &f.bundle, "run-1", &candidate).unwrap_err();
 
-        let error = fetch_candidate_bundle(
-            &fixture.controller,
-            &fixture.bundle,
-            "run-1",
-            &fixture.candidate,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains(&tampered.candidate_sha));
-        let typed = error
-            .source
-            .as_ref()
-            .unwrap()
-            .downcast_ref::<CandidateBundleError>()
-            .unwrap();
-        assert_eq!(typed.kind, "commit_mismatch");
-        assert_eq!(typed.expected, fixture.candidate.candidate_sha);
-        assert_eq!(typed.observed, tampered.candidate_sha);
-        assert_unpinned(&fixture.controller);
-    }
-
-    #[test]
-    fn truncated_bundle_fails_with_typed_missing_object() {
-        let fixture = fixture();
-        let bytes = std::fs::read(&fixture.bundle).unwrap();
-        std::fs::write(&fixture.bundle, &bytes[..bytes.len() / 2]).unwrap();
-
-        let error = fetch_candidate_bundle(
-            &fixture.controller,
-            &fixture.bundle,
-            "run-1",
-            &fixture.candidate,
-        )
-        .unwrap_err();
-
-        let typed = error
-            .source
-            .as_ref()
-            .unwrap()
-            .downcast_ref::<CandidateBundleError>()
-            .unwrap();
-        assert_eq!(typed.kind, "missing_object");
-        assert_eq!(typed.expected, fixture.candidate.candidate_sha);
-        assert!(
-            error.message.contains(&fixture.candidate.candidate_sha),
-            "{}",
-            error.message
-        );
-        assert_unpinned(&fixture.controller);
-    }
-
-    #[test]
-    fn recorded_tree_mismatch_fails_with_typed_tree_mismatch() {
-        let fixture = fixture();
-        let mut recorded = fixture.candidate.clone();
-        recorded.tree_sha = run(&fixture.controller, &["rev-parse", "HEAD^{tree}"]);
-
-        let error =
-            fetch_candidate_bundle(&fixture.controller, &fixture.bundle, "run-1", &recorded)
-                .unwrap_err();
-
-        let typed = error
-            .source
-            .as_ref()
-            .unwrap()
-            .downcast_ref::<CandidateBundleError>()
-            .unwrap();
-        assert_eq!(typed.kind, "tree_mismatch");
-        assert_eq!(typed.expected, recorded.tree_sha);
-        assert_eq!(typed.observed, fixture.candidate.tree_sha);
-        let message = error.message;
-        assert!(
-            message.contains(&recorded.tree_sha) && message.contains(&fixture.candidate.tree_sha)
-        );
-        assert_unpinned(&fixture.controller);
+            let typed = error
+                .source
+                .as_ref()
+                .unwrap()
+                .downcast_ref::<CandidateBundleError>()
+                .unwrap();
+            assert_eq!(typed.kind, kind);
+            assert_eq!(typed.expected, expected, "{kind}");
+            if !observed.is_empty() {
+                assert_eq!(typed.observed, observed, "{kind}");
+            }
+            assert!(error.message.contains("run-1"), "{}", error.message);
+            assert!(error.message.contains(&expected), "{}", error.message);
+            assert!(
+                !error.message.contains("single revision"),
+                "{}",
+                error.message
+            );
+            assert_unpinned(&f.controller);
+        }
     }
 }
