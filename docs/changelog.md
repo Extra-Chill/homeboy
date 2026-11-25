@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.18] - 2026-11-25
+
+### Changed
+- prune and fold low-value agent-task promotion, prompt and provider tests (7/15)
+- prune and fold homeboy-fuzz tests file by file
+- prune redundant lifecycle tests and stale history comments
+- prune agent_task_lifecycle status/submit tests file-by-file
+
 ## [0.497.17] - 2026-11-25
 
 ### Changed
