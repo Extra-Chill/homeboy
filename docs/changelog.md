@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.22] - 2026-11-25
+
+### Changed
+- prune and fold staging-controller and lab-workspace tests
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 9/12)
+- prune lab offload and preparation tests (6/12)
+- prune and fold redundant tests in lab-runner slice 10/12
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 7/12)
+
 ## [0.497.21] - 2026-11-25
 
 ### Changed
