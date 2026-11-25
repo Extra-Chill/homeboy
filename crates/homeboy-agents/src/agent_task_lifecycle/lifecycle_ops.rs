@@ -2863,6 +2863,27 @@ pub fn defer_cook_runtime_admission_in_store(
     run_id: &str,
     owner: Value,
 ) -> Result<bool> {
+    defer_cook_admission_in_store(lifecycle_store, run_id, owner, None)
+}
+
+/// Recover a lost execution child only while its zero-provider attempt still
+/// lacks a successor owner. The failure count travels with the attempt, not
+/// the handoff parent, so subsequent queued executions share the same budget.
+pub(crate) fn defer_interrupted_cook_execution_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    owner: Value,
+    recovery_limit: u64,
+) -> Result<bool> {
+    defer_cook_admission_in_store(lifecycle_store, run_id, owner, Some(recovery_limit))
+}
+
+fn defer_cook_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    owner: Value,
+    recovery_limit: Option<u64>,
+) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
     let now = now_timestamp();
     let mut intent_error = None;
@@ -2876,11 +2897,29 @@ pub fn defer_cook_runtime_admission_in_store(
         {
             return None;
         }
+        if let Some(limit) = recovery_limit {
+            let key = record.metadata["execution_scheduling"]["current_intent_id"].as_str();
+            let failures = record.metadata["execution_scheduling"]["recovery_failures"]
+                .as_u64()
+                .unwrap_or(0)
+                .max(owner["recovery_failures"].as_u64().unwrap_or(0));
+            if key.is_some_and(|key| Some(key) != owner["step_key"].as_str())
+                || failures + 1 >= limit
+            {
+                return None;
+            }
+            record.metadata["execution_scheduling"]["recovery_failures"] = json!(failures + 1);
+        }
         record.metadata["cook_runtime_admission"] = json!({
             "schema": "homeboy/cook-runtime-admission/v1",
             "state": "queued",
             "owner": owner,
         });
+        if recovery_limit.is_some() {
+            record.metadata["cook_runtime_admission"]["reason"] =
+                json!("execution_step_interrupted");
+            record.metadata["cook_runtime_admission"]["job_id"] = owner["job_id"].clone();
+        }
         record.updated_at = Some(now.clone());
         reset_for_requeue(record);
         let not_before = Some((chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339());
