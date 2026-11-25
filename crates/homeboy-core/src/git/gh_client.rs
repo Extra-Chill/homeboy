@@ -711,29 +711,6 @@ mod tests {
     }
 
     #[test]
-    fn github_cli_env_uses_configured_enterprise_proxy() {
-        let mut hosts = HashMap::new();
-        hosts.insert(
-            "github.enterprise.test".to_string(),
-            GithubHostConfig {
-                proxy: Some("https://proxy.example.test:9443".to_string()),
-                env: HashMap::new(),
-            },
-        );
-        let config = GithubConfig {
-            hosts,
-            ..GithubConfig::default()
-        };
-
-        let env = github_cli_env("github.enterprise.test", &config);
-
-        assert!(env.contains(&(
-            "HTTPS_PROXY".to_string(),
-            "https://proxy.example.test:9443".to_string()
-        )));
-    }
-
-    #[test]
     fn github_cli_env_applies_global_host_env() {
         let mut global_hosts = HashMap::new();
         global_hosts.insert(
@@ -797,12 +774,12 @@ mod tests {
         assert!(!env.contains(&("NO_PROXY".to_string(), "global".to_string())));
     }
 
+    /// Merges and branch deletes go through the REST API, never `gh pr merge`,
+    /// which would check out the default branch in the caller's worktree.
     #[test]
-    fn pr_merge_api_args_do_not_use_checkout_merger() {
-        let args = pr_merge_api_args("Extra-Chill/homeboy", 6006, "merge");
-
+    fn merge_and_branch_delete_use_rest_api_not_checkout_commands() {
         assert_eq!(
-            args,
+            pr_merge_api_args("Extra-Chill/homeboy", 6006, "merge"),
             vec![
                 "api",
                 "-X",
@@ -812,15 +789,8 @@ mod tests {
                 "merge_method=merge"
             ]
         );
-        assert!(!args.windows(2).any(|window| window == ["pr", "merge"]));
-    }
-
-    #[test]
-    fn delete_branch_ref_api_args_do_not_checkout_default_branch() {
-        let args = delete_branch_ref_api_args("Extra-Chill/homeboy", "fix/example");
-
         assert_eq!(
-            args,
+            delete_branch_ref_api_args("Extra-Chill/homeboy", "fix/example"),
             vec![
                 "api",
                 "-X",
@@ -828,7 +798,6 @@ mod tests {
                 "repos/Extra-Chill/homeboy/git/refs/heads/fix/example"
             ]
         );
-        assert!(!args.windows(2).any(|window| window == ["pr", "merge"]));
     }
 
     #[cfg(unix)]

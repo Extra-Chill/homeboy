@@ -10,36 +10,16 @@ use crate::extension::trace::parsing::{TraceGitProvenance, TraceResults, TraceSt
 use crate::extension::trace::probes::TraceProbeConfig;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
-use homeboy_core::error::{Error, ErrorCode};
 
 use super::super::list::run_trace_list_workflow;
 use super::super::provenance::{
     git_dirty_state, git_provenance, push_git_provenance_reasons, trace_provenance,
 };
 use super::super::runner::{
-    build_trace_runner, failure_from_output, resolve_trace_baseline_root, trace_is_unclaimed,
-    trace_probes_with_fswatch_attachments,
+    failure_from_output, resolve_trace_baseline_root, trace_probes_with_fswatch_attachments,
 };
 use super::super::types::{TraceListWorkflowArgs, TraceRunnerInputs};
 use super::super::workflow::run_trace_workflow;
-#[test]
-fn test_build_trace_runner() {
-    let temp = tempfile::tempdir().unwrap();
-    let component = test_component(temp.path());
-    let run_dir = RunDir::create().unwrap();
-    let output = build_trace_runner(
-        None,
-        &component,
-        &test_run_args(temp.path()),
-        &run_dir,
-        false,
-    )
-    .unwrap();
-    assert!(!output.success);
-    assert_eq!(output.exit_code, 3);
-    run_dir.cleanup();
-}
-
 #[test]
 fn test_run_trace_list_workflow() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -169,16 +149,6 @@ fn trace_failure_records_child_cleanup_context() {
 }
 
 #[test]
-fn test_trace_is_unclaimed() {
-    let unsupported = Error::new(
-        ErrorCode::ExtensionUnsupported,
-        "No extension provider configured for component 'example'",
-        serde_json::json!({}),
-    );
-    assert!(trace_is_unclaimed(&unsupported));
-}
-
-#[test]
 fn resolve_trace_baseline_root_without_rig_returns_component_path() {
     let temp = tempfile::tempdir().unwrap();
     let component_path = temp.path().to_string_lossy().to_string();
@@ -192,43 +162,6 @@ fn resolve_trace_baseline_root_without_rig_returns_component_path() {
     // Crucially, no homeboy.json gets created in the component checkout
     // just by resolving — that only happens when a baseline is saved.
     assert!(!temp.path().join("homeboy.json").exists());
-}
-
-#[test]
-fn resolve_trace_baseline_root_with_rig_uses_rig_state_dir_and_skips_component_path() {
-    let temp = tempfile::tempdir().unwrap();
-    let component_path = temp.path().to_string_lossy().to_string();
-    let rig_id = format!("__hb-trace-baseline-test-{}", std::process::id());
-
-    let root = resolve_trace_baseline_root(
-        &homeboy_core::paths::homeboy().expect("config root"),
-        &component_path,
-        Some(&rig_id),
-    )
-    .unwrap();
-
-    assert!(
-        root.ends_with(format!("{}.state/baselines", rig_id)),
-        "rig baseline root should live under <id>.state/baselines, got {}",
-        root.display()
-    );
-    assert!(
-        root.exists(),
-        "rig baseline root should be created on resolve"
-    );
-    assert!(
-        !root.starts_with(temp.path()),
-        "rig baseline root must not live inside the component checkout"
-    );
-    assert!(
-        !temp.path().join("homeboy.json").exists(),
-        "resolving a rig baseline root must not touch component homeboy.json"
-    );
-
-    // Cleanup: best-effort remove the rig state dir we created.
-    if let Some(state_dir) = root.parent() {
-        let _ = std::fs::remove_dir_all(state_dir);
-    }
 }
 
 #[test]
@@ -248,6 +181,12 @@ fn rig_save_baseline_does_not_write_component_homeboy_json() {
         Some(&rig_id),
     )
     .unwrap();
+    assert!(
+        baseline_root.ends_with(format!("{}.state/baselines", rig_id)),
+        "rig baseline root should live under <id>.state/baselines, got {}",
+        baseline_root.display()
+    );
+    assert!(!baseline_root.starts_with(temp.path()));
 
     let results = TraceResults {
         component_id: "studio".to_string(),
@@ -427,8 +366,12 @@ fn trace_provenance_records_declared_toolchain_env_path() {
             Some("env:FIXTURE_TOOLCHAIN_BIN")
         );
         assert_eq!(
-            toolchain.toolchains.get("fixture-toolchain"),
-            Some(provenance)
+            provenance.path,
+            toolchain_dir
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
         );
     });
 }

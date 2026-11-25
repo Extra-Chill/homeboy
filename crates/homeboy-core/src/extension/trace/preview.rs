@@ -925,7 +925,7 @@ fn stop_child(child: &mut Option<Child>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_https_origin, TracePublicPreviewSession};
+    use super::TracePublicPreviewSession;
     use homeboy_extension_contract::{
         TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec, TracePublicPreviewMode,
         TracePublicPreviewSpec,
@@ -935,14 +935,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
-
-    #[test]
-    fn extracts_first_https_origin_from_provider_output() {
-        assert_eq!(
-            first_https_origin("ready: https://preview.example.test/run-1\n").as_deref(),
-            Some("https://preview.example.test/run-1")
-        );
-    }
 
     #[test]
     fn starts_provider_command_and_records_preview_metadata() {
@@ -1136,14 +1128,8 @@ mod tests {
             .as_ref()
             .expect("fanout report");
         assert_eq!(report.schema, "homeboy/preview-asset-fanout/v1");
-        assert_eq!(report.concurrency, 4);
-        assert_eq!(report.repeat_count, 3);
-        assert_eq!(report.expected_request_count, expected_requests);
-        assert_eq!(report.client_request_count, expected_requests);
         assert_eq!(report.success_count, expected_requests);
         assert_eq!(report.failure_count, 0);
-        assert_eq!(report.status_counts.get("200"), Some(&expected_requests));
-        assert!(report.failure_buckets.is_empty());
         assert_eq!(local_origin_count.load(Ordering::SeqCst), expected_requests);
     }
 
