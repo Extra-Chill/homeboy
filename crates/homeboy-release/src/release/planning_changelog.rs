@@ -361,42 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_changelog_initialized_creates_missing_file() {
-        let temp = tempfile::tempdir().unwrap();
-        let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
-
-        let changelog_path = temp.path().join("CHANGELOG.md");
-        assert!(!changelog_path.exists(), "precondition: no changelog yet");
-
-        ensure_changelog_initialized(&component, false).expect("preflight should bootstrap");
-
-        let content = std::fs::read_to_string(&changelog_path).expect("file created");
-        assert_eq!(content, super::changelog::INITIAL_CHANGELOG_CONTENT);
-        assert!(
-            !content.contains("## Unreleased"),
-            "should NOT pre-create Unreleased section (legacy): {}",
-            content
-        );
-    }
-
-    #[test]
-    fn ensure_changelog_initialized_creates_parent_dir_for_nested_target() {
-        let temp = tempfile::tempdir().unwrap();
-        let component = component_with_changelog_target(&temp, Some("docs/CHANGELOG.md"));
-
-        let docs_dir = temp.path().join("docs");
-        assert!(!docs_dir.exists(), "precondition: no docs/ yet");
-
-        ensure_changelog_initialized(&component, false).expect("preflight should bootstrap");
-
-        assert!(docs_dir.is_dir(), "docs/ parent should be created");
-        assert!(
-            temp.path().join("docs/CHANGELOG.md").exists(),
-            "changelog should land at docs/CHANGELOG.md"
-        );
-    }
-
-    #[test]
     fn ensure_changelog_initialized_leaves_existing_file_untouched() {
         let temp = tempfile::tempdir().unwrap();
         let component = component_with_changelog_target(&temp, Some("CHANGELOG.md"));
@@ -450,6 +414,12 @@ mod tests {
         let component = component_with_changelog_target(&temp, Some("docs/CHANGELOG.md"));
 
         ensure_changelog_initialized(&component, false).expect("preflight should bootstrap");
+
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("docs/CHANGELOG.md"))
+                .expect("nested changelog and parent dir created"),
+            super::changelog::INITIAL_CHANGELOG_CONTENT
+        );
 
         let status = std::process::Command::new("git")
             .args(["status", "--porcelain"])
@@ -518,70 +488,47 @@ mod tests {
     }
 
     #[test]
-    fn test_group_commits_for_changelog() {
+    fn group_commits_for_changelog_strips_prefixes_and_trailing_reference_groups() {
         let commits = vec![
             commit(
                 "feat(#741): delete AgentType class — replace with string literals",
                 CommitCategory::Feature,
             ),
             commit(
-                "fix(#730): queue-add uses unified check-duplicate",
-                CommitCategory::Fix,
-            ),
-        ];
-
-        let entries = group_commits_for_changelog(&commits);
-        let added = &entries["added"];
-        let fixed = &entries["fixed"];
-
-        assert_eq!(
-            added[0],
-            "delete AgentType class — replace with string literals"
-        );
-        assert_eq!(fixed[0], "queue-add uses unified check-duplicate");
-    }
-
-    #[test]
-    fn group_commits_for_changelog_strips_all_trailing_reference_groups() {
-        let commits = vec![
-            commit(
                 "feat: agent-first scoping — Phase 1 schema (#738) (#739, #740)",
                 CommitCategory::Feature,
+            ),
+            commit(
+                "fix(#730): queue-add uses unified check-duplicate",
+                CommitCategory::Fix,
             ),
             commit(
                 "fix: rename $class param — fixes bootstrap crash (#711)",
                 CommitCategory::Fix,
             ),
             commit(
-                "fix: preserve the prepared workspace on retryable admission failure (#9469)",
+                "fix: preserve #![feature] syntax (#9522) (reviewed)",
                 CommitCategory::Fix,
             ),
         ];
 
         let entries = group_commits_for_changelog(&commits);
-        let added = &entries["added"];
-        let fixed = &entries["fixed"];
 
-        assert_eq!(added[0], "agent-first scoping — Phase 1 schema");
-        assert_eq!(fixed[0], "rename $class param — fixes bootstrap crash");
         assert_eq!(
-            fixed[1],
-            "preserve the prepared workspace on retryable admission failure"
+            entries["added"],
+            vec![
+                "delete AgentType class — replace with string literals",
+                "agent-first scoping — Phase 1 schema",
+            ]
         );
-    }
-
-    #[test]
-    fn changelog_keeps_inline_hash_characters_and_non_reference_groups() {
-        let commits = vec![commit(
-            "fix: preserve #![feature] syntax (#9522) (reviewed)",
-            CommitCategory::Fix,
-        )];
-
-        let entries = group_commits_for_changelog(&commits);
-
         assert_eq!(
             entries["fixed"],
-            vec!["preserve #![feature] syntax (#9522) (reviewed)"]
+            vec![
+                "queue-add uses unified check-duplicate",
+                "rename $class param — fixes bootstrap crash",
+                // Inline hashes and non-reference trailing groups survive.
+                "preserve #![feature] syntax (#9522) (reviewed)",
+            ]
         );
     }
 

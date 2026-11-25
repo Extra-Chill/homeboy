@@ -224,36 +224,19 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_overall_status() {
-        let results = vec![
-            step("version", ReleaseStepStatus::Success),
-            step("release.prepare", ReleaseStepStatus::Failed),
+    fn derive_overall_status_classifies_step_mixes() {
+        use ReleaseStepStatus::*;
+        let cases = [
+            (vec![Success, Failed], PartialSuccess),
+            (vec![Success, Missing], PartialSuccess),
+            (vec![Failed], Failed),
+            (vec![Missing], Missing),
+            (vec![Success, Skipped], Success),
         ];
-
-        assert_eq!(
-            derive_overall_status(&results),
-            ReleaseStepStatus::PartialSuccess
-        );
-    }
-
-    #[test]
-    fn derive_overall_status_marks_missing_steps_non_successful() {
-        let results = vec![step("package", ReleaseStepStatus::Missing)];
-
-        assert_eq!(derive_overall_status(&results), ReleaseStepStatus::Missing);
-    }
-
-    #[test]
-    fn derive_overall_status_marks_success_plus_missing_partial() {
-        let results = vec![
-            step("version", ReleaseStepStatus::Success),
-            step("package", ReleaseStepStatus::Missing),
-        ];
-
-        assert_eq!(
-            derive_overall_status(&results),
-            ReleaseStepStatus::PartialSuccess
-        );
+        for (statuses, expected) in cases {
+            let results: Vec<_> = statuses.into_iter().map(|s| step("package", s)).collect();
+            assert_eq!(derive_overall_status(&results), expected);
+        }
     }
 
     #[test]
@@ -314,42 +297,30 @@ mod tests {
     }
 
     #[test]
-    fn summary_omits_head_repair_when_github_release_was_created() {
-        let results = vec![
-            step_with_data(
-                "git.tag",
-                ReleaseStepStatus::Success,
-                serde_json::json!({ "tag": "sample-plugin-v1.2.3" }),
-            ),
-            step_with_data(
-                "github.release",
-                ReleaseStepStatus::Success,
-                serde_json::json!({ "url": "https://example.com/release" }),
-            ),
-        ];
-        let status = derive_overall_status(&results);
-        let summary = build_summary("sample-plugin", &results, &status);
-
-        assert!(!summary
-            .next_actions
-            .iter()
-            .any(|action| action.contains("no GitHub Release")));
-    }
-
-    #[test]
-    fn summary_omits_head_repair_when_no_tag_exists() {
-        let results = vec![step_with_data(
+    fn summary_omits_head_repair_unless_tag_exists_and_release_skipped() {
+        let tag = step_with_data(
+            "git.tag",
+            ReleaseStepStatus::Success,
+            serde_json::json!({ "tag": "sample-plugin-v1.2.3" }),
+        );
+        let created = step_with_data(
+            "github.release",
+            ReleaseStepStatus::Success,
+            serde_json::json!({ "url": "https://example.com/release" }),
+        );
+        let skipped = step_with_data(
             "github.release",
             ReleaseStepStatus::Success,
             serde_json::json!({ "skipped": true }),
-        )];
-        let status = derive_overall_status(&results);
-        let summary = build_summary("sample-plugin", &results, &status);
-
-        assert!(!summary
-            .next_actions
-            .iter()
-            .any(|action| action.contains("no GitHub Release")));
+        );
+        for results in [vec![tag, created], vec![skipped]] {
+            let status = derive_overall_status(&results);
+            let summary = build_summary("sample-plugin", &results, &status);
+            assert!(!summary
+                .next_actions
+                .iter()
+                .any(|action| action.contains("no GitHub Release")));
+        }
     }
 
     #[test]
