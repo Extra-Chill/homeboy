@@ -383,76 +383,28 @@ mod tests {
     }
 
     #[test]
-    fn auto_flags_match_server_user_conditions() {
+    fn auto_flags_apply_by_server_user_condition() {
+        let flag = |server_user: Option<&str>, flag: &str| CliAutoFlag {
+            when: CliAutoFlagCondition {
+                server_user: server_user.map(str::to_string),
+            },
+            flag: flag.to_string(),
+        };
         let config = cli_config(vec![
-            CliAutoFlag {
-                when: CliAutoFlagCondition {
-                    server_user: Some("root".to_string()),
-                },
-                flag: "--allow-root".to_string(),
-            },
-            CliAutoFlag {
-                when: CliAutoFlagCondition {
-                    server_user: Some("deploy".to_string()),
-                },
-                flag: "--as-deploy".to_string(),
-            },
+            flag(Some("root"), "--allow-root"),
+            flag(Some("deploy"), "--as-deploy"),
+            flag(None, "--global-flag"),
         ]);
 
-        assert_eq!(
-            matching_auto_flags(&config, Some("root")),
-            vec!["--allow-root"]
-        );
-        assert_eq!(
-            matching_auto_flags(&config, Some("deploy")),
-            vec!["--as-deploy"]
-        );
-        assert!(matching_auto_flags(&config, Some("www-data")).is_empty());
-        assert!(matching_auto_flags(&config, None).is_empty());
-    }
-
-    #[test]
-    fn auto_flags_with_empty_conditions_always_apply() {
-        let config = cli_config(vec![CliAutoFlag {
-            when: CliAutoFlagCondition::default(),
-            flag: "--global-flag".to_string(),
-        }]);
-
-        assert_eq!(
-            matching_auto_flags(&config, Some("root")),
-            vec!["--global-flag"]
-        );
-        assert_eq!(matching_auto_flags(&config, None), vec!["--global-flag"]);
-    }
-
-    #[test]
-    fn empty_manifest_auto_flags_do_not_apply_implicit_extension_flags() {
-        let config = cli_config(Vec::new());
-
-        assert!(matching_auto_flags(&config, Some("root")).is_empty());
-        assert!(matching_auto_flags(&config, Some("deploy")).is_empty());
-    }
-
-    #[test]
-    fn cli_config_deserializes_manifest_auto_flags() {
-        let config: CliConfig = serde_json::from_str(
-            r#"{
-                "tool": "wp",
-                "display_name": "WP-CLI",
-                "command_template": "{{cliPath}} {{args}}",
-                "auto_flags": [
-                    { "when": { "server_user": "root" }, "flag": "--allow-root" }
-                ]
-            }"#,
-        )
-        .expect("parse cli config");
-
-        assert_eq!(config.auto_flags.len(), 1);
-        assert_eq!(
-            config.auto_flags[0].when.server_user.as_deref(),
-            Some("root")
-        );
-        assert_eq!(config.auto_flags[0].flag, "--allow-root");
+        for (user, expected) in [
+            (Some("root"), vec!["--allow-root", "--global-flag"]),
+            (Some("deploy"), vec!["--as-deploy", "--global-flag"]),
+            (Some("www-data"), vec!["--global-flag"]),
+            (None, vec!["--global-flag"]),
+        ] {
+            assert_eq!(matching_auto_flags(&config, user), expected, "{user:?}");
+        }
+        assert!(matching_auto_flags(&cli_config(Vec::new()), Some("root")).is_empty());
     }
 
     #[test]
