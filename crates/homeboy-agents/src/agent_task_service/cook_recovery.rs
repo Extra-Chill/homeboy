@@ -1226,6 +1226,10 @@ fn plan_cook_recovery_for_cook(id: &str, live_probes: bool) -> Result<CookRecove
         // continuation status the attempt last recorded: re-running gates or
         // continuing would only redo delivered work.
         CookRecoveryStep::none(format!("The Cook is published as {pr}; review it there."))
+    } else if let Some(gate) = agent_task_lifecycle::live_gate_owner(&record) {
+        // A live gate is verifying the candidate; nothing is recoverable
+        // until it reaches a verdict or its owner stops (#19108).
+        CookRecoveryStep::none(live_gate_reason(&gate, &recipe.cook_id))
     } else if super::cook_recipe::abandoned_cook_continuation(&record) {
         CookRecoveryStep::Continue
     } else {
@@ -1250,6 +1254,43 @@ fn plan_cook_recovery_for_cook(id: &str, live_probes: bool) -> Result<CookRecove
         status,
         step,
     })
+}
+
+fn live_gate_reason(gate: &agent_task_lifecycle::LiveGateOwner, cook_id: &str) -> String {
+    format!(
+        "gating: {}; watch it with `homeboy agent-task status {} --watch` instead of recovering",
+        gate.describe(),
+        homeboy_core::error::posix_quote_arg(cook_id)
+    )
+}
+
+/// `recover --regate` never starts a second gate run on top of a live one.
+fn refuse_regate_over_live_gate(run_id: &str, cook_id: &str) -> Result<()> {
+    let Ok(record) = agent_task_lifecycle::exact_record(run_id) else {
+        return Ok(());
+    };
+    let Some(gate) = agent_task_lifecycle::live_gate_owner(&record) else {
+        return Ok(());
+    };
+    let watch = format!(
+        "homeboy agent-task status {} --watch",
+        homeboy_core::error::posix_quote_arg(cook_id)
+    );
+    let mut error = Error::validation_invalid_argument(
+        "regate",
+        format!(
+            "the candidate's gates are still running ({}); a regate would start a second gate run. Watch the live gate instead",
+            gate.describe()
+        ),
+        Some(run_id.to_string()),
+        Some(vec![watch.clone()]),
+    );
+    error.details["live_gate"] = serde_json::json!({
+        "run_id": run_id,
+        "owner": gate,
+        "status_command": watch,
+    });
+    Err(error)
 }
 
 /// The pull request a publication receipt proves the attempt is published as
@@ -1440,6 +1481,7 @@ fn recover_cook_once(
         plan = plan_cook_recovery(id)?;
     }
     if regate {
+        refuse_regate_over_live_gate(&plan.run_id, &plan.cook_id)?;
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         let index_fenced = store
             .read_cook_index(&plan.cook_id)
@@ -1517,6 +1559,7 @@ fn recover_cook_once(
                 )
             })?;
         plan.run_id = candidate.run_id.clone();
+        refuse_regate_over_live_gate(&plan.run_id, &plan.cook_id)?;
         let record = agent_task_lifecycle::exact_record(&plan.run_id)?;
         let candidate_state =
             agent_task_lifecycle::CookRunState::of(&record).with_cook_index_fence(index_fenced);
