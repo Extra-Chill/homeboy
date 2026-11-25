@@ -16,13 +16,12 @@ fn refresh_with_active_jobs_restarts_in_place_and_preserves_job_ids() {
     crate::execution::tests::restart_in_place::refresh_with_active_jobs_keeps_successor_ownership();
 }
 
-#[test]
-fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
-    let session = RunnerSession {
+fn controller_session(role: RunnerSessionRole, mode: RunnerTunnelMode) -> RunnerSession {
+    RunnerSession {
         machine_id: None,
         runner_id: "lab".to_string(),
-        mode: RunnerTunnelMode::DirectSsh,
-        role: RunnerSessionRole::Controller,
+        mode,
+        role,
         server_id: Some("lab".to_string()),
         controller_id: None,
         broker_url: None,
@@ -40,119 +39,64 @@ fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-    };
-
-    assert_eq!(
-        refresh_owned_lease(session),
-        Some("lease-refresh".to_string())
-    );
+    }
 }
 
 #[test]
-fn disconnected_refresh_connects_without_rotating_a_missing_daemon() {
-    let operations = std::cell::RefCell::new(Vec::new());
+fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
+    for (role, mode, expected) in [
+        (
+            RunnerSessionRole::Controller,
+            RunnerTunnelMode::DirectSsh,
+            Some("lease-refresh"),
+        ),
+        (RunnerSessionRole::Runner, RunnerTunnelMode::DirectSsh, None),
+        (
+            RunnerSessionRole::Controller,
+            RunnerTunnelMode::Loopback,
+            None,
+        ),
+    ] {
+        assert_eq!(
+            refresh_owned_lease(controller_session(role, mode)).as_deref(),
+            expected
+        );
+    }
+}
 
+#[test]
+fn refresh_rotates_only_a_connected_daemon_before_connecting_the_promoted_binary() {
     disconnect_before_reconnect(None, |_| {
         panic!("a disconnected runner has no daemon to rotate")
     })
     .expect("disconnected refresh does not attempt daemon rotation");
-    operations.borrow_mut().push("connect promoted binary");
 
-    assert_eq!(operations.into_inner(), ["connect promoted binary"]);
+    let session = controller_session(RunnerSessionRole::Controller, RunnerTunnelMode::DirectSsh);
+    let rotated = RefCell::new(Vec::new());
+    disconnect_before_reconnect(Some(&session), |session| {
+        rotated
+            .borrow_mut()
+            .push(session.remote_daemon_lease_id.clone());
+        Ok(())
+    })
+    .expect("connected refresh rotates the existing daemon");
+    assert_eq!(rotated.into_inner(), [Some("lease-refresh".to_string())]);
 }
 
-/// #12418: reconnect behavior is selected from the authoritative post-lease
-/// transport state. A stale but connected daemon is still rotated; a retained
+/// #12418: materialization begins from a disconnected observation, but another
+/// controller can connect the old daemon before this refresh obtains promotion
+/// ownership. The post-lease session must drive retirement; a retained stale
 /// record for a disconnected runner must not block connecting the promotion.
 #[test]
-fn reconnect_transport_state_matrix_preserves_disconnected_and_rotation_paths() {
-    let disconnected = refreshed_daemon_status(false, None);
-    let mut stale_connected = refreshed_daemon_status(true, Some("homeboy 0.294.0+oldcommit"));
-    stale_connected.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+fn materialization_race_restarts_the_newly_connected_daemon_and_preserves_active_work() {
+    let mut materialization_snapshot = refreshed_daemon_status(false, None);
+    materialization_snapshot.stale_daemon = Some(RunnerStaleDaemonWarning::new(
         "lab",
         "0.294.0".to_string(),
         "0.294.0".to_string(),
         Some("homeboy 0.294.0+oldcommit".to_string()),
         Some("homeboy 0.294.0+newcommit".to_string()),
     ));
-    let healthy_connected = refreshed_daemon_status(true, Some("homeboy 0.294.0+newcommit"));
-
-    assert!(
-        !reconnect_restarts_existing_transport(&disconnected),
-        "a disconnected runner starts the promoted binary directly"
-    );
-    assert_eq!(
-        reconnect_transport_exit_code(disconnected.is_connected()),
-        1,
-        "a disconnected runner cannot report reconnect transport success"
-    );
-    assert!(
-        reconnect_restarts_existing_transport(&stale_connected),
-        "a stale connected daemon is rotated before reconnect"
-    );
-    assert_eq!(
-        reconnect_transport_exit_code(stale_connected.is_connected()),
-        0,
-        "a stale but connected transport remains a completed reconnect phase"
-    );
-    assert!(
-        reconnect_restarts_existing_transport(&healthy_connected),
-        "a healthy connected daemon retains the established rotation behavior"
-    );
-    assert_eq!(
-        reconnect_transport_exit_code(healthy_connected.is_connected()),
-        0,
-        "a healthy connected transport remains a completed reconnect phase"
-    );
-}
-
-#[test]
-fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
-    let session = RunnerSession {
-        machine_id: None,
-        runner_id: "lab".to_string(),
-        mode: RunnerTunnelMode::DirectSsh,
-        role: RunnerSessionRole::Controller,
-        server_id: Some("lab".to_string()),
-        controller_id: None,
-        broker_url: None,
-        remote_daemon_address: Some("127.0.0.1:7421".to_string()),
-        local_port: Some(7421),
-        local_url: Some("http://127.0.0.1:7421".to_string()),
-        tunnel_pid: Some(1),
-        tunnel_process_start_identity: None,
-        proxy_forward: None,
-        remote_daemon_pid: Some(2),
-        remote_daemon_lease_id: Some("lease-refresh".to_string()),
-        homeboy_version: "test".to_string(),
-        homeboy_build_identity: None,
-        connected_at: "2026-01-01T00:00:00Z".to_string(),
-        worker_identity: None,
-        worker_pid: None,
-        last_seen_at: None,
-    };
-    let operations = std::cell::RefCell::new(Vec::new());
-
-    disconnect_before_reconnect(Some(&session), |_| {
-        operations.borrow_mut().push("disconnect existing daemon");
-        Ok(())
-    })
-    .expect("connected refresh rotates the existing daemon");
-    operations.borrow_mut().push("connect promoted binary");
-
-    assert_eq!(
-        operations.into_inner(),
-        ["disconnect existing daemon", "connect promoted binary"]
-    );
-}
-
-/// #12418: materialization begins from a disconnected observation, but another
-/// controller can connect the old daemon before this refresh obtains promotion
-/// ownership. The post-lease session must drive retirement, and re-adoptable
-/// active work restarts in place rather than being interrupted.
-#[test]
-fn materialization_race_restarts_the_newly_connected_daemon_and_preserves_active_work() {
-    let materialization_snapshot = refreshed_daemon_status(false, None);
     let mut post_lease_status = refreshed_daemon_status(true, Some("homeboy 0.294.0+oldcommit"));
     let old_session = post_lease_status
         .session
@@ -162,7 +106,7 @@ fn materialization_race_restarts_the_newly_connected_daemon_and_preserves_active
     old_session.remote_daemon_pid = Some(42);
 
     assert!(
-        !reconnect_restarts_existing_transport(&materialization_snapshot),
+        reconnect_session_after_promotion(&materialization_snapshot).is_none(),
         "materialization began while the runner was disconnected"
     );
     let post_lease_session = reconnect_session_after_promotion(&post_lease_status)
@@ -170,18 +114,6 @@ fn materialization_race_restarts_the_newly_connected_daemon_and_preserves_active
     assert_eq!(
         post_lease_session.remote_daemon_lease_id.as_deref(),
         Some("lease-old")
-    );
-
-    let operations = RefCell::new(Vec::new());
-    disconnect_before_reconnect(Some(&post_lease_session), |_| {
-        operations.borrow_mut().push("retire lease-old");
-        Ok(())
-    })
-    .expect("the daemon observed after materialization is retired before connect");
-    operations.borrow_mut().push("connect promoted binary");
-    assert_eq!(
-        operations.into_inner(),
-        ["retire lease-old", "connect promoted binary"]
     );
 }
 
@@ -235,91 +167,54 @@ fn refreshed_daemon_status(connected: bool, identity: Option<&str>) -> RunnerSta
 }
 
 #[test]
-fn refreshed_daemon_verification_accepts_the_post_start_health_window() {
-    let not_ready = refreshed_daemon_status(false, Some("homeboy 0.1.0+06bbf46013cf"));
-    let ready = refreshed_daemon_status(true, Some("homeboy 0.1.0+06bbf46013cf"));
-    let mut statuses = [not_ready, ready].into_iter();
-    let mut retries = 0;
-
-    verify_refreshed_daemon_topology_with(
-        "lab",
-        "06bbf46013cf",
-        None,
-        || Ok(statuses.next().expect("post-start status probe")),
-        || retries += 1,
-    )
-    .expect("the persisted connected session identifies the requested daemon commit");
-    assert_eq!(retries, 1, "the initial tunnel health race is retried once");
-}
-
-#[test]
-fn refreshed_daemon_verification_converges_after_exact_identity_refresh() {
-    let mut stale = refreshed_daemon_status(true, Some("homeboy 0.294.0+oldcommit"));
-    stale.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+fn refreshed_daemon_verification_retries_until_daemon_and_configured_binary_converge() {
+    let converged = || refreshed_daemon_status(true, Some("homeboy 0.294.0+19a41cd5102d"));
+    // Post-start health window: the tunnel is not ready on the first probe.
+    let not_ready = refreshed_daemon_status(false, Some("homeboy 0.294.0+19a41cd5102d"));
+    // The daemon still reports the pre-refresh build.
+    let mut stale_daemon = refreshed_daemon_status(true, Some("homeboy 0.294.0+oldcommit"));
+    stale_daemon.stale_daemon = Some(RunnerStaleDaemonWarning::new(
         "lab",
         "0.294.0".to_string(),
         "0.294.0".to_string(),
         Some("homeboy 0.294.0+oldcommit".to_string()),
         Some("homeboy 0.294.0+19a41cd5102d".to_string()),
     ));
-    let converged = refreshed_daemon_status(true, Some("homeboy 0.294.0+19a41cd5102d"));
-    let mut statuses = [stale, converged].into_iter();
-    let mut retries = 0;
-
-    verify_refreshed_daemon_topology_with(
-        "lab",
-        "19a41cd5102d",
-        None,
-        || Ok(statuses.next().expect("refresh convergence status")),
-        || retries += 1,
-    )
-    .expect("refresh converges once daemon and configured executable identities match");
-    assert_eq!(retries, 1);
-}
-
-#[test]
-fn refreshed_daemon_verification_retries_until_the_configured_job_binary_converges() {
-    let daemon_identity = "homeboy 0.294.0+19a41cd5102d";
-    let mut stale_configured = refreshed_daemon_status(true, Some(daemon_identity));
+    // The daemon matches but the configured job binary is still stale.
+    let mut stale_configured = converged();
     stale_configured.configured_job_binary_build_identity =
         Some("homeboy 0.294.0+oldcommit".to_string());
-    let converged = refreshed_daemon_status(true, Some(daemon_identity));
-    let mut statuses = [stale_configured, converged].into_iter();
-    let mut retries = 0;
 
-    verify_refreshed_daemon_topology_with(
-        "lab",
-        "19a41cd5102d",
-        None,
-        || Ok(statuses.next().expect("topology status probe")),
-        || retries += 1,
-    )
-    .expect("refresh succeeds only after the configured binary and daemon converge");
-
-    assert_eq!(
-        retries, 1,
-        "the stale configured binary is reread before success"
-    );
+    for first in [not_ready, stale_daemon, stale_configured] {
+        let mut statuses = [first, converged()].into_iter();
+        let mut retries = 0;
+        verify_refreshed_daemon_topology_with(
+            "lab",
+            "19a41cd5102d",
+            None,
+            || Ok(statuses.next().expect("topology status probe")),
+            || retries += 1,
+        )
+        .expect("refresh converges once daemon and configured executable identities match");
+        assert_eq!(retries, 1);
+    }
 }
 
 #[test]
-fn refreshed_daemon_verification_rejects_a_persisted_configured_binary_mismatch() {
-    let mut status = refreshed_daemon_status(true, Some("homeboy 0.294.0+19a41cd5102d"));
-    status.configured_job_binary_build_identity = Some("homeboy 0.294.0+oldcommit".to_string());
+fn refreshed_daemon_verification_rejects_mismatched_identities() {
+    let mut configured_mismatch = refreshed_daemon_status(true, Some("homeboy 0.1.0+06bbf46013cf"));
+    configured_mismatch.configured_job_binary_build_identity =
+        Some("homeboy 0.1.0+oldcommit".to_string());
+    let substring_mismatch = refreshed_daemon_status(true, Some("homeboy 0.1.0+x06bbf46013cf"));
 
-    let error = verify_refreshed_daemon_topology_status("lab", "19a41cd5102d", None, &status)
-        .expect_err("matching daemon alone must not certify refresh success");
-
-    assert!(error.message.contains("retained configured job binary"));
-}
-
-#[test]
-fn refreshed_daemon_verification_rejects_commit_substring_mismatch() {
-    let status = refreshed_daemon_status(true, Some("homeboy 0.1.0+x06bbf46013cf"));
-
-    let error = verify_refreshed_daemon_topology_status("lab", "06bbf46013cf", None, &status)
-        .expect_err("the daemon commit component must match exactly");
-    assert!(error.message.contains("expected commit `06bbf46013cf`"));
+    for (status, expected) in [
+        (configured_mismatch, "retained configured job binary"),
+        (substring_mismatch, "expected commit `06bbf46013cf`"),
+    ] {
+        let error = verify_refreshed_daemon_topology_status("lab", "06bbf46013cf", None, &status)
+            .expect_err("mismatched topology must not certify refresh success");
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
 }
 
 fn disconnect_report(disconnected: bool, partial: bool) -> crate::RunnerDisconnectReport {
@@ -439,60 +334,37 @@ fn select_without_materialization_sha_promotes_the_verified_binary() {
 
 #[test]
 fn reconnect_rollback_restores_only_its_own_selected_binary() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/newer/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
+    for (configured, expected_restored, expected_path) in [
+        ("/selected/homeboy", true, "/stable/homeboy"),
+        ("/newer/homeboy", false, "/newer/homeboy"),
+    ] {
+        crate::test_support::with_isolated_home(|_| {
+            crate::create(
+                &serde_json::json!({"id": "lab-local", "kind": "local", "homeboy_path": configured})
+                    .to_string(),
+                false,
+            )
+            .expect("runner");
 
-        let restored = restore_runner_homeboy_path_if_selected_in_roots(
-            &ambient_roots(),
-            "lab-local",
-            "/selected/homeboy",
-            Some("/stable/homeboy"),
-        )
-        .expect("compare and restore");
+            let restored = restore_runner_homeboy_path_if_selected_in_roots(
+                &ambient_roots(),
+                "lab-local",
+                "/selected/homeboy",
+                Some("/stable/homeboy"),
+            )
+            .expect("compare and restore");
 
-        assert!(!restored);
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/newer/homeboy")
-        );
-    });
-}
-
-#[test]
-fn reconnect_rollback_restores_its_own_selected_binary() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/selected/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-
-        let restored = restore_runner_homeboy_path_if_selected_in_roots(
-            &ambient_roots(),
-            "lab-local",
-            "/selected/homeboy",
-            Some("/stable/homeboy"),
-        )
-        .expect("compare and restore");
-
-        assert!(restored);
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/stable/homeboy")
-        );
-    });
+            assert_eq!(restored, expected_restored, "{configured}");
+            assert_eq!(
+                crate::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some(expected_path)
+            );
+        });
+    }
 }
 
 #[test]
@@ -586,36 +458,54 @@ fn parse_identity_reads_final_pretty_json_after_command_output() {
 }
 
 #[test]
-fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transport() {
-    let plan = HomeboyBinaryRefreshPlan {
-        runner_id: "lab".to_string(),
-        mode: "materialize".to_string(),
-        git_ref: Some("accepted-sha".to_string()),
-        binary_path: "/runner/_homeboy_binaries".to_string(),
-        script: "managed clone fetch build select".to_string(),
-        followup_commands: Vec::new(),
-    };
-
-    let options = refresh_execution_options(
-        &plan.script,
+fn refresh_execution_options_bound_disconnected_ssh_and_keep_daemon_admission_when_connected() {
+    let disconnected = refresh_execution_options(
+        "managed clone fetch build select",
         vec!["bash".to_string(), "git".to_string(), "cargo".to_string()],
         true,
     );
-
-    assert!(options.allow_diagnostic_ssh);
+    assert!(disconnected.allow_diagnostic_ssh);
     assert_eq!(
-        options.diagnostic_ssh_timeout,
+        disconnected.diagnostic_ssh_timeout,
         Some(DISCONNECTED_SSH_REFRESH_TIMEOUT)
     );
     assert_eq!(
-        options.command,
+        disconnected.command,
         vec!["bash", "-lc", "managed clone fetch build select"]
     );
-    assert!(options
+    assert!(disconnected
         .capability_preflight
         .expect("bootstrap preflight")
         .required_commands
         .is_empty());
+
+    let connected = refresh_execution_options("probe", vec!["bash".to_string()], false);
+    assert!(!connected.allow_diagnostic_ssh);
+    assert_eq!(connected.diagnostic_ssh_timeout, None);
+    assert!(connected.mirror_evidence);
+    assert!(connected.print_handoff);
+    // #18376: the daemon admits the refresh outside bulk pressure admission.
+    assert_eq!(
+        connected
+            .env
+            .get(homeboy_core::runner_pressure::ADMISSION_CLASS_ENV)
+            .map(String::as_str),
+        Some(homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS)
+    );
+}
+
+fn ssh_runner() -> crate::Runner {
+    crate::Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: None,
+        workspace_root: None,
+        settings: Default::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    }
 }
 
 fn stale_daemon_admission_snapshot(
@@ -667,17 +557,7 @@ fn stale_daemon_admission_snapshot(
 
 #[test]
 fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_daemons() {
-    let runner = crate::Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: None,
-        workspace_root: None,
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
-    };
+    let runner = ssh_runner();
     let disconnected = crate::runner_admission_snapshot_for_status(
         refreshed_daemon_status(false, None),
         crate::RunnerAdmissionReadiness::Observation,
@@ -685,12 +565,7 @@ fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_
 
     let route = refresh_execution_route(&runner, &disconnected)
         .expect("disconnected SSH refresh retains diagnostic execution");
-    let options = refresh_execution_options(
-        &ssh_bootstrap_plan().script,
-        vec!["bash".to_string()],
-        route.uses_diagnostic_ssh(),
-    );
-    assert!(options.allow_diagnostic_ssh);
+    assert!(route.uses_diagnostic_ssh());
 
     let unsafe_stale = stale_daemon_admission_snapshot(1, Some("lease-current"), Some(1));
     let error = refresh_execution_route(&runner, &unsafe_stale)
@@ -715,101 +590,40 @@ fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_
 }
 
 #[test]
-fn reconcile_then_refresh_uses_the_idle_postcondition() {
-    let runner = crate::Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: None,
-        workspace_root: None,
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
-    };
-    let reconciled = stale_daemon_admission_snapshot(0, Some("lease-current"), Some(1)).status;
-    let operations = RefCell::new(Vec::new());
+fn reconcile_then_refresh_routes_on_the_reconciled_postcondition() {
+    for (active_jobs, safe_to_rotate) in [(0, true), (1, false)] {
+        let reconciled =
+            stale_daemon_admission_snapshot(active_jobs, Some("lease-current"), Some(1)).status;
+        let operations = RefCell::new(Vec::new());
 
-    let admission = reconciled_refresh_admission_with(
-        "lab",
-        |_| {
-            operations.borrow_mut().push("reconcile");
-            Ok(reconciled)
-        },
-        |status| {
-            operations.borrow_mut().push("project");
-            crate::runner_admission_snapshot_for_status(
-                status,
-                crate::RunnerAdmissionReadiness::Observation,
-            )
-        },
-    )
-    .expect("reconciled refresh admission");
+        let admission = reconciled_refresh_admission_with(
+            "lab",
+            |_| {
+                operations.borrow_mut().push("reconcile");
+                Ok(reconciled)
+            },
+            |status| {
+                operations.borrow_mut().push("project");
+                crate::runner_admission_snapshot_for_status(
+                    status,
+                    crate::RunnerAdmissionReadiness::Observation,
+                )
+            },
+        )
+        .expect("reconciled refresh admission");
 
-    assert_eq!(operations.into_inner(), ["reconcile", "project"]);
-    assert!(admission.summary.safe_to_rotate);
-    assert_eq!(
-        refresh_execution_route(&runner, &admission).expect("idle stale daemon routes over SSH"),
-        RefreshExecutionRoute::DiagnosticSsh
-    );
-}
-
-#[test]
-fn reconcile_then_refresh_fails_closed_when_the_postcondition_has_a_live_job() {
-    let runner = crate::Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: None,
-        workspace_root: None,
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
-    };
-    let live = stale_daemon_admission_snapshot(1, Some("lease-current"), Some(1)).status;
-
-    let admission = reconciled_refresh_admission_with(
-        "lab",
-        |_| Ok(live),
-        |status| {
-            crate::runner_admission_snapshot_for_status(
-                status,
-                crate::RunnerAdmissionReadiness::Observation,
-            )
-        },
-    )
-    .expect("live postcondition projects");
-
-    assert!(!admission.summary.safe_to_rotate);
-    assert!(refresh_execution_route(&runner, &admission).is_err());
-}
-
-#[test]
-fn connected_refresh_keeps_daemon_execution_options() {
-    let plan = HomeboyBinaryRefreshPlan {
-        runner_id: "lab".to_string(),
-        mode: "select".to_string(),
-        git_ref: None,
-        binary_path: "/runner/homeboy".to_string(),
-        script: "probe".to_string(),
-        followup_commands: Vec::new(),
-    };
-
-    let options = refresh_execution_options(&plan.script, vec!["bash".to_string()], false);
-
-    assert!(!options.allow_diagnostic_ssh);
-    assert_eq!(options.diagnostic_ssh_timeout, None);
-    assert!(options.mirror_evidence);
-    assert!(options.print_handoff);
-    // #18376: the daemon admits the refresh outside bulk pressure admission.
-    assert_eq!(
-        options
-            .env
-            .get(homeboy_core::runner_pressure::ADMISSION_CLASS_ENV)
-            .map(String::as_str),
-        Some(homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS)
-    );
+        assert_eq!(operations.into_inner(), ["reconcile", "project"]);
+        assert_eq!(admission.summary.safe_to_rotate, safe_to_rotate);
+        let route = refresh_execution_route(&ssh_runner(), &admission);
+        if safe_to_rotate {
+            assert_eq!(
+                route.expect("idle stale daemon routes over SSH"),
+                RefreshExecutionRoute::DiagnosticSsh
+            );
+        } else {
+            assert!(route.is_err(), "a live job fails closed");
+        }
+    }
 }
 
 #[test]

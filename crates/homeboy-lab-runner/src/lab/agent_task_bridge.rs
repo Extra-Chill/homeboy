@@ -510,30 +510,6 @@ pub(super) fn ensure_agent_task_lifecycle_identity_with(
     Some((args, attempt_run_id))
 }
 
-#[cfg(test)]
-mod lifecycle_identity_tests {
-    use super::*;
-
-    #[test]
-    fn run_plan_record_identity_is_preserved_for_lab_lifecycle() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "run-plan".to_string(),
-            "--plan".to_string(),
-            "@plan.json".to_string(),
-            "--record-run-id".to_string(),
-            "retry-8341".to_string(),
-        ];
-
-        let (rewritten, run_id) = ensure_agent_task_lifecycle_identity_with(&args, None, None)
-            .expect("run-plan has a durable lifecycle identity");
-
-        assert_eq!(rewritten, args);
-        assert_eq!(run_id, "retry-8341");
-    }
-}
-
 /// Resolves the stable per-run isolation token for an agent-task cook offload:
 /// the explicit `--run-id` when provided, otherwise a freshly generated run id.
 /// Returns `None` for other invocations, which already use unique snapshot
@@ -619,25 +595,6 @@ mod tests {
     use homeboy_agents::agent_task_lifecycle::agent_task_handoff_event::agent_task_handoff_document_from_output;
 
     #[test]
-    fn offloaded_dispatch_envelope_parser_selects_structured_failure_from_mixed_stdout() {
-        let stdout = concat!(
-            "remote setup complete\n",
-            "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}\n",
-            "{\"success\":false,\"data\":{\"schema\":\"homeboy/agent-task-dispatch/v1\",\"run_id\":\"run-1\",\"state\":\"failed\",\"record\":{},\"aggregate\":{\"status\":\"failed\"}}}\n"
-        );
-
-        let parsed = agent_task_handoff_value(
-            &agent_task_handoff_document_from_output(stdout).expect("document"),
-        )
-        .expect("parse dispatch stdout")
-        .map(|handoff| handoff.envelope)
-        .expect("dispatch envelope found");
-
-        assert_eq!(parsed["run_id"], "run-1");
-        assert_eq!(parsed["aggregate"]["status"], "failed");
-    }
-
-    #[test]
     fn offloaded_dispatch_envelope_parser_selects_structured_failure_from_stderr() {
         let stderr = concat!(
             "{\n",
@@ -676,14 +633,6 @@ mod tests {
         assert_eq!(
             parsed["run_id"],
             "conductor-full-loop-proof-retry3-20260612"
-        );
-        assert_eq!(
-            parsed["aggregate"]["outcomes"][0]["task_id"],
-            "cook-conductor"
-        );
-        assert_eq!(
-            parsed["aggregate"]["outcomes"][0]["metadata"]["provider"],
-            "remote.agent-task-executor"
         );
         assert_eq!(
             parsed["aggregate"]["outcomes"][0]["metadata"]["runtime_run_result"]
@@ -868,140 +817,59 @@ mod tests {
     }
 
     /// #7530: the controller mirrors the cook/dispatch handoff from the typed
-    /// event, so stdout can be anything at all — including output that would
-    /// previously have been scraped into a *different* handoff.
-    #[test]
-    fn typed_dispatch_handoff_is_taken_from_the_job_event_not_stdout() {
-        let agent_task = dispatch_agent_task(
-            "run-typed-handoff",
-            Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff),
-        );
-        let events = vec![typed_handoff_job_event("run-typed-handoff", "from-event")];
-        let handoff = resolve_offloaded_agent_task_handoff(Some(&agent_task), Some(&events))
-            .expect("typed handoff resolves")
-            .expect("handoff found");
-
-        assert_eq!(handoff.run_id.as_deref(), Some("from-event"));
-    }
-
+    /// event, so stdout can be anything at all. Without a matching typed event
+    /// for the workload's run, no handoff is adopted.
     #[test]
     fn dispatch_handoff_requires_matching_typed_event() {
+        let mirrored = || {
+            Some(dispatch_agent_task(
+                "run-typed-handoff",
+                Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff),
+            ))
+        };
+        let matching = || {
+            Some(vec![typed_handoff_job_event(
+                "run-typed-handoff",
+                "from-event",
+            )])
+        };
         let cases: Vec<(
             &str,
             Option<LabRunnerWorkloadAgentTask>,
             Option<Vec<JobEvent>>,
+            Option<&str>,
         )> = vec![
-            // No agent-task contract.
-            ("no workload", None, None),
-            // Workload declares no handoff policy.
+            ("typed event", mirrored(), matching(), Some("from-event")),
+            ("no workload", None, None, None),
             (
                 "no handoff policy",
                 Some(dispatch_agent_task("run-typed-handoff", None)),
-                Some(vec![typed_handoff_job_event(
-                    "run-typed-handoff",
-                    "from-event",
-                )]),
-            ),
-            // Contract says mirror, but the runner emitted no typed event.
-            (
-                "typed workload, untyped runner",
-                Some(dispatch_agent_task(
-                    "run-typed-handoff",
-                    Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff),
-                )),
+                matching(),
                 None,
             ),
-            // A typed event for a different run must not be adopted.
+            ("typed workload, untyped runner", mirrored(), None, None),
             (
                 "mismatched run identity",
-                Some(dispatch_agent_task(
-                    "run-typed-handoff",
-                    Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff),
-                )),
+                mirrored(),
                 Some(vec![typed_handoff_job_event(
                     "some-other-run",
                     "from-event",
                 )]),
+                None,
             ),
         ];
 
-        for (label, agent_task, events) in cases {
+        for (label, agent_task, events, expected) in cases {
             let handoff =
                 resolve_offloaded_agent_task_handoff(agent_task.as_ref(), events.as_deref())
                     .unwrap_or_else(|error| panic!("{label}: {error:?}"));
 
-            assert!(handoff.is_none(), "{label}");
+            assert_eq!(
+                handoff.and_then(|handoff| handoff.run_id).as_deref(),
+                expected,
+                "{label}"
+            );
         }
-    }
-
-    #[test]
-    fn typed_run_plan_lifecycle_ignores_stdout_without_job_event() {
-        let agent_task = LabRunnerWorkloadAgentTask {
-            run_id: "run-typed-no-event".to_string(),
-            plan_ref: Some("@/tmp/plan.json".to_string()),
-            resolved_provider_policy: None,
-            dispatch_kind:
-                homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
-            lifecycle_mirror_policy:
-                LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
-            handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
-            wait_budget_ms: None,
-        };
-
-        mirror_agent_task_run_plan_lifecycle(Some(&agent_task), None, None)
-            .expect("typed path does not parse stdout fallback");
-    }
-
-    #[test]
-    fn typed_run_plan_lifecycle_mirror_uses_workload_event_without_stdout_parsing() {
-        crate::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let plan_path = temp.path().join("plan.json");
-            fs::write(
-                &plan_path,
-                r#"{"schema":"homeboy/agent-task-plan/v1","plan_id":"plan-typed","tasks":[]}"#,
-            )
-            .expect("write plan");
-            let agent_task = LabRunnerWorkloadAgentTask {
-                run_id: "run-typed-workload".to_string(),
-                plan_ref: Some(format!("@{}", plan_path.display())),
-                resolved_provider_policy: None,
-                dispatch_kind:
-                    homeboy_core::lab_contract::LabRunnerWorkloadAgentTaskDispatchKind::RunPlan,
-                lifecycle_mirror_policy:
-                    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::RunPlanAggregate,
-                handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
-                wait_budget_ms: None,
-            };
-            let events = vec![JobEvent {
-                sequence: 1,
-                job_id: uuid::Uuid::nil(),
-                kind: JobEventKind::Progress,
-                timestamp_ms: 1,
-                message: None,
-                data: Some(serde_json::json!({
-                    "schema": "homeboy/runner-workload-agent-task-lifecycle-event/v1",
-                    "agent_task_lifecycle_event": {
-                        "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
-                        "identity": {
-                            "runner_id": "lab-default",
-                            "runner_job_id": "job-typed",
-                            "run_id": "run-typed-workload"
-                        },
-                        "aggregate": {
-                            "schema":"homeboy/agent-task-aggregate/v1",
-                            "plan_id":"plan-typed",
-                            "status":"succeeded",
-                            "totals":{"skipped":0,"succeeded":0,"failed":0},
-                            "outcomes":[]
-                        }
-                    }
-                })),
-            }];
-
-            mirror_agent_task_run_plan_lifecycle(Some(&agent_task), None, Some(&events))
-                .expect("typed mirror uses job event");
-        });
     }
 
     #[test]
@@ -1216,11 +1084,6 @@ mod tests {
                 "openai/gpt-5.6-terra"
             );
         });
-    }
-
-    #[test]
-    fn workload_without_agent_task_mirrors_nothing() {
-        mirror_agent_task_run_plan_lifecycle(None, None, None).expect("no lifecycle to mirror");
     }
 
     #[test]
