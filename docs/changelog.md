@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.26] - 2026-11-25
+
+### Fixed
+- bind an unclaimed Cook handoff placeholder to its live writer
+- retry provider overloaded_error (529) as transient
+
 ## [0.497.25] - 2026-11-25
 
 ### Changed
