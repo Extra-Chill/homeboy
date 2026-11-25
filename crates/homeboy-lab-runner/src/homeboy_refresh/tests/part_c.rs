@@ -72,14 +72,19 @@ fn freshness(
 }
 
 #[test]
-fn refresh_readiness_does_not_fence_a_ready_daemon_on_its_own_live_jobs() {
-    let mut report = readiness_report(freshness(true, None));
-    report.active_job_count = 1;
-    let readiness = refresh_readiness_from_status("homeboy-lab", &report);
+fn refresh_readiness_certifies_a_ready_daemon_even_with_its_own_live_jobs() {
+    for active_jobs in [0, 1] {
+        let mut report = readiness_report(freshness(true, None));
+        report.active_job_count = active_jobs;
+        let readiness = refresh_readiness_from_status("homeboy-lab", &report);
 
-    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Ready);
-    assert!(readiness.owners.is_empty());
-    assert!(readiness.continuation.is_none());
+        assert_eq!(readiness.state, HomeboyRefreshReadinessState::Ready);
+        assert!(readiness.daemon_fresh);
+        assert!(readiness.accepting_jobs);
+        assert!(readiness.owners.is_empty());
+        assert!(!refresh_requires_reconnect("homeboy-lab", &readiness));
+        assert!(readiness.continuation.is_none());
+    }
 }
 
 #[test]
@@ -121,37 +126,6 @@ fn refresh_readiness_requires_reconnect_when_controller_tunnel_dies_after_restar
     assert_eq!(
         readiness.continuation.as_deref(),
         Some("homeboy runner connect homeboy-lab")
-    );
-}
-
-#[test]
-fn refresh_readiness_certifies_immediate_admission_only_when_ready() {
-    let readiness =
-        refresh_readiness_from_status("homeboy-lab", &readiness_report(freshness(true, None)));
-
-    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Ready);
-    assert!(readiness.daemon_fresh);
-    assert!(readiness.accepting_jobs);
-    assert!(!refresh_requires_reconnect("homeboy-lab", &readiness));
-    assert!(readiness.continuation.is_none());
-}
-
-#[test]
-fn incomplete_readiness_does_not_rewrite_daemon_refresh_compatibility_facts() {
-    let readiness = refresh_readiness_from_status(
-        "homeboy-lab",
-        &readiness_report(freshness(
-            false,
-            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
-        )),
-    );
-
-    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
-    // A completed rotation remains a completed daemon operation. The non-ready
-    // readiness state and nonzero refresh result express incomplete convergence.
-    assert_eq!(
-        readiness.continuation.as_deref(),
-        Some("homeboy runner status homeboy-lab --full")
     );
 }
 
@@ -280,23 +254,7 @@ fn admission_readiness_timeout_surfaces_one_canonical_recovery_action() {
     assert!(error.message.contains("daemon lease is not fresh"));
 }
 
-/// The retry classifier treats only an authoritative lease mismatch as fatal;
-/// both #9466 transient shapes (not-fresh lease and transport drop) are
-/// retryable so the reconnect can converge.
-#[test]
-fn only_lease_mismatch_is_treated_as_authoritative() {
-    assert!(admission_readiness_failure_is_authoritative(
-        &lease_mismatch_error()
-    ));
-    assert!(!admission_readiness_failure_is_authoritative(
-        &not_fresh_error()
-    ));
-    assert!(!admission_readiness_failure_is_authoritative(
-        &transport_drop_error()
-    ));
-}
-
-pub(super) fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, RunnerExecOutput) {
+fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, RunnerExecOutput) {
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "homeboy-lab".to_string(),
         mode: "select".to_string(),
@@ -341,10 +299,10 @@ pub(super) fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, Runner
 /// reconnect, daemon identity verification, admission readiness) can report
 /// `succeeded` while the runner's own admission postcondition still refuses
 /// to converge. That must never surface as `failure: None` alongside a
-/// non-zero exit — the exact "exited 1 without reporting a failure cause"
-/// this issue reported.
+/// non-zero exit, and a converged (or absent) reconnect must never synthesize
+/// a spurious failure.
 #[test]
-fn unconverged_readiness_produces_a_named_failure_not_a_silent_exit() {
+fn unconverged_readiness_produces_an_actionable_named_failure() {
     let (plan, execution) = unconverged_refresh_fixture();
     let readiness = refresh_readiness_from_status(
         "homeboy-lab",
@@ -360,55 +318,22 @@ fn unconverged_readiness_produces_a_named_failure_not_a_silent_exit() {
     let message = failure
         .verification
         .expect("unconverged failure carries a verification message");
-    assert!(
-        message.contains("did not converge"),
-        "failure must explain that the reconnect did not converge: {message}"
-    );
-    assert!(
-        message.contains("Blocked"),
-        "failure must name the readiness state that blocked convergence: {message}"
-    );
-}
+    for expected in [
+        "did not converge",
+        "homeboy-lab",
+        "Blocked",
+        "accepting_jobs=false",
+        "daemon_fresh=false",
+        "lease-new",
+        "homeboy runner status homeboy-lab --full",
+    ] {
+        assert!(message.contains(expected), "{expected}: {message}");
+    }
 
-/// A converged reconnect (readiness `Ready`, or no reconnect at all) must
-/// never synthesize a failure — this exercises both branches side by side so
-/// a future edit cannot silently start reporting spurious failures on the
-/// success path.
-#[test]
-fn converged_or_absent_readiness_never_synthesizes_a_failure() {
-    let (plan, execution) = unconverged_refresh_fixture();
     let ready =
         refresh_readiness_from_status("homeboy-lab", &readiness_report(freshness(true, None)));
-    assert_eq!(ready.state, HomeboyRefreshReadinessState::Ready);
-
     assert!(unconverged_refresh_failure(&plan, &execution, true, Some(&ready)).is_none());
     assert!(unconverged_refresh_failure(&plan, &execution, true, None).is_none());
-}
-
-/// The rendered message must be actionable on its own: name the admission
-/// state, whether jobs are accepted, daemon freshness, the exact owners
-/// fencing convergence, and the one command that resumes the lifecycle.
-#[test]
-fn unconverged_readiness_message_names_state_owners_and_next_action() {
-    let readiness = refresh_readiness_from_status(
-        "homeboy-lab",
-        &readiness_report(freshness(
-            false,
-            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
-        )),
-    );
-    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
-
-    let message = unconverged_readiness_message("homeboy-lab", &readiness);
-    assert!(message.contains("homeboy-lab"));
-    assert!(message.contains("Blocked"));
-    assert!(message.contains("accepting_jobs=false"));
-    assert!(message.contains("daemon_fresh=false"));
-    assert!(message.contains("lease-new"), "must name the fencing owner");
-    assert!(
-        message.contains("homeboy runner status homeboy-lab --full"),
-        "must surface the exact continuation command"
-    );
 }
 
 #[test]

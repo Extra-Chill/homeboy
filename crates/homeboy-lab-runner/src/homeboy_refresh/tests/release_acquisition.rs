@@ -405,41 +405,37 @@ fn acquired_release_tag_reuses_its_verified_slot_without_downloading() {
     );
 }
 
-fn assert_release_archive_rejected(kind: ReleaseArchive, expected: &str) {
+#[test]
+fn release_acquisition_rejects_unsafe_archives_without_a_source_build() {
     let Some(triple) = host_release_triple() else {
         return;
     };
-    let fixture = release_fixture();
-    publish_release_archive(&fixture, triple, kind);
-    let root = binaries_root(&fixture);
+    for (kind, expected) in [
+        (
+            ReleaseArchive::SymlinkCandidate,
+            "Release archive candidate must be a regular file",
+        ),
+        (
+            ReleaseArchive::TraversalMember,
+            "Release archive contains an unsafe member path",
+        ),
+    ] {
+        let fixture = release_fixture();
+        publish_release_archive(&fixture, triple, kind);
+        let root = binaries_root(&fixture);
 
-    let output = materialize(&fixture, RELEASE_TAG, &root);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "an unsafe release archive must be rejected: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    assert!(stderr.contains(expected), "{stderr}");
-    assert!(
-        !fixture.cargo_log.exists(),
-        "a rejected release is not replaced by a source build"
-    );
-    assert!(published_slots(&root).is_empty(), "no slot is published");
-}
-
-#[test]
-fn release_acquisition_rejects_a_symlink_candidate() {
-    assert_release_archive_rejected(
-        ReleaseArchive::SymlinkCandidate,
-        "Release archive candidate must be a regular file",
-    );
-}
-
-#[test]
-fn release_acquisition_rejects_a_traversal_member() {
-    assert_release_archive_rejected(
-        ReleaseArchive::TraversalMember,
-        "Release archive contains an unsafe member path",
-    );
+        let output = materialize(&fixture, RELEASE_TAG, &root);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "an unsafe release archive must be rejected: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(
+            !fixture.cargo_log.exists(),
+            "a rejected release is not replaced by a source build"
+        );
+        assert!(published_slots(&root).is_empty(), "no slot is published");
+    }
 }
