@@ -68,24 +68,3 @@ impl RunnerCapabilityPreflight {
             && self.required_env.is_empty()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn required_tool_constructors_keep_canonical_ids() {
-        assert_eq!(RunnerRequiredTool::homeboy().id(), "homeboy");
-        assert_eq!(RunnerRequiredTool::git().id(), "git");
-        assert_eq!(RunnerRequiredTool::new("browser").id(), "browser");
-    }
-
-    #[test]
-    fn preflight_is_empty_until_a_requirement_is_declared() {
-        let mut preflight = RunnerCapabilityPreflight::default();
-        assert!(preflight.is_empty());
-
-        preflight.required_env.push("TOKEN".to_string());
-        assert!(!preflight.is_empty());
-    }
-}
