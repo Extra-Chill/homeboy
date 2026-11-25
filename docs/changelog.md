@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.5] - 2026-11-25
+
+### Changed
+- one collision check and one root builder for unmaterialized Cook admission
+- prune restating and duplicate tests in api_jobs and artifact modules
+
 ## [0.497.4] - 2026-11-25
 
 ### Changed
