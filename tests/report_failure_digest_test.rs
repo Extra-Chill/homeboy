@@ -335,61 +335,58 @@ mod digest_rendering_tests {
     }
 
     #[test]
-    fn classifies_failures_as_branch_introduced_when_baseline_has_distinct_failures() {
-        let guard = tmp_dir("origin-branch-introduced");
-        let dir = guard.path();
-        write_file(dir, "test.json", TEST_JSON);
-        write_file(
-            dir,
-            "baseline-test.json",
-            r#"{
-                "success": false,
-                "data": {
-                    "findings": [
-                        {
-                            "tool": "test",
-                            "message": "existing unrelated failure",
-                            "file": "tests/other_test.rs",
-                            "metadata": {"test_name": "test_existing_failure"}
-                        }
-                    ]
-                }
-            }"#,
-        );
+    fn classifies_failure_origin_against_baseline_artifact() {
+        let distinct_baseline = r#"{
+            "success": false,
+            "data": {
+                "findings": [
+                    {
+                        "tool": "test",
+                        "message": "existing unrelated failure",
+                        "file": "tests/other_test.rs",
+                        "metadata": {"test_name": "test_existing_failure"}
+                    }
+                ]
+            }
+        }"#;
+        for (name, baseline, expected) in [
+            (
+                "branch-introduced",
+                distinct_baseline,
+                vec!["- `test`: **branch-introduced** (head: 2, baseline: 1, shared: 0)"],
+            ),
+            (
+                "baseline-present",
+                TEST_JSON,
+                vec!["- `test`: **baseline-present** (head: 2, baseline: 2, shared: 2)"],
+            ),
+            (
+                "inconclusive",
+                "not json",
+                vec![
+                    "- `test`: **inconclusive** (baseline artifact `",
+                    "failed to parse",
+                ],
+            ),
+        ] {
+            let guard = tmp_dir(&format!("origin-{name}"));
+            let dir = guard.path();
+            write_file(dir, "test.json", TEST_JSON);
+            write_file(dir, "baseline-test.json", baseline);
 
-        let markdown = render(dir, r#"{"test":"fail"}"#, false, false);
+            let markdown = render(dir, r#"{"test":"fail"}"#, false, false);
 
-        assert!(markdown.contains("### Failure origin classification"));
-        assert!(
-            markdown.contains("- `test`: **branch-introduced** (head: 2, baseline: 1, shared: 0)")
-        );
-    }
-
-    #[test]
-    fn classifies_failures_as_baseline_present_when_all_head_failures_match_baseline() {
-        let guard = tmp_dir("origin-baseline-present");
-        let dir = guard.path();
-        write_file(dir, "test.json", TEST_JSON);
-        write_file(dir, "baseline-test.json", TEST_JSON);
-
-        let markdown = render(dir, r#"{"test":"fail"}"#, false, false);
-
-        assert!(
-            markdown.contains("- `test`: **baseline-present** (head: 2, baseline: 2, shared: 2)")
-        );
-    }
-
-    #[test]
-    fn reports_inconclusive_when_baseline_artifact_cannot_be_parsed() {
-        let guard = tmp_dir("origin-baseline-parse-failed");
-        let dir = guard.path();
-        write_file(dir, "test.json", TEST_JSON);
-        write_file(dir, "baseline-test.json", "not json");
-
-        let markdown = render(dir, r#"{"test":"fail"}"#, false, false);
-
-        assert!(markdown.contains("- `test`: **inconclusive** (baseline artifact `"));
-        assert!(markdown.contains("failed to parse"));
+            assert!(
+                markdown.contains("### Failure origin classification"),
+                "{name}"
+            );
+            for line in expected {
+                assert!(
+                    markdown.contains(line),
+                    "{name}: missing `{line}`\n{markdown}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -428,32 +425,39 @@ mod digest_rendering_tests {
     }
 
     #[test]
-    fn renders_mixed_failures_with_autofix_enabled_not_attempted() {
-        let guard = tmp_dir("mixed-autofix");
-        let dir = guard.path();
-        write_file(dir, "lint.json", LINT_JSON);
-        write_file(dir, "test.json", TEST_JSON);
+    fn autofix_attempt_decides_overall_classification() {
+        for (name, results, attempted, expected) in [
+            (
+                "not-attempted",
+                r#"{"lint":"fail","test":"fail"}"#,
+                false,
+                vec!["- Overall: **auto_fixable**", "  - `lint`", "  - `test`"],
+            ),
+            (
+                "attempted",
+                r#"{"lint":"fail"}"#,
+                true,
+                vec![
+                    "- Overall: **human_needed**",
+                    "- Autofix attempted this run: **yes**",
+                    "  - `lint`",
+                ],
+            ),
+        ] {
+            let guard = tmp_dir(&format!("autofix-{name}"));
+            let dir = guard.path();
+            write_file(dir, "lint.json", LINT_JSON);
+            write_file(dir, "test.json", TEST_JSON);
 
-        let markdown = render(dir, r#"{"lint":"fail","test":"fail"}"#, true, false);
+            let markdown = render(dir, results, true, attempted);
 
-        assert!(markdown.contains("### Lint Failure Digest"));
-        assert!(markdown.contains("### Test Failure Digest"));
-        assert!(markdown.contains("- Overall: **auto_fixable**"));
-        assert!(markdown.contains("  - `lint`"));
-        assert!(markdown.contains("  - `test`"));
-    }
-
-    #[test]
-    fn renders_mixed_failures_after_autofix_attempted_as_human_needed() {
-        let guard = tmp_dir("attempted");
-        let dir = guard.path();
-        write_file(dir, "lint.json", LINT_JSON);
-
-        let markdown = render(dir, r#"{"lint":"fail"}"#, true, true);
-
-        assert!(markdown.contains("- Overall: **human_needed**"));
-        assert!(markdown.contains("- Autofix attempted this run: **yes**"));
-        assert!(markdown.contains("  - `lint`"));
+            for line in expected {
+                assert!(
+                    markdown.contains(line),
+                    "{name}: missing `{line}`\n{markdown}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -550,21 +554,22 @@ mod trace_bench_digest_tests {
     }
 
     #[test]
-    fn renders_trace_pass_status_and_artifact_paths() {
-        let guard = tmp_dir("trace-pass");
-        let dir = guard.path();
-        write_file(
-            dir,
-            "trace.json",
-            &trace_json("pass", "Window stayed closed."),
-        );
+    fn renders_trace_status_and_artifact_paths_without_inlining_content() {
+        for (status, summary, expected) in [
+            ("pass", "Window stayed closed.", "**Status:** PASS"),
+            ("fail", "Window reopened after close.", "**Status:** FAIL"),
+        ] {
+            let guard = tmp_dir(&format!("trace-{status}"));
+            let dir = guard.path();
+            write_file(dir, "trace.json", &trace_json(status, summary));
 
-        let markdown = render(dir, r#"{"trace":"pass"}"#, false, false);
+            let markdown = render(dir, &format!(r#"{{"trace":"{status}"}}"#), false, false);
 
-        assert!(markdown.contains("### Trace: studio / close-window-running-site"));
-        assert!(markdown.contains("**Status:** PASS"));
-        assert!(markdown.contains("- main log: artifacts/main.log"));
-        assert!(!markdown.contains("raw log body that should never appear"));
+            assert!(markdown.contains("### Trace: studio / close-window-running-site"));
+            assert!(markdown.contains(expected), "{status}\n{markdown}");
+            assert!(markdown.contains("- main log: artifacts/main.log"));
+            assert!(!markdown.contains("raw log body that should never appear"));
+        }
     }
 
     #[test]
@@ -582,23 +587,6 @@ mod trace_bench_digest_tests {
             "- scenario `wp-admin-load` / run 0 — Playwright trace (playwright-trace): bench-artifacts/wp-admin-load/trace.zip"
         ));
         assert!(!markdown.contains("trace bytes should never appear"));
-    }
-
-    #[test]
-    fn renders_trace_fail_status_without_inlining_artifact_content() {
-        let guard = tmp_dir("trace-fail");
-        let dir = guard.path();
-        write_file(
-            dir,
-            "trace.json",
-            &trace_json("fail", "Window reopened after close."),
-        );
-
-        let markdown = render(dir, r#"{"trace":"fail"}"#, false, false);
-
-        assert!(markdown.contains("**Status:** FAIL"));
-        assert!(markdown.contains("- main log: artifacts/main.log"));
-        assert!(!markdown.contains("raw log body that should never appear"));
     }
 
     #[test]

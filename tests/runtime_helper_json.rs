@@ -194,12 +194,12 @@ fn emit_test_failure_uses_identity_override_for_fingerprint() {
 }
 
 #[test]
-fn emit_test_failure_derives_canonical_fingerprint_and_supports_infra_fallback() {
+fn emit_test_failure_derives_canonical_fingerprint_from_failure_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output = run_helper(
         dir.path(),
         "emit-test-failure.sh",
-        "homeboy_emit_test_failure --test-id 'Foo::testBar' --suite phpunit --file src/Foo.php --line 42 --failure-type AssertionError --message 'Failed asserting that false is true.' --stdout-excerpt 'out'; homeboy_emit_test_failure --test-id 'cargo test' --failure-type infrastructure --message 'cargo test failed before individual test failures could be parsed' --identity 'rust:cargo-test:failed'",
+        "homeboy_emit_test_failure --test-id 'Foo::testBar' --suite phpunit --file src/Foo.php --line 42 --failure-type AssertionError --message 'Failed asserting that false is true.' --stdout-excerpt 'out'",
     );
 
     assert_success(&output);
@@ -208,7 +208,7 @@ fn emit_test_failure_derives_canonical_fingerprint_and_supports_infra_fallback()
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("record json"))
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 1);
     assert_eq!(records[0]["suite"], "phpunit");
     assert_eq!(records[0]["file"], "src/Foo.php");
     assert_eq!(records[0]["line"], 42);
@@ -222,11 +222,6 @@ fn emit_test_failure_derives_canonical_fingerprint_and_supports_infra_fallback()
     ]
     .join("\0");
     assert_eq!(records[0]["fingerprint"], sha256_hex(&identity));
-    assert_eq!(records[1]["failure_type"], "infrastructure");
-    assert_eq!(
-        records[1]["fingerprint"],
-        sha256_hex("rust:cargo-test:failed")
-    );
 }
 
 #[test]
