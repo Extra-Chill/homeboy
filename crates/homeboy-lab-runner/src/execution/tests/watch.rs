@@ -1,5 +1,5 @@
 //! End-to-end coverage for the controller following Lab jobs with the Runner
-//! API v1 watch cursor (#13881 step 2): cursor-follow event-log equality and
+//! API v1 watch cursor: cursor-follow event-log equality and
 //! resume after a dropped connection.
 
 use super::super::daemon::{

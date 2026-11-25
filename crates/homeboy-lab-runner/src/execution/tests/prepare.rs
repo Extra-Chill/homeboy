@@ -77,13 +77,11 @@ fn malformed_daemon_response_json_is_structured_and_retryable() {
 }
 
 #[test]
-fn test_resolve_cwd_defaults_ssh_runner_to_workspace_root() {
-    let cwd = resolve_cwd(&ssh_runner(), None).expect("cwd");
-    assert_eq!(cwd, "/srv/homeboy");
-}
-
-#[test]
-fn test_resolve_cwd_rejects_ssh_cwd_outside_workspace_root() {
+fn ssh_runner_cwd_defaults_to_and_is_confined_by_workspace_root() {
+    assert_eq!(
+        resolve_cwd(&ssh_runner(), None).expect("cwd"),
+        "/srv/homeboy"
+    );
     let err = resolve_cwd(&ssh_runner(), Some("/tmp/project")).expect_err("reject cwd");
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert!(err.message.contains("workspace_root"));
@@ -165,155 +163,98 @@ fn prepare_runner_process_defers_runner_owned_secret_plan_entries() {
 }
 
 #[test]
-fn ssh_runner_prep_leaves_default_path_to_runner_side() {
+fn ssh_runner_prep_leaves_path_to_the_runner_unless_explicitly_configured() {
     crate::test_support::with_isolated_home(|_| {
-        let plan = prepare_runner_process(RunnerProcessRequest {
-            runner_id: "lab".to_string(),
-            runner: Some(ssh_runner()),
-            cwd: Some("/srv/homeboy/project".to_string()),
-            project_id: None,
-            command: vec!["node".to_string(), "--version".to_string()],
-            env: Default::default(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: None,
-            require_paths: Vec::new(),
-            validate_require_paths_on_host: false,
-        })
-        .expect("prepare ssh runner process");
+        for explicit_path in [None, Some("$HOME/custom/bin:$PATH")] {
+            let mut runner = ssh_runner();
+            if let Some(path) = explicit_path {
+                runner.env.insert("PATH".to_string(), path.to_string());
+            }
 
-        assert!(
-            !plan.env.contains_key("PATH"),
-            "controller must not freeze PATH before daemon-side runner normalization"
-        );
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "lab".to_string(),
+                runner: Some(runner),
+                cwd: Some("/srv/homeboy/project".to_string()),
+                project_id: None,
+                command: vec!["node".to_string(), "--version".to_string()],
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                secret_env_plan: None,
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare ssh runner process");
+
+            // The controller must not freeze PATH before daemon-side normalization.
+            assert_eq!(plan.env.get("PATH").map(String::as_str), explicit_path);
+        }
     });
 }
 
 #[test]
-fn ssh_runner_prep_preserves_explicit_path() {
-    crate::test_support::with_isolated_home(|_| {
-        let mut runner = ssh_runner();
-        runner
-            .env
-            .insert("PATH".to_string(), "$HOME/custom/bin:$PATH".to_string());
-
-        let plan = prepare_runner_process(RunnerProcessRequest {
-            runner_id: "lab".to_string(),
-            runner: Some(runner),
-            cwd: Some("/srv/homeboy/project".to_string()),
-            project_id: None,
-            command: vec!["node".to_string(), "--version".to_string()],
-            env: Default::default(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: None,
-            require_paths: Vec::new(),
-            validate_require_paths_on_host: false,
-        })
-        .expect("prepare ssh runner process with explicit path");
-
-        assert_eq!(
-            plan.env.get("PATH").map(String::as_str),
-            Some("$HOME/custom/bin:$PATH")
-        );
-    });
-}
-
-#[test]
-fn ssh_runner_prep_marks_remote_placement_as_resolved() {
-    crate::test_support::with_isolated_home(|_| {
-        let plan = prepare_runner_process(RunnerProcessRequest {
-            runner_id: "lab".to_string(),
-            runner: Some(ssh_runner()),
-            cwd: Some("/srv/homeboy/project".to_string()),
-            project_id: None,
-            command: vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-            ],
-            env: std::collections::HashMap::from([(
-                RUNNER_PLACEMENT_RESOLVED_ENV.to_string(),
-                "1".to_string(),
-            )]),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: None,
-            require_paths: Vec::new(),
-            validate_require_paths_on_host: false,
-        })
-        .expect("prepare ssh runner process");
-
-        assert_eq!(
-            plan.env.get(RUNNER_HOSTED_EXEC_ENV).map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            plan.env
-                .get(RUNNER_PLACEMENT_RESOLVED_ENV)
-                .map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(plan.env.get(RUNNER_ID_ENV).map(String::as_str), Some("lab"));
-    });
-}
-
-#[test]
-fn local_runner_prep_marks_placement_as_resolved() {
-    // Regression for #8115: a local runner exec must stamp the dispatch-only
-    // placement-resolved markers so nested Homeboy subprocesses (parity
-    // preflight `extension show`, extension materialization, ready_check
-    // chains) recognize that placement is already resolved and short-circuit
-    // routing instead of re-dispatching. Without these markers a local exec
-    // carrying an explicit `--placement` recursively spawns
-    // `homeboy component show` / `extension show` plus the extension
-    // ready_check and saturates the host.
+fn ssh_and_local_runner_prep_mark_placement_as_resolved() {
+    // Nested Homeboy subprocesses read these markers to short-circuit routing
+    // instead of recursively re-dispatching and saturating the host.
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
+        let workspace = workspace.display().to_string();
+        let cases = [
+            (
+                "lab",
+                ssh_runner(),
+                "/srv/homeboy/project".to_string(),
+                std::collections::HashMap::from([(
+                    RUNNER_PLACEMENT_RESOLVED_ENV.to_string(),
+                    "1".to_string(),
+                )]),
+            ),
+            (
+                "local",
+                local_runner(workspace.clone()),
+                workspace,
+                Default::default(),
+            ),
+        ];
 
-        let plan = prepare_runner_process(RunnerProcessRequest {
-            runner_id: "local".to_string(),
-            runner: Some(local_runner(workspace.display().to_string())),
-            cwd: Some(workspace.display().to_string()),
-            project_id: None,
-            command: vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-            ],
-            env: Default::default(),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: None,
-            require_paths: Vec::new(),
-            validate_require_paths_on_host: false,
-        })
-        .expect("prepare local runner process");
+        for (runner_id, runner, cwd, env) in cases {
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: runner_id.to_string(),
+                runner: Some(runner),
+                cwd: Some(cwd),
+                project_id: None,
+                command: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                ],
+                env,
+                secret_env_names: Vec::new(),
+                secret_env_plan: None,
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("prepare runner process");
 
-        assert_eq!(
-            plan.env.get(RUNNER_HOSTED_EXEC_ENV).map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            plan.env
-                .get(RUNNER_PLACEMENT_RESOLVED_ENV)
-                .map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            plan.env.get(RUNNER_ID_ENV).map(String::as_str),
-            Some("local")
-        );
+            for (name, expected) in [
+                (RUNNER_HOSTED_EXEC_ENV, "1"),
+                (RUNNER_PLACEMENT_RESOLVED_ENV, "1"),
+                (RUNNER_ID_ENV, runner_id),
+            ] {
+                assert_eq!(
+                    plan.env.get(name).map(String::as_str),
+                    Some(expected),
+                    "{runner_id}: {name}"
+                );
+            }
+        }
     });
 }
 
@@ -444,33 +385,52 @@ fn runner_prep_drops_undeclared_sensitive_env() {
 }
 
 #[test]
-fn runner_prep_allows_declared_sensitive_env() {
+fn runner_prep_allows_sensitive_env_declared_by_name_or_runtime_allowlist() {
     crate::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
+        let token = ("OPENAI_API_KEY".to_string(), "secret-value".to_string());
+        let cases = [
+            (
+                HashMap::from([token.clone()]),
+                vec!["OPENAI_API_KEY".to_string()],
+            ),
+            (
+                HashMap::from([
+                    token,
+                    (
+                        "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
+                        "OPENAI_API_KEY".to_string(),
+                    ),
+                ]),
+                Vec::new(),
+            ),
+        ];
 
-        let plan = prepare_runner_process(RunnerProcessRequest {
-            runner_id: "local".to_string(),
-            runner: Some(local_runner(workspace.display().to_string())),
-            cwd: Some(workspace.display().to_string()),
-            project_id: None,
-            command: vec!["env".to_string()],
-            env: HashMap::from([("DECLARED_API_TOKEN".to_string(), "secret-value".to_string())]),
-            secret_env_names: vec!["DECLARED_API_TOKEN".to_string()],
-            secret_env_plan: None,
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: None,
-            require_paths: Vec::new(),
-            validate_require_paths_on_host: false,
-        })
-        .expect("declared sensitive env is allowed");
+        for (env, secret_env_names) in cases {
+            let plan = prepare_runner_process(RunnerProcessRequest {
+                runner_id: "local".to_string(),
+                runner: Some(local_runner(workspace.display().to_string())),
+                cwd: Some(workspace.display().to_string()),
+                project_id: None,
+                command: vec!["node".to_string(), "run-headless-loop.cjs".to_string()],
+                env,
+                secret_env_names,
+                secret_env_plan: None,
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                validate_require_paths_on_host: false,
+            })
+            .expect("declared sensitive env is allowed");
 
-        assert_eq!(
-            plan.env.get("DECLARED_API_TOKEN").map(String::as_str),
-            Some("secret-value")
-        );
+            assert_eq!(
+                plan.env.get("OPENAI_API_KEY").map(String::as_str),
+                Some("secret-value")
+            );
+        }
     });
 }
 
@@ -518,43 +478,6 @@ fn daemon_prep_preserves_placement_marker_and_unrelated_runner_side_secret() {
                 .get(RUNNER_PLACEMENT_RESOLVED_ENV)
                 .map(String::as_str),
             Some("1")
-        );
-    });
-}
-
-#[test]
-fn runner_prep_runtime_secret_env_allowlist_declares_sensitive_env() {
-    crate::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("project");
-        std::fs::create_dir_all(&workspace).expect("workspace");
-
-        let plan = prepare_runner_process(RunnerProcessRequest {
-            runner_id: "local".to_string(),
-            runner: Some(local_runner(workspace.display().to_string())),
-            cwd: Some(workspace.display().to_string()),
-            project_id: None,
-            command: vec!["node".to_string(), "run-headless-loop.cjs".to_string()],
-            env: HashMap::from([
-                (
-                    "HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string(),
-                    "OPENAI_API_KEY".to_string(),
-                ),
-                ("OPENAI_API_KEY".to_string(), "secret-value".to_string()),
-            ]),
-            secret_env_names: Vec::new(),
-            secret_env_plan: None,
-            capture_patch: false,
-            raw_exec: false,
-            source_snapshot: None,
-            require_paths: Vec::new(),
-            validate_require_paths_on_host: false,
-        })
-        .expect("runtime secret env allowlist should satisfy preflight declaration");
-
-        assert_eq!(
-            plan.env.get("OPENAI_API_KEY").map(String::as_str),
-            Some("secret-value")
         );
     });
 }

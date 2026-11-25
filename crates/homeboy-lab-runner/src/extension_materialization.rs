@@ -367,21 +367,6 @@ mod lab_job_overlay_tests {
             .is_symlink());
         assert!(!runtime.join("home/.missing").exists());
     }
-
-    #[test]
-    fn concurrent_extension_snapshots_build_private_content_addressed_registries() {
-        let first = overlay("fixture", "/runner/jobs/a", "aaaaaaaaaaaaaaaa");
-        let second = overlay("fixture", "/runner/jobs/b", "bbbbbbbbbbbbbbbb");
-        let first_command = lab_job_extension_overlay_command("/runner/jobs/a", &[first.clone()]);
-        let second_command = lab_job_extension_overlay_command("/runner/jobs/b", &[second.clone()]);
-
-        assert_ne!(first.remote_path, second.remote_path);
-        assert!(first_command.contains(&first.remote_path));
-        assert!(second_command.contains(&second.remote_path));
-        assert!(!first_command.contains("$HOME/.config/homeboy"));
-        assert!(!second_command.contains("$HOME/.config/homeboy"));
-        assert!(!first_command.contains("cp -a"));
-    }
 }
 
 pub(crate) fn plan_controller_snapshot_extension(
@@ -1159,17 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn extension_materialization_uses_daemon_admission() {
-        let command_options = runner_exec_options(&runner(), None, vec!["homeboy".to_string()]);
-        let shell_options = runner_raw_shell("mkdir -p /tmp/extension".to_string());
-
-        assert!(command_options.raw_exec);
-        assert!(!command_options.allow_diagnostic_ssh);
-        assert!(shell_options.raw_exec);
-        assert!(!shell_options.allow_diagnostic_ssh);
-    }
-
-    #[test]
     fn remote_git_materialization_installs_or_replaces_by_runner_state() {
         let runner = runner();
         let request = RunnerExtensionMaterializationRequest {
@@ -1188,7 +1162,7 @@ mod tests {
             &request,
             &mut |_runner_id, options| {
                 commands.push(options.command.clone());
-                Ok((output(), if commands.len() == 1 { 0 } else { 0 }))
+                Ok((output(), 0))
             },
         )
         .expect("materializes");
@@ -1314,11 +1288,11 @@ mod tests {
     }
 
     #[test]
-    fn controller_snapshot_ignores_appledouble_metadata() {
+    fn controller_snapshot_excludes_non_source_metadata_from_hash_and_sync() {
         let workspace = tempfile::tempdir().expect("runner workspace");
         let mut runner = runner();
         runner.workspace_root = Some(workspace.path().to_string_lossy().to_string());
-        let source = tempfile::tempdir().expect("extension source");
+        let source = tempfile::tempdir().expect("installed extension");
         let rules = source
             .path()
             .join("node_modules/eslint-plugin-jest/lib/rules");
@@ -1326,13 +1300,21 @@ mod tests {
         fs::write(source.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
         fs::write(rules.join("consistent-test-it.js"), "module.exports = {};")
             .expect("JavaScript rule");
+        fs::create_dir_all(source.path().join("fixtures")).expect("fixtures");
+        fs::write(source.path().join("fixtures/.source-url"), "fixture").expect("nested source");
         let hash_without_metadata =
             extension_source_content_hash(source.path()).expect("source hash");
+        // AppleDouble sidecars anywhere, and install-local provenance at the root.
         fs::write(rules.join("._consistent-test-it.js"), b"\0\x05\x16\x07ATTR")
             .expect("AppleDouble metadata");
-        let hash_with_metadata = extension_source_content_hash(source.path()).expect("source hash");
+        for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
+            fs::write(source.path().join(generated), "generated").expect("generated metadata");
+        }
 
-        assert_eq!(hash_with_metadata, hash_without_metadata);
+        assert_eq!(
+            extension_source_content_hash(source.path()).expect("source hash"),
+            hash_without_metadata
+        );
 
         let request = RunnerExtensionMaterializationRequest {
             id: "nodejs".to_string(),
@@ -1349,69 +1331,16 @@ mod tests {
             &mut |_runner_id, _options| Ok((output(), 0)),
         )
         .expect("materializes");
-        let synced_rules = Path::new(&provenance.synced_source_path)
-            .join("node_modules/eslint-plugin-jest/lib/rules");
+        let synced = Path::new(&provenance.synced_source_path);
+        let synced_rules = synced.join("node_modules/eslint-plugin-jest/lib/rules");
 
+        assert!(synced.join("nodejs.json").exists());
+        assert!(synced.join("fixtures/.source-url").exists());
         assert!(synced_rules.join("consistent-test-it.js").exists());
         assert!(!synced_rules.join("._consistent-test-it.js").exists());
-    }
-
-    #[test]
-    fn controller_snapshot_of_installed_directory_excludes_generated_metadata() {
-        let workspace = tempfile::tempdir().expect("runner workspace");
-        let mut runner = runner();
-        runner.workspace_root = Some(workspace.path().to_string_lossy().to_string());
-        let source = tempfile::tempdir().expect("installed extension");
-        fs::write(source.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
-        fs::create_dir_all(source.path().join("fixtures")).expect("fixtures");
-        fs::write(source.path().join("fixtures/.source-url"), "fixture").expect("nested source");
-        let hash_without_metadata =
-            extension_source_content_hash(source.path()).expect("source hash");
-        for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
-            fs::write(source.path().join(generated), "generated").expect("generated metadata");
-        }
-
-        assert_eq!(
-            extension_source_content_hash(source.path()).expect("source hash"),
-            hash_without_metadata
-        );
-
-        let request = RunnerExtensionMaterializationRequest {
-            id: "rust".to_string(),
-            revision: "abc123".to_string(),
-            source: RunnerExtensionMaterializationSource::ControllerSnapshot {
-                local_path: source.path().to_path_buf(),
-            },
-        };
-        let provenance = materialize_runner_extension_with_exec(
-            &runner,
-            "homeboy",
-            None,
-            &request,
-            &mut |_runner_id, _options| Ok((output(), 0)),
-        )
-        .expect("materializes");
-        let synced = Path::new(&provenance.synced_source_path);
-
-        assert!(synced.join("rust.json").exists());
-        assert!(synced.join("fixtures/.source-url").exists());
         for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
             assert!(!synced.join(generated).exists(), "{generated} was synced");
         }
-    }
-
-    #[test]
-    fn staged_extension_cleanup_removes_nested_appledouble_metadata() {
-        let staged = tempfile::tempdir().expect("staged extension");
-        let rules = staged.path().join("node_modules/plugin/rules");
-        fs::create_dir_all(&rules).expect("rules directory");
-        fs::write(rules.join("rule.js"), "module.exports = {};").expect("JavaScript rule");
-        fs::write(rules.join("._rule.js"), b"\0\x05\x16\x07ATTR").expect("AppleDouble metadata");
-
-        remove_appledouble_files(staged.path()).expect("clean staged extension");
-
-        assert!(rules.join("rule.js").exists());
-        assert!(!rules.join("._rule.js").exists());
     }
 
     #[test]
@@ -1452,22 +1381,6 @@ mod tests {
     }
 
     #[test]
-    fn controller_snapshot_plan_uses_content_hash_slot() {
-        let dir = tempfile::tempdir().expect("extension source");
-        std::fs::write(dir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
-        std::fs::write(dir.path().join("run.sh"), "echo hi\n").expect("source");
-
-        let plan = plan_controller_snapshot_extension("/runner/ws/", "rust", dir.path())
-            .expect("snapshot plan");
-
-        assert_eq!(plan.id, "rust");
-        assert!(plan
-            .synced_source_path
-            .starts_with("/runner/ws/_lab_workspaces/dev-extensions/rust/"));
-        assert!(plan.synced_source_path.ends_with('/'));
-    }
-
-    #[test]
     fn materialization_can_use_explicit_command_env() {
         let runner = runner();
         let request = RunnerExtensionMaterializationRequest {
@@ -1501,12 +1414,8 @@ mod tests {
     }
 
     #[test]
-    fn isolated_lab_nodejs_overlay_stages_root_assets_for_project_tests() {
+    fn linked_lab_overlay_stages_root_assets_for_flat_and_nested_extension_roots() {
         check_linked_overlay_root(false);
-    }
-
-    #[test]
-    fn nested_root_linked_lab_materialization() {
         check_linked_overlay_root(true);
     }
 

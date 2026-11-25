@@ -1,5 +1,5 @@
 //! A gate observer that loses its daemon transport keeps following the same
-//! job to its terminal status (#17376).
+//! job to its terminal status.
 
 use super::super::daemon::follow_daemon_job_to_terminal;
 use super::*;
