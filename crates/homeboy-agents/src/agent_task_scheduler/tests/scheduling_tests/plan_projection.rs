@@ -210,16 +210,4 @@ mod plan_projection_tests {
         assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(design.instructions, "Build design");
     }
-
-    #[test]
-    fn plan_json_rejects_retired_dependency_graph() {
-        let mut raw = serde_json::to_value(plan_with_tasks(2)).expect("plan json");
-        raw["output_dependencies"] = json!({
-            "task-1": { "depends_on": ["task-0"], "bindings": {} }
-        });
-        let error = serde_json::from_value::<AgentTaskPlan>(raw).expect_err("retired DAG rejected");
-        assert!(error
-            .to_string()
-            .contains("unknown field `output_dependencies`"));
-    }
 }

@@ -2149,12 +2149,11 @@ where
 /// `artifacts_path` is handed to the provider as its private output directory,
 /// so a file growing there is the provider doing work — whatever it is named.
 ///
-/// This deliberately does not filter on the file name. It used to require the
-/// name to contain `progress`, which made liveness depend on a runtime's naming
-/// convention rather than on observable activity (#13623). A runtime that
-/// streams its telemetry into, say, `<task>-<backend>-runtime-stdout.log` was
-/// invisible: the watchdog read zero progress while that file grew to 94KB, and
-/// killed a healthy provider as stalled. Nothing else writes here, so counting
+/// This deliberately does not filter on the file name, so liveness depends on
+/// observable activity rather than a runtime's naming convention (#13623). A
+/// runtime that streams its telemetry into, say,
+/// `<task>-<backend>-runtime-stdout.log` counts as progressing while that file
+/// grows. Nothing else writes here, so counting
 /// every file cannot manufacture liveness the provider did not earn.
 fn runtime_progress_snapshot(root: &Path) -> BTreeMap<PathBuf, u64> {
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -3040,15 +3039,7 @@ pub fn provider_command_parts(
     Some((program, argv.collect(), cwd))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn provider_command_env(
-    request: &AgentTaskRequest,
-    provider: &AgentTaskExecutorProvider,
-) -> Result<Vec<(String, String)>, ProviderCommandEnvError> {
-    provider_command_env_with_credentials(request, provider, None)
-}
-
-fn provider_command_env_with_credentials(
+pub(super) fn provider_command_env_with_credentials(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
     credential_env: Option<&[(String, String)]>,

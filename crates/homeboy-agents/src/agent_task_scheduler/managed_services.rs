@@ -1067,9 +1067,8 @@ pub fn run_service_worker_operation(run_id: &str, operation: &str) -> Result<(),
 /// the same installation it wrote the terminal record into, instead of reaping
 /// whichever ledger the process environment happened to point at (#7505).
 ///
-/// The ambient `reconcile_run_services_on_owner` that used to resolve
-/// `paths::homeboy_data()` for callers is gone: both remaining callers —
-/// rooted cancellation and rooted lost-job terminalization — hold the lifecycle
+/// There is no ambient variant that resolves `paths::homeboy_data()`: both
+/// callers — rooted cancellation and rooted lost-job terminalization — hold the lifecycle
 /// store whose record they are about to replace, and reaping a different home's
 /// ledger than the one that record lives in is exactly the split #7505 forbids.
 pub(crate) fn reconcile_run_services_on_owner_at(
@@ -1444,7 +1443,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cleanup_honors_a_declared_deadline_longer_than_the_legacy_grace() {
+    fn cleanup_honors_a_declared_deadline_longer_than_the_default_grace() {
         with_isolated_home(|_| {
             let mut service = fixture(free_port());
             service.port = None;

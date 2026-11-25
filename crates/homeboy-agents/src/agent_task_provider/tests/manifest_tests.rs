@@ -522,7 +522,8 @@ fn provider_command_env_exposes_generic_agent_tool_contracts() {
         },
     );
 
-    let env = provider_command_env(&request, &provider).expect("provider env");
+    let env =
+        provider_command_env_with_credentials(&request, &provider, None).expect("provider env");
     let env: BTreeMap<String, String> = env.into_iter().collect();
 
     assert_eq!(
@@ -581,7 +582,8 @@ fn provider_command_env_carries_the_command_policy() {
         ..crate::agent_task::AgentCommandPolicy::default()
     };
 
-    let env = provider_command_env(&request, &provider).expect("provider env");
+    let env =
+        provider_command_env_with_credentials(&request, &provider, None).expect("provider env");
     let env: BTreeMap<String, String> = env.into_iter().collect();
 
     let policy: crate::agent_task::AgentToolPolicy = serde_json::from_str(
@@ -603,7 +605,8 @@ fn provider_command_env_strips_git_push_credentials() {
     // The provider environment must deny git push credentials so an executor
     // cannot push a candidate to a real remote before verification. (#8486)
     let (request, provider) = request("task-1", "minimal-provider".to_string());
-    let env = provider_command_env(&request, &provider).expect("provider env");
+    let env =
+        provider_command_env_with_credentials(&request, &provider, None).expect("provider env");
     let env: BTreeMap<String, String> = env.into_iter().collect();
 
     assert_eq!(
