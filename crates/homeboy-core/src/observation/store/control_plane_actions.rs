@@ -1157,67 +1157,6 @@ mod tests {
     }
 
     #[test]
-    fn intent_admission_waits_for_a_competing_writer_and_replays_idempotently() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("store.sqlite");
-        let initialized = ObservationStore::open_initialized_at(&path).unwrap();
-        initialized.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
-        seed_agent_task_resource(&initialized, "run-1", "now");
-        drop(initialized);
-
-        let blocker = rusqlite::Connection::open(&path).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1100));
-            blocker.execute_batch("COMMIT").unwrap();
-        });
-        let connection = super::super::schema::open_bounded_writer_connection(&path).unwrap();
-        let store = ObservationStore {
-            connection,
-            path,
-            readonly: false,
-            roots: None,
-        };
-        let intent = action_intent(
-            "run-1",
-            "effect-held-writer",
-            ControlPlaneAction::Recover,
-            None,
-            &"c".repeat(64),
-        );
-        let started = std::time::Instant::now();
-        let admission = store
-            .enqueue_control_plane_action_intent(
-                &intent,
-                "agent_task_run",
-                &"d".repeat(64),
-                admit_eligible,
-            )
-            .unwrap();
-        let elapsed = started.elapsed();
-        release.join().unwrap();
-        assert!(
-            elapsed >= std::time::Duration::from_millis(900),
-            "elapsed {elapsed:?}"
-        );
-        assert!(matches!(
-            admission,
-            ControlPlaneEffectAdmission::Enqueued(_)
-        ));
-        assert!(matches!(
-            store
-                .enqueue_control_plane_action_intent(
-                    &intent,
-                    "agent_task_run",
-                    &"d".repeat(64),
-                    admit_eligible,
-                )
-                .unwrap(),
-            ControlPlaneEffectAdmission::Duplicate(_)
-        ));
-    }
-
-    #[test]
     fn initialized_store_admits_intent_after_a_writer_holds_past_five_seconds() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("store.sqlite");
@@ -1254,6 +1193,17 @@ mod tests {
         assert!(matches!(
             admission.unwrap(),
             ControlPlaneEffectAdmission::Enqueued(_)
+        ));
+        assert!(matches!(
+            store
+                .enqueue_control_plane_action_intent(
+                    &intent,
+                    "agent_task_run",
+                    &"d".repeat(64),
+                    admit_eligible,
+                )
+                .unwrap(),
+            ControlPlaneEffectAdmission::Duplicate(_)
         ));
     }
 
