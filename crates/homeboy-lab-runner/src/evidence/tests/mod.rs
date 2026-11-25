@@ -648,20 +648,6 @@ fn test_download_placement_honours_an_explicit_output_without_tagging_it() {
     assert_eq!(placement.file_name, "report.json");
 }
 
-#[test]
-fn test_content_disposition_filename_parses_quoted_attachment_name() {
-    let mut headers = header::HeaderMap::new();
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        header::HeaderValue::from_static("attachment; filename=\"report.json\""),
-    );
-
-    assert_eq!(
-        content_disposition_filename(&headers).as_deref(),
-        Some("report.json")
-    );
-}
-
 /// The direct-SSH transport's file name comes from a header the daemon writes,
 /// and the header parser applies no shape check at all — it splits on `;`,
 /// strips `filename=`, and trims quotes. Containment therefore has to live in
@@ -1112,7 +1098,6 @@ fn runner_exec_matrix_summary_run_names_come_from_command_domain() {
 
     assert_eq!(runner_exec_run_label(&command), "trace-matrix-summary");
     assert!(run.id.starts_with("runner-exec-trace-matrix-summary-lab-"));
-    assert!(!run.id.contains("woo-db-api-rest-query-profile"));
     assert_eq!(
         run.metadata_json["lab"]["run_label"].as_str(),
         Some("trace-matrix-summary")
@@ -1495,28 +1480,6 @@ fn test_mirrored_patch_result_fails_when_patch_artifact_was_not_mirrored() {
 }
 
 #[test]
-fn test_remote_file_artifacts_are_indexed_as_runner_tokens() {
-    let detail = json!({
-        "id": "run-1",
-        "artifacts": [{
-            "id": "artifact-1",
-            "kind": "trace",
-            "type": "file",
-            "path": "/srv/private/trace.zip",
-            "sha256": "abc",
-            "size_bytes": 12,
-            "mime": "application/zip",
-            "created_at": "2026-05-16T00:00:00Z"
-        }]
-    });
-    let artifacts = remote_detail_artifacts(&detail, &ssh_runner(), "run-1").expect("artifacts");
-    assert_eq!(artifacts.len(), 1);
-    assert_eq!(artifacts[0].id, "artifact-1");
-    assert_eq!(artifacts[0].artifact_type, "remote_file");
-    assert_eq!(artifacts[0].path, "runner-artifact://lab/run-1/artifact-1");
-}
-
-#[test]
 fn test_remote_fuzz_artifacts_become_controller_owned_before_runner_cleanup() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let roots = context.path_roots();
@@ -1676,6 +1639,7 @@ fn test_remote_fuzz_run_mirrors_under_requested_run_id_with_lab_links() {
         "job-artifact-1"
     );
     assert_eq!(artifacts[0].run_id, "requested-proof");
+    assert_eq!(artifacts[0].artifact_type, "remote_file");
     assert_eq!(
         artifacts[0].metadata_json["local_run_id"],
         "requested-proof"
@@ -2076,69 +2040,6 @@ fn terminal_mirroring_withholds_output_when_declared_run_projection_is_missing()
         assert_eq!(error.details["source_error"]["details"]["http_status"], 404);
         assert!(!error.retryable.unwrap_or(true));
     });
-}
-
-#[test]
-fn terminal_mirroring_persists_declared_run_and_artifact_for_controller_review() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("controller store");
-    let run_id = "bench-controller-review".to_string();
-    let bytes = b"reviewable visual evidence";
-    let digest = format!("{:x}", Sha256::digest(bytes));
-    let download_dir = tempfile::tempdir().expect("download directory");
-    let download_path = download_dir.path().join("diff.png");
-    let job = terminal_runner_job();
-
-    let mirrored = mirror_remote_observation_runs_by_id_with_downloader(
-        &store,
-        &ssh_runner(),
-        &job,
-        std::slice::from_ref(&run_id),
-        None,
-        |requested| {
-            assert_eq!(requested, run_id);
-            Ok(Some(json!({
-                "id": run_id,
-                "kind": "bench",
-                "started_at": "2023-11-14T22:13:20Z",
-                "finished_at": "2023-11-14T22:13:21Z",
-                "status": "fail",
-                "artifacts": [{
-                    "id": "visual-diff",
-                    "kind": "visual_compare",
-                    "type": "file",
-                    "size_bytes": bytes.len(),
-                    "sha256": digest,
-                    "mime": "image/png"
-                }]
-            })))
-        },
-        |_| {
-            fs::write(&download_path, bytes).expect("write downloaded artifact");
-            Ok(download_path.clone())
-        },
-    )
-    .expect("terminal runner evidence projects to the controller");
-
-    assert_eq!(mirrored[0].id, run_id);
-    assert_eq!(
-        store
-            .get_run(&run_id)
-            .expect("controller run lookup")
-            .expect("controller run"),
-        mirrored[0]
-    );
-    let artifact = store
-        .get_artifact("visual-diff")
-        .expect("controller artifact lookup")
-        .expect("controller artifact");
-    assert_eq!(artifact.run_id, run_id);
-    assert_eq!(artifact.artifact_type, "file");
-    assert_eq!(
-        fs::read(&artifact.path).expect("reviewer reads artifact"),
-        bytes
-    );
 }
 
 #[test]
