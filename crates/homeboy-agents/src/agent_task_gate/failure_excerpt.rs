@@ -263,7 +263,10 @@ mod tests {
 
     #[test]
     fn gate_failure_excerpt_names_failing_test_and_exit_code() {
-        let excerpt = gate_failure_excerpt_from_value(&cargo_failure_gate()).expect("excerpt");
+        // The typed report renders through the same persisted-value path.
+        let report: AgentTaskGateReport =
+            serde_json::from_value(cargo_failure_gate()).expect("gate report");
+        let excerpt = gate_failure_excerpt(&report).expect("excerpt");
         assert!(excerpt.contains("gate: gate-1"), "{excerpt}");
         assert!(excerpt.contains("exit code: 101"), "{excerpt}");
         assert!(excerpt.contains("command: sh -c cargo test -p demo"));
@@ -271,15 +274,6 @@ mod tests {
         assert!(excerpt.contains("environment: replace (lab runner lab-1)"));
         assert!(excerpt.contains("test parser::rejects_empty ... FAILED"));
         assert!(excerpt.contains("panicked at src/parser.rs:42:5"));
-    }
-
-    #[test]
-    fn gate_failure_excerpt_from_report_matches_value() {
-        let report: AgentTaskGateReport =
-            serde_json::from_value(cargo_failure_gate()).expect("gate report");
-        let excerpt = gate_failure_excerpt(&report).expect("excerpt");
-        assert!(excerpt.contains("parser::rejects_empty"));
-        assert!(excerpt.contains("exit code: 101"));
     }
 
     #[test]
