@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.9] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in homeboy-cli commands slice 10/16
+- prune and fold low-value tests in homeboy-release (wave 2, 1/4)
+- prune and fold command utils tests (wave 2, homeboy-cli 15/16)
+- prune and fold low-value tests in homeboy-cli rig/runner slice 11/16
+- prune and fold homeboy-cli command tests (wave 2, slice 13/16)
+
 ## [0.497.8] - 2026-11-25
 
 ### Changed
