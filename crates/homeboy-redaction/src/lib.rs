@@ -578,21 +578,34 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn redacts_authorization_schemes_in_strings() {
+    fn redacts_authorization_values_and_inline_secret_assignments() {
         let policy = RedactionPolicy::default();
 
-        assert_eq!(
-            policy.redact_string("Authorization: Bearer abc.def.ghi"),
-            "Authorization: Bearer [REDACTED]"
-        );
-        assert_eq!(
-            policy.redact_string("proxy Basic dXNlcjpzZWNyZXQ="),
-            "proxy Basic [REDACTED]"
-        );
-        assert_eq!(
-            policy.redact_string("Authorization: ToKeN ghp_secret"),
-            "Authorization: ToKeN [REDACTED]"
-        );
+        for (input, expected) in [
+            (
+                "Authorization: Bearer abc.def.ghi",
+                "Authorization: Bearer [REDACTED]",
+            ),
+            ("proxy Basic dXNlcjpzZWNyZXQ=", "proxy Basic [REDACTED]"),
+            (
+                "Authorization: ToKeN ghp_secret",
+                "Authorization: ToKeN [REDACTED]",
+            ),
+            (
+                "Authorization: opaquecredential",
+                "Authorization: [REDACTED]",
+            ),
+            (
+                "Proxy-Authorization: Basic secretvalue",
+                "Proxy-Authorization: Basic [REDACTED]",
+            ),
+            (
+                "token=abc password: hunter2 safe=value",
+                "token=[REDACTED] password: [REDACTED] safe=value",
+            ),
+        ] {
+            assert_eq!(policy.redact_string(input), expected, "{input}");
+        }
     }
 
     /// Runner stdout is a JSON document whose strings can hold serialized
@@ -644,16 +657,6 @@ mod tests {
         assert_eq!(
             policy.redact_url("postgres://app:super-secret@db.example.test/app?token=also-secret"),
             "postgres://[REDACTED]@db.example.test/app?token=[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn redacts_inline_secret_assignments() {
-        let policy = RedactionPolicy::default();
-
-        assert_eq!(
-            policy.redact_string("token=abc password: hunter2 safe=value"),
-            "token=[REDACTED] password: [REDACTED] safe=value"
         );
     }
 
@@ -730,20 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn redacts_authorization_header_values_without_a_scheme_word() {
-        let policy = RedactionPolicy::default();
-
-        assert_eq!(
-            policy.redact_string("Authorization: opaquecredential"),
-            "Authorization: [REDACTED]"
-        );
-        assert_eq!(
-            policy.redact_string("Proxy-Authorization: Basic secretvalue"),
-            "Proxy-Authorization: Basic [REDACTED]"
-        );
-    }
-
-    #[test]
     fn bare_scheme_words_still_redact_credential_shaped_tokens() {
         let policy = RedactionPolicy::default();
 
@@ -782,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn redacts_embedded_and_punctuated_urls() {
+    fn redacts_embedded_punctuated_and_proxy_urls() {
         let policy = RedactionPolicy::default();
         let value = "see (https://user:pass@example.test/log?token=secret#fragment), then continue";
 
@@ -790,12 +779,6 @@ mod tests {
             policy.redact_embedded_urls(value),
             "see (https://[REDACTED]@example.test/log?token=[REDACTED]), then continue"
         );
-    }
-
-    #[test]
-    fn redacts_embedded_proxy_urls_with_credentials() {
-        let policy = RedactionPolicy::default();
-
         assert_eq!(
             policy.redact_embedded_urls(
                 "fatal: proxy socks5://proxy-user:proxy-secret@proxy.example.test:1080 failed"

@@ -44,43 +44,38 @@ where
 mod tests {
     use super::*;
 
+    /// Buckets sort by count desc then key asc, the cap trims the list, and
+    /// the remainder and total still count everything (even at cap zero).
     #[test]
     fn counts_sorts_and_caps_buckets() {
+        let label = |label: &&str| label.to_string();
         let buckets = top_n_by(
             ["beta", "alpha", "beta", "gamma", "alpha", "alpha"],
-            |label| label.to_string(),
+            label,
             2,
         );
-
         assert_eq!(buckets.total, 6);
         assert_eq!(buckets.remainder, 1);
         assert_eq!(
             buckets.items,
             vec![("alpha".to_string(), 3), ("beta".to_string(), 2)]
         );
-    }
 
-    #[test]
-    fn uses_key_order_as_tiebreaker() {
-        let buckets = top_n_by(["zeta", "alpha", "middle"], |label| label.to_string(), 10);
-
+        let ties = top_n_by(["zeta", "alpha", "middle"], label, 10);
         assert_eq!(
-            buckets.items,
+            ties.items,
             vec![
                 ("alpha".to_string(), 1),
                 ("middle".to_string(), 1),
                 ("zeta".to_string(), 1),
             ]
         );
-    }
+        assert_eq!(ties.remainder, 0);
 
-    #[test]
-    fn handles_zero_cap_without_losing_totals() {
-        let buckets = top_n_by(["a", "b", "b"], |label| label.to_string(), 0);
-
-        assert_eq!(buckets.total, 3);
-        assert_eq!(buckets.remainder, 2);
-        assert!(buckets.items.is_empty());
-        assert!(!buckets.is_empty());
+        let zero_cap = top_n_by(["a", "b", "b"], label, 0);
+        assert_eq!(zero_cap.total, 3);
+        assert_eq!(zero_cap.remainder, 2);
+        assert!(zero_cap.items.is_empty());
+        assert!(!zero_cap.is_empty());
     }
 }
