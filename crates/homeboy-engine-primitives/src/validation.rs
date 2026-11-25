@@ -118,118 +118,50 @@ impl Default for ValidationCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// `finish` and `finish_if_errors` must return identical shapes so CLI
+    /// envelopes treat early-exit and end-of-pipeline failures alike.
+    #[test]
+    fn both_finish_paths_return_the_same_error_shapes() {
+        let finishes: [fn(ValidationCollector) -> Result<()>; 2] = [
+            |collector| collector.finish(),
+            |mut collector| collector.finish_if_errors(),
+        ];
+        for finish in finishes {
+            assert!(finish(ValidationCollector::new()).is_ok());
+
+            // A single error without context keeps the field/problem shape.
+            let mut v = ValidationCollector::new();
+            v.push("field", "problem", None);
+            let err = finish(v).unwrap_err();
+            assert_eq!(err.details["field"], "field");
+            assert_eq!(err.details["problem"], "problem");
+
+            // A single error's structured context (e.g. release dirty-file
+            // lists) is preserved verbatim for JSON consumers.
+            let context = json!({ "files": ["target/foo.rs", "Cargo.lock"] });
+            let mut v = ValidationCollector::new();
+            v.push("working_tree", "Uncommitted changes", Some(context.clone()));
+            assert_eq!(finish(v).unwrap_err().details, context);
+
+            // Multiple errors surface as one structured validation error.
+            let mut v = ValidationCollector::new();
+            v.push("a", "first", None);
+            v.push("b", "second", None);
+            let err = finish(v).unwrap_err();
+            assert!(err.message.to_lowercase().contains("validation"));
+        }
+    }
 
     #[test]
-    fn test_push() {
+    fn finish_if_errors_drains_the_collector_for_reuse() {
         let mut v = ValidationCollector::new();
         assert!(!v.has_errors());
-        v.push("field", "problem", None);
-        assert!(v.has_errors());
-    }
-
-    #[test]
-    fn test_finish() {
-        // Clean collector → Ok.
-        let v = ValidationCollector::new();
-        assert!(v.finish().is_ok());
-    }
-
-    #[test]
-    fn test_finish_single_error_shape() {
-        let mut v = ValidationCollector::new();
-        v.push("only", "one problem", None);
-        let err = v.finish().unwrap_err();
-        assert!(err.message.contains("one problem"));
-    }
-
-    #[test]
-    fn test_finish_multiple_errors_shape() {
-        let mut v = ValidationCollector::new();
-        v.push("a", "first", None);
-        v.push("b", "second", None);
-        let err = v.finish().unwrap_err();
-        assert!(err.message.to_lowercase().contains("validation"));
-    }
-
-    #[test]
-    fn test_finish_if_errors() {
-        // Clean collector → Ok, and the collector stays reusable.
-        let mut v = ValidationCollector::new();
-        assert!(v.finish_if_errors().is_ok());
-        v.push("field", "problem", None);
-        assert!(v.finish_if_errors().is_err());
-    }
-
-    #[test]
-    fn test_finish_if_errors_drains_collector() {
-        let mut v = ValidationCollector::new();
         v.push("field_a", "problem a", None);
+        assert!(v.has_errors());
         assert!(v.finish_if_errors().is_err());
-        // After draining, the collector is empty again.
         assert!(!v.has_errors());
         assert!(v.finish_if_errors().is_ok());
-    }
-
-    #[test]
-    fn test_finish_if_errors_multiple_errors_shape() {
-        let mut v = ValidationCollector::new();
-        v.push("a", "first", None);
-        v.push("b", "second", None);
-        let err = v.finish_if_errors().unwrap_err();
-        // Multiple errors flow through validation_multiple_errors and
-        // surface as a structured payload (not a single invalid_argument).
-        assert!(err.message.to_lowercase().contains("validation"));
-    }
-
-    #[test]
-    fn test_finish_if_errors_preserves_single_error_context() {
-        // Regression: the single-error re-emit path used to drop the
-        // `context` JSON entirely, making structured diagnostics
-        // (e.g. release working-tree dirty file lists) invisible to
-        // JSON consumers. Now context is preserved verbatim.
-        let mut v = ValidationCollector::new();
-        let context = serde_json::json!({
-            "files": ["target/foo.rs", "Cargo.lock"],
-            "hint": "Commit, stash, or discard changes before releasing",
-        });
-        v.push(
-            "working_tree",
-            "Uncommitted changes detected",
-            Some(context.clone()),
-        );
-
-        let err = v.finish_if_errors().unwrap_err();
-        assert_eq!(err.details, context);
-    }
-
-    #[test]
-    fn test_finish_preserves_single_error_context() {
-        // Same regression as above, but on the consume-self `finish` path
-        // taken by validators that don't need fail-fast semantics.
-        let mut v = ValidationCollector::new();
-        let context = serde_json::json!({"files": ["only.rs"]});
-        v.push("field", "problem", Some(context.clone()));
-
-        let err = v.finish().unwrap_err();
-        assert_eq!(err.details, context);
-    }
-
-    #[test]
-    fn test_finish_if_errors_single_error_without_context_works() {
-        // Errors collected without context still serialize cleanly — the
-        // preservation logic must not require context to be present.
-        let mut v = ValidationCollector::new();
-        v.push("field", "problem", None);
-        let err = v.finish_if_errors().unwrap_err();
-        // Without context, the base validation_invalid_argument shape
-        // (field + problem) is what we get.
-        assert_eq!(
-            err.details.get("field").and_then(|v| v.as_str()),
-            Some("field")
-        );
-        assert_eq!(
-            err.details.get("problem").and_then(|v| v.as_str()),
-            Some("problem")
-        );
     }
 }

@@ -319,11 +319,6 @@ impl UpgradeOperation {
         self.persist_durable()
     }
 
-    #[cfg(test)]
-    pub fn finish_completed(&mut self, result: &UpgradeResult) {
-        let _ = self.finish_completed_durable(result);
-    }
-
     pub fn finish_completed_durable(&mut self, result: &UpgradeResult) -> Result<()> {
         if let Some(metadata) = self.metadata.as_object_mut() {
             metadata.remove("promotion_wait");
@@ -1571,32 +1566,6 @@ mod tests {
     }
 
     #[test]
-    fn status_terminalizes_an_upgrade_after_its_owner_exits() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            let store = ObservationStore::open_initialized().expect("observation store");
-            let mut run = store.get_run(&id).expect("read run").expect("run exists");
-            run.metadata_json["homeboy_run_owner"]["pid"] = json!(u32::MAX);
-            store
-                .update_running_run_metadata(&id, run.metadata_json)
-                .expect("persist dead owner");
-
-            let status = load_upgrade_operation_status(Some(&id)).expect("reconcile status");
-
-            assert_eq!(status.status, RunStatus::Error.as_str());
-            assert_eq!(status.phase, "interrupted");
-            assert!(status.failed);
-            let persisted = store
-                .get_run(&id)
-                .expect("read reconciled")
-                .expect("run exists");
-            assert!(homeboy_core::observation::running_status_note(&persisted).is_none());
-            drop(operation);
-        });
-    }
-
-    #[test]
     fn dead_owner_after_replacement_is_failed_and_repeated_status_is_idempotent() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let operation = UpgradeOperation::start("homeboy upgrade");
@@ -1632,6 +1601,9 @@ mod tests {
             assert!(first.failure.is_some());
 
             let persisted_after_first = store.get_run(&id).expect("read terminal run").unwrap();
+            assert!(
+                homeboy_core::observation::running_status_note(&persisted_after_first).is_none()
+            );
             let second = load_upgrade_operation_status(Some(&id)).expect("repeat status");
             let persisted_after_second = store.get_run(&id).expect("read terminal run").unwrap();
             assert_eq!(second, first);
@@ -1916,7 +1888,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_daemon_restart_is_durably_completed() {
+    fn completed_result_with_deferred_daemon_restart_is_terminal_pass() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut operation = UpgradeOperation::start("homeboy upgrade");
             let mut result = completed_upgrade_result();
@@ -1931,20 +1903,6 @@ mod tests {
             assert_eq!(status.status, RunStatus::Pass.as_str());
             assert_eq!(status.phase, "completed");
             assert_eq!(status.daemon_pending_restart, result.daemon_pending_restart);
-        });
-    }
-
-    #[test]
-    fn completed_result_is_terminal_pass_with_independent_component_statuses() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            let result = completed_upgrade_result();
-            operation.finish_completed(&result);
-
-            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
-            assert_eq!(status.status, RunStatus::Pass.as_str());
-            assert_eq!(status.phase, "completed");
             assert_eq!(
                 status
                     .controller
@@ -2010,6 +1968,18 @@ mod tests {
             let status = load_upgrade_operation_status(Some(&id)).expect("reload operation");
             assert_eq!(status.status, RunStatus::Fail.as_str());
             assert!(status.failed);
+            assert_eq!(status.phase, "completed");
+            assert_eq!(
+                status
+                    .controller
+                    .as_ref()
+                    .map(|value| value.status.as_str()),
+                Some("updated")
+            );
+            assert_eq!(
+                status.runners.as_ref().map(|value| value.status.as_str()),
+                Some("partial")
+            );
             let failure = status.failure.expect("projected failure evidence");
             assert_eq!(failure.phase, "completed");
             assert_eq!(failure.predicate, "runner_post_swap_verification");
@@ -2022,40 +1992,6 @@ mod tests {
             assert_eq!(
                 failure.diagnostic_references,
                 vec!["homeboy upgrade --force --upgrade-runner lab"]
-            );
-        });
-    }
-
-    #[test]
-    fn runner_partial_completion_is_durable_terminal_fail() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut operation = UpgradeOperation::start("homeboy upgrade");
-            let id = operation.id().expect("persisted operation").to_string();
-            let mut result = completed_upgrade_result();
-            result.partial = true;
-            result.outcome = Some("controller_updated_runner_failed".to_string());
-            result.runner_convergence = Some(RunnerConvergenceDisposition::Partial);
-            result.runners = Some(UpgradeComponentStatus {
-                status: "partial".to_string(),
-                summary: "0 converged, 1 requires repair".to_string(),
-            });
-
-            operation
-                .finish_completed_durable(&result)
-                .expect("persist typed partial completion");
-            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
-            assert_eq!(status.status, RunStatus::Fail.as_str());
-            assert_eq!(status.phase, "completed");
-            assert_eq!(
-                status
-                    .controller
-                    .as_ref()
-                    .map(|value| value.status.as_str()),
-                Some("updated")
-            );
-            assert_eq!(
-                status.runners.as_ref().map(|value| value.status.as_str()),
-                Some("partial")
             );
         });
     }

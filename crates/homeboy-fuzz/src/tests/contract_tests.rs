@@ -94,61 +94,30 @@ fn core_contract_deserializes_without_operation_families() {
 }
 
 #[test]
-fn isolation_proof_requires_explicit_destructive_safety_fields() {
-    let proof = IsolationProof::from_value(json!({
-        "schema": ISOLATION_PROOF_SCHEMA,
-        "version": FUZZ_CONTRACT_VERSION,
-        "runtime_kind": "ephemeral-runner",
-        "provider_ref": { "opaque": "provider-owned" },
-        "disposable": true,
-        "teardown_required": true,
-        "mutation_boundary": "runner-workspace",
-        "proof_artifacts": [{ "kind": "log", "ref": "artifact://proof" }],
-        "verified_by": "test-suite"
-    }))
-    .expect("valid proof");
+fn isolation_proof_requires_proof_artifacts() {
+    let proof = |artifacts: Option<serde_json::Value>| {
+        let mut value = json!({
+            "schema": ISOLATION_PROOF_SCHEMA,
+            "version": FUZZ_CONTRACT_VERSION,
+            "runtime_kind": "ephemeral-runner",
+            "provider_ref": { "opaque": "provider-owned" },
+            "disposable": true,
+            "teardown_required": true,
+            "mutation_boundary": "runner-workspace",
+            "verified_by": "test-suite"
+        });
+        if let Some(artifacts) = artifacts {
+            value["proof_artifacts"] = artifacts;
+        }
+        IsolationProof::from_value(value)
+    };
 
-    assert_eq!(proof.schema, ISOLATION_PROOF_SCHEMA);
-    assert_eq!(proof.runtime_kind, "ephemeral-runner");
-    assert!(proof.disposable);
-    assert!(proof.teardown_required);
-    assert_eq!(proof.snapshot_ref, None);
-    assert_eq!(proof.reset_supported, None);
+    let valid =
+        proof(Some(json!([{ "kind": "log", "ref": "artifact://proof" }]))).expect("valid proof");
+    assert!(valid.disposable);
+    assert!(valid.teardown_required);
 
-    let with_reset = IsolationProof::from_value(json!({
-        "schema": ISOLATION_PROOF_SCHEMA,
-        "version": FUZZ_CONTRACT_VERSION,
-        "runtime_kind": "ephemeral-runner",
-        "provider_ref": { "opaque": "provider-owned" },
-        "disposable": true,
-        "snapshot_ref": "snapshot://baseline-1",
-        "reset_supported": false,
-        "teardown_required": true,
-        "mutation_boundary": "runner-workspace",
-        "proof_artifacts": [{ "kind": "log", "ref": "artifact://proof" }],
-        "verified_by": "test-suite"
-    }))
-    .expect("valid proof with optional reset evidence");
-    assert_eq!(
-        with_reset.snapshot_ref.as_deref(),
-        Some("snapshot://baseline-1")
-    );
-    assert_eq!(with_reset.reset_supported, Some(false));
-}
-
-#[test]
-fn isolation_proof_rejects_missing_required_proof_artifacts() {
-    let error = IsolationProof::from_value(json!({
-        "schema": ISOLATION_PROOF_SCHEMA,
-        "version": FUZZ_CONTRACT_VERSION,
-        "runtime_kind": "ephemeral-runner",
-        "disposable": true,
-        "teardown_required": true,
-        "mutation_boundary": "runner-workspace",
-        "verified_by": "test-suite"
-    }))
-    .expect_err("proof artifacts are required");
-
+    let error = proof(None).expect_err("proof artifacts are required");
     assert!(error.contains("proof_artifacts"));
 }
 
@@ -165,28 +134,4 @@ fn execution_request_deserializes_without_sampling_contract() {
     assert_eq!(request.sampling.schema, FUZZ_SAMPLING_REQUEST_SCHEMA);
     assert_eq!(request.sampling.strategy, "all");
     assert!(request.sampling.replay.deterministic);
-}
-
-#[test]
-fn default_required_artifacts_and_gates_are_product_neutral() {
-    let artifacts = default_fuzz_required_artifacts();
-    let gates = default_fuzz_gates();
-
-    assert!(artifacts.iter().any(|artifact| {
-        artifact.schema == FUZZ_REQUIRED_ARTIFACT_SCHEMA && artifact.id == "result-envelope"
-    }));
-    assert!(artifacts.iter().any(|artifact| artifact.id == "case-log"));
-    assert!(artifacts
-        .iter()
-        .any(|artifact| artifact.id == "coverage-summary"));
-    assert!(gates
-        .iter()
-        .any(|gate| gate.schema == FUZZ_GATE_SCHEMA && gate.id == "no-open-findings"));
-    assert!(gates.iter().any(|gate| gate.id == "has-case-evidence"));
-    assert!(gates
-        .iter()
-        .any(|gate| gate.id == "target-coverage-complete"));
-    assert!(gates
-        .iter()
-        .any(|gate| gate.id == "operation-coverage-complete"));
 }

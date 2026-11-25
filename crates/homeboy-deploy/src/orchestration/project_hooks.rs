@@ -87,49 +87,33 @@ mod tests {
     }
 
     #[test]
-    fn does_nothing_when_project_declares_no_hook() {
+    fn runs_only_the_project_scoped_hook_with_project_vars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().to_string_lossy().to_string();
         let project = Project {
             id: "site".to_string(),
+            base_path: Some(base.clone()),
+            hooks: HashMap::from([
+                (
+                    HookEvent::PostDeploy,
+                    vec!["touch {{base_path}}/component-hook".to_string()],
+                ),
+                (
+                    HookEvent::PostDeployProject,
+                    vec!["echo {{projectId}} > {{base_path}}/project-hook".to_string()],
+                ),
+            ]),
             ..Project::default()
         };
-        // Must not panic and must not attempt any command execution — there
-        // is nothing to assert on directly here beyond "did not blow up",
-        // since a no-op is externally silent by design.
-        run_project_scoped_post_deploy_hook(&ctx_for(project.clone()), &project);
-    }
 
-    #[test]
-    fn does_not_run_when_only_post_deploy_is_declared() {
-        // A project declaring the component-scoped `post:deploy` event (but
-        // not the project-scoped `post:deploy:project` event) must not run
-        // anything here — that would double-run a hook meant for
-        // `run_post_deploy_hooks` per component.
-        let project = Project {
-            id: "site".to_string(),
-            hooks: HashMap::from([(
-                HookEvent::PostDeploy,
-                vec!["echo should-not-run".to_string()],
-            )]),
-            ..Project::default()
-        };
         run_project_scoped_post_deploy_hook(&ctx_for(project.clone()), &project);
-    }
 
-    #[test]
-    fn runs_the_declared_project_scoped_hook_once() {
-        let project = Project {
-            id: "site".to_string(),
-            base_path: Some("/var/www/site".to_string()),
-            hooks: HashMap::from([(
-                HookEvent::PostDeployProject,
-                vec!["echo {{base_path}} {{projectId}}".to_string()],
-            )]),
-            ..Project::default()
-        };
-        // Non-fatal by design, so this only asserts the call completes; the
-        // resolved command content/order is covered directly by
-        // `hooks::run_project_scoped_hooks_remote` unit tests in
-        // `homeboy_core::engine::hooks`.
-        run_project_scoped_post_deploy_hook(&ctx_for(project.clone()), &project);
+        let marker = std::fs::read_to_string(dir.path().join("project-hook"))
+            .expect("post:deploy:project hook must run");
+        assert_eq!(marker.trim(), "site");
+        assert!(
+            !dir.path().join("component-hook").exists(),
+            "component-scoped post:deploy must not run from the project-scoped hook"
+        );
     }
 }

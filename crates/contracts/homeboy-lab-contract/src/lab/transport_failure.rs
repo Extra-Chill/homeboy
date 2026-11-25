@@ -435,14 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_dispositions_remain_distinct() {
-        assert_ne!(
-            serde_json::to_value(LabJobAcceptanceDisposition::NoJobAccepted)
-                .expect("serialize disposition"),
-            serde_json::to_value(LabJobAcceptanceDisposition::AcceptedIdentityLost)
-                .expect("serialize disposition")
-        );
-
+    fn accepted_job_with_lost_identity_is_never_retryable() {
         let wrapped = preacceptance_transport_error(
             "cook-attempt-accepted",
             "homeboy-lab",

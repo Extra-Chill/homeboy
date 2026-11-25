@@ -179,8 +179,11 @@ mod tests {
     use homeboy_core::component::Component;
     use homeboy_core::error::{Error, ErrorCode};
 
+    /// #11135: the wrapper fails closed (no local_build fallback) while
+    /// keeping the download failure's code, details and causal chain
+    /// machine-readable.
     #[test]
-    fn release_asset_download_error_fails_closed_without_local_build_fallback() {
+    fn release_asset_download_error_fails_closed_and_preserves_classification() {
         let component = Component {
             id: "example".to_string(),
             ..Component::default()
@@ -199,7 +202,6 @@ mod tests {
         assert!(error
             .message
             .contains("artifact source release_asset failed"));
-        // The fail-closed policy is a next action, so it is carried as a hint.
         assert!(error.hints.iter().any(|hint| hint
             .message
             .contains("Refusing to fall back to local_build")));
@@ -207,28 +209,6 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.message.contains("use --tagged")));
-    }
-
-    /// #11135: the download failure's own classification is what makes a
-    /// stranded release-asset deploy machine-readable, so wrapping it must not
-    /// collapse the code, the details, or the causal chain into prose.
-    #[test]
-    fn release_asset_download_error_preserves_the_underlying_classification() {
-        let component = Component {
-            id: "example".to_string(),
-            ..Component::default()
-        };
-
-        let error = release_asset_download_error(
-            &component,
-            "v1.2.3",
-            "example.zip",
-            Error::internal_io(
-                "HTTP 404".to_string(),
-                Some("download release artifact".to_string()),
-            ),
-        );
-
         assert_eq!(error.code, ErrorCode::InternalIoError);
         assert_eq!(
             error.details.get("error").and_then(|value| value.as_str()),

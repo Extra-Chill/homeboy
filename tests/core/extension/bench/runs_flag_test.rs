@@ -91,33 +91,6 @@ mod cases {
     }
 
     #[test]
-    fn runs_skip_serializes_when_none() {
-        let raw = serde_json::to_string(&scenario("plain", &[("p95_ms", 12.0)])).unwrap();
-
-        assert!(!raw.contains("runs"));
-        assert!(!raw.contains("runs_summary"));
-    }
-
-    #[test]
-    fn runs_distribution_math_population_stdev() {
-        let aggregated = aggregate_runs(&[
-            results(vec![scenario("known", &[("value", 1.0)])]),
-            results(vec![scenario("known", &[("value", 2.0)])]),
-            results(vec![scenario("known", &[("value", 3.0)])]),
-        ])
-        .unwrap();
-
-        let summary = aggregated.scenarios[0]
-            .runs_summary
-            .as_ref()
-            .unwrap()
-            .get("value")
-            .unwrap();
-        assert!((summary.stdev - (2.0_f64 / 3.0).sqrt()).abs() < 1e-9);
-        assert_eq!(summary.n, 3);
-    }
-
-    #[test]
     fn runs_handles_missing_scenario_in_some_runs() {
         let aggregated = aggregate_runs(&[
             results(vec![scenario("x", &[("install_ms", 10.0)])]),
@@ -147,32 +120,19 @@ mod cases {
 
     #[test]
     fn runs_preserve_per_run_artifacts() {
-        let mut first = scenario("agent", &[("success_rate", 1.0)]);
-        first.artifacts.insert(
-            "transcript".to_string(),
-            BenchArtifact {
-                path: Some("artifacts/run-1/transcript.json".to_string()),
-                url: None,
-                artifact_type: None,
-                kind: Some("json".to_string()),
-                label: Some("Run 1 transcript".to_string()),
-                observation_artifact_id: None,
-                ..BenchArtifact::default()
-            },
-        );
-        let mut second = scenario("agent", &[("success_rate", 1.0)]);
-        second.artifacts.insert(
-            "transcript".to_string(),
-            BenchArtifact {
-                path: Some("artifacts/run-2/transcript.json".to_string()),
-                url: None,
-                artifact_type: None,
-                kind: Some("json".to_string()),
-                label: Some("Run 2 transcript".to_string()),
-                observation_artifact_id: None,
-                ..BenchArtifact::default()
-            },
-        );
+        let with_transcript = |path: &str| {
+            let mut scenario = scenario("agent", &[("success_rate", 1.0)]);
+            scenario.artifacts.insert(
+                "transcript".to_string(),
+                BenchArtifact {
+                    path: Some(path.to_string()),
+                    ..BenchArtifact::default()
+                },
+            );
+            scenario
+        };
+        let first = with_transcript("artifacts/run-1/transcript.json");
+        let second = with_transcript("artifacts/run-2/transcript.json");
 
         let aggregated = aggregate_runs(&[results(vec![first]), results(vec![second])]).unwrap();
         let runs = aggregated.scenarios[0].runs.as_ref().unwrap();

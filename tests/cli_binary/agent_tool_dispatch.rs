@@ -4,77 +4,49 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-/// Maximum number of bytes retained per captured stream in this test harness.
-/// The dispatched homeboy process' stdout/stderr are bounded with truncation
-/// metadata so the test exercises the same bounded-capture contract the
-/// production control plane uses rather than slurping unbounded output (#5363).
-const DISPATCH_CAPTURE_LIMIT_BYTES: usize = 1024 * 1024;
-
-/// Truncation metadata describing how much of a captured stream was retained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StreamCaptureMetadata {
-    limit_bytes: usize,
-    seen_bytes: usize,
-    retained_bytes: usize,
-    truncated: bool,
-}
-
-/// Bound a captured stream to a retained-byte cap, keeping the trailing bytes
-/// (the most relevant tail) and returning the retained bytes plus truncation
-/// metadata. Mirrors the `bound_captured_stream` pattern used by the production
-/// control plane and `agent_task_promotion`.
-fn bound_captured_stream(bytes: &[u8], limit: usize) -> (Vec<u8>, StreamCaptureMetadata) {
-    let seen = bytes.len();
-    let retained: &[u8] = if seen > limit {
-        &bytes[seen - limit..]
-    } else {
-        bytes
-    };
-    let metadata = StreamCaptureMetadata {
-        limit_bytes: limit,
-        seen_bytes: seen,
-        retained_bytes: retained.len(),
-        truncated: seen > retained.len(),
-    };
-    (retained.to_vec(), metadata)
-}
-
+/// Dispatch prints the raw `agent-tool-result/v1` document, never the command
+/// envelope, whether the policy denies the tool or the control plane rejects
+/// its input.
 #[test]
-fn agent_tool_dispatch_outputs_raw_denied_result_without_wrapper() {
-    let output = run_tool_dispatch(
-        json!({
-            "schema": "homeboy/agent-tool-policy/v1",
-            "default_location": "disabled"
-        }),
-        request_json("create_github_issue"),
-    );
+fn agent_tool_dispatch_outputs_raw_results_without_command_wrapper() {
+    for (location, status, class) in [
+        ("disabled", "denied", "agent_tool.disabled"),
+        ("control_plane", "failed", "agent_tool.validation"),
+    ] {
+        let output = run_tool_dispatch(
+            json!({
+                "schema": "homeboy/agent-tool-policy/v1",
+                "default_location": location
+            }),
+            request_json("create_github_issue"),
+        );
 
-    assert_eq!(output.status.code(), Some(0));
-    assert!(
-        output.stderr.is_empty(),
-        "stderr should be empty: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout: Value = serde_json::from_slice(&output.stdout).expect("raw result json");
-    assert_eq!(stdout["schema"], "homeboy/agent-tool-result/v1");
-    assert_eq!(stdout["status"], "denied");
-    assert_eq!(stdout["diagnostics"][0]["class"], "agent_tool.disabled");
-    assert!(
-        stdout.get("success").is_none(),
-        "must not emit command wrapper"
-    );
-    assert!(
-        stdout.get("data").is_none(),
-        "must not emit command wrapper"
-    );
+        assert_eq!(output.status.code(), Some(0), "{location}");
+        assert!(
+            output.stderr.is_empty(),
+            "{location}: stderr should be empty: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout: Value = serde_json::from_slice(&output.stdout).expect("raw result json");
+        assert_eq!(stdout["schema"], "homeboy/agent-tool-result/v1");
+        assert_eq!(stdout["status"], status, "{location}");
+        assert_eq!(stdout["diagnostics"][0]["class"], class, "{location}");
+        assert!(
+            stdout.get("success").is_none() && stdout.get("data").is_none(),
+            "{location}: must not emit command wrapper: {stdout}"
+        );
+    }
 }
 
+/// Workspace tools round-trip content, and a command deny list constrains
+/// commands rather than blocking unrelated tools.
 #[test]
 fn agent_tool_dispatch_handles_workspace_write_and_read() {
     let dir = tempfile::tempdir().expect("tempdir");
     let policy = json!({
         "schema": "homeboy/agent-tool-policy/v1",
-        "default_location": "control_plane"
+        "default_location": "control_plane",
+        "commands": { "deny": [{ "pattern": "cargo *" }] }
     });
 
     let write_output = run_tool_dispatch(
@@ -153,56 +125,6 @@ fn agent_tool_dispatch_refuses_a_denied_command_with_a_reason() {
         .contains("Make your edits"));
 }
 
-/// A command the policy does not refuse must still execute normally, so the
-/// policy constrains rather than blocks.
-#[test]
-fn agent_tool_dispatch_permits_a_command_outside_the_deny_list() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let output = run_tool_dispatch(
-        json!({
-            "schema": "homeboy/agent-tool-policy/v1",
-            "default_location": "control_plane",
-            "commands": { "deny": [{ "pattern": "cargo *" }] }
-        }),
-        json!({
-            "schema": "homeboy/agent-tool-request/v1",
-            "request_id": "request-permitted",
-            "task_id": "task-1",
-            "tool": "workspace_write",
-            "input": {
-                "workspace_path": dir.path(),
-                "path": "notes/allowed.txt",
-                "content": "not a cargo command\n"
-            }
-        }),
-    );
-
-    assert_eq!(output.status.code(), Some(0));
-    let stdout: Value = serde_json::from_slice(&output.stdout).expect("raw result json");
-    assert_eq!(stdout["status"], "succeeded");
-}
-
-#[test]
-fn agent_tool_dispatch_outputs_raw_control_plane_validation_result() {
-    let output = run_tool_dispatch(
-        json!({
-            "schema": "homeboy/agent-tool-policy/v1",
-            "default_location": "control_plane"
-        }),
-        request_json("create_github_issue"),
-    );
-
-    assert_eq!(output.status.code(), Some(0));
-    let stdout: Value = serde_json::from_slice(&output.stdout).expect("raw result json");
-    assert_eq!(stdout["schema"], "homeboy/agent-tool-result/v1");
-    assert_eq!(stdout["status"], "failed");
-    assert_eq!(stdout["diagnostics"][0]["class"], "agent_tool.validation");
-    assert!(
-        stdout.get("success").is_none(),
-        "must not emit command wrapper"
-    );
-}
-
 fn run_tool_dispatch(policy: Value, request: Value) -> std::process::Output {
     run_tool_dispatch_with_env(policy, request, &[])
 }
@@ -230,30 +152,7 @@ fn run_tool_dispatch_with_env(
         .expect("stdin")
         .write_all(request.to_string().as_bytes())
         .expect("write request");
-    let mut output = child.wait_with_output().expect("homeboy output");
-    // Bound the retained stdout/stderr with truncation metadata so a runaway
-    // dispatched process cannot force unbounded capture into the test harness
-    // (#5363). The cap is far above any legitimate dispatch result size, so it
-    // is transparent for normal runs.
-    let (stdout, stdout_capture) =
-        bound_captured_stream(&output.stdout, DISPATCH_CAPTURE_LIMIT_BYTES);
-    let (stderr, stderr_capture) =
-        bound_captured_stream(&output.stderr, DISPATCH_CAPTURE_LIMIT_BYTES);
-    assert!(
-        !stdout_capture.truncated,
-        "dispatch stdout exceeded the {}-byte retained-capture cap (seen {} bytes); \
-         a legitimate dispatch result should never be this large",
-        stdout_capture.limit_bytes, stdout_capture.seen_bytes
-    );
-    assert!(
-        !stderr_capture.truncated,
-        "dispatch stderr exceeded the {}-byte retained-capture cap (seen {} bytes); \
-         a legitimate dispatch result should never be this large",
-        stderr_capture.limit_bytes, stderr_capture.seen_bytes
-    );
-    output.stdout = stdout;
-    output.stderr = stderr;
-    output
+    child.wait_with_output().expect("homeboy output")
 }
 
 #[test]
@@ -319,26 +218,6 @@ printf '%s
     let captured_body =
         std::fs::read_to_string(capture_prefix.with_extension("body")).expect("gh body");
     assert_eq!(captured_body, body);
-}
-
-#[test]
-fn bound_captured_stream_keeps_trailing_tail_when_truncated() {
-    let blob = format!("{}TAIL", "x".repeat(100));
-    let (retained, capture) = bound_captured_stream(blob.as_bytes(), 4);
-    assert_eq!(retained, b"TAIL");
-    assert_eq!(capture.limit_bytes, 4);
-    assert_eq!(capture.seen_bytes, blob.len());
-    assert_eq!(capture.retained_bytes, 4);
-    assert!(capture.truncated);
-}
-
-#[test]
-fn bound_captured_stream_retains_full_source_within_limit() {
-    let (retained, capture) = bound_captured_stream(b"ok", DISPATCH_CAPTURE_LIMIT_BYTES);
-    assert_eq!(retained, b"ok");
-    assert_eq!(capture.seen_bytes, 2);
-    assert_eq!(capture.retained_bytes, 2);
-    assert!(!capture.truncated);
 }
 
 fn request_json(tool: &str) -> Value {

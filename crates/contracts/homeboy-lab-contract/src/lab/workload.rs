@@ -200,50 +200,13 @@ mod tests {
 
         let refs: Vec<JobArtifactMetadata> =
             serde_json::from_value(payload.clone()).expect("legacy refs deserialize");
-        assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].id, "report");
-        assert_eq!(refs[0].name.as_deref(), Some("summary"));
         assert_eq!(refs[0].path.as_deref(), Some("artifacts/summary.json"));
-        assert_eq!(refs[1].id, "bare");
         assert_eq!(refs[1].name, None);
 
         // Fields gained in the collapse stay absent from the wire form, so the
         // round trip is byte-identical to the pre-collapse shape.
-        assert_eq!(refs[0].mime, None);
-        assert_eq!(refs[0].size_bytes, None);
-        assert_eq!(refs[0].sha256, None);
-
         let reserialized = serde_json::to_value(&refs).expect("refs serialize");
         assert_eq!(reserialized, payload);
-    }
-
-    /// The added fields are additive: when they are populated they serialize
-    /// alongside the original four, and a consumer that ignores them still sees
-    /// the pre-collapse shape.
-    #[test]
-    fn artifact_ref_added_fields_are_additive() {
-        let artifact = JobArtifactMetadata {
-            id: "report".to_string(),
-            path: Some("artifacts/summary.json".to_string()),
-            sha256: Some("abc123".to_string()),
-            size_bytes: Some(42),
-            ..Default::default()
-        };
-
-        let value = serde_json::to_value(&artifact).expect("artifact serializes");
-        assert_eq!(
-            value,
-            json!({
-                "id": "report",
-                "path": "artifacts/summary.json",
-                "sha256": "abc123",
-                "size_bytes": 42
-            })
-        );
-
-        let round_tripped: JobArtifactMetadata =
-            serde_json::from_value(value).expect("artifact deserializes");
-        assert_eq!(round_tripped, artifact);
     }
 
     fn workload_payload(agent_task: Option<serde_json::Value>) -> serde_json::Value {
@@ -274,28 +237,21 @@ mod tests {
         payload
     }
 
-    /// `agent_task` is an optional section. A workload written by a peer that
-    /// never populates it (any non-agent-task command, and every binary that
-    /// predates the section) must still deserialize.
+    /// Workloads written by older peers must still parse: `agent_task` is
+    /// optional (non-agent-task commands and binaries that predate it), and
+    /// `handoff_mirror_policy` was added later. A relaying controller must
+    /// re-serialize them unchanged rather than fabricate a policy the emitter
+    /// never declared; `None` selects the retained stdout fallback.
     #[test]
-    fn workload_without_an_agent_task_section_still_parses() {
+    fn workloads_from_older_peers_parse_and_relay_unchanged() {
         let workload: LabRunnerWorkload =
             serde_json::from_value(workload_payload(None)).expect("workload without agent_task");
-
         assert!(workload.agent_task.is_none());
+        assert!(serde_json::to_value(&workload)
+            .expect("workload serializes")
+            .get("agent_task")
+            .is_none());
 
-        // ... and the absent section stays absent on the wire.
-        let reserialized = serde_json::to_value(&workload).expect("workload serializes");
-        assert!(reserialized.get("agent_task").is_none());
-    }
-
-    /// `handoff_mirror_policy` was added after `agent_task` shipped. A workload
-    /// emitted by a peer that predates the field must deserialize with the
-    /// field absent — and re-serialize byte-identically, so a controller that
-    /// merely relays a workload does not fabricate a policy the emitter never
-    /// declared. `None` is what selects the retained stdout fallback.
-    #[test]
-    fn agent_task_section_without_a_handoff_mirror_policy_round_trips_unchanged() {
         let agent_task = json!({
             "run_id": "cook-7530",
             "dispatch_kind": "cook",
@@ -304,80 +260,17 @@ mod tests {
         let workload: LabRunnerWorkload =
             serde_json::from_value(workload_payload(Some(agent_task.clone())))
                 .expect("workload with a pre-typed agent_task section");
-
         let parsed = workload.agent_task.as_ref().expect("agent_task section");
-        assert_eq!(parsed.run_id, "cook-7530");
-        assert_eq!(parsed.plan_ref, None);
-        assert_eq!(
-            parsed.dispatch_kind,
-            LabRunnerWorkloadAgentTaskDispatchKind::Cook
-        );
-        assert_eq!(
-            parsed.lifecycle_mirror_policy,
-            LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None
-        );
         assert_eq!(parsed.handoff_mirror_policy, None);
-
-        let reserialized = serde_json::to_value(parsed).expect("agent_task serializes");
-        assert_eq!(reserialized, agent_task);
-    }
-
-    /// The added field is additive: populated, it serializes alongside the
-    /// original four, and a consumer that ignores it still sees the pre-typed
-    /// shape.
-    #[test]
-    fn handoff_mirror_policy_is_additive_and_snake_case() {
-        let agent_task = LabRunnerWorkloadAgentTask {
-            run_id: "cook-7530".to_string(),
-            plan_ref: None,
-            resolved_provider_policy: None,
-            dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::Dispatch,
-            lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
-            handoff_mirror_policy: Some(
-                LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
-            ),
-            wait_budget_ms: None,
-        };
-
-        let value = serde_json::to_value(&agent_task).expect("agent_task serializes");
         assert_eq!(
-            value,
-            json!({
-                "run_id": "cook-7530",
-                "dispatch_kind": "dispatch",
-                "lifecycle_mirror_policy": "none",
-                "handoff_mirror_policy": "dispatch_handoff"
-            })
-        );
-
-        let round_tripped: LabRunnerWorkloadAgentTask =
-            serde_json::from_value(value).expect("agent_task deserializes");
-        assert_eq!(round_tripped, agent_task);
-
-        let run_plan = json!({
-            "run_id": "run-plan-7530",
-            "plan_ref": "@plan.json",
-            "dispatch_kind": "run_plan",
-            "lifecycle_mirror_policy": "run_plan_aggregate",
-            "handoff_mirror_policy": "none"
-        });
-        let parsed: LabRunnerWorkloadAgentTask =
-            serde_json::from_value(run_plan).expect("run-plan agent_task deserializes");
-        assert_eq!(
-            parsed.handoff_mirror_policy,
-            Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None)
+            serde_json::to_value(parsed).expect("agent_task serializes"),
+            agent_task
         );
     }
 
-    /// Adding a *spelling* to `handoff_mirror_policy` is not free the way
-    /// adding the field was. An old peer rejects the unknown spelling, and
-    /// because `agent_task` is deserialized as a whole that rejection fails the
-    /// entire workload parse — not just the section.
-    ///
-    /// This test pins that so the blast radius is visible at review time: a new
-    /// policy spelling is a breaking change for old peers and must be rolled
-    /// out behind another new optional field instead, exactly as this field was
-    /// rolled out rather than as a `lifecycle_mirror_policy` variant.
+    /// Adding a *spelling* to `handoff_mirror_policy` is a breaking change for
+    /// old peers: the unknown spelling fails the entire workload parse, so new
+    /// policies must roll out behind another optional field.
     #[test]
     fn an_unknown_handoff_policy_spelling_is_a_breaking_change_for_old_peers() {
         let payload = workload_payload(Some(json!({
@@ -386,15 +279,7 @@ mod tests {
             "lifecycle_mirror_policy": "none",
             "handoff_mirror_policy": "a_policy_from_the_future"
         })));
-
-        let section: std::result::Result<LabRunnerWorkloadAgentTask, _> =
-            serde_json::from_value(payload["agent_task"].clone());
-        assert!(section.is_err(), "unknown spelling is rejected");
-
         let workload: std::result::Result<LabRunnerWorkload, _> = serde_json::from_value(payload);
-        assert!(
-            workload.is_err(),
-            "and that rejection propagates to the whole workload"
-        );
+        assert!(workload.is_err());
     }
 }

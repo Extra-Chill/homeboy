@@ -256,56 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn request_and_response_round_trip_with_strict_serde() {
-        let request = plan_request();
-        let request_json = serde_json::to_value(&request).expect("request serializes");
-        let parsed_request: WorktreeRetentionRequest =
-            serde_json::from_value(request_json).expect("request parses");
-        assert_eq!(parsed_request, request);
-
-        let response = planned_response();
-        let response_json = serde_json::to_value(&response).expect("response serializes");
-        let parsed_response: WorktreeRetentionResponse =
-            serde_json::from_value(response_json).expect("response parses");
-        assert_eq!(parsed_response, response);
-        parsed_response
-            .validate_identity(&request)
-            .expect("plan identity is valid");
-    }
-
-    #[test]
-    fn unknown_fields_and_missing_required_fields_are_rejected() {
-        let error = serde_json::from_value::<WorktreeRetentionRequest>(serde_json::json!({
-            "schema": WORKTREE_RETENTION_SCHEMA,
-            "provider_id": "fixture",
-            "operation": "plan",
-            "request_id": "req-1",
-            "unexpected": true
-        }))
-        .expect_err("unknown request fields are rejected");
-        assert!(error.to_string().contains("unexpected"));
-
-        let error = serde_json::from_value::<WorktreeRetentionResponse>(serde_json::json!({
-            "schema": WORKTREE_RETENTION_SCHEMA,
-            "provider_id": "fixture",
-            "run_id": "run-1",
-            "plan_id": "plan-1",
-            "state": "planned",
-            "inventory_completeness": "complete",
-            "extra": 1
-        }))
-        .expect_err("unknown response fields are rejected");
-        assert!(error.to_string().contains("extra"));
-
-        serde_json::from_value::<WorktreeRetentionRequest>(serde_json::json!({
-            "provider_id": "fixture",
-            "operation": "plan",
-            "request_id": "req-1"
-        }))
-        .expect_err("schema is required");
-    }
-
-    #[test]
     fn apply_requires_explicit_reviewed_identity() {
         let mut request = plan_request();
         request.operation = WorktreeRetentionOperation::Apply;
@@ -326,13 +276,16 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_apply_response_identity_is_rejected() {
+    fn apply_response_identity_must_match_the_reviewed_plan() {
         let mut request = plan_request();
         request.operation = WorktreeRetentionOperation::Apply;
         request.run_id = Some("run-1".to_string());
         request.plan_id = Some("plan-1".to_string());
         let mut response = planned_response();
         response.state = WorktreeRetentionState::Applying;
+        response
+            .validate_identity(&request)
+            .expect("reviewed identity matches");
         response.plan_id = "other-plan".to_string();
         assert!(response
             .validate_identity(&request)

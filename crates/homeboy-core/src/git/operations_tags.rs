@@ -371,6 +371,7 @@ mod is_ancestor_tests {
         let (_remote, clone, pushed) = remote_and_clone();
         let path = clone.path().to_str().unwrap();
 
+        fetch_origin(path).expect("fetch origin should succeed");
         // Existing branch resolves to the pushed commit.
         assert_eq!(
             remote_branch_commit(path, "main").unwrap().as_deref(),
@@ -378,12 +379,5 @@ mod is_ancestor_tests {
         );
         // A branch that does not exist on the remote returns None.
         assert_eq!(remote_branch_commit(path, "does-not-exist").unwrap(), None);
-    }
-
-    #[test]
-    fn test_fetch_origin() {
-        let (_remote, clone, _pushed) = remote_and_clone();
-        // A plain fetch against a healthy remote must succeed.
-        fetch_origin(clone.path().to_str().unwrap()).expect("fetch origin should succeed");
     }
 }

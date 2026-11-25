@@ -69,26 +69,6 @@ pub struct AgentTaskTypedArtifact {
     pub metadata: Value,
 }
 
-#[cfg(test)]
-impl AgentTaskArtifactDeclaration {
-    pub(super) fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
-        self.description = self.description.map(|value| policy.redact_string(&value));
-        self.path = self.path.map(|value| policy.redact_string(&value));
-        self.metadata = policy.redact_json(&self.metadata);
-        self
-    }
-}
-
-#[cfg(test)]
-impl AgentTaskTypedArtifact {
-    pub(super) fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
-        self.payload = policy.redact_json(&self.payload);
-        self.artifact = self.artifact.map(|artifact| artifact.redacted_with(policy));
-        self.metadata = policy.redact_json(&self.metadata);
-        self
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskArtifact {
     #[serde(default = "artifact_schema")]
@@ -167,20 +147,6 @@ impl AgentTaskArtifact {
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
         })
-    }
-}
-
-#[cfg(test)]
-impl AgentTaskArtifact {
-    pub(super) fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
-        self.name = self.name.map(|value| policy.redact_string(&value));
-        self.label = self.label.map(|value| policy.redact_string(&value));
-        self.role = self.role.map(|value| policy.redact_string(&value));
-        self.semantic_key = self.semantic_key.map(|value| policy.redact_string(&value));
-        self.path = self.path.map(|value| policy.redact_string(&value));
-        self.url = self.url.map(|value| policy.redact_url(&value));
-        self.metadata = policy.redact_json(&self.metadata);
-        self
     }
 }
 

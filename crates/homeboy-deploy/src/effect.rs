@@ -101,14 +101,8 @@ mod tests {
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::project::Project;
 
-    #[test]
-    fn post_effect_version_read_uses_applied_remote_tree() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let remote_dir = temp.path().join("plugin");
-        std::fs::create_dir_all(&remote_dir).expect("remote dir");
-        std::fs::write(remote_dir.join("plugin.php"), "<?php\nVersion: 1.2.3\n")
-            .expect("remote version file");
-        let component = Component {
+    fn versioned_plugin() -> Component {
+        Component {
             id: "plugin".to_string(),
             remote_path: "plugin".to_string(),
             version_targets: Some(vec![VersionTarget {
@@ -117,174 +111,95 @@ mod tests {
                 artifact_path: None,
             }]),
             ..Component::default()
-        };
-        let effect = DeployEffect {
-            remote_path: remote_dir.to_string_lossy().to_string(),
-            artifact_path: Some("/tmp/plugin.zip".to_string()),
-            verified: false,
-        };
-        let expected_version = "1.2.3".to_string();
-
-        let version = remote_version_after_deploy_effect(
-            &component,
-            &Project::default(),
-            temp.path().to_str().expect("base path"),
-            &local_client(),
-            Some(&effect),
-            Some(&expected_version),
-        )
-        .expect("post-effect version");
-
-        let PostDeployVerification::Verified(Some(version)) = version else {
-            panic!("expected verified post-effect version");
-        };
-
-        assert_eq!(version, "1.2.3");
+        }
     }
 
     #[test]
-    fn post_effect_version_read_returns_applied_unverified_when_probe_remains_unreadable() {
+    fn post_effect_version_reads_applied_tree_and_degrades_to_applied_unverified() {
         let temp = tempfile::tempdir().expect("tempdir");
         let remote_dir = temp.path().join("plugin");
         std::fs::create_dir_all(&remote_dir).expect("remote dir");
-        let component = Component {
-            id: "plugin".to_string(),
-            remote_path: "plugin".to_string(),
-            version_targets: Some(vec![VersionTarget {
-                file: "plugin.php".to_string(),
-                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
-                artifact_path: None,
-            }]),
-            ..Component::default()
-        };
         let effect = DeployEffect {
             remote_path: remote_dir.to_string_lossy().to_string(),
             artifact_path: Some("/tmp/plugin.zip".to_string()),
             verified: false,
         };
+        let project = Project {
+            id: "site".to_string(),
+            ..Project::default()
+        };
         let expected_version = "1.2.3".to_string();
+        let verify = || {
+            remote_version_after_deploy_effect(
+                &versioned_plugin(),
+                &project,
+                temp.path().to_str().expect("base path"),
+                &local_client(),
+                Some(&effect),
+                Some(&expected_version),
+            )
+        };
 
-        let result = remote_version_after_deploy_effect(
-            &component,
-            &Project {
-                id: "site".to_string(),
-                ..Project::default()
-            },
-            temp.path().to_str().expect("base path"),
-            &local_client(),
-            Some(&effect),
-            Some(&expected_version),
-        )
-        .expect("missing post-effect remote version should stay typed");
-
-        let PostDeployVerification::AppliedUnverified(message) = result else {
+        let PostDeployVerification::AppliedUnverified(message) =
+            verify().expect("unreadable probe should stay typed")
+        else {
             panic!("expected applied_unverified outcome");
         };
-        assert!(
-            message.contains("postcondition remained unreadable"),
-            "unexpected outcome: {message}"
-        );
         assert!(
             message.contains("homeboy deploy --project site --component plugin --check"),
             "unexpected outcome: {message}"
         );
+
+        std::fs::write(remote_dir.join("plugin.php"), "<?php\nVersion: 1.2.3\n")
+            .expect("remote version file");
+        let PostDeployVerification::Verified(Some(version)) =
+            verify().expect("post-effect version")
+        else {
+            panic!("expected verified post-effect version");
+        };
+        assert_eq!(version, "1.2.3");
     }
 
     #[test]
-    fn post_effect_artifact_deploy_without_version_targets_fails_loudly() {
-        // Reproduces issue #3608: an artifact was uploaded and extracted, but the
-        // component declares no version_targets, so Homeboy cannot confirm the
-        // files actually landed. It must refuse to fabricate a success.
+    fn post_effect_without_version_targets_requires_verifier_for_artifact_deploys() {
+        // Issue #3608: an artifact deploy with no version_targets and no
+        // extension verifier must not fabricate success. Verified artifact
+        // deploys and effect-less (git) deploys report local_version.
         let component = Component {
-            id: "sample-plugin-socials".to_string(),
-            remote_path: "wp-content/plugins/sample-plugin-socials".to_string(),
+            id: "plugin".to_string(),
+            remote_path: "wp-content/plugins/plugin".to_string(),
             version_targets: None,
             ..Component::default()
         };
-        let effect = DeployEffect {
-            remote_path: "wp-content/plugins/sample-plugin-socials".to_string(),
-            artifact_path: Some(
-                "wp-content/plugins/sample-plugin-socials/.homeboy-sample-plugin-socials.zip"
-                    .to_string(),
-            ),
-            verified: false,
+        let artifact_effect = |verified| DeployEffect {
+            remote_path: "wp-content/plugins/plugin".to_string(),
+            artifact_path: Some("/srv/staging/.homeboy-plugin.zip".to_string()),
+            verified,
         };
         let expected_version = "0.14.0".to_string();
+        let verify = |effect: Option<&DeployEffect>| {
+            remote_version_after_deploy_effect(
+                &component,
+                &Project::default(),
+                "/srv/site",
+                &local_client(),
+                effect,
+                Some(&expected_version),
+            )
+        };
 
-        let error = remote_version_after_deploy_effect(
-            &component,
-            &Project::default(),
-            "/srv/site",
-            &local_client(),
-            Some(&effect),
-            Some(&expected_version),
-        )
-        .expect_err("unverifiable artifact deploy should fail");
-
+        let error = verify(Some(&artifact_effect(false)))
+            .expect_err("unverifiable artifact deploy should fail");
         assert!(
             error.contains("cannot confirm the files actually landed"),
             "unexpected error: {error}"
         );
-    }
 
-    #[test]
-    fn post_effect_artifact_deploy_without_version_targets_accepts_extension_verified() {
-        // When an extension verifier already confirmed the deploy (`verified`),
-        // the absence of version_targets is acceptable and we report local_version.
-        let component = Component {
-            id: "sample-plugin-socials".to_string(),
-            remote_path: "wp-content/plugins/sample-plugin-socials".to_string(),
-            version_targets: None,
-            ..Component::default()
-        };
-        let effect = DeployEffect {
-            remote_path: "wp-content/plugins/sample-plugin-socials".to_string(),
-            artifact_path: Some("/srv/staging/.homeboy-sample-plugin-socials.zip".to_string()),
-            verified: true,
-        };
-        let expected_version = "0.14.0".to_string();
-
-        let version = remote_version_after_deploy_effect(
-            &component,
-            &Project::default(),
-            "/srv/site",
-            &local_client(),
-            Some(&effect),
-            Some(&expected_version),
-        )
-        .expect("verified artifact deploy without version_targets should succeed");
-
-        let PostDeployVerification::Verified(version) = version else {
-            panic!("expected verified outcome");
-        };
-        assert_eq!(version.as_deref(), Some("0.14.0"));
-    }
-
-    #[test]
-    fn post_effect_no_effect_returns_local_version_without_verification() {
-        // Git-style deploys produce no effect; there is no artifact-landing claim
-        // to verify, so we fall back to local_version unchanged.
-        let component = Component {
-            id: "plugin".to_string(),
-            remote_path: "plugin".to_string(),
-            version_targets: None,
-            ..Component::default()
-        };
-        let expected_version = "1.0.0".to_string();
-
-        let version = remote_version_after_deploy_effect(
-            &component,
-            &Project::default(),
-            "/srv/site",
-            &local_client(),
-            None,
-            Some(&expected_version),
-        )
-        .expect("no-effect deploy should return local_version");
-
-        let PostDeployVerification::Verified(version) = version else {
-            panic!("expected verified outcome");
-        };
-        assert_eq!(version.as_deref(), Some("1.0.0"));
+        for effect in [Some(artifact_effect(true)), None] {
+            let Ok(PostDeployVerification::Verified(version)) = verify(effect.as_ref()) else {
+                panic!("expected verified outcome for {effect:?}");
+            };
+            assert_eq!(version.as_deref(), Some("0.14.0"));
+        }
     }
 }

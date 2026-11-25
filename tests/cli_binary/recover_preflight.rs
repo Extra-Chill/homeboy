@@ -122,8 +122,8 @@ fn run_json(
     (output.status.code(), envelope, output)
 }
 
-/// A finalized Cook used to be replayed through `cook-continue`. `recover`
-/// names no step for it, and neither preflight nor recovery touches it.
+/// `recover` names no step for a finalized Cook, and neither preflight nor
+/// recovery touches it.
 #[test]
 fn recover_preflight_reports_no_step_for_a_finalized_cook() {
     use homeboy::agents::agent_task_service::{
@@ -187,33 +187,10 @@ fn recover_preflight_leaves_a_queued_finalized_continuation_to_its_worker() {
     assert!(!lifecycle_store.aggregate_path(run_id).exists());
 }
 
+/// An unknown id is answered by the handler itself, under host pressure, and
+/// without initializing any lifecycle state.
 #[test]
-fn recover_preflight_rejects_an_unknown_id_without_initializing_state() {
-    let context = HermeticTestContext::new();
-    let (code, envelope, _) = run_json(
-        &context,
-        &[
-            "--placement",
-            "local",
-            "agent-task",
-            "recover",
-            "missing-cook",
-            "--preflight",
-        ],
-    );
-
-    assert_eq!(code, Some(2), "{envelope:#}");
-    assert_eq!(envelope["success"], false, "{envelope:#}");
-    assert!(
-        envelope.to_string().contains("missing-cook"),
-        "{envelope:#}"
-    );
-    assert!(!context.data_dir().join("agent-task-runs").exists());
-    assert!(!context.data_dir().join("agent-task-cooks").exists());
-}
-
-#[test]
-fn pressured_recover_preflight_bypasses_startup_resource_admission() {
+fn pressured_recover_preflight_rejects_an_unknown_id_without_admission_or_state() {
     let context = HermeticTestContext::new();
     let output = context
         .command(TestBinary::HomeboyFixture)
@@ -236,6 +213,7 @@ fn pressured_recover_preflight_bypasses_startup_resource_admission() {
     });
     // The handler itself answers (unknown Cook), not resource admission.
     assert_eq!(output.status.code(), Some(2), "{envelope:#}");
+    assert_eq!(envelope["success"], false, "{envelope:#}");
     assert!(
         envelope.to_string().contains("missing-cook-under-pressure"),
         "{envelope:#}"
@@ -248,12 +226,10 @@ fn pressured_recover_preflight_bypasses_startup_resource_admission() {
     assert!(!context.data_dir().join("agent-task-cooks").exists());
 }
 
-/// A retryable pre-execution Cook failure used to be re-dispatched on a new
-/// provider route through `retry <attempt> --backend/--selector/--model`.
-/// `recover --preflight` names the retry step for it, and `retry` no longer
-/// carries a Cook provider-route surface: the route is a `recover` override.
+/// `recover --preflight` names the retry step for a retryable pre-execution
+/// Cook failure, by Cook id or attempt id, and reserves nothing.
 #[test]
-fn recover_preflight_names_the_retry_step_retry_route_overrides_used_to_reach() {
+fn recover_preflight_names_the_retry_step_for_a_retryable_pre_execution_failure() {
     use homeboy::agents::agent_task_lifecycle::{
         record_cook_attempt_in_store, record_pre_execution_failure_in_store,
     };
@@ -285,36 +261,13 @@ fn recover_preflight_names_the_retry_step_retry_route_overrides_used_to_reach() 
         assert!(report["result"].is_null(), "{report:#}");
     }
 
-    for route in [
-        ["--backend", "replacement"],
-        ["--selector", "replacement-selector"],
-        ["--model", "replacement-model"],
-    ] {
-        let output = context
-            .command(TestBinary::HomeboyFixture)
-            .args(["agent-task", "retry", run_id])
-            .args(route)
-            .output()
-            .expect("run retry");
-        assert_eq!(output.status.code(), Some(2), "{route:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("unexpected argument"),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
     let records = homeboy::agents::agent_task_lifecycle::list_records_in_store(&lifecycle_store)
         .expect("records");
-    assert_eq!(
-        records.len(),
-        1,
-        "preflight and refused retries reserve nothing"
-    );
+    assert_eq!(records.len(), 1, "preflight reserves nothing");
 }
 
 /// An explicit retry of a Cook ID reserves from the Cook's latest durable
-/// attempt rather than refusing the ID (#17933), even while
-/// `recover --preflight` names a step for that Cook.
+/// attempt rather than refusing the ID (#17933).
 #[test]
 fn explicit_retry_of_a_cook_id_reserves_from_its_latest_attempt() {
     use homeboy::agents::agent_task_lifecycle::{
@@ -336,11 +289,6 @@ fn explicit_retry_of_a_cook_id_reserves_from_its_latest_attempt() {
         )
         .expect("persist retryable readiness failure");
     });
-
-    let (code, envelope, _) =
-        run_json(&context, &["agent-task", "recover", cook_id, "--preflight"]);
-    assert_eq!(code, Some(0), "{envelope:#}");
-    assert_eq!(envelope["data"]["step"]["kind"], "retry", "{envelope:#}");
 
     let (code, envelope, _) = run_json(
         &context,

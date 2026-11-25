@@ -306,77 +306,10 @@ fn scp_file_atomic(
 
 #[cfg(test)]
 mod tests {
-    use super::{process_output_result, rsync_base_args, scp_file, upload_directory, upload_file};
+    use super::{process_output_result, rsync_base_args, upload_directory, upload_file};
     use crate::test_support::local_client;
     use std::fs;
     use std::process::Command;
-
-    #[test]
-    fn test_upload_directory() {
-        let temp = tempfile::tempdir().expect("create tempdir");
-        let source = temp.path().join("source");
-        let target = temp.path().join("target");
-        fs::create_dir_all(&source).expect("create source dir");
-        fs::create_dir_all(&target).expect("create target dir");
-        fs::write(source.join("file.txt"), "hello").expect("write source file");
-
-        let result = upload_directory(&local_client(), &source, target.to_str().unwrap())
-            .expect("upload directory");
-
-        assert!(result.success);
-        assert_eq!(
-            fs::read_to_string(target.join("file.txt")).expect("read copied file"),
-            "hello"
-        );
-    }
-
-    #[test]
-    fn test_upload_file() {
-        let temp = tempfile::tempdir().expect("create tempdir");
-        let source = temp.path().join("source.txt");
-        let target = temp.path().join("target.txt");
-        fs::write(&source, "hello").expect("write source file");
-
-        let result =
-            upload_file(&local_client(), &source, target.to_str().unwrap()).expect("upload file");
-
-        assert!(result.success);
-        assert_eq!(
-            fs::read_to_string(&target).expect("read copied file"),
-            "hello"
-        );
-    }
-
-    #[test]
-    fn test_scp_file() {
-        let temp = tempfile::tempdir().expect("create tempdir");
-        let source = temp.path().join("source.txt");
-        let target = temp.path().join("target.txt");
-        fs::write(&source, "hello").expect("write source file");
-
-        let result =
-            scp_file(&local_client(), &source, target.to_str().unwrap()).expect("scp file");
-
-        assert!(result.success);
-        assert_eq!(
-            fs::read_to_string(&target).expect("read copied file"),
-            "hello"
-        );
-    }
-
-    #[test]
-    fn process_output_result_returns_success_for_zero_exit() {
-        let output = Command::new("sh")
-            .args(["-c", "exit 0"])
-            .output()
-            .expect("run success fixture");
-
-        let result = process_output_result(output);
-
-        assert!(result.success);
-        assert_eq!(result.exit_code, 0);
-        assert!(result.error.is_none());
-    }
 
     /// The deploy target is read while it is written, so the flag set is a
     /// correctness property rather than a tuning preference. Losing
@@ -384,95 +317,94 @@ mod tests {
     /// of the transfer; losing `--delete-after` lets `--delete` remove a file
     /// before its replacement lands, which a concurrent reader observes as a
     /// missing file. Both produced real production fatals (issue #14861).
+    /// Deferring the renames must not weaken the mirror guarantee either:
+    /// added files still arrive and removed files are still deleted.
     #[test]
-    fn rsync_base_args_defer_updates_and_deletes_to_the_end() {
+    fn upload_directory_mirrors_source_with_deferred_updates() {
         let args = rsync_base_args();
+        for flag in ["-a", "--delete", "--delay-updates", "--delete-after"] {
+            assert!(args.contains(&flag.to_string()), "rsync must pass {flag}");
+        }
 
-        assert!(args.contains(&"-a".to_string()), "archive mode is required");
-        assert!(
-            args.contains(&"--delete".to_string()),
-            "target must mirror source exactly or stale files shadow new ones"
-        );
-        assert!(
-            args.contains(&"--delay-updates".to_string()),
-            "transferred files must be renamed in at the end, not in place"
-        );
-        assert!(
-            args.contains(&"--delete-after".to_string()),
-            "deletions must run after the transfer, not before it"
-        );
-    }
-
-    /// Deferring the renames must not weaken the mirror guarantee: files added
-    /// to the source still arrive, and files removed from the source are still
-    /// deleted from the target. A `--delete-after` that quietly stopped
-    /// deleting would satisfy the flag assertion above while reintroducing the
-    /// stale-file shadowing `--delete` exists to prevent.
-    #[test]
-    fn delayed_flags_still_mirror_the_source_exactly() {
         if Command::new("rsync").arg("--version").output().is_err() {
             eprintln!("rsync unavailable; skipping mirror check");
             return;
         }
 
-        let base = std::env::temp_dir().join(format!(
-            "homeboy-rsync-mirror-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        let src = base.join("src");
-        let dst = base.join("dst");
-        std::fs::create_dir_all(&src).expect("create source");
-        std::fs::create_dir_all(&dst).expect("create target");
-
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let src = temp.path().join("src");
+        let dst = temp.path().join("dst");
+        fs::create_dir_all(&src).expect("create source");
+        fs::create_dir_all(&dst).expect("create target");
         // Target starts with a file the source does not have.
-        std::fs::write(dst.join("removed.txt"), b"obsolete").expect("seed target");
-        std::fs::write(src.join("kept.txt"), b"current").expect("seed source");
+        fs::write(dst.join("removed.txt"), b"obsolete").expect("seed target");
+        fs::write(src.join("kept.txt"), b"current").expect("seed source");
 
-        let mut args = rsync_base_args();
-        args.push(format!("{}/", src.display()));
-        args.push(format!("{}/", dst.display()));
-
-        let output = Command::new("rsync")
-            .args(&args)
-            .output()
-            .expect("run rsync");
-        assert!(
-            output.status.success(),
-            "rsync rejected the flag set: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let result =
+            upload_directory(&local_client(), &src, dst.to_str().unwrap()).expect("upload");
 
         assert!(
-            dst.join("kept.txt").exists(),
-            "source file did not arrive at the target"
+            result.success,
+            "rsync rejected the flag set: {:?}",
+            result.error
         );
+        assert_eq!(fs::read_to_string(dst.join("kept.txt")).unwrap(), "current");
         assert!(
             !dst.join("removed.txt").exists(),
             "--delete-after did not delete; mirror guarantee is broken"
         );
         assert!(
-            std::fs::read_dir(&dst)
+            fs::read_dir(&dst)
                 .expect("read target")
                 .filter_map(|e| e.ok())
                 .all(|e| !e.file_name().to_string_lossy().starts_with('.')),
             "staging artifacts were left behind in the target"
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
-    fn process_output_result_captures_stderr_for_failed_exit() {
-        let output = Command::new("sh")
-            .args(["-c", "printf 'copy failed' >&2; exit 7"])
-            .output()
-            .expect("run failure fixture");
+    fn upload_file_replaces_destination_without_leaving_temp_files() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let source = temp.path().join("source.txt");
+        let target = temp.path().join("target.txt");
+        fs::write(&source, "hello").expect("write source file");
+        fs::write(&target, "old").expect("seed target file");
 
-        let result = process_output_result(output);
+        let result =
+            upload_file(&local_client(), &source, target.to_str().unwrap()).expect("upload file");
 
-        assert!(!result.success);
-        assert_eq!(result.exit_code, 7);
-        assert_eq!(result.error.as_deref(), Some("copy failed"));
+        assert!(result.success);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello");
+        assert!(fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .all(|e| !e
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".homeboy-upload-")));
+    }
+
+    #[test]
+    fn process_output_result_maps_exit_status_and_stderr() {
+        for (script, success, exit_code, error) in [
+            ("exit 0", true, 0, None),
+            (
+                "printf 'copy failed' >&2; exit 7",
+                false,
+                7,
+                Some("copy failed"),
+            ),
+        ] {
+            let output = Command::new("sh")
+                .args(["-c", script])
+                .output()
+                .expect("run fixture");
+
+            let result = process_output_result(output);
+
+            assert_eq!(result.success, success, "{script}");
+            assert_eq!(result.exit_code, exit_code, "{script}");
+            assert_eq!(result.error.as_deref(), error, "{script}");
+        }
     }
 }

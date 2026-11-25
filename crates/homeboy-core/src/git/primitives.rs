@@ -882,10 +882,6 @@ mod tests {
         assert_eq!(err.details["command"], "git fetch origin");
         assert!(err.details.get("env").is_none());
         assert!(!err.message.contains("/secret/"));
-        assert_eq!(
-            err.details.get("command").and_then(|value| value.as_str()),
-            Some("git fetch origin")
-        );
     }
 
     #[test]

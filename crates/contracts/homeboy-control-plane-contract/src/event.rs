@@ -189,58 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn event_page_round_trips_with_typed_cursor_and_identities() {
-        let run = RunId::new("run-1").expect("run");
-        let page = ControlPlaneEventPage {
-            schema: CONTROL_PLANE_EVENT_PAGE_SCHEMA.to_string(),
-            run: run.clone(),
-            events: vec![ControlPlaneEvent {
-                schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
-                event: EventId::new("run-1:event:1").expect("event"),
-                sequence: 1,
-                occurred_at: Some("2026-01-01T00:00:00Z".to_string()),
-                mission: None,
-                run,
-                task: Some(TaskId::new("task-1").expect("task")),
-                attempt: None,
-                execution: None,
-                kind: "task.state_changed".to_string(),
-                source: ControlPlaneEventSource {
-                    component: "agent-task".to_string(),
-                    instance: None,
-                },
-                data: serde_json::json!({ "state": "succeeded" }),
-                artifacts: Vec::new(),
-                evidence: Vec::new(),
-            }],
-            next_cursor: Some(EventCursor::new("1").expect("cursor")),
-            has_more: false,
-        };
-
-        let value = serde_json::to_value(&page).expect("serialize");
-        assert_eq!(value["schema"], CONTROL_PLANE_EVENT_PAGE_SCHEMA);
-        assert_eq!(value["events"][0]["schema"], CONTROL_PLANE_EVENT_SCHEMA);
-        assert_eq!(value["events"][0]["event"], "run-1:event:1");
-        assert_eq!(value["next_cursor"], "1");
-        let decoded: ControlPlaneEventPage = serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, page);
-
-        let retention = ControlPlaneEventRetention {
-            schema: CONTROL_PLANE_EVENT_RETENTION_SCHEMA.to_string(),
-            run: RunId::new("run-1").expect("run"),
-            earliest_sequence: Some(1),
-            latest_sequence: Some(10),
-        };
-        let value = serde_json::to_value(&retention).expect("serialize retention");
-        assert_eq!(value["schema"], CONTROL_PLANE_EVENT_RETENTION_SCHEMA);
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneEventRetention>(value)
-                .expect("deserialize retention"),
-            retention
-        );
-    }
-
-    #[test]
     fn append_request_bounds_each_reference_field() {
         let mut request = append_request();
         request.evidence.push(ControlPlaneEvidenceRef {

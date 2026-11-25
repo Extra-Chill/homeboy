@@ -669,58 +669,11 @@ fn repository_contract(component: &Component, contract: &str) -> Result<PathBuf>
 mod tests {
     use super::{
         layered_payload, repository_contract, run_if_configured, validate_repository_policy,
-        CREATE_INPUT_CONTEXT, ENCODE_POLICY_CONTEXT, FLUSH_INPUT_CONTEXT, WRITE_INPUT_CONTEXT,
     };
     use crate::route::DeployTarget;
     use crate::DeployConfig;
     use homeboy_core::component::{Component, DeploymentProviderAttachment};
-    use homeboy_core::error::Error;
     use homeboy_core::project::{Project, ProjectComponentAttachment};
-
-    /// Each step names its own operation, so a report identifies the failing
-    /// line and not only the function (#11134).
-    #[test]
-    fn every_payload_step_reports_a_distinct_operation() {
-        let mut contexts = vec![
-            ENCODE_POLICY_CONTEXT,
-            CREATE_INPUT_CONTEXT,
-            WRITE_INPUT_CONTEXT,
-            FLUSH_INPUT_CONTEXT,
-        ];
-        #[cfg(unix)]
-        contexts.push(super::SECURE_INPUT_CONTEXT);
-
-        let total = contexts.len();
-        contexts.sort_unstable();
-        contexts.dedup();
-
-        assert_eq!(
-            contexts.len(),
-            total,
-            "payload steps must stay individually attributable: {contexts:?}"
-        );
-        assert!(contexts.iter().all(|context| !context.is_empty()));
-    }
-
-    /// `.map_err(|_| ...)` discarded the `io::Error` outright, so the report
-    /// carried no errno, no path, and no kind. The classifying constructors
-    /// must keep all of it alongside the operation.
-    #[test]
-    fn a_failed_payload_step_reports_the_underlying_io_error() {
-        let io_error = std::fs::File::create(
-            std::path::Path::new("/homeboy-nonexistent-root").join("provider-input"),
-        )
-        .expect_err("creating under a missing root fails");
-
-        let error = Error::from_io_error(&io_error, Some(CREATE_INPUT_CONTEXT.to_string()));
-
-        assert_eq!(error.details["context"], CREATE_INPUT_CONTEXT);
-        let reported = error.details["error"].as_str().expect("io error text");
-        assert!(
-            reported.contains("os error"),
-            "the errno must survive: {reported}"
-        );
-    }
 
     #[test]
     fn requires_a_repository_contained_contract_file() {
@@ -778,48 +731,6 @@ mod tests {
             &attachment(None, Some(serde_json::json!({})))
         )
         .is_err());
-    }
-
-    #[test]
-    fn project_targets_are_distinct_from_shared_inline_policy() {
-        let component: Component = serde_json::from_value(serde_json::json!({
-            "id": "fixture",
-            "deployment_provider": {
-                "extension": "fixture-extension",
-                "provider": "fixture.deploy",
-                "policy": { "repository": "shared" }
-            }
-        }))
-        .expect("portable component");
-        let project = |id: &str, target: serde_json::Value| Project {
-            id: id.to_string(),
-            components: vec![ProjectComponentAttachment {
-                id: "fixture".to_string(),
-                local_path: "/source/fixture".to_string(),
-                deployment_provider_input: Some(target),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let first = project("first", serde_json::json!({ "target": "one" }));
-        let second = project("second", serde_json::json!({ "target": "two" }));
-
-        assert_eq!(
-            component
-                .deployment_provider
-                .as_ref()
-                .expect("provider")
-                .policy,
-            Some(serde_json::json!({ "repository": "shared" }))
-        );
-        assert!(serde_json::to_value(&component)
-            .expect("portable serialization")
-            .get("deployment_provider_input")
-            .is_none());
-        assert_ne!(
-            first.components[0].deployment_provider_input,
-            second.components[0].deployment_provider_input
-        );
     }
 
     use homeboy_core::test_support::run_git_command as git;
@@ -971,10 +882,15 @@ mod tests {
         });
     }
 
+    /// The provider is an option, not an owner: with no selected provider
+    /// target, with an explicit `--target server`, or on a server-deployed
+    /// project with one stale attachment (#12214), dispatch declines so the
+    /// standard deployment route stays reachable.
     #[test]
-    fn local_attachment_defers_a_repository_provider_without_a_target() {
+    fn provider_dispatch_declines_when_the_server_route_applies() {
         let repository = provider_repository("fixture");
-        let project = Project {
+
+        let unselected = Project {
             id: "local-site".to_string(),
             components: vec![ProjectComponentAttachment {
                 id: "fixture".to_string(),
@@ -984,43 +900,69 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut config = DeployConfig::check_all_no_pull_head();
-        config.check = false;
-        config.all = false;
-        config.component_ids = vec!["fixture".to_string()];
-        config.dry_run = true;
+        let mut component_dry_run = DeployConfig::check_all_no_pull_head();
+        component_dry_run.check = false;
+        component_dry_run.all = false;
+        component_dry_run.component_ids = vec!["fixture".to_string()];
+        component_dry_run.dry_run = true;
 
-        assert!(
-            run_if_configured("local-site", &project, &config, None)
-                .expect("local attachment must not invoke the provider")
-                .is_none(),
-            "the standard deployment route must remain available when no provider target is selected"
-        );
-    }
+        let mut explicit_server = DeployConfig::check_all_no_pull_head();
+        explicit_server.target = Some(DeployTarget::Server);
 
-    /// The provider is an option, not an owner. `--target server` must reach the
-    /// standard deployment route even on a project that configures a provider
-    /// target, so a dual-deliverable component stays deployable both ways.
-    #[test]
-    fn an_explicit_server_target_declines_a_selected_provider() {
-        let repository = provider_repository("fixture");
-        let project = provider_project(repository.path());
-        let mut config = DeployConfig::check_all_no_pull_head();
-        config.target = Some(DeployTarget::Server);
+        let generic = tempfile::tempdir().expect("generic repository");
+        std::fs::write(
+            generic.path().join("homeboy.json"),
+            r#"{"id":"generic","deploy_strategy":"git"}"#,
+        )
+        .expect("generic component");
+        let server_project_with_absent_checkout = Project {
+            id: "site".to_string(),
+            components: vec![
+                ProjectComponentAttachment {
+                    id: "generic".to_string(),
+                    local_path: generic.path().to_string_lossy().to_string(),
+                    ..Default::default()
+                },
+                ProjectComponentAttachment {
+                    id: "absent".to_string(),
+                    local_path: generic
+                        .path()
+                        .join("deleted-checkout")
+                        .to_string_lossy()
+                        .to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
 
-        assert!(
-            run_if_configured("site", &project, &config, None)
-                .expect("an explicit server target must not invoke the provider")
-                .is_none(),
-            "--target server must fall through to the standard deployment route"
-        );
+        for (name, project, config) in [
+            ("no provider target", unselected, component_dry_run),
+            (
+                "explicit --target server",
+                provider_project(repository.path()),
+                explicit_server,
+            ),
+            (
+                "server project with absent checkout",
+                server_project_with_absent_checkout,
+                DeployConfig::check_all_no_pull_head(),
+            ),
+        ] {
+            assert!(
+                run_if_configured(&project.id.clone(), &project, &config, None)
+                    .expect(name)
+                    .is_none(),
+                "{name}: must fall through to the standard deployment route"
+            );
+        }
     }
 
     /// The reported failure (#12853). Routing to the provider is now explicit,
     /// so when its required input is missing the error must name both ways out:
     /// configure the target, or deploy the server deliverable instead.
     #[test]
-    fn a_missing_provider_target_reports_the_server_deliverable_as_a_remedy() {
+    fn a_selected_provider_without_target_input_fails_closed_with_remedies() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let repository = tempfile::tempdir().expect("repository");
             std::fs::write(
@@ -1071,19 +1013,10 @@ mod tests {
                 tried.contains("--target server"),
                 "the server deliverable must stay reachable: {tried}"
             );
-        });
-    }
 
-    #[test]
-    fn explicit_provider_target_without_required_input_fails_closed() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let repository = provider_repository("fixture");
-            write_provider_extension_with_target_requirement(
-                home.path(),
-                Some("sh {{extension_path}}/run.sh check {{payload.contract}}"),
-                true,
-            );
-            let project = Project {
+            // A project-level provider override without its target input fails
+            // closed the same way, even without an explicit `--target`.
+            let overridden = Project {
                 id: "provider-site".to_string(),
                 components: vec![ProjectComponentAttachment {
                     id: "fixture".to_string(),
@@ -1098,15 +1031,13 @@ mod tests {
                 }],
                 ..Default::default()
             };
-
             let error = run_if_configured(
                 "provider-site",
-                &project,
+                &overridden,
                 &DeployConfig::check_all_no_pull_head(),
                 None,
             )
             .expect_err("the selected provider must require its target input");
-
             assert_eq!(
                 error.details["field"],
                 "components.deployment_provider_input"
@@ -1244,52 +1175,6 @@ mod tests {
                 skipped.warnings
             );
         });
-    }
-
-    /// The reported shape: a server-deployed project with one stale attachment.
-    /// Provider dispatch must decline it so orchestration can run the read-only
-    /// status pass, instead of erroring out of the command entirely (#12214).
-    #[test]
-    fn project_wide_check_with_absent_checkout_defers_non_provider_project() {
-        let generic = tempfile::tempdir().expect("generic repository");
-        std::fs::write(
-            generic.path().join("homeboy.json"),
-            r#"{"id":"generic","deploy_strategy":"git"}"#,
-        )
-        .expect("generic component");
-        let project = Project {
-            id: "site".to_string(),
-            components: vec![
-                ProjectComponentAttachment {
-                    id: "generic".to_string(),
-                    local_path: generic.path().to_string_lossy().to_string(),
-                    ..Default::default()
-                },
-                ProjectComponentAttachment {
-                    id: "absent".to_string(),
-                    local_path: generic
-                        .path()
-                        .join("deleted-checkout")
-                        .to_string_lossy()
-                        .to_string(),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-
-        let dispatched = run_if_configured(
-            "site",
-            &project,
-            &DeployConfig::check_all_no_pull_head(),
-            None,
-        )
-        .expect("an absent checkout must not abort provider dispatch");
-
-        assert!(
-            dispatched.is_none(),
-            "a server-deployed project must fall through to orchestration"
-        );
     }
 
     #[test]

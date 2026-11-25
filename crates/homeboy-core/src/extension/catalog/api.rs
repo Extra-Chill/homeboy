@@ -949,81 +949,54 @@ mod tests {
     }
 
     #[test]
-    fn handshake_reports_no_shared_version_without_losing_supported_versions() {
-        crate::test_support::with_isolated_home(|_| {
-            write_extension(
-                "fixture",
-                serde_json::json!({ "name": "Fixture", "version": "1.0.0" }),
-            );
-            let response = negotiate_api(
-                "fixture",
-                &ExtensionApiHandshakeRequest {
-                    schema: EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA.to_string(),
-                    supported_versions: vec![ExtensionApiVersion { major: 99 }],
-                },
-            )
-            .expect("handshake");
+    fn handshake_reports_typed_compatibility_failures() {
+        let cases = [
+            (
+                EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA,
+                vec![ExtensionApiVersion { major: 99 }],
+                None,
+                None,
+                ExtensionApiCompatibilityFailureCode::NoSharedApiVersion,
+            ),
+            (
+                EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA,
+                vec![EXTENSION_API_V1],
+                Some(">=999.0.0"),
+                Some(EXTENSION_API_V1),
+                ExtensionApiCompatibilityFailureCode::HomeboyVersionIncompatible,
+            ),
+            (
+                "homeboy/extension-api-handshake-request/v2",
+                vec![EXTENSION_API_V1],
+                None,
+                None,
+                ExtensionApiCompatibilityFailureCode::InvalidHandshakeSchema,
+            ),
+        ];
+        for (schema, supported_versions, requires, selected, failure) in cases {
+            crate::test_support::with_isolated_home(|_| {
+                let mut manifest = serde_json::json!({ "name": "Fixture", "version": "1.0.0" });
+                if let Some(requires) = requires {
+                    manifest["requires"] = serde_json::json!({ "homeboy": requires });
+                }
+                write_extension("fixture", manifest);
+                let response = negotiate_api(
+                    "fixture",
+                    &ExtensionApiHandshakeRequest {
+                        schema: schema.to_string(),
+                        supported_versions,
+                    },
+                )
+                .expect("handshake");
 
-            assert_eq!(response.selected_version, None);
-            assert_eq!(response.supported_versions, [EXTENSION_API_V1]);
-            assert_eq!(response.descriptor, None);
-            assert_eq!(
-                response.compatibility.failures[0].code,
-                ExtensionApiCompatibilityFailureCode::NoSharedApiVersion
-            );
-        });
-    }
-
-    #[test]
-    fn handshake_reports_controller_version_incompatibility() {
-        crate::test_support::with_isolated_home(|_| {
-            write_extension(
-                "fixture",
-                serde_json::json!({
-                    "name": "Fixture",
-                    "version": "1.0.0",
-                    "requires": { "homeboy": ">=999.0.0" }
-                }),
-            );
-            let response = negotiate_api(
-                "fixture",
-                &ExtensionApiHandshakeRequest {
-                    schema: EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA.to_string(),
-                    supported_versions: vec![EXTENSION_API_V1],
-                },
-            )
-            .expect("handshake");
-
-            assert_eq!(response.selected_version, Some(EXTENSION_API_V1));
-            assert_eq!(
-                response.compatibility.failures[0].code,
-                ExtensionApiCompatibilityFailureCode::HomeboyVersionIncompatible
-            );
-        });
-    }
-
-    #[test]
-    fn handshake_rejects_the_wrong_request_schema() {
-        crate::test_support::with_isolated_home(|_| {
-            write_extension(
-                "fixture",
-                serde_json::json!({ "name": "Fixture", "version": "1.0.0" }),
-            );
-            let response = negotiate_api(
-                "fixture",
-                &ExtensionApiHandshakeRequest {
-                    schema: "homeboy/extension-api-handshake-request/v2".to_string(),
-                    supported_versions: vec![EXTENSION_API_V1],
-                },
-            )
-            .expect("handshake");
-
-            assert_eq!(response.selected_version, None);
-            assert_eq!(
-                response.compatibility.failures[0].code,
-                ExtensionApiCompatibilityFailureCode::InvalidHandshakeSchema
-            );
-        });
+                assert_eq!(response.selected_version, selected, "{failure:?}");
+                assert_eq!(response.compatibility.failures[0].code, failure);
+                if failure == ExtensionApiCompatibilityFailureCode::NoSharedApiVersion {
+                    assert_eq!(response.supported_versions, [EXTENSION_API_V1]);
+                    assert_eq!(response.descriptor, None);
+                }
+            });
+        }
     }
 
     #[test]
