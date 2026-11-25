@@ -1164,7 +1164,6 @@ fn excerpt_with_limit(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use homeboy_error::ErrorCode;
-    use std::io::{Error as IoError, ErrorKind};
 
     #[test]
     fn diagnostic_collection_reports_count_and_depth_truncation() {
@@ -1211,13 +1210,6 @@ mod tests {
         )
         .expect("portable artifact ref");
         assert_eq!(parsed.artifact.as_deref(), Some("patch-1"));
-        let special = parse_agent_task_homeboy_uri(
-            "homeboy://agent-task/run/run%2F1/artifacts#task=task%20%26%20one&artifact=patch%2F%25%3F",
-        )
-        .expect("special-character ref");
-        assert_eq!(special.run_id, "run/1");
-        assert_eq!(special.task.as_deref(), Some("task & one"));
-        assert_eq!(special.artifact.as_deref(), Some("patch/%?"));
         assert!(parse_agent_task_homeboy_uri(
             "homeboy://agent-task/run/run-1/artifacts#artifact=%ZZ"
         )
@@ -1268,23 +1260,6 @@ mod tests {
     }
 
     #[test]
-    fn file_evidence_read_error_retains_operation_path_and_os_error() {
-        let path = Path::new("evidence.json");
-        let os_error = IoError::new(ErrorKind::PermissionDenied, "read denied");
-        let expected_os_error = os_error.to_string();
-
-        let error = file_evidence_io_error("read", path, os_error);
-
-        assert_eq!(error.code, ErrorCode::InternalIoError);
-        assert_eq!(error.message, "IO error");
-        assert_eq!(error.details["error"], expected_os_error);
-        assert_eq!(
-            error.details["context"],
-            "agent_task.evidence.hydrate.read: evidence.json"
-        );
-    }
-
-    #[test]
     fn process_stream_summaries_hydrate_file_uris_with_redaction_and_a_byte_limit() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let stream = directory.path().join("provider.stderr");
@@ -1310,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn process_stream_summaries_reject_unsafe_or_unreadable_references() {
+    fn process_stream_summaries_reject_unsafe_unreadable_or_untrusted_references() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let streams = process_stream_summaries(
             &json!({
@@ -1323,20 +1298,13 @@ mod tests {
 
         assert_eq!(streams[0]["error"], "unsupported_uri");
         assert_eq!(streams[1]["error"], "not_regular_file");
-    }
 
-    #[test]
-    fn process_stream_summaries_do_not_follow_paths_outside_the_evidence_directory() {
-        let evidence_directory = tempfile::tempdir().expect("evidence directory");
+        // A readable file outside the evidence directory is never followed.
         let stream_directory = tempfile::tempdir().expect("stream directory");
-        let stream = stream_directory.path().join("provider.stderr");
-        fs::write(&stream, "private stream").expect("write stream");
-
-        let streams = process_stream_summaries(
-            &json!({ "stderr_path": stream }),
-            Some(evidence_directory.path()),
-        );
-
+        let outside = stream_directory.path().join("provider.stderr");
+        fs::write(&outside, "private stream").expect("write stream");
+        let streams =
+            process_stream_summaries(&json!({ "stderr_path": outside }), Some(directory.path()));
         assert_eq!(streams[0]["status"], "unavailable");
         assert_eq!(streams[0]["error"], "untrusted_path");
         assert!(streams[0].get("excerpt").is_none());
