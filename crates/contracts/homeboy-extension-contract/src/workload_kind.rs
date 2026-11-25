@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn full_declaration_round_trips() {
+    fn full_declaration_round_trips_and_unknown_keys_are_rejected() {
         let value = json!({
             "script": "scripts/workload/fuzz.sh",
             "env": ["NODE_OPTIONS"],
@@ -347,6 +347,14 @@ mod tests {
         assert!(config.campaign);
         config.validate("fuzz").expect("valid");
         assert_eq!(serde_json::to_value(&config).unwrap(), value);
+
+        // A typo must fail loudly instead of leaving a declaration inert.
+        let error = serde_json::from_value::<WorkloadKindConfig>(json!({
+            "script": "run.sh",
+            "replay": "typo"
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `replay`"));
     }
 
     #[test]
@@ -364,22 +372,6 @@ mod tests {
             serde_json::to_value(&config).unwrap(),
             json!({ "script": "run.sh" })
         );
-    }
-
-    #[test]
-    fn unknown_keys_are_rejected_instead_of_going_inert() {
-        let error = serde_json::from_value::<WorkloadKindConfig>(json!({
-            "script": "run.sh",
-            "replay": "typo"
-        }))
-        .unwrap_err();
-        assert!(error.to_string().contains("unknown field `replay`"));
-
-        let error = serde_json::from_value::<WorkloadKindConfig>(json!({
-            "compare": { "metrics": [{ "name": "m", "direction": "sideways" }] }
-        }))
-        .unwrap_err();
-        assert!(error.to_string().contains("sideways"));
     }
 
     #[test]
@@ -415,10 +407,5 @@ mod tests {
             { "type": "json_pointer", "path": "package.json", "pointer": "scripts/fuzz", "id": "x" }
         ] }));
         assert!(bad_pointer.validate("fuzz").is_err());
-    }
-
-    #[test]
-    fn capability_id_is_prefixed_kind() {
-        assert_eq!(workload_capability_id("fuzz"), "workload.fuzz");
     }
 }

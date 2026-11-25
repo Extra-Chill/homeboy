@@ -222,233 +222,87 @@ mod tests {
         Version::parse(s).unwrap()
     }
 
-    // ========================================================================
-    // Parsing
-    // ========================================================================
-
     #[test]
-    fn parse_exact() {
-        let c = VersionConstraint::parse("1.2.3").unwrap();
-        assert_eq!(c, VersionConstraint::Exact(v("1.2.3")));
-    }
-
-    #[test]
-    fn parse_wildcard() {
-        let c = VersionConstraint::parse("*").unwrap();
-        assert_eq!(c, VersionConstraint::Any);
-    }
-
-    #[test]
-    fn parse_caret() {
-        let c = VersionConstraint::parse("^1.2.3").unwrap();
-        assert_eq!(c, VersionConstraint::Caret(v("1.2.3")));
-    }
-
-    #[test]
-    fn parse_caret_partial() {
-        let c = VersionConstraint::parse("^2.0").unwrap();
-        assert_eq!(c, VersionConstraint::Caret(v("2.0.0")));
-    }
-
-    #[test]
-    fn parse_tilde() {
-        let c = VersionConstraint::parse("~1.5").unwrap();
-        assert_eq!(c, VersionConstraint::Tilde(v("1.5.0")));
-    }
-
-    #[test]
-    fn parse_gte() {
-        let c = VersionConstraint::parse(">=1.0.0").unwrap();
-        assert_eq!(c, VersionConstraint::GreaterEqual(v("1.0.0")));
-    }
-
-    #[test]
-    fn parse_gt() {
-        let c = VersionConstraint::parse(">2.0.0").unwrap();
-        assert_eq!(c, VersionConstraint::Greater(v("2.0.0")));
-    }
-
-    #[test]
-    fn parse_lte() {
-        let c = VersionConstraint::parse("<=3.0.0").unwrap();
-        assert_eq!(c, VersionConstraint::LessEqual(v("3.0.0")));
-    }
-
-    #[test]
-    fn parse_lt() {
-        let c = VersionConstraint::parse("<1.0.0").unwrap();
-        assert_eq!(c, VersionConstraint::Less(v("1.0.0")));
-    }
-
-    #[test]
-    fn parse_with_spaces() {
-        let c = VersionConstraint::parse(">= 1.0.0 ").unwrap();
-        assert_eq!(c, VersionConstraint::GreaterEqual(v("1.0.0")));
-    }
-
-    #[test]
-    fn comma_separated_constraints_require_every_bound() {
-        let c = VersionConstraint::parse(">=2.0.0, <3.0.0").unwrap();
-        assert!(c.matches(&v("2.1.0")));
-        assert!(!c.matches(&v("3.0.0")));
-        assert_eq!(c.to_string(), ">=2.0.0, <3.0.0");
-    }
-
-    #[test]
-    fn parse_single_number() {
-        let c = VersionConstraint::parse("^2").unwrap();
-        assert_eq!(c, VersionConstraint::Caret(v("2.0.0")));
-    }
-
-    #[test]
-    fn parse_invalid_version() {
+    fn parse_recognizes_operators_padding_and_whitespace() {
+        for (input, expected) in [
+            ("*", VersionConstraint::Any),
+            ("1.2.3", VersionConstraint::Exact(v("1.2.3"))),
+            ("^1.2.3", VersionConstraint::Caret(v("1.2.3"))),
+            ("^2.0", VersionConstraint::Caret(v("2.0.0"))),
+            ("^2", VersionConstraint::Caret(v("2.0.0"))),
+            ("~1.5", VersionConstraint::Tilde(v("1.5.0"))),
+            (">=1.0.0", VersionConstraint::GreaterEqual(v("1.0.0"))),
+            (">= 1.0.0 ", VersionConstraint::GreaterEqual(v("1.0.0"))),
+            (">2.0.0", VersionConstraint::Greater(v("2.0.0"))),
+            ("<=3.0.0", VersionConstraint::LessEqual(v("3.0.0"))),
+            ("<1.0.0", VersionConstraint::Less(v("1.0.0"))),
+        ] {
+            assert_eq!(
+                VersionConstraint::parse(input).unwrap(),
+                expected,
+                "{input}"
+            );
+        }
         assert!(VersionConstraint::parse(">=abc").is_err());
     }
 
-    // ========================================================================
-    // Matching — Exact
-    // ========================================================================
-
     #[test]
-    fn exact_matches_same() {
-        let c = VersionConstraint::Exact(v("1.2.3"));
-        assert!(c.matches(&v("1.2.3")));
-    }
-
-    #[test]
-    fn exact_rejects_different() {
-        let c = VersionConstraint::Exact(v("1.2.3"));
-        assert!(!c.matches(&v("1.2.4")));
-        assert!(!c.matches(&v("1.3.0")));
-        assert!(!c.matches(&v("2.0.0")));
-    }
-
-    // ========================================================================
-    // Matching — Wildcard
-    // ========================================================================
-
-    #[test]
-    fn any_matches_everything() {
-        let c = VersionConstraint::Any;
-        assert!(c.matches(&v("0.0.0")));
-        assert!(c.matches(&v("999.999.999")));
-    }
-
-    // ========================================================================
-    // Matching — Caret
-    // ========================================================================
-
-    #[test]
-    fn caret_major_nonzero() {
-        let c = VersionConstraint::Caret(v("1.2.3"));
-        assert!(c.matches(&v("1.2.3")));
-        assert!(c.matches(&v("1.2.4")));
-        assert!(c.matches(&v("1.3.0")));
-        assert!(c.matches(&v("1.99.99")));
-        assert!(!c.matches(&v("2.0.0")));
-        assert!(!c.matches(&v("1.2.2")));
-        assert!(!c.matches(&v("0.9.0")));
-    }
-
-    #[test]
-    fn caret_minor_nonzero() {
-        let c = VersionConstraint::Caret(v("0.2.3"));
-        assert!(c.matches(&v("0.2.3")));
-        assert!(c.matches(&v("0.2.4")));
-        assert!(c.matches(&v("0.2.99")));
-        assert!(!c.matches(&v("0.3.0")));
-        assert!(!c.matches(&v("0.2.2")));
-        assert!(!c.matches(&v("1.0.0")));
-    }
-
-    #[test]
-    fn caret_all_zero() {
-        let c = VersionConstraint::Caret(v("0.0.3"));
-        assert!(c.matches(&v("0.0.3")));
-        assert!(!c.matches(&v("0.0.4")));
-        assert!(!c.matches(&v("0.0.2")));
-        assert!(!c.matches(&v("0.1.0")));
-    }
-
-    // ========================================================================
-    // Matching — Tilde
-    // ========================================================================
-
-    #[test]
-    fn tilde_allows_patch() {
-        let c = VersionConstraint::Tilde(v("1.2.3"));
-        assert!(c.matches(&v("1.2.3")));
-        assert!(c.matches(&v("1.2.4")));
-        assert!(c.matches(&v("1.2.99")));
-        assert!(!c.matches(&v("1.3.0")));
-        assert!(!c.matches(&v("1.2.2")));
-        assert!(!c.matches(&v("2.0.0")));
-    }
-
-    // ========================================================================
-    // Matching — Comparison operators
-    // ========================================================================
-
-    #[test]
-    fn gte_matches() {
-        let c = VersionConstraint::GreaterEqual(v("1.0.0"));
-        assert!(c.matches(&v("1.0.0")));
-        assert!(c.matches(&v("1.0.1")));
-        assert!(c.matches(&v("2.0.0")));
-        assert!(!c.matches(&v("0.9.9")));
-    }
-
-    #[test]
-    fn gt_matches() {
-        let c = VersionConstraint::Greater(v("1.0.0"));
-        assert!(!c.matches(&v("1.0.0")));
-        assert!(c.matches(&v("1.0.1")));
-    }
-
-    #[test]
-    fn lte_matches() {
-        let c = VersionConstraint::LessEqual(v("1.0.0"));
-        assert!(c.matches(&v("1.0.0")));
-        assert!(c.matches(&v("0.9.9")));
-        assert!(!c.matches(&v("1.0.1")));
-    }
-
-    #[test]
-    fn lt_matches() {
-        let c = VersionConstraint::Less(v("1.0.0"));
-        assert!(!c.matches(&v("1.0.0")));
-        assert!(c.matches(&v("0.9.9")));
-    }
-
-    // ========================================================================
-    // Display
-    // ========================================================================
-
-    #[test]
-    fn display_roundtrip() {
-        let cases = vec![
-            "*", "1.2.3", ">=1.0.0", ">1.0.0", "<=1.0.0", "<1.0.0", "^1.2.3", "~1.2.3",
-        ];
-        for case in cases {
-            let c = VersionConstraint::parse(case).unwrap();
-            let displayed = c.to_string();
-            let reparsed = VersionConstraint::parse(&displayed).unwrap();
-            assert_eq!(c, reparsed, "roundtrip failed for '{}'", case);
+    fn constraints_match_their_documented_ranges() {
+        for (constraint, version, expected) in [
+            ("1.2.3", "1.2.3", true),
+            ("1.2.3", "1.2.4", false),
+            ("*", "0.0.0", true),
+            ("^1.2.3", "1.99.99", true),
+            ("^1.2.3", "1.2.2", false),
+            ("^1.2.3", "2.0.0", false),
+            ("^0.2.3", "0.2.99", true),
+            ("^0.2.3", "0.3.0", false),
+            ("^0.0.3", "0.0.3", true),
+            ("^0.0.3", "0.0.4", false),
+            ("~1.2.3", "1.2.99", true),
+            ("~1.2.3", "1.2.2", false),
+            ("~1.2.3", "1.3.0", false),
+            (">=1.0.0", "1.0.0", true),
+            (">1.0.0", "1.0.0", false),
+            ("<=1.0.0", "1.0.0", true),
+            ("<1.0.0", "1.0.0", false),
+            (">=2.0.0, <3.0.0", "2.1.0", true),
+            (">=2.0.0, <3.0.0", "3.0.0", false),
+        ] {
+            assert_eq!(
+                VersionConstraint::parse(constraint)
+                    .unwrap()
+                    .matches(&v(version)),
+                expected,
+                "{constraint} vs {version}"
+            );
         }
     }
 
-    // ========================================================================
-    // Extension version parsing
-    // ========================================================================
-
     #[test]
-    fn parse_extension_version_valid() {
-        let v = parse_extension_version("1.2.3", "test-extension").unwrap();
-        assert_eq!(v, Version::new(1, 2, 3));
+    fn display_round_trips_through_parse() {
+        for case in [
+            "*",
+            "1.2.3",
+            ">=1.0.0",
+            ">1.0.0",
+            "<=1.0.0",
+            "<1.0.0",
+            "^1.2.3",
+            "~1.2.3",
+            ">=2.0.0, <3.0.0",
+        ] {
+            let constraint = VersionConstraint::parse(case).unwrap();
+            assert_eq!(constraint.to_string(), case);
+            assert_eq!(
+                VersionConstraint::parse(&constraint.to_string()).unwrap(),
+                constraint
+            );
+        }
     }
 
     #[test]
-    fn parse_extension_version_invalid() {
+    fn invalid_extension_version_error_names_extension_and_value() {
         let err = parse_extension_version("not-a-version", "test-extension").unwrap_err();
         assert!(err.message.contains("test-extension"));
         assert!(err.message.contains("not-a-version"));

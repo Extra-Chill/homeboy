@@ -195,7 +195,15 @@ mod tests {
     }
 
     #[test]
-    fn resolver_requires_a_versioned_literal_argv_contract() {
+    fn validation_names_the_invalid_schema_and_requires_resolver_argv() {
+        let error = NotificationTransportConfig {
+            schema: "homeboy/notification-transport/v2".to_string(),
+            ..transport("example.completed")
+        }
+        .validate()
+        .expect_err("invalid schema must fail");
+        assert!(error.to_string().contains("notification_transports.schema"));
+
         let mut config = transport("example.completed");
         config.route_resolver = Some(NotificationRouteResolverConfig {
             schema: NOTIFICATION_ROUTE_RESOLVER_SCHEMA.to_string(),
@@ -206,17 +214,5 @@ mod tests {
 
         config.route_resolver.as_mut().unwrap().command.clear();
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn invalid_transport_declaration_reports_the_invalid_field() {
-        let error = NotificationTransportConfig {
-            schema: "homeboy/notification-transport/v2".to_string(),
-            ..transport("example.completed")
-        }
-        .validate()
-        .expect_err("invalid schema must fail");
-
-        assert!(error.to_string().contains("notification_transports.schema"));
     }
 }

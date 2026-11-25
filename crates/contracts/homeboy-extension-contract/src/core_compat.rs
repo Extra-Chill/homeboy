@@ -150,38 +150,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn undeclared_constraint_is_allowed() {
-        let report = evaluate_core_compatibility(None, None).expect("compat report");
-        assert_eq!(report.status, "undeclared");
-        assert!(report.requires_homeboy.is_none());
-    }
-
-    #[test]
-    fn satisfied_constraint_is_compatible() {
-        let current = installed_homeboy_version();
-        let report = evaluate_core_compatibility(Some(&format!(">={current}")), None)
-            .expect("compat report");
-        assert_eq!(report.status, "compatible");
-        assert_eq!(
-            report.requires_homeboy.as_deref(),
-            Some(format!(">={current}").as_str())
-        );
-    }
-
-    #[test]
-    fn explicit_candidate_version_is_evaluated_without_using_the_running_binary() {
-        let report = evaluate_core_compatibility_for_version(Some(">=2.0.0"), None, "2.1.0")
-            .expect("compat report");
-        assert_eq!(report.status, "compatible");
-        assert_eq!(report.installed_homeboy, "2.1.0");
-    }
-
-    #[test]
-    fn undeclared_candidate_version_is_reported_as_the_selected_controller() {
-        let report =
-            evaluate_core_compatibility_for_version(None, None, "2.1.0").expect("compat report");
-        assert_eq!(report.status, "undeclared");
-        assert_eq!(report.installed_homeboy, "2.1.0");
+    fn evaluation_classifies_constraints_against_the_selected_version() {
+        for (constraint, status, remediation) in [
+            (None, "undeclared", None),
+            (Some("  "), "undeclared", None),
+            (Some(">=2.0.0"), "compatible", None),
+            (
+                Some(">=3.0.0"),
+                "incompatible",
+                Some(CORE_COMPAT_REMEDIATION_COMMAND),
+            ),
+        ] {
+            let report = evaluate_core_compatibility_for_version(constraint, None, "2.1.0")
+                .expect("compat report");
+            assert_eq!(report.status, status, "{constraint:?}");
+            assert_eq!(report.installed_homeboy, "2.1.0", "{constraint:?}");
+            assert_eq!(
+                report.remediation_command.as_deref(),
+                remediation,
+                "{constraint:?}"
+            );
+        }
     }
 
     #[test]

@@ -1,76 +1,25 @@
 use super::{BenchArtifact, BenchPreviewLifecycleMetadata};
 
+/// Bench artifacts are read by extension bench runners: absent optional
+/// fields stay off the wire and preview lifecycle metadata is flattened.
 #[test]
-fn bench_artifact_omits_absent_optional_fields() {
-    let artifact = BenchArtifact {
+fn bench_artifact_wire_shape_omits_absent_fields_and_flattens_preview_metadata() {
+    let minimal = BenchArtifact {
         path: Some("artifacts/run-1/out.txt".to_string()),
-        url: None,
-        artifact_type: None,
-        kind: None,
-        label: None,
-        observation_artifact_id: None,
         ..BenchArtifact::default()
     };
-
-    let raw = serde_json::to_string(&artifact).unwrap();
-
-    assert_eq!(raw, r#"{"path":"artifacts/run-1/out.txt"}"#);
-}
-
-#[test]
-fn bench_artifact_serializes_url_fields_when_present() {
-    let artifact = BenchArtifact {
-        path: None,
-        url: Some("https://example.test/wp-admin/".to_string()),
-        artifact_type: Some("url".to_string()),
-        kind: Some("admin_url".to_string()),
-        label: Some("Admin".to_string()),
-        observation_artifact_id: None,
-        ..BenchArtifact::default()
-    };
-
-    let raw = serde_json::to_string(&artifact).unwrap();
-
     assert_eq!(
-        raw,
-        r#"{"url":"https://example.test/wp-admin/","type":"url","kind":"admin_url","label":"Admin"}"#
+        serde_json::to_string(&minimal).unwrap(),
+        r#"{"path":"artifacts/run-1/out.txt"}"#
     );
-}
 
-#[test]
-fn bench_artifact_serializes_required_durable_contract() {
-    let artifact = BenchArtifact {
-        path: Some("artifacts/run-1/diff.png".to_string()),
-        required_durable: true,
-        ..BenchArtifact::default()
-    };
-
-    assert_eq!(
-        serde_json::to_string(&artifact).unwrap(),
-        r#"{"path":"artifacts/run-1/diff.png","required_durable":true}"#
-    );
-}
-
-#[test]
-fn bench_artifact_accepts_mixed_legacy_and_durable_records() {
-    let legacy: BenchArtifact =
-        serde_json::from_str(r#"{"path":"artifacts/legacy.png"}"#).expect("legacy artifact");
-    let durable: BenchArtifact =
-        serde_json::from_str(r#"{"path":"artifacts/current.png","required_durable":true}"#)
-            .expect("durable artifact");
-
-    assert!(!legacy.required_durable);
-    assert!(durable.required_durable);
-}
-
-#[test]
-fn bench_artifact_serializes_optional_fields_and_flattened_preview_metadata() {
     let artifact = BenchArtifact {
         path: Some("artifacts/preview.json".to_string()),
         url: Some("https://example.test/preview.json".to_string()),
         artifact_type: Some("preview".to_string()),
         kind: Some("preview".to_string()),
         label: Some("Baseline preview".to_string()),
+        required_durable: true,
         role: Some("baseline".to_string()),
         preview_url: Some("https://preview.example.test/".to_string()),
         public_url: Some("https://preview.example.test/".to_string()),
@@ -95,6 +44,7 @@ fn bench_artifact_serializes_optional_fields_and_flattened_preview_metadata() {
             "type": "preview",
             "kind": "preview",
             "label": "Baseline preview",
+            "required_durable": true,
             "role": "baseline",
             "preview_url": "https://preview.example.test/",
             "public_url": "https://preview.example.test/",
@@ -111,9 +61,12 @@ fn bench_artifact_serializes_optional_fields_and_flattened_preview_metadata() {
 }
 
 #[test]
-fn bench_artifact_rejects_unknown_fields() {
+fn bench_artifact_decodes_legacy_records_and_rejects_unknown_fields() {
+    let legacy: BenchArtifact =
+        serde_json::from_str(r#"{"path":"artifacts/legacy.png"}"#).expect("legacy artifact");
+    assert!(!legacy.required_durable);
+
     let err = serde_json::from_str::<BenchArtifact>(r#"{"path":"artifact.txt","unexpected":true}"#)
         .expect_err("artifact schema is strict");
-
     assert!(err.to_string().contains("unknown field"));
 }

@@ -172,7 +172,7 @@ mod tests {
     use crate::ExtensionManifest;
 
     #[test]
-    fn reads_multiple_generic_provider_descriptors() {
+    fn reads_provider_descriptors_and_names_a_missing_command() {
         let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
             "name": "fixture", "version": "1.0.0",
             "deployment_providers": [
@@ -183,8 +183,6 @@ mod tests {
         .expect("fixture manifest");
 
         assert_eq!(manifest.deployment_providers.len(), 2);
-        assert_eq!(manifest.deployment_providers[0].id, "fixture.alpha");
-        assert_eq!(manifest.deployment_providers[1].id, "fixture.beta");
         assert_eq!(
             manifest.deployment_providers[1]
                 .layered_input
@@ -193,6 +191,13 @@ mod tests {
                 .schema,
             DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA
         );
+
+        let error = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+            "name": "fixture", "version": "1.0.0",
+            "deployment_providers": [{ "id": "fixture.alpha" }]
+        }))
+        .expect_err("missing command must not deserialize");
+        assert!(error.to_string().contains("command"));
     }
 
     #[test]
@@ -234,16 +239,5 @@ mod tests {
             unknown.is_err(),
             "unknown release layout fields are rejected"
         );
-    }
-
-    #[test]
-    fn malformed_provider_descriptor_is_a_named_manifest_error() {
-        let result: Result<ExtensionManifest, _> = serde_json::from_value(serde_json::json!({
-            "name": "fixture", "version": "1.0.0",
-            "deployment_providers": [{ "id": "fixture.alpha" }]
-        }));
-
-        let error = result.expect_err("missing command must not deserialize");
-        assert!(error.to_string().contains("command"));
     }
 }

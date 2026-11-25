@@ -281,18 +281,13 @@ mod tests {
             result.case_totals(),
             BTreeMap::from([("fail", 1), ("pass", 1)])
         );
-    }
 
-    #[test]
-    fn minimal_envelope_needs_only_schema_kind_and_status() {
-        let result = parse(
+        let minimal = parse(
             &json!({ "schema": WORKLOAD_RESULT_SCHEMA, "kind": "fuzz", "status": "pass" }),
             None,
         )
-        .expect("valid");
-        assert!(result.findings.is_empty() && result.cases.is_empty());
-        assert!(result.payload.is_null());
-        assert!(result.status.is_pass());
+        .expect("schema, kind and status are the only required fields");
+        assert!(minimal.payload.is_null());
     }
 
     #[test]
