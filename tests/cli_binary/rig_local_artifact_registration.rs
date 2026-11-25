@@ -15,12 +15,17 @@ fn failed_nested_cli_registration_is_visible_to_runs_artifacts() {
     rig.pipeline.insert(
         "check".to_string(),
         vec![command_step(format!(
-            "mkdir -p {bundle}; printf '{{}}' > {bundle}/failure.json; {binary} rig artifact register --kind wp_codebox_bundle --path {bundle} >/dev/null; exit 23",
+            "mkdir -p {bundle}; printf '{{}}' > {bundle}/failure.json; {binary} rig artifact register --kind wp_codebox_bundle --path {bundle} >/dev/null || exit 24; exit 23",
             bundle = bundle.display(),
             binary = binary.display(),
         ))],
     );
-    let rig_path = temp.path().join("rig.json");
+    // Package lint reads every authored file. Keep the installation outside
+    // that tree: raw reads of a live SQLite inode can release this process's
+    // POSIX locks when the descriptor closes, corrupting concurrent writes.
+    let package = temp.path().join("package");
+    std::fs::create_dir(&package).expect("package dir");
+    let rig_path = package.join("rig.json");
     std::fs::write(
         &rig_path,
         serde_json::to_vec_pretty(&rig).expect("serialize rig"),
@@ -55,13 +60,17 @@ fn failed_nested_cli_registration_is_visible_to_runs_artifacts() {
     );
 
     let output = Command::new(&binary)
-        .args(["runs", "artifacts", run_id])
+        .args(["runs", "artifacts", run_id, "--full"])
         .env("HOME", &home)
         .env_remove("XDG_DATA_HOME")
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .output()
         .expect("runs artifacts");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "runs artifacts failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("runs artifacts JSON");
     let artifacts = stdout["data"]["payload"]["artifacts"]
@@ -70,12 +79,19 @@ fn failed_nested_cli_registration_is_visible_to_runs_artifacts() {
     let retained = artifacts
         .iter()
         .find(|artifact| artifact["kind"] == "wp_codebox_bundle")
-        .expect("registered bundle row");
+        .unwrap_or_else(|| {
+            let preserved = temp.path();
+            panic!("waiting for synchronously registered bundle row after rig completion; observed {stdout}; rig output: {check_json}; fixture: {}", preserved.display())
+        });
 
     assert_eq!(retained["type"], "directory");
-    assert!(std::path::Path::new(retained["path"].as_str().unwrap())
-        .join("failure.json")
-        .is_file());
+    assert!(
+        std::path::Path::new(retained["path"].as_str().unwrap())
+            .join("failure.json")
+            .is_file(),
+        "retained directory missing: {retained}; fixture: {}",
+        temp.path().display()
+    );
     assert_eq!(
         artifacts
             .iter()

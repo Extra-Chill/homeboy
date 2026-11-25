@@ -4293,13 +4293,28 @@ fn active_discovery_finds_records_beyond_a_thousand_terminal_rows() {
 #[test]
 fn discovery_998_record_history_and_active_pages_do_not_repeat_or_lose_records() {
     with_isolated_home(|_| {
-        for index in 0..998 {
-            agent_task_lifecycle::seed_queued_run_for_tests(
-                &discovery_plan(),
-                Some(&format!("run-page-{index:04}")),
-            )
-            .expect("submitted");
+        // Discovery reads observation snapshots, not admission artifacts.
+        // Build one real queued snapshot, then vary only its durable identity:
+        // 998 full submissions repeatedly initialize stores, write plans and
+        // prepare admission events without exercising any pagination behavior.
+        agent_task_lifecycle::seed_queued_run_for_tests(&discovery_plan(), Some("run-page-0000"))
+            .expect("seed queued snapshot");
+        let observation = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+        // One fixture transaction avoids 997 independent durable commits;
+        // the read contract under test is the same committed SQLite snapshot.
+        let mut connection = rusqlite::Connection::open(observation.database_path()).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for index in 1..998 {
+            let id = format!("run-page-{index:04}");
+            transaction.execute(
+                "INSERT INTO runs (id, kind, component_id, started_at, finished_at, status, command, cwd, homeboy_version, git_sha, rig_id, metadata_json)
+                 SELECT ?1, kind, component_id, started_at, finished_at, status, command, cwd, homeboy_version, git_sha, rig_id,
+                        json_set(metadata_json, '$.agent_task_run.run_id', ?1)
+                 FROM runs WHERE id = 'run-page-0000'",
+                [&id],
+            ).expect("persist discovery snapshot");
         }
+        transaction.commit().expect("commit discovery fixture");
 
         let first = discover_runs_with_options(
             AgentTaskDiscoveryFilter::All,
@@ -4361,6 +4376,31 @@ fn discovery_998_record_history_and_active_pages_do_not_repeat_or_lose_records()
         assert_eq!(active_first.next_cursor, Some(20));
         assert_eq!(active_second.count, 20);
         assert_ne!(active_first.runs[0].run_id, active_second.runs[0].run_id);
+        let expected = (0..998)
+            .map(|index| format!("run-page-{index:04}"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let observed = exhaustive
+            .runs
+            .iter()
+            .map(|run| run.run_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            observed, expected,
+            "history must retain each seeded identity exactly once"
+        );
+        for (first, second) in [(&first, &second), (&active_first, &active_second)] {
+            let ids = first
+                .runs
+                .iter()
+                .chain(&second.runs)
+                .map(|run| &run.run_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                ids.len(),
+                40,
+                "consecutive discovery pages must not overlap: {ids:?}"
+            );
+        }
     });
 }
 
