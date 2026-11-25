@@ -1177,7 +1177,8 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
         if let Err(error) = std::thread::Builder::new()
             .name("release-prefetch".into())
             .spawn(|| {
-                let mut prefetcher = homeboy_upgrade::update_check::ReleasePrefetcher::default();
+                let mut prefetcher =
+                    homeboy_upgrade::upgrade::update_check::ReleasePrefetcher::default();
                 loop {
                     std::thread::sleep(prefetcher.tick());
                 }

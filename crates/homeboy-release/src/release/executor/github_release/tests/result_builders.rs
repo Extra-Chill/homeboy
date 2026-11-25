@@ -5,8 +5,8 @@ use crate::release::types::ReleaseStepStatus;
 use super::super::gh_cli::{gh_failure_diagnostic, GhCommandOutput};
 use super::super::{
     create_failed_result, not_created_result, published_existing_draft_result,
-    published_release_url, unfinished_release_result, upload_failed_result, upload_success_result,
-    UploadFailedResultRequest,
+    published_release_url, unfinished_release_result, upload_failed_result,
+    upload_success_result_with_publications, UploadFailedResultRequest,
 };
 use super::{data_bool, data_str, test_body, test_repair, test_repo};
 
@@ -211,7 +211,7 @@ fn create_failed_result_sanitizes_persisted_output() {
 
 #[test]
 fn verified_upload_result_is_successful_only_after_publication() {
-    let result = upload_success_result("v0.10.6", &test_repo(), 2);
+    let result = upload_success_result_with_publications("v0.10.6", &test_repo(), 2, &[]);
 
     assert_eq!(result.status, ReleaseStepStatus::Success);
     assert_eq!(data_str(&result, "action"), Some("github.release.upload"));

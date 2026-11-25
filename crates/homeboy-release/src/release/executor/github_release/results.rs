@@ -280,18 +280,6 @@ pub(crate) fn upload_failed_result(
     )
 }
 
-#[allow(
-    dead_code,
-    reason = "No production caller: retained as a test result builder for the upload success shape."
-)]
-pub(crate) fn upload_success_result(
-    tag: &str,
-    github: &GitHubRepo,
-    artifact_count: usize,
-) -> ReleaseStepResult {
-    upload_success_result_with_publications(tag, github, artifact_count, &[])
-}
-
 pub(crate) fn upload_success_result_with_publications(
     tag: &str,
     github: &GitHubRepo,

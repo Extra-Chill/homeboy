@@ -299,15 +299,10 @@ mod checkout_less_release_version_tests {
 mod tests {
     /// The shared version reader must not branch on ecosystem-specific terms —
     /// it is consumed by every extension's release and deploy path.
-    ///
-    /// This assertion moved here with `version.rs` when it was lifted out of
-    /// `homeboy-release` (#11144); it previously lived in that crate's
-    /// `pipeline` facade alongside the same check for `executor.rs`.
     #[test]
     fn version_core_stays_ecosystem_agnostic() {
-        // `component_version.rs` carries the single version-read spine that
-        // used to be three copies inside `version.rs` (#11144), so it is held
-        // to the same contract.
+        // `component_version.rs` carries the single version-read spine
+        // (#11144), so it is held to the same contract.
         let sources = [
             ("version.rs", include_str!("version.rs")),
             (
