@@ -5,12 +5,12 @@
 //! any non-terminal transition committed after it read the record: a Lab
 //! handoff binding, a cancellation request, provider progress.
 
-use super::stub_lab_offload_submission;
+use super::{rewrite_record_in_store, stub_lab_offload_submission};
 use crate::agent_task_lifecycle::{
     record_detached_lab_run_in_store, record_lab_offload_planned_with_submission_in_store,
-    recover_transport_proxy_in_store, rewrite_record_for_test, AgentTaskLabHandoffState,
-    AgentTaskLifecycleStore, DetachedLabRunRecord, LabOffloadProxyPlan, RunnerAuthority,
-    RunnerContinuationProvider, RunnerContinuationTestGuard, AGENT_TASK_TRANSITION_CONFLICT,
+    recover_transport_proxy_in_store, AgentTaskLabHandoffState, AgentTaskLifecycleStore,
+    DetachedLabRunRecord, LabOffloadProxyPlan, RunnerAuthority, RunnerContinuationProvider,
+    RunnerContinuationTestGuard, AGENT_TASK_TRANSITION_CONFLICT,
 };
 use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 use homeboy_core::{Error, Result};
@@ -104,24 +104,7 @@ fn stale_proxy_recovery_cannot_unbind_a_concurrent_lab_handoff_acceptance() {
         &stub_lab_offload_submission,
     )
     .expect("controller proxy planned before acceptance");
-    // The stub admission pins no real controller runtime; recovery validates
-    // the pin, so the fixture carries none.
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            store.roots().data(),
-        );
-        rewrite_record_for_test(RUN_ID, |record| {
-            if let Some(metadata) = record.metadata.as_object_mut() {
-                metadata.remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
-            }
-        })
-    })
-    .expect("drop the stub runtime pin");
+    drop_stub_runtime_pin(&store);
     let planned = store.read_record(RUN_ID).expect("planned proxy");
     assert_eq!(planned.state(), RunExecutionState::Queued);
     assert!(planned.runner_job_id().is_none());
@@ -150,6 +133,17 @@ fn stale_proxy_recovery_cannot_unbind_a_concurrent_lab_handoff_acceptance() {
         error.details["reason_code"],
         serde_json::json!(AGENT_TASK_TRANSITION_CONFLICT)
     );
+}
+
+/// The stub admission pins no real controller runtime; recovery and
+/// cancellation validate the pin, so these fixtures carry none.
+fn drop_stub_runtime_pin(store: &AgentTaskLifecycleStore) {
+    rewrite_record_in_store(store, RUN_ID, |record| {
+        if let Some(metadata) = record.metadata.as_object_mut() {
+            metadata.remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+        }
+    })
+    .expect("drop the stub runtime pin");
 }
 
 // --- The fence itself -------------------------------------------------------
@@ -232,49 +226,42 @@ fn exhausted_transition_conflicts_are_retryable_controller_failures() {
     );
 }
 
-/// Both caller-held commit paths preserve a progress write that wins the CAS.
+/// A typed advance from a stale snapshot rebases onto a concurrent progress
+/// write that won the CAS; the plain `commit_record` path is covered by
+/// `a_stale_annotation_rebases_unless_it_overlaps_the_concurrent_write`.
 #[test]
-fn non_terminal_snapshot_transitions_preserve_concurrent_progress() {
+fn a_stale_handoff_binding_preserves_concurrent_progress() {
     use crate::agent_task_lifecycle::{set_run_state, AgentTaskAdvance};
 
-    for kind in [None, Some(AgentTaskAdvance::BindLabHandoff)] {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let store = AgentTaskLifecycleStore::new(context.path_roots());
-        planned_proxy(&store);
-        let mut snapshot = store.read_record(RUN_ID).expect("snapshot");
-        snapshot.metadata["controller_annotation"] = serde_json::json!("kept");
-        if kind.is_some() {
-            snapshot.lab_handoff = Some(
-                crate::agent_task_lifecycle::AgentTaskLabHandoff::pending(
-                    RUNNER_ID,
-                    "2026-11-11T00:00:00Z".to_string(),
-                    "2999-01-01T00:00:00Z".to_string(),
-                )
-                .accepted(RUNNER_JOB_ID, "2026-11-11T00:05:00Z".to_string()),
-            );
-            set_run_state(&mut snapshot, RunExecutionState::Running);
-        }
-        store
-            .mutate_record(RUN_ID, |record| {
-                record.metadata["heartbeat"] = serde_json::json!("concurrent");
-                true
-            })
-            .expect("concurrent annotate");
-        assert!(store.read_record(RUN_ID).unwrap().revision > snapshot.revision);
-        match kind {
-            None => store.commit_record(&mut snapshot),
-            Some(kind) => store.advance_record(&mut snapshot, kind),
-        }
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    planned_proxy(&store);
+    let mut snapshot = store.read_record(RUN_ID).expect("snapshot");
+    snapshot.metadata["controller_annotation"] = serde_json::json!("kept");
+    snapshot.lab_handoff = Some(
+        crate::agent_task_lifecycle::AgentTaskLabHandoff::pending(
+            RUNNER_ID,
+            "2026-11-11T00:00:00Z".to_string(),
+            "2999-01-01T00:00:00Z".to_string(),
+        )
+        .accepted(RUNNER_JOB_ID, "2026-11-11T00:05:00Z".to_string()),
+    );
+    set_run_state(&mut snapshot, RunExecutionState::Running);
+    store
+        .mutate_record(RUN_ID, |record| {
+            record.metadata["heartbeat"] = serde_json::json!("concurrent");
+            true
+        })
+        .expect("concurrent annotate");
+    store
+        .advance_record(&mut snapshot, AgentTaskAdvance::BindLabHandoff)
         .expect("stale transition rebases");
-        let stored = store.read_record(RUN_ID).expect("committed");
-        assert_eq!(stored.metadata["heartbeat"], "concurrent");
-        assert_eq!(stored.metadata["controller_annotation"], "kept");
-        assert_eq!(snapshot, stored);
-        if kind.is_some() {
-            assert_eq!(stored.state(), RunExecutionState::Running);
-            assert_eq!(stored.runner_job_id(), Some(RUNNER_JOB_ID));
-        }
-    }
+    let stored = store.read_record(RUN_ID).expect("committed");
+    assert_eq!(stored.metadata["heartbeat"], "concurrent");
+    assert_eq!(stored.metadata["controller_annotation"], "kept");
+    assert_eq!(snapshot, stored);
+    assert_eq!(stored.state(), RunExecutionState::Running);
+    assert_eq!(stored.runner_job_id(), Some(RUNNER_JOB_ID));
 }
 
 /// State and ownership move only through typed transitions: an annotation
@@ -341,29 +328,12 @@ fn annotations_cannot_change_state_or_ownership() {
 /// lifecycle read, `runs.status` and the active-run SQL report one state, and
 /// only a `Cancelled` record carries cancellation provenance. A later operator
 /// cancellation reuses the receipt's first cause instead of colliding with it.
-/// Successor of `operator_cancellation_recovers_provenance_missing_from_running_record`,
-/// whose running-with-provenance fixture is now unwritable (#15718).
 #[test]
 fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     planned_proxy(&store);
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            store.roots().data(),
-        );
-        rewrite_record_for_test(RUN_ID, |record| {
-            if let Some(metadata) = record.metadata.as_object_mut() {
-                metadata.remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
-            }
-        })
-    })
-    .expect("drop the stub runtime pin");
+    drop_stub_runtime_pin(&store);
     let mut pending = store.read_record(RUN_ID).expect("queued proxy");
     pending.lab_handoff = Some(crate::agent_task_lifecycle::AgentTaskLabHandoff::pending(
         RUNNER_ID,
