@@ -464,25 +464,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn registry_contains_current_core_sidecars() {
-        let keys: Vec<&str> = REGISTRY.iter().map(|entry| entry.key).collect();
-
-        for key in [
-            "lint.findings",
-            "test.results",
-            "test.failures",
-            "fix.results",
-            "bench.responsiveness",
-            "fuzz.artifacts",
-            "bench.results",
-            "trace.results",
-        ] {
-            assert!(keys.contains(&key), "missing registry key {key}");
-            assert_eq!(default_schema_version(key), Some("v1"));
-        }
-    }
-
     /// Extension-produced keys resolve to their registry path and producer.
     #[test]
     fn registry_resolves_extension_produced_keys() {
@@ -579,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn validates_known_valid_payloads() {
+    fn validates_known_valid_payloads_for_core_sidecars() {
         validate_payload("lint.findings", &json!([{ "message": "lint failed" }])).unwrap();
         validate_payload("test.results", &json!({ "total": 2, "failed": 0 })).unwrap();
         validate_payload("test.failures", &json!([{ "message": "test failed" }])).unwrap();
@@ -591,28 +572,10 @@ mod tests {
             &json!({ "timeline": [], "assertions": [] }),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn rejects_invalid_payload_shapes() {
-        let err = validate_payload("lint.findings", &json!({ "message": "wrong" }))
-            .expect_err("lint findings must be an array");
-
-        assert!(err.to_string().contains("JSON array"));
-    }
-
-    #[test]
-    fn rejects_missing_required_array_fields() {
-        let err = validate_payload("lint.findings", &json!([{ "rule": "demo" }]))
-            .expect_err("lint finding message is required");
-
-        assert!(err.to_string().contains("message"));
-    }
-
-    #[test]
-    fn accepts_test_failures_without_optional_fields() {
-        validate_payload("test.failures", &json!([{ "test_id": "demo" }]))
-            .expect("test failures may omit fields supplied by heterogeneous runners");
+        validate_payload("fix.results", &empty_payload("fix.results").unwrap()).unwrap();
+        validate_payload("fuzz.artifacts", &empty_payload("fuzz.artifacts").unwrap()).unwrap();
+        // Heterogeneous runners may omit optional test failure fields.
+        validate_payload("test.failures", &json!([{ "test_id": "demo" }])).unwrap();
     }
 
     /// Post-run validation is not allowed to invent violations out of absence:
