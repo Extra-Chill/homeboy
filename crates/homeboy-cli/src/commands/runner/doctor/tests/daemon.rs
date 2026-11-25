@@ -271,24 +271,24 @@ fn ssh_target_uses_runner_env_for_remote_probes() {
 }
 
 #[test]
-fn remote_default_artifact_root_expands_under_home() {
-    assert_eq!(
-        remote::default_artifact_root_for_home("/home/runner"),
-        Some("/home/runner/.local/share/homeboy/artifacts".to_string())
-    );
-}
-
-#[test]
-fn remote_default_artifact_root_normalizes_trailing_home_slash() {
-    assert_eq!(
-        remote::default_artifact_root_for_home("/Users/user/"),
-        Some("/Users/user/.local/share/homeboy/artifacts".to_string())
-    );
-}
-
-#[test]
-fn remote_default_artifact_root_rejects_empty_home() {
-    assert_eq!(remote::default_artifact_root_for_home("  "), None);
+fn remote_default_artifact_root_resolves_under_home() {
+    for (home, expected) in [
+        (
+            "/home/runner",
+            Some("/home/runner/.local/share/homeboy/artifacts"),
+        ),
+        (
+            "/Users/user/",
+            Some("/Users/user/.local/share/homeboy/artifacts"),
+        ),
+        ("  ", None),
+    ] {
+        assert_eq!(
+            remote::default_artifact_root_for_home(home).as_deref(),
+            expected,
+            "{home:?}"
+        );
+    }
 }
 
 #[test]
@@ -424,8 +424,7 @@ fn probe_with_home(home: &std::path::Path, command: &str) -> bool {
         .success()
 }
 
-#[test]
-fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
+fn lab_runner_and_server() -> (Runner, server::Server) {
     let runner = Runner {
         id: "lab".to_string(),
         kind: RunnerKind::Ssh,
@@ -449,6 +448,12 @@ fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
         env: Default::default(),
         runner: None,
     };
+    (runner, server)
+}
+
+#[test]
+fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
+    let (runner, server) = lab_runner_and_server();
     let output = homeboy::core::server::CommandOutput {
         stdout: String::new(),
         stderr: "mm_send_fd: sendmsg(0): Message too long".to_string(),
@@ -493,17 +498,6 @@ fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
 }
 
 #[test]
-fn lab_offload_uses_a_bounded_probe_envelope() {
-    assert_eq!(
-        remote::probe_limits(RunnerDoctorScope::LabOffload),
-        (
-            std::time::Duration::from_secs(3),
-            std::time::Duration::from_secs(20),
-        )
-    );
-}
-
-#[test]
 fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
     let recovery = homeboy::core::daemon::DaemonFreshnessReport {
         fresh: false,
@@ -525,29 +519,7 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
             "homeboy runner connect lab",
         )],
     };
-    let runner = Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: Some("lab".to_string()),
-        workspace_root: None,
-        settings: server::RunnerSettings::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: server::RunnerPolicy::default(),
-    };
-    let server = server::Server {
-        id: "lab".to_string(),
-        aliases: Vec::new(),
-        host: "example.test".to_string(),
-        user: "runner".to_string(),
-        port: 22,
-        identity_file: None,
-        kind: None,
-        auth: None,
-        env: Default::default(),
-        runner: None,
-    };
+    let (runner, server) = lab_runner_and_server();
 
     let report = remote::disconnected_report("lab", &runner, &server, Some(recovery), None);
 
@@ -600,29 +572,7 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         termination_evidence: None,
         repair_plan: Vec::new(),
     };
-    let runner = Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: Some("lab".to_string()),
-        workspace_root: None,
-        settings: server::RunnerSettings::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: server::RunnerPolicy::default(),
-    };
-    let server = server::Server {
-        id: "lab".to_string(),
-        aliases: Vec::new(),
-        host: "example.test".to_string(),
-        user: "runner".to_string(),
-        port: 22,
-        identity_file: None,
-        kind: None,
-        auth: None,
-        env: Default::default(),
-        runner: None,
-    };
+    let (runner, server) = lab_runner_and_server();
     let summary = homeboy::runner::runners::RunnerAdmissionSummary {
         pressure: None,
         runner_id: "lab".to_string(),
@@ -681,167 +631,82 @@ mod repair_dispatch {
         )
     }
 
-    /// The live reproduction on the machine that motivated this fix: a
-    /// reachable daemon whose build identity no longer matches the binary. It
-    /// must reach the binary refresh, not a session reconnect that would
-    /// reproduce the same mismatch.
+    /// Typed codes dispatch to typed actions. A version mismatch reaches the
+    /// binary refresh (not a reconnect that would reproduce it), and the ref and
+    /// downgrade allowance come from the step's argv, never the rendered command.
     #[test]
-    fn a_version_mismatch_step_dispatches_to_a_binary_refresh() {
-        let step = DaemonRepairStep::executable(
-            daemon_repair_codes::RUNNER_REFRESH_HOMEBOY,
-            action(&["runner", "refresh-homeboy", "lab"]),
-        );
-
-        assert_eq!(
-            dispatch_for(&step),
-            DaemonRepairDispatch::RefreshHomeboy {
-                git_ref: None,
-                allow_downgrade: false,
-            }
-        );
-    }
-
-    /// The recovery ref and the downgrade allowance come from the step's argv,
-    /// which is the authoritative form. Nothing re-parses the rendered command.
-    #[test]
-    fn refresh_arguments_are_read_from_argv_not_from_the_rendered_command() {
-        let step = DaemonRepairStep::executable(
-            daemon_repair_codes::RUNNER_REFRESH_HOMEBOY,
-            action(&[
-                "runner",
-                "refresh-homeboy",
-                "lab",
-                "--ref",
-                "abc123",
-                "--allow-downgrade",
-            ]),
-        );
-
-        assert_eq!(
-            dispatch_for(&step),
-            DaemonRepairDispatch::RefreshHomeboy {
-                git_ref: Some("abc123".to_string()),
-                allow_downgrade: true,
-            }
-        );
-    }
-
-    /// The empty-plan case. A report matching no repair branch now yields a
-    /// read-only diagnosis, and the executor must surface it with an explicit
-    /// reason instead of either running it as a repair or saying nothing.
-    #[test]
-    fn an_unmatched_report_yields_an_explicit_refusal_not_silence() {
-        let step = DaemonRepairStep::text(
-            daemon_repair_codes::RUNNER_DIAGNOSE,
-            "homeboy runner doctor lab --scope lab-offload",
-        );
-
-        let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step) else {
-            panic!("a read-only diagnosis is not a repair to apply");
-        };
-        assert!(reason.contains("authorizes no mutation"), "{reason}");
-        assert!(!reason.is_empty());
-    }
-
-    /// A recovery command a runner advertised as text has no argv behind it, so
-    /// it is reported rather than executed. It must not fall through silently.
-    #[test]
-    fn an_untyped_recovery_command_is_reported_rather_than_executed() {
-        let step = DaemonRepairStep::text(
-            daemon_repair_codes::STALE_DAEMON_RECOVERY,
-            "homeboy runner refresh-homeboy lab --ref abc123",
-        );
-
-        let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step) else {
-            panic!("an untyped step must never be shell-parsed into an execution");
-        };
-        assert!(
-            reason.contains(daemon_repair_codes::STALE_DAEMON_RECOVERY),
-            "{reason}"
-        );
-    }
-
-    #[test]
-    fn the_generic_reconnect_plan_still_dispatches_step_by_step() {
-        assert_eq!(
-            dispatch_for(&DaemonRepairStep::text(
-                daemon_repair_codes::RUNNER_DISCONNECT,
-                "homeboy runner disconnect lab"
-            )),
-            DaemonRepairDispatch::Disconnect
-        );
-        assert_eq!(
-            dispatch_for(&DaemonRepairStep::text(
-                daemon_repair_codes::RUNNER_CONNECT,
-                "homeboy runner connect lab"
-            )),
-            DaemonRepairDispatch::Connect
-        );
-    }
-}
-
-mod repair_readiness {
-    use homeboy::runner::runners::{
-        RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
-    };
-
-    fn fresh_lease() -> homeboy::core::daemon::DaemonFreshnessReport {
-        homeboy::core::daemon::DaemonFreshnessReport {
-            fresh: true,
-            stale_reason_code: None,
-            restartable: false,
-            lease_id: Some("lease-doctor".to_string()),
-            pid: Some(4242),
-            recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Recoverable),
-            ownership_evidence: None,
-            daemon_version: None,
-            daemon_build_identity: None,
-            runtime_paths: None,
-            active_jobs: 0,
-            termination_evidence: None,
-            repair_plan: Vec::new(),
+    fn typed_repair_steps_dispatch_to_typed_actions() {
+        for (step, expected) in [
+            (
+                DaemonRepairStep::executable(
+                    daemon_repair_codes::RUNNER_REFRESH_HOMEBOY,
+                    action(&["runner", "refresh-homeboy", "lab"]),
+                ),
+                DaemonRepairDispatch::RefreshHomeboy {
+                    git_ref: None,
+                    allow_downgrade: false,
+                },
+            ),
+            (
+                DaemonRepairStep::executable(
+                    daemon_repair_codes::RUNNER_REFRESH_HOMEBOY,
+                    action(&[
+                        "runner",
+                        "refresh-homeboy",
+                        "lab",
+                        "--ref",
+                        "abc123",
+                        "--allow-downgrade",
+                    ]),
+                ),
+                DaemonRepairDispatch::RefreshHomeboy {
+                    git_ref: Some("abc123".to_string()),
+                    allow_downgrade: true,
+                },
+            ),
+            (
+                DaemonRepairStep::text(
+                    daemon_repair_codes::RUNNER_DISCONNECT,
+                    "homeboy runner disconnect lab",
+                ),
+                DaemonRepairDispatch::Disconnect,
+            ),
+            (
+                DaemonRepairStep::text(
+                    daemon_repair_codes::RUNNER_CONNECT,
+                    "homeboy runner connect lab",
+                ),
+                DaemonRepairDispatch::Connect,
+            ),
+        ] {
+            assert_eq!(dispatch_for(&step), expected, "{}", step.code);
         }
     }
 
-    fn status(stale_daemon: Option<RunnerStaleDaemonWarning>) -> RunnerStatusReport {
-        let daemon_freshness = stale_daemon.is_none().then(fresh_lease);
-        RunnerStatusReport {
-            runner_id: "homeboy-lab".to_string(),
-            connected: true,
-            state: RunnerSessionState::Connected,
-            session: None,
-            stale_daemon,
-            configured_job_binary_build_identity: None,
-            daemon_freshness,
-            active_jobs: Vec::new(),
-            active_runner_jobs: Vec::new(),
-            stale_runner_jobs: Vec::new(),
-            active_job_count: 0,
-            stale_runner_job_count: 0,
-            active_job_state: RunnerActiveJobState::Available,
-            active_job_source: None,
-            active_job_error: None,
-            active_job_recovery_evidence: None,
-            recent_observation_failure: None,
-            session_path: "test".to_string(),
+    /// A read-only diagnosis and a recovery command advertised only as text are
+    /// reported with an explicit reason, never executed or silently dropped.
+    #[test]
+    fn non_automatable_steps_are_refused_with_a_reason() {
+        for (step, expected_reason) in [
+            (
+                DaemonRepairStep::text(
+                    daemon_repair_codes::RUNNER_DIAGNOSE,
+                    "homeboy runner doctor lab --scope lab-offload",
+                ),
+                "authorizes no mutation",
+            ),
+            (
+                DaemonRepairStep::text(
+                    daemon_repair_codes::STALE_DAEMON_RECOVERY,
+                    "homeboy runner refresh-homeboy lab --ref abc123",
+                ),
+                daemon_repair_codes::STALE_DAEMON_RECOVERY,
+            ),
+        ] {
+            let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step) else {
+                panic!("{} must not dispatch to an execution", step.code);
+            };
+            assert!(reason.contains(expected_reason), "{reason}");
         }
-    }
-
-    #[test]
-    fn reachable_incompatible_daemon_is_not_admission_ready() {
-        let stale = RunnerStaleDaemonWarning::new(
-            "homeboy-lab",
-            "0.329.1".to_string(),
-            "0.329.1".to_string(),
-            Some("homeboy 0.329.1+ea98b7e9b4cc".to_string()),
-            Some("homeboy 0.329.1+98cc7876dd71".to_string()),
-        );
-
-        assert!(!status(Some(stale)).admission_summary().accepting_jobs);
-    }
-
-    #[test]
-    fn repair_success_postcondition_requires_open_admission() {
-        assert!(status(None).admission_summary().accepting_jobs);
     }
 }

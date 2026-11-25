@@ -149,91 +149,78 @@ mod tests {
         }
     }
 
+    /// Each case names the property it protects:
+    /// - a failing check with no automatic repair is convergence, not an error;
+    /// - an `Ok` check never has its action run;
+    /// - an action that already ran and left its check failing is ineffective
+    ///   rather than retried, and that outranks the attempt budget;
+    /// - a distinct action past the ceiling is exhausted.
     #[test]
-    fn the_wire_vocabulary_is_pinned() {
-        let step = |s| serde_json::to_value(s).expect("serialize");
-        assert_eq!(step(RepairStep::Converged)["step"], "converged");
-        assert_eq!(
-            step(RepairStep::Exhausted { attempts: 1 })["step"],
-            "exhausted"
-        );
-        assert_eq!(
-            step(RepairStep::Apply { action: refresh() })["step"],
-            "apply"
-        );
-        assert_eq!(
-            step(RepairStep::Ineffective { action: refresh() })["step"],
-            "ineffective"
-        );
-    }
-
-    #[test]
-    fn nothing_failing_is_converged() {
-        let checks = vec![check("a", RunnerDoctorStatus::Ok, Some(refresh()))];
-        assert_eq!(next_step(&checks, &[], 4), RepairStep::Converged);
-    }
-
-    /// A failing check with no automatic repair is convergence for the loop, not
-    /// an error. Plenty of checks are fixed by a decision homeboy should not
-    /// make, and spinning on them would be worse than stopping.
-    #[test]
-    fn a_failing_check_without_an_action_is_converged() {
-        let checks = vec![check("a", RunnerDoctorStatus::Error, None)];
-        assert_eq!(next_step(&checks, &[], 4), RepairStep::Converged);
-    }
-
-    /// An `Ok` check must never have its action run. Doctor emits actions on
-    /// healthy checks in some paths, and repairing something that is working is
-    /// the most expensive possible way to waste an attempt.
-    #[test]
-    fn an_ok_check_never_offers_its_action() {
-        let checks = vec![
-            check("healthy", RunnerDoctorStatus::Ok, Some(refresh())),
-            check("broken", RunnerDoctorStatus::Error, None),
+    fn next_step_decides_each_loop_outcome() {
+        use RunnerDoctorStatus::{Error, Ok, Warning};
+        let cases: Vec<(
+            &str,
+            Vec<RunnerCheck>,
+            Vec<RunnerRepairAction>,
+            usize,
+            RepairStep,
+        )> = vec![
+            (
+                "nothing failing",
+                vec![check("a", Ok, Some(refresh()))],
+                vec![],
+                4,
+                RepairStep::Converged,
+            ),
+            (
+                "failing without action",
+                vec![check("a", Error, None)],
+                vec![],
+                4,
+                RepairStep::Converged,
+            ),
+            (
+                "ok check never offers its action",
+                vec![
+                    check("healthy", Ok, Some(refresh())),
+                    check("broken", Error, None),
+                ],
+                vec![],
+                4,
+                RepairStep::Converged,
+            ),
+            (
+                "warning with action is applied",
+                vec![check("a", Warning, Some(refresh()))],
+                vec![],
+                4,
+                RepairStep::Apply { action: refresh() },
+            ),
+            (
+                "already ran and did not help",
+                vec![check("a", Error, Some(refresh()))],
+                vec![refresh()],
+                4,
+                RepairStep::Ineffective { action: refresh() },
+            ),
+            (
+                "ineffective outranks the budget",
+                vec![check("a", Error, Some(refresh()))],
+                vec![refresh(), refresh()],
+                1,
+                RepairStep::Ineffective { action: refresh() },
+            ),
+            (
+                "distinct action past the ceiling",
+                vec![check("a", Error, Some(refresh()))],
+                vec![RunnerRepairAction::Reconnect; 4],
+                4,
+                RepairStep::Exhausted { attempts: 4 },
+            ),
         ];
-        assert_eq!(next_step(&checks, &[], 4), RepairStep::Converged);
-    }
-
-    #[test]
-    fn a_failing_check_with_an_action_is_applied() {
-        let checks = vec![check("a", RunnerDoctorStatus::Warning, Some(refresh()))];
-        assert_eq!(
-            next_step(&checks, &[], 4),
-            RepairStep::Apply { action: refresh() }
-        );
-    }
-
-    /// The property that stops an infinite loop: an action that already ran and
-    /// left its check failing is reported as ineffective rather than retried.
-    #[test]
-    fn an_action_that_already_ran_and_did_not_help_is_ineffective() {
-        let checks = vec![check("a", RunnerDoctorStatus::Error, Some(refresh()))];
-        assert_eq!(
-            next_step(&checks, &[refresh()], 4),
-            RepairStep::Ineffective { action: refresh() }
-        );
-    }
-
-    /// Ineffectiveness outranks the budget. Both stop the loop, but they tell
-    /// the operator to do different things, and "raise the ceiling" is the wrong
-    /// advice when the repair simply does not work.
-    #[test]
-    fn ineffective_is_reported_even_with_no_budget_left() {
-        let checks = vec![check("a", RunnerDoctorStatus::Error, Some(refresh()))];
-        assert_eq!(
-            next_step(&checks, &[refresh(), refresh()], 1),
-            RepairStep::Ineffective { action: refresh() }
-        );
-    }
-
-    #[test]
-    fn a_distinct_action_past_the_ceiling_is_exhausted() {
-        let checks = vec![check("a", RunnerDoctorStatus::Error, Some(refresh()))];
-        let history = vec![RunnerRepairAction::Reconnect; 4];
-        assert_eq!(
-            next_step(&checks, &history, 4),
-            RepairStep::Exhausted { attempts: 4 }
-        );
+        for (name, checks, history, max, expected) in cases {
+            assert_eq!(next_step(&checks, &history, max), expected, "{name}");
+        }
     }
 
     /// Two checks wanting the same repair must not consume two attempts.

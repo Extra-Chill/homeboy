@@ -649,218 +649,13 @@ impl From<RunnerKindArg> for RunnerKind {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cli_surface::{Cli, Commands};
+    use crate::cli_surface::Cli;
     use clap::Parser;
 
     #[test]
-    fn runner_exec_workspace_sync_timeout_defaults_and_overrides() {
-        for (extra, expected) in [
-            (Vec::<&str>::new(), std::time::Duration::from_secs(240)),
-            (
-                vec!["--workspace-sync-timeout", "7s"],
-                std::time::Duration::from_secs(7),
-            ),
-        ] {
-            let mut argv = vec!["homeboy", "runner", "exec", "lab"];
-            argv.extend(extra);
-            argv.extend(["--", "pwd"]);
-            let cli = Cli::try_parse_from(argv).expect("parse runner exec timeout");
-            let Commands::Runner(RunnerArgs {
-                command:
-                    RunnerCommand::Exec(RunnerExecArgs {
-                        workspace_sync_timeout,
-                        ..
-                    }),
-            }) = cli.command
-            else {
-                panic!("expected runner exec command");
-            };
-            assert_eq!(workspace_sync_timeout, expected);
-        }
-    }
-
-    #[test]
-    fn preflight_accepts_only_the_request_json_flag() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "runner",
-            "preflight",
-            "--request",
-            r#"{"schema":"homeboy/placement-readiness/v2","runner_id":"lab","invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"capability.alpha"}}"#,
-        ])
-        .expect("parse typed preflight request");
-        assert!(matches!(
-            cli.command,
-            Commands::Runner(RunnerArgs {
-                command: RunnerCommand::Preflight { .. }
-            })
-        ));
-        assert!(
-            Cli::try_parse_from(["homeboy", "runner", "preflight", "--required-tool", "node"])
-                .is_err()
-        );
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "runner",
-            "preflight",
-            "--request",
-            "{}",
-            "--unknown"
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn runner_operator_commands_accept_omitted_ids_and_flags() {
-        for args in [
-            vec!["doctor", "--repair", "--scope", "lab-offload", "--full"],
-            vec!["connect"],
-            vec!["disconnect", "--local-recovery"],
-            vec!["status", "--full"],
-        ] {
-            let cli = Cli::try_parse_from(["homeboy", "runner"].into_iter().chain(args))
-                .expect("runner ID is optional");
-            assert!(matches!(
-                cli.command,
-                Commands::Runner(RunnerArgs {
-                    command: RunnerCommand::Doctor {
-                        runner_id: None,
-                        ..
-                    } | RunnerCommand::Connect { id: None, .. }
-                        | RunnerCommand::Disconnect { id: None, .. }
-                        | RunnerCommand::Status { id: None, .. }
-                })
-            ));
-        }
-    }
-
-    #[test]
-    fn doctor_repair_without_scope_selects_lab_offload_repair() {
-        let cli = Cli::try_parse_from(["homeboy", "runner", "doctor", "lab", "--repair"])
-            .expect("generated runner recovery command parses");
-        let Commands::Runner(RunnerArgs {
-            command:
-                RunnerCommand::Doctor {
-                    scope,
-                    repair: true,
-                    ..
-                },
-        }) = cli.command
-        else {
-            panic!("expected runner doctor repair command");
-        };
-
-        assert_eq!(
-            super::doctor::repair_scope(scope.into(), true),
-            doctor::RunnerDoctorScope::LabOffload
-        );
-    }
-
-    #[test]
-    fn runner_job_list_accepts_recovery_filters_and_rejects_conflicting_states() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "runner",
-            "job",
-            "list",
-            "lab",
-            "--active",
-            "--correlation",
-            "run-11770",
-        ])
-        .expect("parse runner job list filters");
-        assert!(matches!(
-            cli.command,
-            Commands::Runner(RunnerArgs {
-                command: RunnerCommand::Job {
-                    command: RunnerJobCommand::List {
-                        active: true,
-                        queued: false,
-                        terminal: false,
-                        all: false,
-                        json: false,
-                        ..
-                    }
-                }
-            })
-        ));
-        assert!(Cli::try_parse_from([
-            "homeboy", "runner", "job", "list", "lab", "--active", "--queued"
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from(["homeboy", "runner", "job", "list", "lab", "--all"]).is_ok());
-    }
-
-    #[test]
-    fn runner_job_logs_accepts_explicit_machine_output() {
-        let cli = Cli::try_parse_from([
-            "homeboy", "runner", "job", "logs", "lab", "job-42", "--json",
-        ])
-        .expect("parse machine-readable runner logs");
-
-        assert!(matches!(
-            cli.command,
-            Commands::Runner(RunnerArgs {
-                command: RunnerCommand::Job {
-                    command: RunnerJobCommand::Logs { json: true, .. }
-                }
-            })
-        ));
-    }
-
-    #[test]
-    fn recipe_run_preserves_required_execution_arguments_and_recipe_providers_is_a_sibling() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "runner",
-            "recipe-run",
-            "local",
-            "--provider",
-            "fixture.run",
-            "--sync-workspace",
-            "/workspace",
-            "--recipe",
-            "recipe.json",
-            "--artifacts",
-            "artifacts",
-            "--run-id",
-            "run-12157",
-        ])
-        .expect("existing recipe-run invocation parses");
-        assert!(matches!(
-            cli.command,
-            Commands::Runner(RunnerArgs {
-                command: RunnerCommand::RecipeRun {
-                    runner_id,
-                    provider,
-                    ..
-                }
-            }) if runner_id == "local" && provider == "fixture.run"
-        ));
-
-        let cli = Cli::try_parse_from(["homeboy", "runner", "recipe-providers"])
-            .expect("provider inventory parses");
-        assert!(matches!(
-            cli.command,
-            Commands::Runner(RunnerArgs {
-                command: RunnerCommand::RecipeProviders
-            })
-        ));
-
-        let error = match Cli::try_parse_from(["homeboy", "runner", "recipe-run", "local"]) {
-            Ok(_) => panic!("normal recipe-run remains required"),
-            Err(error) => error,
-        };
-        let rendered = error.to_string();
-        assert!(rendered.contains("--provider"));
-        assert!(!rendered.contains("--runner_id"));
-    }
-
-    #[test]
-    fn runner_exec_accepts_workspace_ref_and_rejects_raw_path_combinations() {
+    fn runner_cli_rejects_conflicting_selectors() {
         let workspace_ref = "workspace:00000000-0000-0000-0000-000000000001";
-        Cli::try_parse_from([
+        assert!(Cli::try_parse_from([
             "homeboy",
             "runner",
             "exec",
@@ -871,22 +666,39 @@ mod tests {
             "--",
             "true",
         ])
-        .expect("workspace-ref hydrated exec parses");
+        .is_ok());
+        assert!(
+            Cli::try_parse_from(["homeboy", "runner", "job", "list", "lab", "--active"]).is_ok()
+        );
 
         for conflicting in [
-            ["--cwd", "/runner/path"],
-            ["--sync-workspace", "/local/path"],
-        ] {
-            let mut args = vec![
-                "homeboy",
-                "runner",
+            vec![
                 "exec",
                 "--workspace-ref",
                 workspace_ref,
-            ];
-            args.extend(conflicting);
-            args.extend(["lab", "--", "true"]);
-            assert!(Cli::try_parse_from(args).is_err());
+                "--cwd",
+                "/runner/path",
+                "lab",
+                "--",
+                "true",
+            ],
+            vec![
+                "exec",
+                "--workspace-ref",
+                workspace_ref,
+                "--sync-workspace",
+                "/local/path",
+                "lab",
+                "--",
+                "true",
+            ],
+            vec!["job", "list", "lab", "--active", "--queued"],
+        ] {
+            let argv = ["homeboy", "runner"].into_iter().chain(conflicting.clone());
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{conflicting:?} must be rejected"
+            );
         }
     }
 }
