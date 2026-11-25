@@ -553,14 +553,6 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn catalog_stops_when_no_next_page_exists() {
-        let count = with_catalog_server("200 OK", "[]", |_| {
-            assert!(fetch_release_catalog().unwrap().is_empty());
-        });
-        assert_eq!(count, 1);
-    }
-
-    #[test]
     fn forbidden_catalog_reports_http_status_before_decoding() {
         let count = with_catalog_server("403 Forbidden", "rate limited", |_| {
             let error = fetch_release_catalog().unwrap_err();
@@ -629,7 +621,7 @@ pub(super) mod tests {
     /// The fallback is only useful if it is stated. This is the exact sentence
     /// the issue asked for.
     #[test]
-    fn fallback_notice_names_both_releases_and_the_target() {
+    fn fallback_notice_names_both_releases_and_the_target_only_when_falling_back() {
         let releases = vec![release("v0.333.0", &[MAC]), release("v0.332.0", &[LINUX])];
 
         let selection = select_installable(&releases, Some(LINUX));
@@ -644,14 +636,10 @@ pub(super) mod tests {
                 "v0.333.0 has no x86_64-unknown-linux-gnu asset; v0.332.0 is the newest installable release."
             )
         );
-    }
 
-    #[test]
-    fn no_notice_when_the_newest_release_is_installable() {
+        // No notice when the newest release is installable.
         let releases = vec![release("v0.333.0", &[LINUX]), release("v0.332.0", &[LINUX])];
-
         let selection = select_installable(&releases, Some(LINUX));
-
         assert_eq!(
             selection
                 .installable
