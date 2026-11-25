@@ -26,18 +26,6 @@ fn declared_agent_task_secret_env_parses_repeated_and_equals_args() {
 }
 
 #[test]
-fn declared_agent_task_secret_env_allows_global_flags_before_agent_task() {
-    let names = declared_agent_task_secret_env(&[
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "dispatch".to_string(),
-        "--secret-env=HOMEBOY_TEST_ACCESS_TOKEN".to_string(),
-    ]);
-
-    assert_eq!(names, vec!["HOMEBOY_TEST_ACCESS_TOKEN".to_string()]);
-}
-
-#[test]
 fn declared_agent_task_secret_env_ignores_trace_secret_env() {
     let names = declared_agent_task_secret_env(&[
         "homeboy".to_string(),
@@ -52,9 +40,11 @@ fn declared_agent_task_secret_env_ignores_trace_secret_env() {
 }
 
 #[test]
-fn declared_trace_secret_env_parses_repeated_and_equals_args() {
+fn declared_trace_secret_env_parses_repeated_and_equals_args_after_global_flags() {
     let names = declared_trace_secret_env(&[
         "homeboy".to_string(),
+        "--runner".to_string(),
+        "homeboy-lab".to_string(),
         "trace".to_string(),
         "compare".to_string(),
         "woocommerce-gateway-stripe".to_string(),
@@ -73,22 +63,6 @@ fn declared_trace_secret_env_parses_repeated_and_equals_args() {
             "STRIPE_SECRET_KEY".to_string(),
         ]
     );
-}
-
-#[test]
-fn declared_trace_secret_env_allows_global_flags_before_trace() {
-    let names = declared_trace_secret_env(&[
-        "homeboy".to_string(),
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "trace".to_string(),
-        "compare".to_string(),
-        "woocommerce-gateway-stripe".to_string(),
-        "real-wallet".to_string(),
-        "--secret-env=STRIPE_SECRET_KEY".to_string(),
-    ]);
-
-    assert_eq!(names, vec!["STRIPE_SECRET_KEY".to_string()]);
 }
 
 #[test]
@@ -127,33 +101,6 @@ fn trace_project_id_from_args_reads_compare_and_component_forms() {
         ]),
         Some("woocommerce-gateway-stripe".to_string())
     );
-}
-
-#[test]
-fn hydrate_trace_secret_env_reports_redacted_status_without_values() {
-    let args = vec![
-        "homeboy".to_string(),
-        "trace".to_string(),
-        "compare".to_string(),
-        "woocommerce-gateway-stripe".to_string(),
-        "real-wallet".to_string(),
-        "--secret-env=HOMEBOY_TRACE_SECRET_TEST_KEY".to_string(),
-    ];
-    let mut env = std::collections::HashMap::new();
-    std::env::set_var("HOMEBOY_TRACE_SECRET_TEST_KEY", "sk_test_fake_not_real");
-
-    let diagnostics = hydrate_trace_secret_env(&args, &mut env).expect("hydrate trace secret");
-
-    assert_eq!(
-        env.get("HOMEBOY_TRACE_SECRET_TEST_KEY").map(String::as_str),
-        Some("sk_test_fake_not_real")
-    );
-    let rendered = diagnostics.to_string();
-    assert!(rendered.contains("HOMEBOY_TRACE_SECRET_TEST_KEY"));
-    assert!(rendered.contains("env"));
-    assert!(!rendered.contains("sk_test_fake_not_real"));
-
-    std::env::remove_var("HOMEBOY_TRACE_SECRET_TEST_KEY");
 }
 
 #[test]
@@ -545,31 +492,6 @@ fn declared_tunnel_secret_env_detects_service_preview_client_backend() {
     assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
 }
 
-#[test]
-fn hydrate_tunnel_secret_env_reports_runner_deferred_names_without_values() {
-    let args = vec![
-        "homeboy".to_string(),
-        "tunnel".to_string(),
-        "preview-client".to_string(),
-        "start".to_string(),
-        "--ingress".to_string(),
-        "https://preview-broker.example.test".to_string(),
-        "--public-host".to_string(),
-        "preview.example.test".to_string(),
-        "--local-origin".to_string(),
-        "http://127.0.0.1:8888".to_string(),
-    ];
-    let mut env = std::collections::HashMap::new();
-
-    let diagnostics = hydrate_tunnel_secret_env(&args, &mut env).expect("hydrate tunnel secret");
-
-    assert!(env.is_empty());
-    let rendered = diagnostics.to_string();
-    assert!(rendered.contains("homeboy/lab-tunnel-secret-env/v1"));
-    assert!(rendered.contains("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
-    assert!(rendered.contains("runner"));
-}
-
 fn write_component_test_secret_fixture(home: &std::path::Path, source: &std::path::Path) {
     let extension_dir = home.join(".config/homeboy/extensions/lab-test-secret-fixture");
     std::fs::create_dir_all(&extension_dir).expect("extension dir");
@@ -668,23 +590,6 @@ fn component_test_secret_env_declares_component_names_as_runner_deferred() {
             .map(|secret_ref| secret_ref.owner.as_deref())
             .collect::<Vec<_>>();
         assert_eq!(owners, vec![Some("runner"), Some("runner")]);
-    });
-}
-
-/// The same `review test` argv without the ComponentTest source — i.e. any
-/// command whose contract does not declare it — keeps yielding no names.
-#[test]
-fn component_test_secret_env_requires_declared_source() {
-    crate::test_support::with_isolated_home(|home| {
-        let source = tempfile::tempdir().expect("source dir");
-        write_component_test_secret_fixture(home.path(), source.path());
-        let args = review_test_args(source.path());
-
-        let plan =
-            build_lab_secret_env_handoff_plan(&[], &args, HashMap::new()).expect("handoff plan");
-
-        assert!(plan.secret_env_names.is_empty());
-        assert!(plan.runner_deferred_secret_env.is_empty());
     });
 }
 

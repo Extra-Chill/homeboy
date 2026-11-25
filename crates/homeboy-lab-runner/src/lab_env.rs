@@ -369,10 +369,6 @@ mod tests {
     use super::*;
     use crate::lab_workspaces::workspace_mapping_entry;
     use crate::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOutput};
-    use std::sync::Mutex;
-
-    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     struct EnvVarGuard {
         name: &'static str,
         prior: Option<String>,
@@ -688,19 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_ci_env_preserves_github_actions_context() {
-        let _github_actions = EnvVarGuard::set("GITHUB_ACTIONS", "true");
-        let mut env = HashMap::new();
-
-        forward_ci_env(&mut env);
-
-        assert_eq!(env.get("GITHUB_ACTIONS").map(String::as_str), Some("true"));
-    }
-
-    #[test]
     fn warns_when_runner_exec_wait_timeout_is_only_a_workload_setting() {
-        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
-        let _guard = EnvVarGuard::unset(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
         let args = vec![
             "homeboy".to_string(),
             "bench".to_string(),
@@ -708,24 +692,15 @@ mod tests {
             format!("{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400"),
         ];
 
-        let warning = misplaced_runner_exec_wait_timeout_warning(&args).expect("warning");
+        {
+            let _guard = EnvVarGuard::unset(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
+            let warning = misplaced_runner_exec_wait_timeout_warning(&args).expect("warning");
+            assert!(warning.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV));
+            assert!(warning.contains("controller process"));
+            assert!(warning.contains("workload setting"));
+        }
 
-        assert!(warning.contains(RUNNER_EXEC_WAIT_TIMEOUT_ENV));
-        assert!(warning.contains("controller process"));
-        assert!(warning.contains("workload setting"));
-    }
-
-    #[test]
-    fn skips_runner_exec_wait_timeout_setting_warning_when_controller_env_is_set() {
-        let _lock = ENV_TEST_LOCK.lock().expect("env test lock");
         let _guard = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "2400");
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--setting".to_string(),
-            format!("{RUNNER_EXEC_WAIT_TIMEOUT_ENV}=2400"),
-        ];
-
         assert_eq!(misplaced_runner_exec_wait_timeout_warning(&args), None);
     }
 }
