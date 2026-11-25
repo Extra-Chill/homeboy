@@ -232,48 +232,36 @@ mod tests {
     }
 
     #[test]
-    fn redacts_absolute_provider_paths_to_relative_when_local_paths_suppressed() {
+    fn provider_paths_are_relative_unless_local_paths_included() {
         let artifacts_dir = Path::new("/home/chubes/work/visual-compare/27-university-department");
-        let result =
-            visual_compare_result_from_value(&provider_value(artifacts_dir), artifacts_dir, false);
-
-        // No absolute path leaks to the reviewer-facing report.
-        for artifact in &result.artifacts {
-            assert!(
-                !artifact.target.starts_with('/'),
-                "leaked absolute path: {}",
-                artifact.target
+        let absolute_candidate = artifacts_dir.join("candidate.png").display().to_string();
+        let absolute_dir = artifacts_dir.display().to_string();
+        for (include_local_paths, candidate_target, directory) in [
+            (false, "candidate.png", "27-university-department"),
+            (true, absolute_candidate.as_str(), absolute_dir.as_str()),
+        ] {
+            let result = visual_compare_result_from_value(
+                &provider_value(artifacts_dir),
+                artifacts_dir,
+                include_local_paths,
             );
+            if !include_local_paths {
+                for artifact in &result.artifacts {
+                    assert!(
+                        !artifact.target.starts_with('/'),
+                        "leaked absolute path: {}",
+                        artifact.target
+                    );
+                }
+            }
+            let candidate = result
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.label == "candidate")
+                .expect("candidate artifact");
+            assert_eq!(candidate.target, candidate_target);
+            assert_eq!(result.artifacts_directory, directory);
         }
-        let candidate = result
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.label == "candidate")
-            .expect("candidate artifact");
-        assert_eq!(candidate.target, "candidate.png");
-        // artifacts_directory is reduced to the slug, not an absolute path.
-        assert_eq!(result.artifacts_directory, "27-university-department");
-    }
-
-    #[test]
-    fn keeps_absolute_provider_paths_when_local_paths_included() {
-        let artifacts_dir = Path::new("/home/chubes/work/visual-compare/27-university-department");
-        let result =
-            visual_compare_result_from_value(&provider_value(artifacts_dir), artifacts_dir, true);
-
-        let candidate = result
-            .artifacts
-            .iter()
-            .find(|artifact| artifact.label == "candidate")
-            .expect("candidate artifact");
-        assert_eq!(
-            candidate.target,
-            artifacts_dir.join("candidate.png").display().to_string()
-        );
-        assert_eq!(
-            result.artifacts_directory,
-            artifacts_dir.display().to_string()
-        );
     }
 
     #[test]
