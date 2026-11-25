@@ -407,18 +407,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ready_check_runs_when_not_reentrant() {
-        let manifest = manifest_with_ready_check("/tmp", "true");
-        let _environment = ReadinessEnvironment::new(None, None);
-
-        let status = extension_ready_status(&manifest);
-
-        assert_eq!(status.ready, Some(true));
-        assert_eq!(status.state, ExtensionReadinessState::Ready);
-        assert_eq!(status.reason, None);
-    }
-
     /// Metadata inspection must not spawn an operator-authored shell command.
     /// The `ready_check` here fails instantly if it ever runs, and the sentinel
     /// is explicitly absent so the re-entry guard cannot mask the result.
