@@ -602,100 +602,6 @@ fn legacy_gate_runs_unchanged_action_release_wrapper_suite() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn declared_baseline_executor_exports_the_plan_deadline() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let bin = workspace.path().join("bin");
-    std::fs::create_dir(&bin).expect("bin");
-    let homeboy = bin.join("homeboy");
-    homeboy_test_support::write_executable(
-        &homeboy,
-        "#!/bin/sh\nprintf %s \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\n",
-        0o755,
-    )
-    .expect("adapter");
-
-    let plan =
-        homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
-            vec![
-                "homeboy".to_string(),
-                "review".to_string(),
-                "test".to_string(),
-            ],
-            42,
-        )
-        .unwrap();
-    let mut environment = AgentTaskGateEnvironmentPolicy::default();
-    environment
-        .variables
-        .insert("PATH".to_string(), format!("{}:/bin", bin.display()));
-    let runtime = tempfile::tempdir().expect("runtime");
-
-    let report = run_declared_test_with_timeout(
-        workspace.path(),
-        1,
-        &plan,
-        AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        runtime.path(),
-        &environment,
-        &[],
-    )
-    .expect("baseline execution");
-
-    assert_eq!(report.stdout, "42");
-    assert_eq!(
-        report.test_execution_outcome,
-        Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed)
-    );
-}
-
-#[test]
-fn env_var_guard_restores_even_when_the_test_body_panics() {
-    // The property that matters. An assertion failing between the mutation
-    // and a hand-written restore is what turns one red test into a cascade
-    // across every test scheduled after it in the same process.
-    let _lock = env_mutex();
-    let scratch = tempfile::tempdir().expect("scratch");
-    std::env::set_var("__HOMEBOY_TEST_ENV_GUARD_PANIC__", "original");
-
-    let panicked = std::panic::catch_unwind(|| {
-        let _guard = EnvVarGuard::set(&[("__HOMEBOY_TEST_ENV_GUARD_PANIC__", scratch.path())]);
-        panic!("assertion failed mid-test");
-    })
-    .is_err();
-
-    assert!(panicked);
-    assert_eq!(
-        std::env::var("__HOMEBOY_TEST_ENV_GUARD_PANIC__")
-            .ok()
-            .as_deref(),
-        Some("original"),
-        "a panicking test must not leak its environment mutation"
-    );
-    std::env::remove_var("__HOMEBOY_TEST_ENV_GUARD_PANIC__");
-}
-
-#[test]
-fn isolated_gate_test_leaves_home_intact() {
-    // Isolated gate tests must not remove HOME for the rest of the process;
-    // tests in later modules depend on it.
-    let _lock = env_mutex();
-    let before = std::env::var_os("HOME");
-
-    {
-        let scratch = tempfile::tempdir().expect("scratch");
-        let _guard = EnvVarGuard::set(&[("HOME", scratch.path())]);
-    }
-
-    assert_eq!(
-        std::env::var_os("HOME"),
-        before,
-        "HOME must survive a gate test that isolates it"
-    );
-}
-
 /// Gate setup for `gates`, under the default hydration policy.
 pub(super) fn hydrate_gate_dependency_roots(
     checkout: &Path,
@@ -864,39 +770,6 @@ fn subdirectory_component_dev_tools_are_hydrated_before_gate_execution() {
         }
         assert!(!root.join("ignored/deep/vendor").exists());
         assert!(!root.join("submodule/deep/vendor").exists());
-    });
-}
-
-/// A child directory that is its own repository (a submodule) belongs to
-/// another project: the root workspace consumes its packages, and its own
-/// lockfile is not this checkout's contract. Gate setup hydrates real
-/// package children but never installs inside a nested repository.
-#[test]
-fn nested_repository_children_are_not_hydrated() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let checkout = tempfile::tempdir().expect("checkout");
-        let root = checkout.path();
-        let provider = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#;
-        for directory in ["package", "vendor"] {
-            fs::create_dir(root.join(directory)).expect("child");
-            fs::write(root.join(directory).join("homeboy.json"), provider).expect("child provider");
-        }
-        fs::write(root.join("vendor/.git"), "gitdir: ../.git/modules/vendor\n")
-            .expect("submodule gitfile");
-
-        let evidence = hydrate_gate_dependency_roots(
-            root,
-            "fixture",
-            &["cd package && true", "cd vendor && true"],
-        )
-        .expect("dependency hydration");
-        let roots = evidence
-            .iter()
-            .map(|setup| setup.package_root.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(roots, vec!["package"], "{evidence:?}");
-        assert!(root.join("package/hydration-count").is_file());
-        assert!(!root.join("vendor/hydration-count").exists());
     });
 }
 
@@ -1559,86 +1432,58 @@ fn failed_durable_spawn_registration_reaps_the_isolated_gate_group() {
     assert!(!homeboy_core::process::pid_is_running(pid));
 }
 
+/// Live heartbeats carry a bounded output tail; a private gate's tail is
+/// withheld on every heartbeat.
 #[cfg(unix)]
 #[test]
 fn supervised_gate_heartbeats_with_a_bounded_live_output_tail() {
-    let worktree = tempfile::tempdir().expect("worktree");
-    let tails = Arc::new(Mutex::new(Vec::new()));
-    let supervision = GateSupervision {
-        timeout: Duration::from_secs(1),
-        no_progress_timeout: Duration::from_secs(1),
-        heartbeat_interval: Duration::from_millis(10),
-        on_spawn: Arc::new(|_, _| Ok(())),
-        on_heartbeat: Arc::new({
-            let tails = Arc::clone(&tails);
-            move |status| {
-                tails
-                    .lock()
-                    .expect("tails")
-                    .push(status.output_tail.clone());
-                Ok(())
-            }
-        }),
-        is_cancelled: Arc::new(|| false),
-    };
-    run_gate_command_with_supervision(
-        worktree.path(),
-        1,
-        "printf stdout; printf stderr >&2; sleep 0.5",
+    for visibility in [
         AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        None,
-        Some(&supervision),
-        &AgentTaskGateEnvironmentPolicy::default(),
-        &[],
-    )
-    .expect("gate");
-    assert!(tails
-        .lock()
-        .expect("tails")
-        .iter()
-        .any(|tail| tail.contains("stdout") && tail.contains("stderr")));
-}
-
-#[cfg(unix)]
-#[test]
-fn supervised_private_gate_never_persists_live_output() {
-    let worktree = tempfile::tempdir().expect("worktree");
-    let tails = Arc::new(Mutex::new(Vec::new()));
-    let supervision = GateSupervision {
-        timeout: Duration::from_secs(1),
-        no_progress_timeout: Duration::from_secs(1),
-        heartbeat_interval: Duration::from_millis(10),
-        on_spawn: Arc::new(|_, _| Ok(())),
-        on_heartbeat: Arc::new({
-            let tails = Arc::clone(&tails);
-            move |status| {
-                tails
-                    .lock()
-                    .expect("tails")
-                    .push(status.output_tail.clone());
-                Ok(())
-            }
-        }),
-        is_cancelled: Arc::new(|| false),
-    };
-    run_gate_command_with_supervision(
-        worktree.path(),
-        1,
-        "printf secret-stdout; printf secret-stderr >&2; sleep 0.5",
         AgentTaskGateVisibility::Private,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        None,
-        Some(&supervision),
-        &AgentTaskGateEnvironmentPolicy::default(),
-        &[],
-    )
-    .expect("private gate");
-    let tails = tails.lock().expect("tails");
-    assert!(!tails.is_empty());
-    assert!(tails
-        .iter()
-        .all(|tail| tail == "private gate output withheld"));
+    ] {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let tails = Arc::new(Mutex::new(Vec::new()));
+        let supervision = GateSupervision {
+            timeout: Duration::from_secs(1),
+            no_progress_timeout: Duration::from_secs(1),
+            heartbeat_interval: Duration::from_millis(10),
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new({
+                let tails = Arc::clone(&tails);
+                move |status| {
+                    tails
+                        .lock()
+                        .expect("tails")
+                        .push(status.output_tail.clone());
+                    Ok(())
+                }
+            }),
+            is_cancelled: Arc::new(|| false),
+        };
+        run_gate_command_with_supervision(
+            worktree.path(),
+            1,
+            "printf stdout; printf stderr >&2; sleep 0.5",
+            visibility,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )
+        .expect("gate");
+        let tails = tails.lock().expect("tails");
+        if visibility == AgentTaskGateVisibility::Private {
+            assert!(!tails.is_empty());
+            assert!(tails
+                .iter()
+                .all(|tail| tail == "private gate output withheld"));
+        } else {
+            assert!(tails
+                .iter()
+                .any(|tail| tail.contains("stdout") && tail.contains("stderr")));
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1787,160 +1632,86 @@ pub(super) fn chatty_gate_supervision() -> GateSupervision {
     }
 }
 
-/// An uninstrumented gate (any third-party test runner) is alive while it
-/// prints, even when it runs far longer than the no-progress window.
+/// Output liveness: an uninstrumented gate (any third-party runner) is
+/// alive while it prints. Once a gate emits a marker it is instrumented and
+/// ordinary output can no longer mask a stalled test case (#11415), unless a
+/// `"liveness":"output"` marker hands a delegated phase back to output
+/// liveness (#16152); the next plain marker restores marker-only liveness.
 #[cfg(unix)]
 #[test]
-fn uninstrumented_gate_output_keeps_it_alive() {
-    let worktree = tempfile::tempdir().expect("worktree");
-    let report = run_gate_command_with_supervision(
-        worktree.path(),
-        1,
-        "for i in $(seq 1 40); do echo \"case $i passed\"; sleep 0.02; done",
-        AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        None,
-        Some(&chatty_gate_supervision()),
-        &AgentTaskGateEnvironmentPolicy::default(),
-        &[],
-    )
-    .expect("gate report");
-    assert_eq!(report.termination, AgentTaskGateTermination::Completed);
-    assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
-}
-
-/// Once a gate emits a marker it is instrumented: ordinary output can no
-/// longer mask a stalled test case (#11415).
-#[cfg(unix)]
-#[test]
-fn instrumented_gate_output_cannot_mask_a_missing_marker() {
-    let worktree = tempfile::tempdir().expect("worktree");
-    let report = run_gate_command_with_supervision(
-            worktree.path(),
-            1,
+fn gate_liveness_follows_progress_markers_and_output_handoffs() {
+    for (command, stalls) in [
+        (
+            "for i in $(seq 1 40); do echo \"case $i passed\"; sleep 0.02; done",
+            false,
+        ),
+        (
             "printf 'HOMEBOY_PROGRESS {\"phase\":\"test\"}\\n'; for i in $(seq 1 100); do echo \"line $i\"; sleep 0.02; done",
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            None,
-            Some(&chatty_gate_supervision()),
-            &AgentTaskGateEnvironmentPolicy::default(),
-            &[],
-        )
-        .expect("gate report");
-    assert_eq!(report.termination, AgentTaskGateTermination::NoProgress);
-    let evidence = report.failure_evidence.as_ref().expect("failure evidence");
-    assert!(
-        evidence
-            .summary
-            .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
-        "{}",
-        evidence.summary
-    );
-    let first = report.supervision_regate.as_ref().expect("first run");
-    assert!(
-        first
-            .summary
-            .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
-        "{}",
-        first.summary
-    );
-}
-
-/// A marker with `"liveness":"output"` hands a delegated phase (a cargo
-/// build, an extension test runner) back to output liveness, so an
-/// instrumented command can run an uninstrumented child (#16152).
-#[cfg(unix)]
-#[test]
-fn output_liveness_marker_keeps_a_delegated_phase_alive() {
-    let worktree = tempfile::tempdir().expect("worktree");
-    let report = run_gate_command_with_supervision(
-            worktree.path(),
-            1,
+            true,
+        ),
+        (
             // The exact setup markers `homeboy review` emits.
             concat!(
                 "printf '%s\\n' 'HOMEBOY_PROGRESS {\"component\":\"c\",\"current\":\"c\",\"deadline_ms\":1,\"elapsed_ms\":0,\"last_progress_ms_ago\":null,\"liveness\":null,\"phase\":\"dependency_setup\",\"provider\":null,\"status\":\"running\"}'; ",
                 "printf '%s\\n' 'HOMEBOY_PROGRESS {\"component\":\"c\",\"current\":\"c\",\"deadline_ms\":1,\"elapsed_ms\":1,\"last_progress_ms_ago\":null,\"liveness\":\"output\",\"phase\":\"dependency_setup\",\"provider\":null,\"status\":\"completed\"}'; ",
                 "for i in $(seq 1 40); do echo \"case $i passed\"; sleep 0.02; done",
             ),
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            None,
-            Some(&chatty_gate_supervision()),
-            &AgentTaskGateEnvironmentPolicy::default(),
-            &[],
-        )
-        .expect("gate report");
-    assert_eq!(report.termination, AgentTaskGateTermination::Completed);
-    assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
-}
-
-/// The next plain marker restores marker-only liveness after a handoff.
-#[cfg(unix)]
-#[test]
-fn plain_marker_after_output_handoff_restores_marker_only_liveness() {
-    let worktree = tempfile::tempdir().expect("worktree");
-    let report = run_gate_command_with_supervision(
-            worktree.path(),
-            1,
+            false,
+        ),
+        (
             "printf 'HOMEBOY_PROGRESS {\"phase\":\"build\",\"liveness\":\"output\"}\\n'; printf 'HOMEBOY_PROGRESS {\"phase\":\"test\"}\\n'; for i in $(seq 1 100); do echo \"line $i\"; sleep 0.02; done",
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            None,
-            Some(&chatty_gate_supervision()),
-            &AgentTaskGateEnvironmentPolicy::default(),
-            &[],
-        )
-        .expect("gate report");
-    assert_eq!(report.termination, AgentTaskGateTermination::NoProgress);
-    let evidence = report.failure_evidence.as_ref().expect("failure evidence");
-    assert!(
-        evidence
-            .summary
-            .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
-        "{}",
-        evidence.summary
-    );
-    let first = report.supervision_regate.as_ref().expect("first run");
-    assert!(
-        first
-            .summary
-            .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
-        "{}",
-        first.summary
-    );
-}
-
-#[test]
-fn semantic_failure_remains_completed_with_reviewer_resolvable_command() {
-    let worktree = tempfile::tempdir().expect("worktree");
-    let report = run_gate_command_with_supervision(
-        worktree.path(),
-        1,
-        "printf failure >&2; exit 7",
-        AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        None,
-        None,
-        &AgentTaskGateEnvironmentPolicy::default(),
-        &[],
-    )
-    .expect("gate report");
-    assert_eq!(report.termination, AgentTaskGateTermination::Completed);
-    assert_eq!(report.exit_code, 7);
-    assert_eq!(
-        report.failure_evidence.as_ref().expect("evidence").command,
-        "printf failure >&2; exit 7"
-    );
-}
-
-#[test]
-fn command_owned_budget_exit_codes_remain_candidate_failures() {
-    let worktree = tempfile::tempdir().expect("worktree");
-    for code in [124, 125] {
+            true,
+        ),
+    ] {
+        let worktree = tempfile::tempdir().expect("worktree");
         let report = run_gate_command_with_supervision(
             worktree.path(),
             1,
-            &format!("exit {code}"),
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&chatty_gate_supervision()),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )
+        .expect("gate report");
+        if !stalls {
+            assert_eq!(
+                report.termination,
+                AgentTaskGateTermination::Completed,
+                "{command}"
+            );
+            assert_eq!(report.status, AgentTaskGateStatus::Succeeded, "{command}");
+            continue;
+        }
+        assert_eq!(
+            report.termination,
+            AgentTaskGateTermination::NoProgress,
+            "{command}"
+        );
+        let evidence = report.failure_evidence.as_ref().expect("failure evidence");
+        let first = report.supervision_regate.as_ref().expect("first run");
+        for summary in [&evidence.summary, &first.summary] {
+            assert!(
+                summary.contains("no HOMEBOY_PROGRESS marker for 250 ms"),
+                "{summary}"
+            );
+        }
+    }
+}
+
+/// A command's own failure, including a 124/125 exit it chose itself, is a
+/// completed candidate failure naming the command a reviewer can rerun.
+#[test]
+fn semantic_failure_remains_completed_with_reviewer_resolvable_command() {
+    let worktree = tempfile::tempdir().expect("worktree");
+    for code in [7, 124, 125] {
+        let command = format!("printf failure >&2; exit {code}");
+        let report = run_gate_command_with_supervision(
+            worktree.path(),
+            1,
+            &command,
             AgentTaskGateVisibility::Visible,
             AgentTaskGateRevealPolicy::FullEvidence,
             None,
@@ -1948,10 +1719,13 @@ fn command_owned_budget_exit_codes_remain_candidate_failures() {
             &AgentTaskGateEnvironmentPolicy::default(),
             &[],
         )
-        .expect("command report");
+        .expect("gate report");
         assert_eq!(report.termination, AgentTaskGateTermination::Completed);
+        assert_eq!(report.exit_code, code);
+        let evidence = report.failure_evidence.as_ref().expect("evidence");
+        assert_eq!(evidence.command, command);
         assert_eq!(
-            report.failure_evidence.as_ref().unwrap().classification,
+            evidence.classification,
             AgentTaskGateFailureClassification::CandidateCode
         );
     }

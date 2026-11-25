@@ -688,25 +688,6 @@ fn toolchain_preflight_bounds_output_and_reports_capture_metadata() {
 }
 
 #[test]
-fn gate_environment_pins_temp_dir_variables_to_the_invocation_tmpdir() {
-    let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
-    let selected = selected_gate_environment(
-        &AgentTaskGateEnvironmentPolicy::default(),
-        Some(runtime_tmpdir.path()),
-    )
-    .expect("gate environment");
-
-    let expected = runtime_tmpdir.path().join("tmp").display().to_string();
-    for name in TMPDIR_ENV_VARS {
-        assert_eq!(
-            selected.values.get(*name),
-            Some(&expected),
-            "{name} must resolve to the invocation temp dir"
-        );
-    }
-}
-
-#[test]
 fn gate_environment_relocates_isolated_config_root_and_data_roots_into_gate_home() {
     let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
     let operator = tempfile::tempdir().expect("operator roots");

@@ -222,13 +222,24 @@ mod tests {
     }
 
     #[test]
-    fn runner_artifact_without_a_job_binding_fails_closed() {
+    fn runner_artifact_without_a_binding_or_provenance_fails_closed() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let error = materialize_artifact(&mut artifact(b"patch bytes"), "run", "task", None)
-                .expect_err("runner artifact without a binding must not download");
-            assert!(error
-                .message
-                .contains("no authenticated runner/job binding exists"));
+            for (metadata, expected) in [
+                (
+                    json!({ "executor_artifact_finalized": true }),
+                    "no authenticated runner/job binding exists",
+                ),
+                (
+                    json!({ "source_provenance": { "runner_id": "   " } }),
+                    "no artifact runner provenance is recorded",
+                ),
+            ] {
+                let mut artifact = artifact(b"patch bytes");
+                artifact.metadata = metadata;
+                let error = materialize_artifact(&mut artifact, "run", "task", None)
+                    .expect_err("runner artifact without a binding must not download");
+                assert!(error.message.contains(expected), "{}", error.message);
+            }
         });
     }
 
@@ -260,20 +271,6 @@ mod tests {
                 "must reach the runner download path: {}",
                 error.message
             );
-        });
-    }
-
-    #[test]
-    fn empty_or_missing_artifact_provenance_still_fails_closed() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut artifact = artifact(b"patch bytes");
-            artifact.metadata = json!({ "source_provenance": { "runner_id": "   " } });
-
-            let error = materialize_artifact(&mut artifact, "run", "task", None)
-                .expect_err("blank provenance must fail closed");
-            assert!(error
-                .message
-                .contains("no artifact runner provenance is recorded"));
         });
     }
 

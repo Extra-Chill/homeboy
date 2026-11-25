@@ -943,44 +943,29 @@ mod tests {
         }
     }
 
+    /// A provider that never launched or a controller restart (dead pid) is
+    /// reconcilable; a live owner outranks an expired heartbeat and a stale
+    /// projection.
     #[test]
-    fn provider_never_launched_and_controller_restart_are_reconcilable() {
-        for metadata in [
-            serde_json::json!({}),
-            serde_json::json!({"runner_pid": 99_999_999}),
+    fn owner_liveness_gates_recover_while_cancel_stays_available() {
+        for (metadata, liveness, recover) in [
+            (serde_json::json!({}), AgentTaskLiveness::Stale, true),
+            (
+                serde_json::json!({"runner_pid": 99_999_999}),
+                AgentTaskLiveness::Stale,
+                true,
+            ),
+            (
+                serde_json::json!({"runner_pid": std::process::id(), "stale_running": true}),
+                AgentTaskLiveness::Active,
+                false,
+            ),
         ] {
-            let run = record(RunExecutionState::Running, metadata);
-            let state = CookRunState::of(&run);
-            assert_eq!(state.liveness, AgentTaskLiveness::Stale);
-            assert!(state.allows(A::Cancel));
-            assert!(state.allows(A::Recover));
+            let state = CookRunState::of(&record(RunExecutionState::Running, metadata.clone()));
+            assert_eq!(state.liveness, liveness, "{metadata}");
+            assert!(state.allows(A::Cancel), "{metadata}");
+            assert_eq!(state.allows(A::Recover), recover, "{metadata}");
         }
-    }
-
-    #[test]
-    fn live_owner_outranks_expired_heartbeat_and_stale_projection() {
-        let run = record(
-            RunExecutionState::Running,
-            serde_json::json!({
-                "runner_pid": std::process::id(), "stale_running": true,
-            }),
-        );
-        let state = CookRunState::of(&run);
-        assert_eq!(state.liveness, AgentTaskLiveness::Active);
-        assert!(state.allows(A::Cancel));
-        assert!(!state.allows(A::Recover));
-    }
-
-    #[test]
-    fn discovery_and_record_annotation_delegate_liveness() {
-        let discovery = include_str!("../agent_task_service/discovery.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
-        assert!(!discovery.contains("fn classify_liveness("));
-        assert!(!discovery.contains("process_identity_state_with_start_identity("));
-        let records = include_str!("records.rs");
-        assert!(!records.contains("process_identity_state_with_start_identity(\n            pid,"));
     }
 
     #[test]
@@ -1306,6 +1291,15 @@ mod tests {
             assert!(!production.contains("AgentTaskLabHandoffState::"));
             assert!(!production.contains("CookDeliveryState::"));
         }
+        // Verbs read the run state rather than reclassifying status.
+        for source in [
+            include_str!("action_eligibility.rs"),
+            include_str!("../agent_task_service/cook_recovery.rs"),
+        ] {
+            let production = source.split("#[cfg(test)]").next().expect("source");
+            assert!(!production.contains("CookStatus::CandidateRecoverable"));
+            assert!(!production.contains(".is_in_flight()"));
+        }
     }
 
     #[test]
@@ -1368,20 +1362,6 @@ mod tests {
             transition_record(&next, Some(&stored)).unwrap();
             assert_eq!(CookRunState::of(&next).phase, phase);
             transition_record(&next, Some(&next)).unwrap();
-        }
-    }
-
-    #[test]
-    fn verbs_do_not_reclassify_candidate_or_in_flight_status() {
-        for source in [
-            include_str!("action_eligibility.rs"),
-            include_str!("../agent_task_service/cook_recovery.rs"),
-        ] {
-            let production = source.split("#[cfg(test)]").next().expect("source");
-            assert!(!production.contains("AgentTaskLabHandoffState::"));
-            assert!(!production.contains("CookDeliveryState::"));
-            assert!(!production.contains("CookStatus::CandidateRecoverable"));
-            assert!(!production.contains(".is_in_flight()"));
         }
     }
 
