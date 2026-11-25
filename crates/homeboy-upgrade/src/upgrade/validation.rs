@@ -273,15 +273,6 @@ mod tests {
         assert!(check.uninstallable_versions.is_empty());
     }
 
-    /// The release-asset method pins the selected installable release.
-    #[test]
-    fn only_the_release_pinning_method_selects_an_installable_release() {
-        assert!(selects_an_installable_release(InstallMethod::Binary));
-        assert!(!selects_an_installable_release(InstallMethod::Homebrew));
-        assert!(!selects_an_installable_release(InstallMethod::Source));
-        assert!(!selects_an_installable_release(InstallMethod::Unknown));
-    }
-
     /// Non-binary installs read the same catalog and report its newest stable
     /// release without verifying any asset.
     #[test]

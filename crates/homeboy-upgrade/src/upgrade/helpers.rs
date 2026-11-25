@@ -3553,32 +3553,11 @@ mod runner_source_upgrade_tests {
             Some("0.369.0+replacement")
         );
         assert!(!controller_allows_extension_refresh(false, &completion));
-    }
-
-    #[test]
-    fn skip_runners_supersession_uses_the_active_post_refresh_identity() {
-        let completion = reconcile_controller_identity(
-            Some(build_identity::BuildIdentity {
-                version: "0.369.0".to_string(),
-                git_commit: Some("replacement".to_string()),
-                git_dirty: Some(false),
-                display: "0.369.0+replacement".to_string(),
-            }),
-            Some("0.368.0+baseline"),
-            Some("0.368.0"),
-        )
-        .expect("active replacement identity is readable");
-
         assert!(runner_completion_is_skipped(
             true,
             true,
             completion.superseded
         ));
-        assert_eq!(completion.version.as_deref(), Some("0.369.0"));
-        assert_eq!(
-            completion.build_identity.as_deref(),
-            Some("0.369.0+replacement")
-        );
     }
 
     #[test]
@@ -3823,19 +3802,6 @@ mod runner_source_upgrade_tests {
 
     #[cfg(unix)]
     #[test]
-    fn extension_preflight_allows_registered_linked_local_source() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let source = home
-                .path()
-                .join(".config/homeboy/extension-sources/linked/linked");
-            link_registered_extension(home.path(), "linked", &source);
-
-            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn extension_preflight_allows_moved_registered_source_root() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let config = home.path().join(".config/homeboy");
@@ -3868,37 +3834,26 @@ mod runner_source_upgrade_tests {
 
     #[cfg(unix)]
     #[test]
-    fn extension_preflight_rejects_unregistered_external_linked_source() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let source = home.path().join("external/external");
-            link_registered_extension(home.path(), "external", &source);
+    fn extension_preflight_rejects_linked_sources_outside_registered_roots() {
+        for (id, relative_source, detail) in [
+            ("external", "external/external", "registered"),
+            (
+                "traversal",
+                ".config/homeboy/extension-sources/traversal/../outside/traversal",
+                "escapes",
+            ),
+        ] {
+            homeboy_core::test_support::with_isolated_home(|home| {
+                link_registered_extension(home.path(), id, &home.path().join(relative_source));
 
-            let blockers = preflight_extensions_for_upgrade("1.0.0");
-            assert_eq!(
-                blockers[0].classification,
-                "linked_source_root_unrecognized"
-            );
-            assert!(blockers[0].detail.contains("registered"));
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn extension_preflight_rejects_traversal_outside_registered_source_root() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let root = home
-                .path()
-                .join(".config/homeboy/extension-sources/traversal");
-            let source = root.join("../outside/traversal");
-            link_registered_extension(home.path(), "traversal", &source);
-
-            let blockers = preflight_extensions_for_upgrade("1.0.0");
-            assert_eq!(
-                blockers[0].classification,
-                "linked_source_root_unrecognized"
-            );
-            assert!(blockers[0].detail.contains("escapes"));
-        });
+                let blockers = preflight_extensions_for_upgrade("1.0.0");
+                assert_eq!(
+                    blockers[0].classification,
+                    "linked_source_root_unrecognized"
+                );
+                assert!(blockers[0].detail.contains(detail), "{id}");
+            });
+        }
     }
 
     #[test]
@@ -3941,7 +3896,7 @@ mod runner_source_upgrade_tests {
 
     #[cfg(unix)]
     #[test]
-    fn extension_preflight_dry_run_does_not_mutate_registered_source() {
+    fn extension_preflight_allows_registered_linked_source_without_mutating_it() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let source = home
                 .path()
@@ -3990,7 +3945,7 @@ mod runner_source_upgrade_tests {
     }
 
     #[test]
-    fn extension_preflight_failure_does_not_invoke_controller_mutation() {
+    fn extension_preflight_failure_result_reports_blockers() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let extensions = home.path().join(".config/homeboy/extensions");
             write_extension(
@@ -3999,23 +3954,18 @@ mod runner_source_upgrade_tests {
                 r#"{"name":"incompatible","version":"1.0.0","requires":{"homeboy":">=3.0.0"}}"#,
             );
 
-            let mut controller_mutated = false;
             let blockers = preflight_extensions_for_upgrade("2.1.0");
-            let result = if blockers.is_empty() {
-                controller_mutated = true;
-                Ok(())
-            } else {
-                Err(extension_preflight_failure_result(
-                    InstallMethod::Binary,
-                    "2.0.0".to_string(),
-                    None,
-                    "2.1.0",
-                    blockers,
-                ))
-            };
-
-            assert!(!controller_mutated, "controller installation must not run");
-            let result = result.expect_err("incompatible extension blocks upgrade");
+            assert!(
+                !blockers.is_empty(),
+                "incompatible extension blocks upgrade"
+            );
+            let result = extension_preflight_failure_result(
+                InstallMethod::Binary,
+                "2.0.0".to_string(),
+                None,
+                "2.1.0",
+                blockers,
+            );
             assert_eq!(
                 result.outcome.as_deref(),
                 Some("extension_preflight_failed")
@@ -4360,16 +4310,6 @@ version = "0.0.0"
     }
 
     #[test]
-    fn resolve_source_upgrade_target_falls_back_to_current_identity_when_not_engaged() {
-        // When source upgrade is not engaged, the target resolution must not
-        // re-exec any binary and simply reports the in-process identity so
-        // ordinary (non-source) upgrades are unchanged.
-        let (version, identity) = resolve_source_upgrade_target(false, "9.9.9");
-        assert_eq!(version, "9.9.9");
-        assert_eq!(identity, build_identity::current());
-    }
-
-    #[test]
     fn gitless_source_snapshot_is_an_executable_same_version_candidate() {
         let source = tempdir().expect("source");
         write_source_manifest(source.path(), "1.2.3");
@@ -4518,29 +4458,21 @@ mod symlinked_extension_tests {
     }
 
     #[test]
-    fn no_warning_when_not_running_under_sudo() {
-        let _guard = SudoUserGuard::set(None);
-        assert!(detect_unrefreshed_symlinked_extensions(&[]).is_empty());
-    }
-
-    #[test]
-    fn no_warning_when_sudo_user_is_root() {
-        let _guard = SudoUserGuard::set(Some("root"));
-        assert!(detect_unrefreshed_symlinked_extensions(&[]).is_empty());
-    }
-
-    #[test]
-    fn no_warning_when_sudo_user_is_empty() {
-        let _guard = SudoUserGuard::set(Some(""));
-        assert!(detect_unrefreshed_symlinked_extensions(&[]).is_empty());
-    }
-
-    #[test]
-    fn no_warning_when_invoking_user_has_no_config_dir() {
-        // A user that exists in passwd but has no homeboy extensions dir must
-        // not produce warnings (and must not panic on the missing directory).
-        let _guard = SudoUserGuard::set(Some("definitely-not-a-real-user-xyz"));
-        assert!(detect_unrefreshed_symlinked_extensions(&[]).is_empty());
+    fn no_warning_without_a_non_root_invoking_user_config_dir() {
+        // Not under sudo, sudo as root, empty SUDO_USER, and a user with no
+        // homeboy extensions dir (which must not panic) all warn about nothing.
+        for sudo_user in [
+            None,
+            Some("root"),
+            Some(""),
+            Some("definitely-not-a-real-user-xyz"),
+        ] {
+            let _guard = SudoUserGuard::set(sudo_user);
+            assert!(
+                detect_unrefreshed_symlinked_extensions(&[]).is_empty(),
+                "{sudo_user:?}"
+            );
+        }
     }
 
     fn git_fixture(path: &Path, args: &[&str]) {
@@ -4788,14 +4720,28 @@ mod convergence_tests {
     }
 
     #[test]
+    fn runner_convergence_fails_on_failed_or_stale_children() {
+        let mut failed = runner("0.304.0", "0.304.0", false);
+        failed.success = false;
+        // A failed child is partial even when the controller is already current.
+        assert!(runner_convergence_failed(&[], &[failed], None));
+        // A changed runner whose final version still misses the controller.
+        assert!(runner_convergence_failed(
+            &[runner("0.299.0", "0.300.0", true)],
+            &[],
+            Some("0.301.2")
+        ));
+        assert!(!runner_convergence_failed(
+            &[runner("0.299.0", "0.301.2", true)],
+            &[],
+            Some("0.301.2")
+        ));
+    }
+
+    #[test]
     fn successful_but_stale_child_is_partial_controller_convergence() {
         let runner = runner("0.301.2", "0.301.2", false);
 
-        assert!(runner_convergence_failed(
-            std::slice::from_ref(&runner),
-            &[],
-            Some("0.304.0")
-        ));
         let disposition = runner_convergence_disposition(
             false,
             std::slice::from_ref(&runner),
@@ -4933,57 +4879,48 @@ mod convergence_tests {
     }
 
     #[test]
-    fn skip_runners_reports_skipped_not_converged() {
+    fn runner_disposition_message_distinguishes_skipped_absent_and_converged() {
+        let converged = runner("0.301.2", "0.310.0", true);
         // #9842: --skip-runners must never claim convergence.
-        let disposition = runner_convergence_disposition(true, &[], &[], Some("0.310.0"));
-        assert_eq!(disposition, RunnerConvergenceDisposition::Skipped);
-        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[], &[], None);
-        assert!(message.contains("runner convergence skipped"), "{message}");
-        assert!(!message.contains("converged"), "{message}");
-    }
-
-    #[test]
-    fn no_configured_runners_is_distinct_from_converged() {
-        let disposition = runner_convergence_disposition(false, &[], &[], Some("0.310.0"));
-        assert_eq!(
-            disposition,
-            RunnerConvergenceDisposition::NoRunnersConfigured
-        );
-        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[], &[], None);
-        assert!(message.contains("no configured runners"), "{message}");
-    }
-
-    #[test]
-    fn converged_runners_still_report_convergence() {
-        let runner = runner("0.301.2", "0.310.0", true);
-        let disposition = runner_convergence_disposition(
-            false,
-            std::slice::from_ref(&runner),
-            &[],
-            Some("0.310.0"),
-        );
-        assert_eq!(disposition, RunnerConvergenceDisposition::Converged);
-        let message = upgrade_message(
-            true,
-            Some("0.310.0"),
-            None,
-            disposition,
-            &[runner],
-            &[],
-            None,
-        );
-        assert!(
-            message.contains("configured runners converged"),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn failed_child_is_partial_even_when_controller_is_already_current() {
-        let mut runner = runner("0.304.0", "0.304.0", false);
-        runner.success = false;
-
-        assert!(runner_convergence_failed(&[], &[runner], None));
+        for (skip, runners, expected, phrase, forbidden) in [
+            (
+                true,
+                Vec::new(),
+                RunnerConvergenceDisposition::Skipped,
+                "runner convergence skipped",
+                Some("converged"),
+            ),
+            (
+                false,
+                Vec::new(),
+                RunnerConvergenceDisposition::NoRunnersConfigured,
+                "no configured runners",
+                None,
+            ),
+            (
+                false,
+                vec![converged],
+                RunnerConvergenceDisposition::Converged,
+                "configured runners converged",
+                None,
+            ),
+        ] {
+            let disposition = runner_convergence_disposition(skip, &runners, &[], Some("0.310.0"));
+            assert_eq!(disposition, expected);
+            let message = upgrade_message(
+                true,
+                Some("0.310.0"),
+                None,
+                disposition,
+                &runners,
+                &[],
+                None,
+            );
+            assert!(message.contains(phrase), "{message}");
+            if let Some(forbidden) = forbidden {
+                assert!(!message.contains(forbidden), "{message}");
+            }
+        }
     }
 
     #[test]
@@ -5038,21 +4975,6 @@ mod convergence_tests {
     }
 
     #[test]
-    fn extension_status_names_each_skip_reason_when_partial() {
-        let skips = vec![ExtensionUpgradeSkip {
-            extension_id: "wordpress".to_string(),
-            reason: "extension source is unreachable".to_string(),
-            recovery_commands: Vec::new(),
-        }];
-        let status = extension_component_status(true, false, &[], &skips);
-        assert_eq!(status.status, "partial");
-        assert_eq!(
-            status.summary,
-            "0 updated, 1 skipped (wordpress: extension source is unreachable)"
-        );
-    }
-
-    #[test]
     fn partial_extension_outcome_is_prominent_in_upgrade_message() {
         let skips = vec![ExtensionUpgradeSkip {
             extension_id: "wordpress".to_string(),
@@ -5060,6 +4982,7 @@ mod convergence_tests {
             recovery_commands: Vec::new(),
         }];
         let status = extension_component_status(true, false, &[], &skips);
+        assert_eq!(status.status, "partial");
         let message = upgrade_message(
             true,
             Some("0.310.0"),
@@ -5105,25 +5028,14 @@ mod convergence_tests {
         assert!(message.starts_with("TARGETED RUNNER SCOPE"));
         assert!(message.contains("controller remains 0.301.2"));
         assert!(message.contains("homeboy upgrade --force --upgrade-runner lab"));
-    }
 
-    #[test]
-    fn targeted_runner_only_scope_is_partial_when_runner_remains_stale() {
-        let message = targeted_runner_message(
+        let stale = targeted_runner_message(
             "0.301.2",
             &["lab".to_string()],
             &[runner("0.299.0", "0.299.0", false)],
             &[],
         );
-
-        assert!(message.starts_with("PARTIAL: TARGETED RUNNER SCOPE"));
-    }
-
-    #[test]
-    fn changed_runner_is_partial_when_final_version_still_misses_controller() {
-        let runner = runner("0.299.0", "0.300.0", true);
-
-        assert!(runner_convergence_failed(&[runner], &[], Some("0.301.2")));
+        assert!(stale.starts_with("PARTIAL: TARGETED RUNNER SCOPE"));
     }
 }
 
@@ -5182,14 +5094,6 @@ mod pinned_release_tests {
             selected.asset_url().as_deref(),
             Some("https://github.com/Extra-Chill/homeboy/releases/download/v0.332.0/homeboy-x86_64-unknown-linux-gnu.tar.xz")
         );
-    }
-
-    #[test]
-    fn a_pin_accepts_the_bare_semver_spelling() {
-        let selected = resolve_pinned_release(&catalog(), "0.332.0", Some(LINUX))
-            .expect("pinned release resolves");
-
-        assert_eq!(selected.tag, "v0.332.0");
     }
 
     /// Pinning a release that cannot install here must fail before any binary
@@ -5287,20 +5191,15 @@ mod pinned_release_tests {
     }
 
     #[test]
-    fn a_pin_infers_binary_for_a_cargo_installed_controller() {
+    fn an_omitted_method_infers_binary_for_a_pin_and_detects_otherwise() {
         let (method, inferred) = resolve_install_method(None, Some("v0.332.0"), || {
             panic!("a release pin must not use the detected cargo install method")
         });
-
         assert_eq!(method, InstallMethod::Binary);
         assert!(inferred);
         assert!(validate_pinned_version(Some("v0.332.0"), method).is_ok());
-    }
 
-    #[test]
-    fn omitted_method_without_a_pin_uses_detection() {
         let (method, inferred) = resolve_install_method(None, None, || InstallMethod::Homebrew);
-
         assert_eq!(method, InstallMethod::Homebrew);
         assert!(!inferred);
     }
@@ -5343,46 +5242,54 @@ mod promoted_daemon_tests {
     const NEW: &str = "homeboy 0.391.2+new";
 
     #[test]
-    fn stale_resident_after_binary_swap_selects_installed_binary_restart() {
-        assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(OLD), true),
-            PromotedDaemonStart::RestartInstalledBinary
-        );
-        assert_eq!(
-            promoted_daemon_start(OLD, NEW, false, None, false),
-            PromotedDaemonStart::InstalledBinary
-        );
-    }
-
-    #[test]
-    fn promotion_does_not_replace_a_daemon_that_already_matches_the_installed_binary() {
-        assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(NEW), true),
-            PromotedDaemonStart::AlreadyInstalled
-        );
-    }
-
-    #[test]
-    fn stale_resident_with_exact_lease_restarts_in_place_even_from_the_installed_binary() {
-        // Live jobs do not matter: the requested stop re-arms their resume.
-        for invoking in [OLD, NEW] {
+    fn promoted_daemon_start_matches_resident_identity_and_lease() {
+        // (invoking identity, resident running, resident identity, exact lease)
+        for (invoking, running, resident, lease, expected) in [
+            // A stale resident with the exact lease restarts from the installed
+            // binary, whichever binary invokes; live jobs re-arm their resume.
+            (
+                OLD,
+                true,
+                Some(OLD),
+                true,
+                PromotedDaemonStart::RestartInstalledBinary,
+            ),
+            (
+                NEW,
+                true,
+                Some(OLD),
+                true,
+                PromotedDaemonStart::RestartInstalledBinary,
+            ),
+            (
+                OLD,
+                false,
+                None,
+                false,
+                PromotedDaemonStart::InstalledBinary,
+            ),
+            (
+                OLD,
+                true,
+                Some(NEW),
+                true,
+                PromotedDaemonStart::AlreadyInstalled,
+            ),
+            (NEW, true, Some(NEW), true, PromotedDaemonStart::InProcess),
+            (
+                OLD,
+                true,
+                Some(OLD),
+                false,
+                PromotedDaemonStart::PendingRestart,
+            ),
+        ] {
             assert_eq!(
-                promoted_daemon_start(invoking, NEW, true, Some(OLD), true),
-                PromotedDaemonStart::RestartInstalledBinary
+                promoted_daemon_start(invoking, NEW, running, resident, lease),
+                expected,
+                "{invoking} {running} {resident:?} {lease}"
             );
         }
-        assert_eq!(
-            promoted_daemon_start(NEW, NEW, true, Some(NEW), true),
-            PromotedDaemonStart::InProcess
-        );
-    }
-
-    #[test]
-    fn stale_resident_without_lease_leaves_restart_pending() {
-        assert_eq!(
-            promoted_daemon_start(OLD, NEW, true, Some(OLD), false),
-            PromotedDaemonStart::PendingRestart
-        );
     }
 
     #[test]

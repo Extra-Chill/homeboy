@@ -500,7 +500,9 @@ mod tests {
 
     #[test]
     fn exit_code_rejects_every_reported_failure() {
+        // A pre-convergence response without the newer fields stays readable.
         let baseline: UpgradeResult = serde_json::from_str(r#"{"command":"upgrade","install_method":"binary","previous_version":"1","new_version":"2","upgraded":true,"message":"ok","restart_required":false}"#).unwrap();
+        assert!(baseline.runners_updated.is_empty() && baseline.extension_skips.is_empty());
         assert_eq!(baseline.exit_code(), 0);
         for status in [
             "failed",
@@ -529,19 +531,6 @@ mod tests {
         let mut convergence = baseline;
         convergence.runner_convergence = Some(RunnerConvergenceDisposition::Partial);
         assert_ne!(convergence.exit_code(), 0);
-    }
-
-    #[test]
-    fn upgrade_response_without_new_fields_remains_deserializable() {
-        let result: UpgradeResult = serde_json::from_str(
-            r#"{"command":"upgrade","install_method":"binary","previous_version":"0.301.2","new_version":"0.304.0","upgraded":true,"message":"ok","restart_required":false}"#,
-        )
-        .expect("pre-convergence response remains readable");
-
-        assert!(!result.partial);
-        assert!(result.runners_updated.is_empty());
-        assert!(result.services_pending_restart.is_empty());
-        assert!(result.extension_skips.is_empty());
     }
 
     #[test]

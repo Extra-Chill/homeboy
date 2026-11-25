@@ -778,35 +778,14 @@ mod tests {
         }
     }
 
-    /// The staleness surface reads this cache on every command, so the read must
-    /// be a pure file read that round-trips what the daily check wrote.
+    /// Without a cache file, or with one a failed network check wrote (an
+    /// empty version), there is no release to compare against.
     #[test]
-    fn cached_latest_release_round_trips_the_daily_cache() {
-        with_isolated_home(|_home| {
-            let checked_at = homeboy_engine_primitives::now_secs();
-            seed_cache("0.329.1", true, checked_at);
-
-            let cached = cached_latest_release().expect("cache is readable");
-            assert_eq!(cached.latest_version, "0.329.1");
-            assert_eq!(cached.checked_at, checked_at);
-        });
-    }
-
-    #[test]
-    fn cached_latest_release_is_absent_without_a_cache_file() {
+    fn cached_latest_release_is_absent_without_a_usable_cache() {
         with_isolated_home(|_home| {
             assert!(cached_latest_release().is_none());
-        });
-    }
 
-    /// A cache written by a failed network check carries an empty version. That
-    /// is not a release to compare against, so it must read as absent rather
-    /// than as an empty "latest".
-    #[test]
-    fn cached_latest_release_rejects_an_empty_version() {
-        with_isolated_home(|_home| {
             seed_cache("   ", false, homeboy_engine_primitives::now_secs());
-
             assert!(cached_latest_release().is_none());
         });
     }
@@ -816,7 +795,7 @@ mod tests {
     /// rather than discarded — which would report "unknown" on every command
     /// once the host loses network.
     #[test]
-    fn cached_latest_release_returns_a_stale_cache_with_its_timestamp() {
+    fn cached_latest_release_round_trips_a_stale_cache_with_its_timestamp() {
         with_isolated_home(|_home| {
             let old = homeboy_engine_primitives::now_secs() - (CHECK_INTERVAL_SECS * 3);
             seed_cache("0.329.1", true, old);
@@ -866,34 +845,19 @@ mod tests {
     }
 
     #[test]
-    fn disabled_by_env_reports_disabled() {
-        with_isolated_home(|_home| {
-            std::env::remove_var(ENV_VAR_DISABLE);
-            assert!(!is_disabled());
-
-            std::env::set_var(ENV_VAR_DISABLE, "1");
-            assert!(is_disabled());
-        });
-    }
-
-    #[test]
-    fn test_env_var_disable() {
+    fn update_check_is_disabled_by_truthy_env_values() {
         // Serialized against the other env-mutating tests in this module by the
         // hermetic home guard, which also restores `HOMEBOY_NO_UPDATE_CHECK`.
         with_isolated_home(|_home| {
             std::env::remove_var(ENV_VAR_DISABLE);
-            assert!(!is_disabled_by_env());
+            assert!(!is_disabled());
 
+            for (value, disabled) in [("1", true), ("True", true), ("0", false)] {
+                std::env::set_var(ENV_VAR_DISABLE, value);
+                assert_eq!(is_disabled_by_env(), disabled, "{value}");
+            }
             std::env::set_var(ENV_VAR_DISABLE, "1");
-            assert!(is_disabled_by_env());
-
-            std::env::set_var(ENV_VAR_DISABLE, "True");
-            assert!(is_disabled_by_env());
-
-            std::env::set_var(ENV_VAR_DISABLE, "0");
-            assert!(!is_disabled_by_env());
-
-            std::env::remove_var(ENV_VAR_DISABLE);
+            assert!(is_disabled());
         });
     }
 
