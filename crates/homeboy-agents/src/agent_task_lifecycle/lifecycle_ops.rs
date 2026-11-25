@@ -1471,10 +1471,25 @@ pub fn normalize_missing_execution_placement_decision_in_store(
             None,
         )
     })?;
-    if persisted.decision_id == decision.decision_id || !persisted.is_submission_stamp() {
+    if persisted.decision_id == decision.decision_id {
         return Ok(false);
     }
-    let reason = "durable run carried a submission-derived placement decision";
+    // A Cook attempt inherits its mission's routed decision at
+    // materialization. The route that actually dispatches the attempt owns the
+    // authoritative decision for this execution, so it supersedes the inherited
+    // one — but never by loosening a Lab requirement onto the controller.
+    let inherited = record.metadata["execution_placement_inherited"]["decision_id"]
+        .as_str()
+        .is_some_and(|id| id == persisted.decision_id);
+    let reason = if persisted.is_submission_stamp() {
+        "durable run carried a submission-derived placement decision"
+    } else if inherited
+        && (persisted.permits_local_execution() || !decision.permits_local_execution())
+    {
+        "durable run carried a placement decision inherited from its Cook mission"
+    } else {
+        return Ok(false);
+    };
     record.metadata["execution_placement_decision"] =
         serde_json::to_value(decision).map_err(|error| {
             Error::internal_json(
@@ -1486,6 +1501,70 @@ pub fn normalize_missing_execution_placement_decision_in_store(
         "at": now_timestamp(),
         "reason": reason,
         "adopted_decision_id": decision.decision_id,
+    });
+    lifecycle_store.commit_record(&mut record)?;
+    Ok(true)
+}
+
+/// Bind a Cook attempt to its mission's persisted routing decision.
+///
+/// Attempt plans are submitted without a routing decision, so submission stamps
+/// them as controller-local (`requested: automatic, selected: controller`).
+/// For a Lab-dispatched Cook that stamp is wrong: status, diagnose, retry and
+/// local-continuation guards would all read the attempt as controller-owned and
+/// offer (or perform) a controller fallback the mission forbade. Replace only a
+/// submission stamp, and only before any placement outcome was verified.
+pub fn inherit_cook_execution_placement_decision_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    decision: &homeboy_lab_contract::ExecutionPlacementDecision,
+) -> Result<bool> {
+    if !decision.is_valid() {
+        return Ok(false);
+    }
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
+    let persisted = record
+        .metadata
+        .get("execution_placement_decision")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+                value.clone(),
+            )
+        });
+    match persisted {
+        None => {}
+        Some(Ok(persisted)) if persisted.is_submission_stamp() => {
+            // An operator's explicit local override is only honored when the
+            // mission itself does not require the Lab.
+            if persisted.decision_id == decision.decision_id
+                || (persisted.override_authorization.authorized
+                    && decision.required
+                        != homeboy_lab_contract::ExecutionPlacementRequirement::Lab)
+            {
+                return Ok(false);
+            }
+        }
+        Some(_) => return Ok(false),
+    }
+    if record
+        .metadata
+        .get("execution_placement_outcome")
+        .is_some_and(|outcome| !outcome.is_null())
+    {
+        return Ok(false);
+    }
+    record.metadata["execution_placement_decision"] =
+        serde_json::to_value(decision).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize inherited placement decision".to_string()),
+            )
+        })?;
+    record.metadata["execution_placement_inherited"] = json!({
+        "at": now_timestamp(),
+        "source": "cook_recipe_attempt_dispatch",
+        "decision_id": decision.decision_id,
     });
     lifecycle_store.commit_record(&mut record)?;
     Ok(true)
