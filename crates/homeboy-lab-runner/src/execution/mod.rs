@@ -134,6 +134,7 @@ pub(crate) use process::{
 pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use secrets::runner_exec_secret_env_plan;
 
+mod queue_wait;
 mod request;
 pub use request::{exec_request, RunnerExecRequest};
 

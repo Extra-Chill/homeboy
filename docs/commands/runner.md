@@ -8,6 +8,14 @@ One host daemon per machine, shared by every controller and runner id.
 homeboy runner <COMMAND>
 ```
 
+### Exec admission feedback
+
+Foreground `runner exec` reports queued admission changes on stderr, with a heartbeat every 10 seconds while it can observe the daemon. Reports include the admission reason, queue position, load/CPU and pressure budget when available. `--raw` leaves these diagnostics on stderr, not command stdout.
+
+Use `runner exec --no-wait <runner> -- <command>` to refuse a queue wait, or `--max-queue-wait 45s` to bound it separately from command execution time. A refusal returns resource exit code 20 with the admission reason and blocker; if already submitted, cancellation is requested and its response is retained in the error. The default remains an unbounded admission wait. Workspace preparation and transport operations retain their own timeouts.
+
+Pressure JSON retains the existing numeric fields and adds `units`: PSI fields are hundredths of percent, and `observed_load_per_cpu` is five-minute load per logical CPU in ten-thousandths (10000 = 1.0), not milli-load. Status reapplies the configured exec pressure thresholds to its observation.
+
 `runner` manages durable execution backends. SSH runners are a capability on a `homeboy server` record, so the common Lab flow uses one ID for the machine and its runner. Local runners remain standalone because they describe this machine rather than an SSH server. Both storage shapes share the same runner capability contract: workspace root, settings, environment, secret references, resources, and policy.
 
 Each controller allows one runner per machine; a second registration is refused at connect with `runner.machine_already_registered`.

@@ -16,6 +16,7 @@ use super::super::CmdResult;
 #[derive(Debug, Clone)]
 pub(super) struct RunnerExecInput {
     pub runner_id: String,
+    pub max_queue_wait: Option<Duration>,
     pub command: Vec<String>,
     pub cwd: Option<String>,
     pub sync_workspace: Option<String>,
@@ -45,6 +46,7 @@ impl RunnerExecInput {
     pub(super) fn new(runner_id: impl Into<String>, command: Vec<String>) -> Self {
         Self {
             runner_id: runner_id.into(),
+            max_queue_wait: None,
             command,
             cwd: None,
             sync_workspace: None,
@@ -75,6 +77,7 @@ impl RunnerExecInput {
 pub(super) fn execute(input: RunnerExecInput) -> CmdResult<RunnerExecOutput> {
     let RunnerExecInput {
         runner_id,
+        max_queue_wait,
         command,
         cwd,
         sync_workspace,
@@ -172,6 +175,7 @@ pub(super) fn execute(input: RunnerExecInput) -> CmdResult<RunnerExecOutput> {
         read_only_artifact_access: read_only_artifact,
     };
     let mut request = runner::RunnerExecRequest::new(runner_id, options);
+    request.max_queue_wait = max_queue_wait;
     request.sync_workspace = sync_workspace;
     request.workspace_ref = workspace_ref;
     request.hydrate_deps = hydrate_deps;
