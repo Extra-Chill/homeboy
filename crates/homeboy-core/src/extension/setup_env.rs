@@ -181,15 +181,9 @@ mod tests {
     }
 
     #[test]
-    fn load_returns_empty_when_nothing_persisted() {
+    fn load_is_empty_until_persisted_and_after_clearing() {
         with_isolated_home(|_| {
-            assert!(load("never-persisted").is_empty());
-        });
-    }
-
-    #[test]
-    fn persist_empty_clears_previous_document() {
-        with_isolated_home(|_| {
+            assert!(load("sample-runtime").is_empty());
             persist(
                 "sample-runtime",
                 &[("KEY".to_string(), "value".to_string())],
@@ -204,9 +198,7 @@ mod tests {
 
     #[test]
     fn sanitizes_extension_id_for_filesystem_safety() {
-        // The sanitizer maps every filesystem-unsafe character (here `/`) to
-        // `_`; `sample/runtime` therefore becomes `sample_runtime`. (#6705's mechanical
-        // term rename left a stale expected literal here.)
+        // Filesystem-unsafe characters (here `/`) map to `_`.
         assert_eq!(sanitize_extension_id("sample/runtime"), "sample_runtime");
         assert_eq!(sanitize_extension_id("sample-runtime"), "sample-runtime");
     }

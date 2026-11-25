@@ -548,12 +548,18 @@ mod tests {
     }
 
     #[test]
-    fn test_run_self_checks_runs_commands_in_order() {
+    fn test_run_self_checks_runs_commands_in_order_and_captures_output() {
         let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(dir.path().join("one.sh"), "printf one >> order.txt\n")
-            .expect("first script should be written");
-        std::fs::write(dir.path().join("two.sh"), "printf two >> order.txt\n")
-            .expect("second script should be written");
+        std::fs::write(
+            dir.path().join("one.sh"),
+            "printf one >> order.txt\nprintf self-check-stdout\n",
+        )
+        .expect("first script should be written");
+        std::fs::write(
+            dir.path().join("two.sh"),
+            "printf two >> order.txt\nprintf self-check-stderr >&2\n",
+        )
+        .expect("second script should be written");
 
         let mut component = Component::new(
             "fixture".to_string(),
@@ -563,54 +569,7 @@ mod tests {
         );
         component.scripts = Some(ComponentScriptsConfig {
             lint: vec!["sh one.sh".to_string(), "sh two.sh".to_string()],
-            test: Vec::new(),
-            build: Vec::new(),
-            bench: Vec::new(),
-            bench_compare: Vec::new(),
-            fuzz: Vec::new(),
-            trace: Vec::new(),
-            deps: Vec::new(),
-        });
-
-        let output = run_self_checks_with_passthrough(
-            &component,
-            ExtensionCapability::Lint,
-            dir.path(),
-            false,
-        )
-        .expect("self-checks should run");
-
-        assert!(output.success);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("order.txt")).unwrap(),
-            "onetwo"
-        );
-    }
-
-    #[test]
-    fn test_run_self_checks_with_passthrough() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        std::fs::write(
-            dir.path().join("lint.sh"),
-            "printf self-check-stdout\nprintf self-check-stderr >&2\n",
-        )
-        .expect("script should be written");
-
-        let mut component = Component::new(
-            "fixture".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "".to_string(),
-            None,
-        );
-        component.scripts = Some(ComponentScriptsConfig {
-            lint: vec!["sh lint.sh".to_string()],
-            test: Vec::new(),
-            build: Vec::new(),
-            bench: Vec::new(),
-            bench_compare: Vec::new(),
-            fuzz: Vec::new(),
-            trace: Vec::new(),
-            deps: Vec::new(),
+            ..Default::default()
         });
 
         let output = run_self_checks_with_passthrough(
@@ -622,80 +581,62 @@ mod tests {
         .expect("self-checks should run without terminal passthrough");
 
         assert!(output.success);
-        assert_eq!(output.stdout, "self-check-stdout");
-        assert_eq!(output.stderr, "self-check-stderr");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("order.txt")).unwrap(),
+            "onetwo"
+        );
+        assert!(output.stdout.contains("self-check-stdout"));
+        assert!(output.stderr.contains("self-check-stderr"));
     }
 
+    /// Both a component-declared and an ambient `CARGO_TARGET_DIR` are
+    /// overridden by the managed isolated target, and the child sees it.
     #[test]
-    fn self_check_child_reports_component_cargo_target_evidence() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let target = dir.path().join("component-target");
-        let mut component = Component::new(
-            "fixture".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "".to_string(),
-            None,
-        );
-        component.managed_execution.shared_cargo_target = true;
-        component.env.insert(
-            "CARGO_TARGET_DIR".to_string(),
-            target.to_string_lossy().to_string(),
-        );
-        component.scripts = Some(ComponentScriptsConfig {
-            lint: vec![
-                "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\""
-                    .to_string(),
-            ],
-            ..Default::default()
-        });
-
-        let output = run_self_checks_with_passthrough(
-            &component,
-            ExtensionCapability::Lint,
-            dir.path(),
-            false,
-        )
-        .expect("self-check should run");
-
-        let evidence = output.cargo_target.expect("managed target evidence");
-        assert_eq!(evidence.resolution, "isolated");
-        assert_ne!(evidence.path, target.to_string_lossy());
-        assert_eq!(output.stdout, format!("isolated:{}", evidence.path));
-    }
-
-    #[test]
-    fn self_check_child_reports_ambient_cargo_target_evidence() {
+    fn self_check_child_reports_isolated_cargo_target_evidence() {
         let _env_lock = homeboy_core::test_support::env_lock();
-        let dir = tempfile::tempdir().expect("temp dir");
-        let target = dir.path().join("ambient-target");
-        let _restore = EnvRestore::set("CARGO_TARGET_DIR", &target.to_string_lossy());
-        let mut component = Component::new(
-            "fixture".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            "".to_string(),
-            None,
-        );
-        component.managed_execution.shared_cargo_target = true;
-        component.scripts = Some(ComponentScriptsConfig {
-            lint: vec![
-                "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\""
-                    .to_string(),
-            ],
-            ..Default::default()
-        });
+        for ambient in [false, true] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let target = dir.path().join("declared-target");
+            let mut component = Component::new(
+                "fixture".to_string(),
+                dir.path().to_string_lossy().to_string(),
+                "".to_string(),
+                None,
+            );
+            let _restore = if ambient {
+                Some(EnvRestore::set(
+                    "CARGO_TARGET_DIR",
+                    &target.to_string_lossy(),
+                ))
+            } else {
+                component.env.insert(
+                    "CARGO_TARGET_DIR".to_string(),
+                    target.to_string_lossy().to_string(),
+                );
+                None
+            };
+            component.managed_execution.shared_cargo_target = true;
+            component.scripts = Some(ComponentScriptsConfig {
+                lint: vec![
+                    "printf '%s:%s' \"$HOMEBOY_CARGO_TARGET_RESOLUTION\" \"$CARGO_TARGET_DIR\""
+                        .to_string(),
+                ],
+                ..Default::default()
+            });
 
-        let output = run_self_checks_with_passthrough(
-            &component,
-            ExtensionCapability::Lint,
-            dir.path(),
-            false,
-        )
-        .expect("self-check should run");
+            let output = run_self_checks_with_passthrough(
+                &component,
+                ExtensionCapability::Lint,
+                dir.path(),
+                false,
+            )
+            .expect("self-check should run");
 
-        let evidence = output.cargo_target.expect("managed target evidence");
-        assert_eq!(evidence.resolution, "isolated");
-        assert_ne!(evidence.path, target.to_string_lossy());
-        assert_eq!(output.stdout, format!("isolated:{}", evidence.path));
+            let evidence = output.cargo_target.expect("managed target evidence");
+            assert_eq!(evidence.resolution, "isolated", "ambient={ambient}");
+            assert_ne!(evidence.path, target.to_string_lossy(), "ambient={ambient}");
+            assert_eq!(output.stdout, format!("isolated:{}", evidence.path));
+        }
     }
 
     #[test]
@@ -750,13 +691,7 @@ mod tests {
         );
         component.scripts = Some(ComponentScriptsConfig {
             lint: vec!["sh large.sh".to_string()],
-            test: Vec::new(),
-            build: Vec::new(),
-            bench: Vec::new(),
-            bench_compare: Vec::new(),
-            fuzz: Vec::new(),
-            trace: Vec::new(),
-            deps: Vec::new(),
+            ..Default::default()
         });
 
         let output = run_self_checks_with_passthrough(
