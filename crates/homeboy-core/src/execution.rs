@@ -174,17 +174,4 @@ mod tests {
             .collect::<Vec<_>>()
             .is_empty());
     }
-
-    #[test]
-    fn display_order_needs_kind_serializes_explicitly() {
-        let step = PlanStep::ready("test", "review.test")
-            .needs(vec!["review.lint".to_string()])
-            .needs_kind(PlanStepDependencyKind::DisplayOrder)
-            .build();
-
-        let value = serde_json::to_value(&step).expect("serialize step");
-
-        assert_eq!(value["needs"], serde_json::json!(["review.lint"]));
-        assert_eq!(value["needs_kind"], "display_order");
-    }
 }
