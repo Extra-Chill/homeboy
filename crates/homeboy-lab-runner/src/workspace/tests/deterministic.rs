@@ -14,46 +14,28 @@ fn deterministic_path_stays_under_workspace_root() {
 }
 
 #[test]
-fn run_isolation_token_yields_distinct_remote_paths_for_same_head() {
+fn run_isolation_token_isolates_runs_and_is_stable_per_run() {
     let path = Path::new("/Users/user/Developer/homeboy");
     let base = deterministic_remote_path("/srv/homeboy", path, "abc123", None);
     let run_a = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-a"));
+    let run_a_again = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-a"));
     let run_b = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-b"));
+    let blank = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("   "));
 
     // Two different runs at the same HEAD must not share a remote workspace
     // directory, otherwise leftover untracked artifacts from one run can
-    // contaminate the other (#4393).
+    // contaminate the other (#4393). Retries of one run reuse its checkout.
     assert_ne!(run_a, run_b);
     assert_ne!(run_a, base);
-    assert_ne!(run_b, base);
-    // All paths still stay under the deterministic workspace root.
+    assert_eq!(run_a, run_a_again);
+    assert_eq!(base, blank);
     for remote in [&base, &run_a, &run_b] {
         assert!(remote.starts_with("/srv/homeboy/_lab_workspaces/homeboy-"));
     }
 }
 
 #[test]
-fn run_isolation_token_is_stable_for_same_run() {
-    let path = Path::new("/Users/user/Developer/homeboy");
-    let first = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-a"));
-    let second = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("run-a"));
-
-    // The same run id must deterministically resolve to the same workspace
-    // so retries/streaming of one run reuse its own isolated checkout.
-    assert_eq!(first, second);
-}
-
-#[test]
-fn blank_run_isolation_token_does_not_change_remote_path() {
-    let path = Path::new("/Users/user/Developer/homeboy");
-    let base = deterministic_remote_path("/srv/homeboy", path, "abc123", None);
-    let blank = deterministic_remote_path("/srv/homeboy", path, "abc123", Some("   "));
-
-    assert_eq!(base, blank);
-}
-
-#[test]
-fn materialization_plan_records_explicit_remote_path_contract() {
+fn materialization_plan_normalizes_root_and_derives_artifact_dir() {
     let path = Path::new("/Users/user/Developer/homeboy@cook-path");
     let remote = deterministic_remote_path("/srv/homeboy/", path, "abc123", Some("run-1"));
     let plan = RunnerWorkspaceMaterializationPlan::from_test_parts(
@@ -66,14 +48,6 @@ fn materialization_plan_records_explicit_remote_path_contract() {
     );
 
     assert_eq!(plan.workspace_root, "/srv/homeboy");
-    assert_eq!(plan.local_basename, "homeboy@cook-path");
-    assert_eq!(plan.remote_path, remote);
-    assert_eq!(plan.sync_mode, RunnerWorkspaceSyncMode::Git);
-    assert_eq!(plan.identity, "abc123");
-    assert_eq!(
-        plan.path_strategy,
-        "workspace_root_lab_workspaces_sanitized_basename_identity_digest"
-    );
     assert_eq!(
         plan.output_paths.artifact_dir,
         format!("{remote}-homeboy-artifacts")

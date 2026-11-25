@@ -347,45 +347,26 @@ mod tests {
     }
 
     #[test]
-    fn pull_plan_rejects_path_outside_workspace_root() {
-        let err = plan_workspace_pull(
-            &runner(),
-            &RunnerWorkspacePullOptions {
-                remote_path: "/etc".to_string(),
-                includes: vec!["*.conf".to_string()],
-                to: ".".to_string(),
-                dry_run: true,
-            },
-        )
-        .expect_err("outside root should fail");
-
-        assert!(err.to_string().contains("allowed runner workspace root"));
-    }
-
-    #[test]
-    fn pull_plan_rejects_parent_components() {
-        let err = plan_workspace_pull(
-            &runner(),
-            &RunnerWorkspacePullOptions {
-                remote_path: "/srv/homeboy/../secret".to_string(),
-                includes: vec!["*.fig".to_string()],
-                to: ".".to_string(),
-                dry_run: true,
-            },
-        )
-        .expect_err("parent remote path should fail");
-        assert!(err.to_string().contains("parent directory"));
-
-        let err = plan_workspace_pull(
-            &runner(),
-            &RunnerWorkspacePullOptions {
-                remote_path: "/srv/homeboy/work".to_string(),
-                includes: vec!["../*.fig".to_string()],
-                to: ".".to_string(),
-                dry_run: true,
-            },
-        )
-        .expect_err("parent include should fail");
-        assert!(err.to_string().contains("relative path"));
+    fn pull_plan_rejects_paths_escaping_the_workspace_root() {
+        for (remote_path, include, expected) in [
+            ("/etc", "*.conf", "allowed runner workspace root"),
+            ("/srv/homeboy/../secret", "*.fig", "parent directory"),
+            ("/srv/homeboy/work", "../*.fig", "relative path"),
+        ] {
+            let err = plan_workspace_pull(
+                &runner(),
+                &RunnerWorkspacePullOptions {
+                    remote_path: remote_path.to_string(),
+                    includes: vec![include.to_string()],
+                    to: ".".to_string(),
+                    dry_run: true,
+                },
+            )
+            .expect_err("escaping pull path should fail");
+            assert!(
+                err.to_string().contains(expected),
+                "{remote_path} {include}: {err}"
+            );
+        }
     }
 }
