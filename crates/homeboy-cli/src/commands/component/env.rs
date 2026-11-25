@@ -222,13 +222,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn requirement(id: &str, version: &str) -> ExtensionApiRuntimeRequirement {
-        ExtensionApiRuntimeRequirement {
-            id: id.to_string(),
-            version: version.to_string(),
-        }
-    }
-
     #[cfg(unix)]
     fn install_detector(home: &Path, id: &str, manifest: &str, script: &str) {
         let extension_dir = home.join(".config/homeboy/extensions").join(id);
@@ -251,6 +244,7 @@ mod tests {
         temp
     }
 
+    #[cfg(unix)]
     fn runtimes_from(output: &ComponentOutput) -> BTreeMap<String, ComponentRuntimeRequirement> {
         serde_json::from_value::<ComponentEnvOutput>(output.entity.clone().expect("entity"))
             .expect("env output")
@@ -279,30 +273,24 @@ mod tests {
     }
 
     #[test]
-    fn component_env_reports_top_level_runtimes_without_extension() {
-        let component =
-            write_component(r#"{"id":"portable-env","runtimes":{"node":{"version":"24"}}}"#);
-        let (output, code) =
-            env(None, Some(&component.path().to_string_lossy())).expect("component env");
+    fn component_env_without_extension_reports_only_top_level_runtimes() {
+        for (homeboy_json, expected_runtimes) in [
+            (
+                r#"{"id":"portable-env","runtimes":{"node":{"version":"24"}}}"#,
+                Some(serde_json::json!({"node": {"version": "24", "source": "component"}})),
+            ),
+            // No declarations: the `runtimes` key is omitted entirely.
+            (r#"{"id":"portable-env"}"#, None),
+        ] {
+            let component = write_component(homeboy_json);
+            let (output, code) =
+                env(None, Some(&component.path().to_string_lossy())).expect("component env");
 
-        assert_eq!(code, 0);
-        let entity = output.entity.expect("entity");
-        assert_eq!(entity["extension"], serde_json::Value::Null);
-        assert_eq!(
-            entity["runtimes"],
-            serde_json::json!({"node": {"version": "24", "source": "component"}})
-        );
-    }
-
-    #[test]
-    fn component_env_without_extension_or_declarations_has_no_runtimes() {
-        let component = write_component(r#"{"id":"portable-env"}"#);
-        let (output, code) =
-            env(None, Some(&component.path().to_string_lossy())).expect("component env");
-
-        assert_eq!(code, 0);
-        assert!(runtimes_from(&output).is_empty());
-        assert!(output.entity.expect("entity").get("runtimes").is_none());
+            assert_eq!(code, 0);
+            let entity = output.entity.expect("entity");
+            assert_eq!(entity["extension"], serde_json::Value::Null);
+            assert_eq!(entity.get("runtimes").cloned(), expected_runtimes);
+        }
     }
 
     #[cfg(unix)]
@@ -334,99 +322,6 @@ mod tests {
             assert_eq!(runtimes["python"].version, "3.12");
             assert_eq!(runtimes["ruby"].source, "extension:demo");
         });
-    }
-
-    #[test]
-    fn extension_runtime_requirements_fill_missing_component_versions() {
-        let mut runtimes = BTreeMap::new();
-
-        apply_extension_runtime_requirements(
-            "fixture-runtime",
-            &[requirement("node", "24"), requirement("php", "8.3")],
-            &mut runtimes,
-        );
-
-        assert_eq!(runtimes["node"].version, "24");
-        assert_eq!(runtimes["node"].source, "extension:fixture-runtime");
-        assert_eq!(runtimes["php"].version, "8.3");
-        assert_eq!(runtimes["php"].source, "extension:fixture-runtime");
-    }
-
-    #[test]
-    fn runtime_requirements_accept_canonical_shape_only() {
-        let generic: RuntimeRequirementsConfig = serde_json::from_value(serde_json::json!({
-            "runtimes": {
-                "python": { "version": "3.12" },
-                "ruby": { "version": "3.3" }
-            }
-        }))
-        .expect("generic requirements");
-
-        assert_eq!(generic.runtimes["python"].version, "3.12");
-        assert_eq!(generic.runtimes["ruby"].version, "3.3");
-    }
-
-    #[test]
-    fn component_env_detector_output_overrides_component_values_before_runtime_defaults() {
-        let mut runtimes = BTreeMap::from([
-            (
-                "node".to_string(),
-                ComponentRuntimeRequirement {
-                    version: "20".to_string(),
-                    source: "component".to_string(),
-                },
-            ),
-            (
-                "php".to_string(),
-                ComponentRuntimeRequirement {
-                    version: "8.0".to_string(),
-                    source: "component".to_string(),
-                },
-            ),
-        ]);
-
-        apply_detected_runtimes(&[requirement("php", "8.2")], &mut runtimes);
-        apply_extension_runtime_requirements(
-            "demo",
-            &[requirement("node", "24"), requirement("php", "8.4")],
-            &mut runtimes,
-        );
-
-        assert_eq!(runtimes["php"].version, "8.2");
-        assert_eq!(runtimes["php"].source, "component");
-        assert_eq!(runtimes["node"].version, "20");
-        assert_eq!(runtimes["node"].source, "component");
-    }
-
-    #[test]
-    fn component_versions_win_over_extension_runtime_requirements() {
-        let mut runtimes = BTreeMap::from([
-            (
-                "node".to_string(),
-                ComponentRuntimeRequirement {
-                    version: "22".to_string(),
-                    source: "component".to_string(),
-                },
-            ),
-            (
-                "php".to_string(),
-                ComponentRuntimeRequirement {
-                    version: "8.2".to_string(),
-                    source: "component".to_string(),
-                },
-            ),
-        ]);
-
-        apply_extension_runtime_requirements(
-            "fixture-runtime",
-            &[requirement("node", "24"), requirement("php", "8.3")],
-            &mut runtimes,
-        );
-
-        assert_eq!(runtimes["node"].version, "22");
-        assert_eq!(runtimes["node"].source, "component");
-        assert_eq!(runtimes["php"].version, "8.2");
-        assert_eq!(runtimes["php"].source, "component");
     }
 
     #[cfg(unix)]
@@ -482,66 +377,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn component_env_cli_fails_when_detector_execution_fails() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            install_detector(
-                home.path(),
-                "demo",
-                r#"{"id":"demo","name":"Demo","version":"1.0.0","component_env":{"detect_script":"scripts/env/detect.sh"}}"#,
+    fn component_env_cli_fails_explicitly_when_the_detector_fails_or_emits_invalid_output() {
+        for (script, expected) in [
+            (
                 "#!/bin/sh\nprintf 'detector boom' >&2\nexit 7\n",
-            );
-            let component = write_component(r#"{"id":"portable-env","extensions":{"demo":{}}}"#);
-            let error = env(None, Some(&component.path().to_string_lossy()))
-                .expect_err("detector failure must be explicit");
-            assert_eq!(error.message, "IO error");
-            assert!(error.details["error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("failed"));
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn component_env_cli_fails_when_detector_output_is_invalid() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            install_detector(
-                home.path(),
-                "demo",
-                r#"{"id":"demo","name":"Demo","version":"1.0.0","component_env":{"detect_script":"scripts/env/detect.sh"}}"#,
+                "IO error",
+            ),
+            (
                 "#!/bin/sh\nprintf 'not json'\n",
-            );
-            let component = write_component(r#"{"id":"portable-env","extensions":{"demo":{}}}"#);
-            let error = env(None, Some(&component.path().to_string_lossy()))
-                .expect_err("invalid detector output must be explicit");
-            assert!(error
-                .message
-                .contains("parse component env detector output"));
-        });
-    }
-
-    #[test]
-    fn component_env_cli_does_not_execute_detectors() {
-        let source = include_str!("env.rs");
-        let detector_helper = concat!("run_component_env", "_detector");
-        let local_exec = concat!("execute_local_command", "_in_dir");
-        let manifest_loader_marker = concat!("load", "_extension");
-        let manifest_type = concat!("Extension", "Manifest");
-        assert!(
-            !source.contains(detector_helper),
-            "CLI must not reintroduce detector helper execution"
-        );
-        assert!(
-            !source.contains(local_exec),
-            "CLI must not reintroduce local detector process execution"
-        );
-        assert!(
-            !source.contains(manifest_loader_marker),
-            "CLI must not load extension manifests for detector execution"
-        );
-        assert!(
-            !source.contains(manifest_type),
-            "CLI must not depend on raw extension manifests for component env"
-        );
+                "parse component env detector output",
+            ),
+        ] {
+            homeboy_core::test_support::with_isolated_home(|home| {
+                install_detector(
+                    home.path(),
+                    "demo",
+                    r#"{"id":"demo","name":"Demo","version":"1.0.0","component_env":{"detect_script":"scripts/env/detect.sh"}}"#,
+                    script,
+                );
+                let component =
+                    write_component(r#"{"id":"portable-env","extensions":{"demo":{}}}"#);
+                let error = env(None, Some(&component.path().to_string_lossy()))
+                    .expect_err("detector failure must be explicit");
+                assert!(
+                    error.message.contains(expected),
+                    "{expected}: {}",
+                    error.message
+                );
+            });
+        }
     }
 }

@@ -5934,7 +5934,7 @@ mod tests {
     }
 
     #[test]
-    fn a_config_root_nested_in_the_data_root_is_never_listed_twice() {
+    fn a_config_root_sharing_a_subtree_with_the_data_root_is_never_listed_twice() {
         // `HOMEBOY_DATA_DIR` can legally be pointed at the config root. Sharing
         // a filesystem is not double-counting; sharing a subtree is.
         let root = TempDir::new().expect("shared root");
@@ -5959,14 +5959,12 @@ mod tests {
         );
         assert_eq!(inventory.config_root.path, inventory.root.path);
         assert!(inventory.config_root.exists);
-    }
 
-    #[test]
-    fn a_config_root_containing_the_data_root_is_not_double_counted() {
+        // The reverse nesting: a config root that contains the data root would
+        // count the data root twice.
         let config = TempDir::new().expect("config root");
         let data = config.path().join("data");
         std::fs::create_dir_all(&data).expect("nested data root");
-
         let inventory = retained_storage_filesystem_inventory_for(
             data.clone(),
             config.path().to_path_buf(),
@@ -5974,14 +5972,10 @@ mod tests {
             data.join("cargo-targets"),
         )
         .expect("filesystem inventory");
-
-        assert!(
-            !inventory
-                .top_level
-                .iter()
-                .any(|entry| entry.category == "config_root"),
-            "a config root that contains the data root would count the data root twice"
-        );
+        assert!(!inventory
+            .top_level
+            .iter()
+            .any(|entry| entry.category == "config_root"));
     }
 
     #[cfg(unix)]
@@ -6049,11 +6043,14 @@ mod tests {
 
         // The report used to accumulate from five sources and never reach the
         // artifact root, so an operator saw bytes it could not name a command
-        // for (#10316).
+        // for (#10316). Controller scratch and Cargo targets keep their owning
+        // commands too, so retained-storage never claims a store it does not own.
         for category in [
             "persisted-run-artifacts",
             "runner-downloads",
             "orphaned-artifact-bytes",
+            "controller-scratch",
+            "shared-cargo-targets",
         ] {
             assert!(
                 report
@@ -6098,160 +6095,57 @@ mod tests {
         assert_eq!(decided.len(), CleanupCategoryArg::value_variants().len());
     }
 
-    /// The two categories #11131 names. They are remote, bounded, and were
-    /// missing by omission rather than by decision.
+    /// Unattended retention membership is a deliberate decision per category:
+    /// remote categories nobody inspects (#11131), test homes whose owners were
+    /// killed (#11073) and the release store (#14223) are swept; live runner
+    /// inputs, operator worktrees and the separately budgeted Cargo pass are not.
     #[test]
-    fn unattended_retention_reaches_the_remote_categories_nobody_inspects() {
-        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::RemoteLabWorkspaces));
-        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::RunnerBinaryCaches));
-    }
-
-    /// Both remote categories stay inside the pass's wall-clock budget:
-    /// workspace pruning is cursor-paginated with a bounded pass count and a
-    /// page limit, and both are age-floored by the shared runner floor.
-    #[test]
-    fn the_remote_retention_categories_are_bounded_before_they_are_automatic() {
-        let policy = cleanup::cleanup_policy_from_retention(
-            &defaults::RetentionConfig::default(),
-            CleanupPolicyOverrides::default(),
-        )
-        .expect("resolve policy");
-
-        assert_eq!(
-            CleanupPolicy::runner_workspace_passes(true),
-            cleanup::RUNNER_WORKSPACE_APPLY_PASSES
-        );
-        assert!(policy.runner_workspace_page_limit > 0);
-        assert!(policy.runner_min_age_hours > 0);
-    }
-
-    /// The category exists because nothing else reclaims these bytes: the
-    /// process that owned them was killed, so its `Drop` never ran and no
-    /// operator ever looks in `$TMPDIR`. Leaving it opt-in would reproduce the
-    /// silence #11073 reported.
-    #[test]
-    fn unattended_retention_reaches_the_test_homes_no_process_survived_to_clean_up() {
-        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::LeakedTestHomes));
-        assert!(!OPT_IN_ONLY_CATEGORIES.contains(&CleanupCategoryArg::LeakedTestHomes));
-        assert_eq!(
-            cleanup_category_arg_name(&CleanupCategoryArg::LeakedTestHomes),
-            "leaked-test-homes"
-        );
-        assert!(
-            CleanupCategorySelection::new(Vec::new(), Vec::new())
-                .includes(CleanupCategoryArg::LeakedTestHomes),
-            "a bare sweep must reach the category"
-        );
-        assert!(
-            !CleanupCategorySelection::new(Vec::new(), vec![CleanupCategoryArg::LeakedTestHomes])
-                .includes(CleanupCategoryArg::LeakedTestHomes),
-            "an operator must still be able to exclude it"
-        );
-    }
-
-    /// Bounded before it is automatic, exactly like the remote categories: an
-    /// age floor, a finite byte ceiling, and the shared scan limit.
-    #[test]
-    fn the_leaked_test_home_category_is_bounded_before_it_is_automatic() {
-        let policy = cleanup::cleanup_policy_from_retention(
-            &defaults::RetentionConfig::default(),
-            CleanupPolicyOverrides::default(),
-        )
-        .expect("resolve policy");
-
-        assert!(policy.leaked_test_home_min_age() > Duration::ZERO);
-        assert!(policy.leaked_test_home_max_total_bytes < u64::MAX);
-        assert!(policy.scan_limit() > 0);
-    }
-
-    /// #14223: the durable release store had no bound of any kind and reached
-    /// 6.1 GB, 6.0 GB of it one repository's fourteen ~435 MB builds. Nothing
-    /// reclaimed it by hand, so leaving the category opt-in would let it refill
-    /// on the next release cadence exactly as before.
-    #[test]
-    fn unattended_retention_reaches_the_release_store_nothing_else_bounds() {
-        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::ReleaseArtifacts));
-        assert!(!OPT_IN_ONLY_CATEGORIES.contains(&CleanupCategoryArg::ReleaseArtifacts));
-        assert_eq!(
-            cleanup_category_arg_name(&CleanupCategoryArg::ReleaseArtifacts),
-            "release-artifacts"
-        );
-        assert!(
-            CleanupCategorySelection::new(Vec::new(), Vec::new())
-                .includes(CleanupCategoryArg::ReleaseArtifacts),
-            "a bare sweep must reach the category"
-        );
-        assert!(
-            !CleanupCategorySelection::new(Vec::new(), vec![CleanupCategoryArg::ReleaseArtifacts])
-                .includes(CleanupCategoryArg::ReleaseArtifacts),
-            "an operator must still be able to exclude it"
-        );
-    }
-
-    /// Bounded before it is automatic. Both budgets must be finite: a count
-    /// alone cannot bound a store whose per-release payload spans two orders of
-    /// magnitude across repositories.
-    #[test]
-    fn the_release_artifact_category_is_bounded_before_it_is_automatic() {
-        let policy = cleanup::cleanup_policy_from_retention(
-            &defaults::RetentionConfig::default(),
-            CleanupPolicyOverrides::default(),
-        )
-        .expect("resolve policy");
-
-        assert!(policy.release_artifact_max_count < usize::MAX);
-        assert!(policy.release_artifact_max_bytes < u64::MAX);
-        assert!(policy.release_artifact_min_age() > Duration::ZERO);
-        assert!(policy.scan_limit() > 0);
-    }
-
-    /// Inputs a running job may still need, and uncommitted operator work, are
-    /// never reclaimed without an operator asking.
-    #[test]
-    fn unattended_retention_never_reaches_live_inputs_or_operator_work() {
-        assert!(!AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::RunnerDownloads));
-        assert!(!AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::TaskWorktrees));
-    }
-
-    #[test]
-    fn automatic_retention_and_retained_storage_keep_their_store_ownership_boundary() {
-        // #10738 applies bounded lifecycle cleanup for controller runtimes, while
-        // #9824 only reports filesystem attribution and names the same owner.
-        // Cargo remains a separate budgeted automatic pass, so it must not enter
-        // the aggregate category sweep.
-        assert!(!AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::SharedCargoTargets));
-
-        let report =
-            build_retained_storage_report(Vec::new(), 1, None, test_sqlite(), test_filesystem());
-        for command in [
-            "homeboy cleanup --include controller-scratch",
-            "homeboy cleanup --include shared-cargo-targets",
+    fn unattended_retention_membership_is_deliberate() {
+        for (category, automatic) in [
+            (CleanupCategoryArg::RemoteLabWorkspaces, true),
+            (CleanupCategoryArg::RunnerBinaryCaches, true),
+            (CleanupCategoryArg::LeakedTestHomes, true),
+            (CleanupCategoryArg::ReleaseArtifacts, true),
+            (CleanupCategoryArg::RunnerDownloads, false),
+            (CleanupCategoryArg::TaskWorktrees, false),
+            (CleanupCategoryArg::SharedCargoTargets, false),
         ] {
-            assert!(
-                report
-                    .safe_next_commands
-                    .iter()
-                    .any(|entry| entry == command),
-                "retained-storage must preserve the owning command for {command}"
+            assert_eq!(
+                AUTOMATIC_RETENTION_CATEGORIES.contains(&category),
+                automatic,
+                "{category:?}"
             );
         }
     }
 
+    /// Every automatic category is bounded by the default policy before it is
+    /// allowed to run unattended, and the aggregate shares the specialists'
+    /// runner age floor and page limit.
     #[test]
-    fn aggregate_and_specialist_share_one_runner_age_floor() {
-        // The aggregate carried a literal `24` beside each specialist's
-        // `default_value_t = 24`. One named constant is now the only source.
-        assert_eq!(cleanup::RUNNER_MIN_AGE_HOURS, 24);
+    fn automatic_categories_are_bounded_by_the_default_policy() {
         let policy = cleanup::cleanup_policy_from_retention(
             &defaults::RetentionConfig::default(),
             CleanupPolicyOverrides::default(),
         )
         .expect("resolve policy");
+
         assert_eq!(policy.runner_min_age_hours, cleanup::RUNNER_MIN_AGE_HOURS);
+        assert!(policy.runner_min_age_hours > 0);
         assert_eq!(
             policy.runner_workspace_page_limit,
             cleanup::RUNNER_WORKSPACE_PAGE_LIMIT
         );
+        assert!(policy.runner_workspace_page_limit > 0);
+        assert_eq!(
+            CleanupPolicy::runner_workspace_passes(true),
+            cleanup::RUNNER_WORKSPACE_APPLY_PASSES
+        );
+        assert!(policy.leaked_test_home_min_age() > Duration::ZERO);
+        assert!(policy.leaked_test_home_max_total_bytes < u64::MAX);
+        assert!(policy.release_artifact_max_count < usize::MAX);
+        assert!(policy.release_artifact_max_bytes < u64::MAX);
+        assert!(policy.release_artifact_min_age() > Duration::ZERO);
+        assert!(policy.scan_limit() > 0);
     }
 
     #[test]
@@ -6290,6 +6184,19 @@ mod tests {
                 vec![CleanupCategoryArg::RunnerDownloads],
                 vec![CleanupCategoryArg::RunnerDownloads],
                 CleanupCategoryArg::RunnerDownloads,
+                false,
+            ),
+            // Automatic categories stay excludable by an operator.
+            (
+                vec![],
+                vec![CleanupCategoryArg::LeakedTestHomes],
+                CleanupCategoryArg::LeakedTestHomes,
+                false,
+            ),
+            (
+                vec![],
+                vec![CleanupCategoryArg::ReleaseArtifacts],
+                CleanupCategoryArg::ReleaseArtifacts,
                 false,
             ),
         ];
@@ -6596,35 +6503,23 @@ mod tests {
 
     /// #14956: a bounded pass that timed out inventorying categories with
     /// nothing to reclaim and nothing blocked on reconciliation is truthful
-    /// degraded coverage, not a synchronous failure.
+    /// degraded coverage, not a synchronous failure. Un-inventoried
+    /// reclaimable candidates, or records blocked on reconciliation (excluded
+    /// from `candidate_count`), are outstanding work a one-shot synchronous
+    /// caller cannot resume on its own, so they still fail.
     #[test]
-    fn synchronous_continuation_with_no_reclaim_work_pending_is_not_forced_into_failure() {
-        let mut result = synchronous_continuation_result(0, 0);
-        finalize_synchronous_cleanup_result(&mut result);
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.output["status"], "partial");
-    }
-
-    /// A bounded pass that left reclaimable candidates un-inventoried is
-    /// retention work a one-shot synchronous caller cannot resume on its own
-    /// — it still needs a non-zero exit and the aggregate's replay action.
-    #[test]
-    fn synchronous_continuation_with_reclaim_work_pending_still_fails() {
-        let mut result = synchronous_continuation_result(4, 0);
-        finalize_synchronous_cleanup_result(&mut result);
-        assert_eq!(result.exit_code, 1);
-        assert_eq!(result.output["status"], "partial_failure");
-    }
-
-    /// Records blocked on reconciliation are outstanding work even though
-    /// they are excluded from `candidate_count`; they must not be waved
-    /// through as "nothing to reclaim".
-    #[test]
-    fn synchronous_continuation_with_reconciliation_blockers_still_fails() {
-        let mut result = synchronous_continuation_result(0, 2);
-        finalize_synchronous_cleanup_result(&mut result);
-        assert_eq!(result.exit_code, 1);
-        assert_eq!(result.output["status"], "partial_failure");
+    fn synchronous_continuation_fails_only_when_reclaim_work_is_pending() {
+        for (candidates, blockers, exit_code, status) in [
+            (0, 0, 0, "partial"),
+            (4, 0, 1, "partial_failure"),
+            (0, 2, 1, "partial_failure"),
+        ] {
+            let mut result = synchronous_continuation_result(candidates, blockers);
+            finalize_synchronous_cleanup_result(&mut result);
+            let case = format!("candidates={candidates} blockers={blockers}");
+            assert_eq!(result.exit_code, exit_code, "{case}");
+            assert_eq!(result.output["status"], status, "{case}");
+        }
     }
 
     /// The budget check runs before dispatch, so no phase is ever started
@@ -6998,6 +6893,8 @@ mod tests {
             CleanupCategoryArg::RuntimeTmp,
             CleanupCategoryArg::ControllerScratch,
             CleanupCategoryArg::SharedCargoTargets,
+            CleanupCategoryArg::LeakedTestHomes,
+            CleanupCategoryArg::ReleaseArtifacts,
         ] {
             assert!(
                 bare.includes(category),
@@ -7043,17 +6940,6 @@ mod tests {
             CleanupJobDriver.public_request(&request).unwrap()["include_untagged"],
             serde_json::Value::Bool(true)
         );
-    }
-
-    #[test]
-    fn completed_cleanup_checkpoint_preserves_the_resumable_request_and_result() {
-        let checkpoint = serde_json::json!({
-            "request": { "apply": true, "include": ["runtime-tmp"] },
-            "completed": { "phase": "completed", "evidence": { "category_count": 1 } }
-        });
-
-        assert_eq!(checkpoint["request"]["apply"], true);
-        assert_eq!(checkpoint["completed"]["phase"], "completed");
     }
 
     #[test]
@@ -7252,22 +7138,6 @@ mod tests {
     }
 
     #[test]
-    fn repo_artifact_failure_message_names_the_first_failed_root() {
-        let diagnostics = vec![RepoArtifactRootDiagnostic {
-            scope: "configured_component",
-            path: Some("/srv/plugin".to_string()),
-            success: false,
-            output: None,
-            error: Some("not readable".to_string()),
-            skip_reason: None,
-        }];
-        assert_eq!(
-            repo_artifact_failure_message(1, &diagnostics),
-            "1 owned cleanup root(s) could not be inspected; first: /srv/plugin: not readable"
-        );
-    }
-
-    #[test]
     fn cleanup_inventory_static_metadata_preserves_specialist_commands() {
         let cases = [
             (
@@ -7392,48 +7262,6 @@ mod tests {
                     .to_string(),
             )
         );
-    }
-
-    #[test]
-    fn task_worktree_cleanup_next_actions_preserve_mode_specific_commands() {
-        let cases = [
-            (false, "homeboy worktree cleanup --cleanup-branches --apply"),
-            (true, "homeboy worktree cleanup --cleanup-branches --apply"),
-        ];
-
-        for (apply, command) in cases {
-            let category = CleanupInventoryCategory {
-                category: TASK_WORKTREES_METADATA.category.to_string(),
-                canonical_cleanup_command: TASK_WORKTREES_METADATA.canonical_cleanup_command(apply),
-                specialist_command: TASK_WORKTREES_METADATA
-                    .specialist_command(apply)
-                    .to_string(),
-                included: true,
-                skipped: false,
-                skip_reason: None,
-                failure: None,
-                outcome: "completed".to_string(),
-                inventory_completeness: "complete".to_string(),
-                timeout_ms: 0,
-                last_progress: None,
-                continuation_command: TASK_WORKTREES_METADATA
-                    .specialist_command(apply)
-                    .to_string(),
-                cleanup_run_ref: None,
-                candidate_count: 1,
-                applied_count: 0,
-                skipped_count: 0,
-                reconciliation_blocker_count: 0,
-                reconciliation_command: None,
-                unsatisfied_native_contract_count: 0,
-                estimated_bytes: 0,
-                reclaimed_bytes: 0,
-                output: Value::Null,
-            };
-
-            let actionable = cleanup_actionable(&[category], apply);
-            assert_eq!(actionable.next_actions[0].command, command);
-        }
     }
 
     #[test]
@@ -7576,82 +7404,71 @@ mod tests {
         ));
     }
 
+    /// The completion line follows the post-apply remaining count and scan
+    /// completeness, never the mode: a summary must not claim completion while
+    /// candidates remain, and a partial scan keeps its bounded continuation.
     #[test]
-    fn cleanup_artifacts_apply_summary_uses_post_apply_remaining_count() {
-        let payload = json!({
-            "command": "cleanup.artifacts",
-            "mode": "apply",
-            "root": "/tmp/homeboy",
-            "candidate_count": 4,
-            "skipped_count": 1,
-            "applied_count": 3,
-            "remaining_count": 0,
-            "estimated_bytes": 4096,
-            "reclaimed_bytes": 3072,
-            "skipped": [
-                { "reason": "worktree branch is not merged into its upstream" }
-            ]
-        });
+    fn cleanup_artifacts_summary_completion_follows_remaining_candidates() {
+        let cases = [
+            (
+                json!({
+                    "command": "cleanup.artifacts", "mode": "apply", "root": "/tmp/homeboy",
+                    "candidate_count": 4, "skipped_count": 1, "applied_count": 3,
+                    "remaining_count": 0, "estimated_bytes": 4096, "reclaimed_bytes": 3072,
+                    "skipped": [{ "reason": "worktree branch is not merged into its upstream" }]
+                }),
+                vec![
+                    "Mode: apply\n",
+                    "Remaining candidates: 0\n",
+                    "Reclaimed: 3.0 KiB\n",
+                    "Cleanup complete: no eligible candidates remain.\n",
+                ],
+                vec!["Next safe command:"],
+            ),
+            (
+                json!({
+                    "command": "cleanup.artifacts", "mode": "dry_run", "root": "/tmp/homeboy",
+                    "candidate_count": 18, "inspected_count": 18, "scan_complete": true,
+                    "skipped_count": 0, "applied_count": 0, "remaining_count": 18,
+                    "estimated_bytes": 1024, "reclaimed_bytes": 0, "skipped": []
+                }),
+                vec![
+                    "Inventory: complete (18 artifact paths inspected)\n",
+                    "Remaining candidates: 18\n",
+                    "Cleanup incomplete; eligible artifacts may remain.\n",
+                ],
+                vec!["Cleanup complete: no eligible candidates remain."],
+            ),
+            (
+                json!({
+                    "command": "cleanup.artifacts", "mode": "apply", "root": "/tmp/homeboy",
+                    "candidate_count": 2, "inspected_count": 2, "scan_complete": false,
+                    "skipped_count": 0, "applied_count": 2, "remaining_count": 1,
+                    "estimated_bytes": 4096, "reclaimed_bytes": 3072,
+                    "next_command": "homeboy cleanup artifacts --path /tmp/homeboy --limit 2 --apply",
+                    "skipped": []
+                }),
+                vec![
+                    "Remaining candidates: 1\n",
+                    "Inventory: partial (2 artifact paths inspected)\n",
+                    "Next safe command: homeboy cleanup artifacts --path /tmp/homeboy --limit 2 --apply\n",
+                ],
+                vec!["Cleanup complete: no eligible candidates remain."],
+            ),
+        ];
 
-        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
-
-        assert!(summary.contains("Mode: apply\n"));
-        assert!(summary.contains("Remaining candidates: 0\n"));
-        assert!(summary.contains("Reclaimed: 3.0 KiB\n"));
-        assert!(summary.contains("Cleanup complete: no eligible candidates remain.\n"));
-        assert!(!summary.contains("Next safe command:"));
-    }
-
-    #[test]
-    fn cleanup_artifacts_summary_does_not_claim_completion_with_remaining_candidates() {
-        let payload = json!({
-            "command": "cleanup.artifacts",
-            "mode": "dry_run",
-            "root": "/tmp/homeboy",
-            "candidate_count": 18,
-            "inspected_count": 18,
-            "scan_complete": true,
-            "skipped_count": 0,
-            "applied_count": 0,
-            "remaining_count": 18,
-            "estimated_bytes": 1024,
-            "reclaimed_bytes": 0,
-            "skipped": []
-        });
-
-        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
-
-        assert!(summary.contains("Inventory: complete (18 artifact paths inspected)\n"));
-        assert!(summary.contains("Remaining candidates: 18\n"));
-        assert!(summary.contains("Cleanup incomplete; eligible artifacts may remain.\n"));
-        assert!(!summary.contains("Cleanup complete: no eligible candidates remain."));
-    }
-
-    #[test]
-    fn cleanup_artifacts_summary_keeps_bounded_continuation() {
-        let payload = json!({
-            "command": "cleanup.artifacts",
-            "mode": "apply",
-            "root": "/tmp/homeboy",
-            "candidate_count": 2,
-            "inspected_count": 2,
-            "scan_complete": false,
-            "skipped_count": 0,
-            "applied_count": 2,
-            "remaining_count": 1,
-            "estimated_bytes": 4096,
-            "reclaimed_bytes": 3072,
-            "next_command": "homeboy cleanup artifacts --path /tmp/homeboy --limit 2 --apply",
-            "skipped": []
-        });
-
-        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
-
-        assert!(summary.contains("Remaining candidates: 1\n"));
-        assert!(summary.contains("Inventory: partial (2 artifact paths inspected)\n"));
-        assert!(summary.contains(
-            "Next safe command: homeboy cleanup artifacts --path /tmp/homeboy --limit 2 --apply\n"
-        ));
+        for (payload, present, absent) in cases {
+            let summary = render_artifact_cleanup_summary(&payload).expect("summary");
+            for line in present {
+                assert!(summary.contains(line), "missing {line:?} in:\n{summary}");
+            }
+            for line in absent {
+                assert!(
+                    !summary.contains(line),
+                    "unexpected {line:?} in:\n{summary}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7687,33 +7504,72 @@ mod tests {
         assert!(summary.contains("size not measured (pressure) /tmp/homeboy/target\n"));
     }
 
+    fn external_storage_output(
+        inventory_complete: bool,
+        unknown_bytes: u64,
+        unsatisfied_native_contracts: Vec<cleanup::ExternalStorageUnsatisfiedContract>,
+    ) -> cleanup::ExternalStorageCleanupOutput {
+        cleanup::ExternalStorageCleanupOutput {
+            provider_count: 1,
+            candidate_count: 0,
+            applied_count: 0,
+            skipped_count: 0,
+            estimated_bytes: 0,
+            reclaimed_bytes: 0,
+            unknown_bytes,
+            unknown_bytes_is_lower_bound: !inventory_complete,
+            inventory_complete,
+            incomplete_roots: Vec::new(),
+            unsatisfied_native_contracts,
+            providers: Vec::new(),
+        }
+    }
+
+    /// Three zero-candidate external-storage shapes must stay distinguishable:
+    /// a partial inventory is a bounded continuation, an unsatisfied native
+    /// contract is a distinct non-`completed` outcome with a typed blocker
+    /// count (the regression that hid a 99 GB unreclaimed SQLite event table
+    /// behind `outcome: completed`, #14955), and a satisfied empty probe is the
+    /// genuine clean completion.
     #[test]
-    fn external_storage_category_propagates_partial_inventory() {
-        let category = external_storage_category(
-            cleanup::ExternalStorageCleanupOutput {
-                provider_count: 1,
-                candidate_count: 0,
-                applied_count: 0,
-                skipped_count: 0,
-                estimated_bytes: 0,
-                reclaimed_bytes: 0,
-                unknown_bytes: 12,
-                unknown_bytes_is_lower_bound: true,
-                inventory_complete: false,
-                incomplete_roots: Vec::new(),
-                unsatisfied_native_contracts: Vec::new(),
-                providers: Vec::new(),
-            },
-            false,
-        )
-        .expect("external storage category");
-        assert_eq!(category[0].category, "external_storage");
-        assert_eq!(category[0].inventory_completeness, "partial");
-        assert_eq!(category[0].output["unknown_bytes"], 12);
-        assert!(is_bounded_continuation(&category[0]));
-        let mut complete = category.into_iter().next().expect("category");
-        complete.inventory_completeness = "complete".to_string();
-        assert!(!is_bounded_continuation(&complete));
+    fn external_storage_category_distinguishes_partial_unsatisfied_and_clean_results() {
+        for (output, outcome, completeness, contracts, bounded) in [
+            (
+                external_storage_output(false, 12, Vec::new()),
+                None,
+                "partial",
+                0,
+                true,
+            ),
+            (
+                external_storage_output(true, 0, vec![unsatisfied_contract_fixture()]),
+                Some("contract_unsatisfied"),
+                "complete",
+                1,
+                false,
+            ),
+            (
+                external_storage_output(true, 0, Vec::new()),
+                Some("completed"),
+                "complete",
+                0,
+                false,
+            ),
+        ] {
+            let category = external_storage_category(output, false)
+                .expect("external storage category")
+                .into_iter()
+                .next()
+                .expect("category");
+            assert_eq!(category.category, "external_storage");
+            assert_eq!(category.candidate_count, 0);
+            if let Some(outcome) = outcome {
+                assert_eq!(category.outcome, outcome);
+            }
+            assert_eq!(category.inventory_completeness, completeness, "{outcome:?}");
+            assert_eq!(category.unsatisfied_native_contract_count, contracts);
+            assert_eq!(is_bounded_continuation(&category), bounded, "{outcome:?}");
+        }
     }
 
     fn unsatisfied_contract_fixture() -> cleanup::ExternalStorageUnsatisfiedContract {
@@ -7723,77 +7579,6 @@ mod tests {
             invocation: "pi db event-log-status".to_string(),
             failure: "SQL syntax error".to_string(),
         }
-    }
-
-    /// An unsatisfied native contract must surface a distinct, non-`completed`
-    /// outcome and a nonzero typed blocker count, even though the provider
-    /// reported zero candidates -- the exact shape of the regression that hid
-    /// a 99 GB unreclaimed SQLite event table behind `outcome: completed`,
-    /// `candidate_count: 0` (#14955).
-    #[test]
-    fn external_storage_category_surfaces_unsatisfied_native_contracts_distinctly() {
-        let category = external_storage_category(
-            cleanup::ExternalStorageCleanupOutput {
-                provider_count: 1,
-                candidate_count: 0,
-                applied_count: 0,
-                skipped_count: 0,
-                estimated_bytes: 0,
-                reclaimed_bytes: 0,
-                unknown_bytes: 0,
-                unknown_bytes_is_lower_bound: false,
-                inventory_complete: true,
-                incomplete_roots: Vec::new(),
-                unsatisfied_native_contracts: vec![unsatisfied_contract_fixture()],
-                providers: Vec::new(),
-            },
-            false,
-        )
-        .expect("external storage category")
-        .into_iter()
-        .next()
-        .expect("category");
-        assert_eq!(category.candidate_count, 0);
-        assert_eq!(category.unsatisfied_native_contract_count, 1);
-        assert_eq!(category.outcome, "contract_unsatisfied");
-        assert_ne!(
-            category.outcome, "completed",
-            "an unsatisfied contract must never be reported as a clean completion"
-        );
-        // Not a bounded continuation: the contract cannot be resumed by
-        // scanning more, and inventory itself completed successfully.
-        assert!(!is_bounded_continuation(&category));
-    }
-
-    /// A satisfied contract with zero candidates is the genuine clean result
-    /// this behavior must keep distinguishable from an unsatisfied one, even
-    /// though both report `candidate_count == 0`.
-    #[test]
-    fn external_storage_category_reports_a_satisfied_empty_probe_as_completed() {
-        let category = external_storage_category(
-            cleanup::ExternalStorageCleanupOutput {
-                provider_count: 1,
-                candidate_count: 0,
-                applied_count: 0,
-                skipped_count: 0,
-                estimated_bytes: 0,
-                reclaimed_bytes: 0,
-                unknown_bytes: 0,
-                unknown_bytes_is_lower_bound: false,
-                inventory_complete: true,
-                incomplete_roots: Vec::new(),
-                unsatisfied_native_contracts: Vec::new(),
-                providers: Vec::new(),
-            },
-            false,
-        )
-        .expect("external storage category")
-        .into_iter()
-        .next()
-        .expect("category");
-        assert_eq!(category.candidate_count, 0);
-        assert_eq!(category.unsatisfied_native_contract_count, 0);
-        assert_eq!(category.outcome, "completed");
     }
 
     /// An unsatisfied native contract must elevate the aggregate `status` and
@@ -7821,20 +7606,7 @@ mod tests {
     #[test]
     fn cleanup_actionable_surfaces_an_investigate_action_for_unsatisfied_contracts() {
         let mut category = external_storage_category(
-            cleanup::ExternalStorageCleanupOutput {
-                provider_count: 1,
-                candidate_count: 0,
-                applied_count: 0,
-                skipped_count: 0,
-                estimated_bytes: 0,
-                reclaimed_bytes: 0,
-                unknown_bytes: 0,
-                unknown_bytes_is_lower_bound: false,
-                inventory_complete: true,
-                incomplete_roots: Vec::new(),
-                unsatisfied_native_contracts: vec![unsatisfied_contract_fixture()],
-                providers: Vec::new(),
-            },
+            external_storage_output(true, 0, vec![unsatisfied_contract_fixture()]),
             false,
         )
         .expect("external storage category")
@@ -7855,61 +7627,41 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_artifacts_summary_lists_candidates_in_payload_order() {
-        let payload = json!({
-            "command": "cleanup.artifacts",
-            "mode": "dry_run",
-            "root": "/tmp/repo",
-            "candidate_count": 2,
-            "skipped_count": 0,
-            "applied_count": 0,
-            "remaining_count": 2,
-            "estimated_bytes": 3072,
-            "reclaimed_bytes": 0,
-            "candidates": [
-                { "path": "/tmp/repo/node_modules", "size_bytes": 2048 },
-                { "path": "/tmp/repo/dist", "size_bytes": 1024 }
-            ],
-            "skipped": []
-        });
-
-        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
-
-        assert!(summary.contains("Rebuildable artifacts (showing 2 of 2):"));
-        let first = summary.find("  - 2.0 KiB /tmp/repo/node_modules").unwrap();
-        let second = summary.find("  - 1.0 KiB /tmp/repo/dist").unwrap();
-        assert!(first < second);
-    }
-
-    #[test]
-    fn cleanup_artifacts_summary_marks_truncated_candidate_list() {
-        let candidates: Vec<_> = (0..12)
-            .map(|index| {
-                json!({
-                    "path": format!("/tmp/repo/target-{index}"),
-                    "size_bytes": 1024
+    fn cleanup_artifacts_summary_lists_candidates_in_payload_order_and_marks_truncation() {
+        let summary_for = |sizes: &[u64]| {
+            let candidates: Vec<_> = sizes
+                .iter()
+                .enumerate()
+                .map(|(index, size)| {
+                    json!({ "path": format!("/tmp/repo/target-{index}"), "size_bytes": size })
                 })
-            })
-            .collect();
-        let payload = json!({
-            "command": "cleanup.artifacts",
-            "mode": "dry_run",
-            "root": "/tmp/repo",
-            "candidate_count": 12,
-            "skipped_count": 0,
-            "applied_count": 0,
-            "remaining_count": 12,
-            "estimated_bytes": 12288,
-            "reclaimed_bytes": 0,
-            "candidates": candidates,
-            "skipped": []
-        });
+                .collect();
+            render_artifact_cleanup_summary(&json!({
+                "command": "cleanup.artifacts",
+                "mode": "dry_run",
+                "root": "/tmp/repo",
+                "candidate_count": sizes.len(),
+                "skipped_count": 0,
+                "applied_count": 0,
+                "remaining_count": sizes.len(),
+                "estimated_bytes": sizes.iter().sum::<u64>(),
+                "reclaimed_bytes": 0,
+                "candidates": candidates,
+                "skipped": []
+            }))
+            .expect("summary")
+        };
 
-        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
+        let ordered = summary_for(&[2048, 1024]);
+        assert!(ordered.contains("Rebuildable artifacts (showing 2 of 2):"));
+        let first = ordered.find("  - 2.0 KiB /tmp/repo/target-0").unwrap();
+        let second = ordered.find("  - 1.0 KiB /tmp/repo/target-1").unwrap();
+        assert!(first < second);
 
-        assert!(summary.contains("Rebuildable artifacts (showing 10 of 12):"));
-        assert!(summary.contains("Full candidate list is available in JSON output"));
-        assert!(summary.contains("--sort size --limit 10"));
-        assert!(!summary.contains("/tmp/repo/target-10"));
+        let truncated = summary_for(&[1024; 12]);
+        assert!(truncated.contains("Rebuildable artifacts (showing 10 of 12):"));
+        assert!(truncated.contains("Full candidate list is available in JSON output"));
+        assert!(truncated.contains("--sort size --limit 10"));
+        assert!(!truncated.contains("/tmp/repo/target-10"));
     }
 }
