@@ -895,6 +895,19 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
 /// makes cancellation in that interval able to signal the exact process, while
 /// the launcher id prevents a stale launcher from publishing another owner's
 /// child or supervisor.
+pub fn record_claimed_detached_cook_step_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    apply_cook_handoff_event(
+        lifecycle_store,
+        &sanitize_run_id(cook_id),
+        CookHandoffEvent::Admit(launcher_id, job_id),
+    )
+}
+
 pub fn record_claimed_detached_cook_handoff_supervision_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -996,6 +1009,8 @@ fn complete_detached_cook_handoff_parent_in_store(
 pub(crate) enum CookHandoffEvent<'a> {
     /// `(launcher_id)` takes ownership of a pre-supervisor parent.
     Claim(&'a str),
+    /// `(launcher_id, supervisor_job_id)` transfers custody before step start.
+    Admit(&'a str, &'a str),
     /// `(launcher_id, child_pid, child_start_identity, supervisor_job_id)`.
     Supervise(&'a str, u32, &'a ProcessStartIdentity, &'a str),
     /// `(attempt_run_id)` takes custody before its Cook index is published.
@@ -1034,11 +1049,17 @@ pub(crate) fn cook_handoff_event_admits(
             }
             (_, Claim(_)) => {
                 pre_supervisor
+                    && !handoff["supervisor_job_id"].is_string()
                     && !(handoff.get("launcher_id").is_some()
                         && detached_cook_launcher_is_live(record, chrono::Utc::now()))
             }
-            (_, Supervise(launcher_id, ..) | FailClaimed(launcher_id, _)) => {
+            (_, Admit(launcher_id, _) | Supervise(launcher_id, ..)) => {
                 pre_supervisor && handoff["launcher_id"] == launcher_id
+            }
+            (_, FailClaimed(launcher_id, _)) => {
+                pre_supervisor
+                    && handoff["launcher_id"] == launcher_id
+                    && !handoff["supervisor_job_id"].is_string()
             }
             // Replaying the reserved attempt rewrites nothing; neither does a
             // reservation after the one-time handoff (later retries need none).
@@ -1075,6 +1096,9 @@ pub(crate) fn apply_cook_handoff_event(
             handoff["launcher_start_identity"] = json!(identity);
             let lease = chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS);
             handoff["admission_deadline_at"] = json!((chrono::Utc::now() + lease).to_rfc3339());
+        }
+        Admit(_, job_id) => {
+            handoff["supervisor_job_id"] = json!(job_id);
         }
         Supervise(_, child_pid, child_start_identity, job_id) => {
             handoff["child_pid"] = json!(child_pid);
@@ -1114,7 +1138,7 @@ pub(crate) fn apply_cook_handoff_event(
         Fail(_) | FailClaimed(..) | Expire(_) => {
             lifecycle_store.transition_when(cook_id, terminate)?
         }
-        Claim(_) | Supervise(..) | Reserve(_) => {
+        Claim(_) | Admit(..) | Supervise(..) | Reserve(_) => {
             lifecycle_store.mutate_record(cook_id, |record| {
                 use CookAdmissionPhase::Pending;
                 let pending = matches!(CookAdmissionPhase::of(record), Some(Pending { .. }));
@@ -1164,7 +1188,7 @@ pub(crate) fn apply_cook_handoff_event(
             "detached Cook handoff is already owned or has advanced",
             lifecycle_store.read_record_bounded(cook_id).ok(),
         ),
-        (None, Supervise(..)) => (
+        (None, Admit(..) | Supervise(..)) => (
             "detached Cook handoff is not owned by this launcher or has advanced",
             lifecycle_store.read_record(cook_id).ok(),
         ),
@@ -1241,7 +1265,10 @@ pub fn detached_cook_admission_is_live(
         // Runtime sealing can outlast the initial lease. Use the same observed
         // launcher custody as reclaim, falling back to the deadline only when
         // process identity cannot be established.
-        Some("pre_supervisor") | None => detached_cook_launcher_is_live(record, now),
+        Some("pre_supervisor") | None => {
+            record.metadata["detached_cook_handoff"]["supervisor_job_id"].is_string()
+                || detached_cook_launcher_is_live(record, now)
+        }
         _ => false,
     }
 }

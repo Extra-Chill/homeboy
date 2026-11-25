@@ -280,13 +280,19 @@ fn whole_daemon_process_group_killed_recovers_without_edits() {
     let pid = daemon_pid(&current["data"]);
     // SAFETY: getpgid/kill on the daemon this test started.
     let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
-    assert!(pgid > 0);
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while pid_alive(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        pgid > 1 && pgid != unsafe { libc::getpgrp() },
+        "isolated daemon group: {pgid}"
+    );
+    assert_eq!(unsafe { libc::kill(-pgid, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while pid_alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "waiting for daemon {pid} (pgid {pgid}) to exit after SIGKILL; observed: {:?}",
+            std::fs::read_to_string(format!("/proc/{pid}/status"))
+        );
+        std::thread::sleep(Duration::from_millis(25));
     }
     // In production the init system reaps the killed processes at once. The
     // test binary can be their subreaper (nextest runs each test as its own
