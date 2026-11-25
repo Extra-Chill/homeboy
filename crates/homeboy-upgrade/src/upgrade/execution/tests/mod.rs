@@ -2,7 +2,7 @@
 
 #[cfg(unix)]
 #[test]
-fn release_candidate_is_queried_before_rename_and_never_after() {
+fn release_candidate_is_queried_before_rename_and_proven_by_hash_after() {
     let directory = tempfile::tempdir().unwrap();
     let staged = directory.path().join("candidate");
     let destination = directory.path().join("installed");
@@ -27,22 +27,7 @@ fn release_candidate_is_queried_before_rename_and_never_after() {
         std::fs::read_to_string(calls).unwrap(),
         "--version\n--observation-schema-version\n"
     );
-}
-
-#[test]
-fn destination_hash_rejects_mismatch_after_rename() {
-    let directory = tempfile::tempdir().unwrap();
-    let staged = directory.path().join("candidate");
-    let destination = directory.path().join("installed");
-    std::fs::write(&staged, b"selected release").unwrap();
-    let evidence = ReplacementEvidence::new(
-        &destination,
-        Some("0.376.1"),
-        None,
-        sha256_file(&staged).unwrap(),
-    )
-    .unwrap();
-    std::fs::rename(&staged, &destination).unwrap();
+    // Bytes that change after the rename no longer prove the replacement.
     std::fs::write(&destination, b"different bytes").unwrap();
     assert!(!replacement_was_applied(&evidence).unwrap());
 }

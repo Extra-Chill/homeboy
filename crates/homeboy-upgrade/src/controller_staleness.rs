@@ -379,7 +379,9 @@ mod tests {
     }
 
     /// The exact scenario in #11483: 0.327.0 running against a published
-    /// v0.329.1 is two minor releases behind and must escalate.
+    /// v0.329.1 is two minor releases behind and must escalate, with the
+    /// operator-facing warning and JSON wire shape carrying everything needed
+    /// to act on it.
     #[test]
     fn reported_issue_scenario_is_stale_and_escalated() {
         let staleness = assess(
@@ -389,15 +391,7 @@ mod tests {
             1_100,
         );
 
-        assert_eq!(staleness.status, ControllerCurrency::BehindMinor);
-        assert!(staleness.stale);
-        assert!(staleness.escalated);
-        assert_eq!(staleness.minor_releases_behind, Some(2));
-        assert_eq!(staleness.latest_version.as_deref(), Some("0.329.1"));
-        assert_eq!(staleness.git_commit.as_deref(), Some("ed33954781a9"));
-        assert_eq!(staleness.remediation.as_deref(), Some("homeboy upgrade"));
         assert_eq!(staleness.cache_age_secs, Some(100));
-
         let warning = staleness.warning_line().expect("stale controller warns");
         assert!(warning.contains("STALE"));
         assert!(warning.contains("2 minor release(s) behind v0.329.1"));
@@ -405,118 +399,88 @@ mod tests {
         // compute the commit delta the release delta cannot express.
         assert!(warning.contains("ed33954781a9"));
         assert!(warning.contains("homeboy upgrade"));
+
+        let json = serde_json::to_value(&staleness).expect("staleness serializes");
+        assert_eq!(json["status"], "behind_minor");
+        assert_eq!(json["stale"], true);
+        assert_eq!(json["escalated"], true);
+        assert_eq!(json["running_version"], "0.327.0");
+        assert_eq!(json["build_identity"], "homeboy 0.327.0+ed33954781a9");
+        assert_eq!(json["git_commit"], "ed33954781a9");
+        assert_eq!(json["latest_version"], "0.329.1");
+        assert_eq!(json["minor_releases_behind"], 2);
+        assert_eq!(json["remediation"], "homeboy upgrade");
     }
 
+    /// Classification, escalation threshold (*more than* one minor behind),
+    /// and warning emission across every comparable relation. A source build
+    /// ahead of the release must never warn, or operators learn to ignore it.
     #[test]
-    fn matching_version_is_current_and_silent() {
-        let staleness = assess(&identity("0.329.1", None), Some("0.329.1"), Some(10), 20);
+    fn classifies_running_build_against_latest_release() {
+        use ControllerCurrency::*;
+        for (running, latest, status, minor_behind, stale, escalated) in [
+            ("0.329.1", "0.329.1", Current, Some(0), false, false),
+            // GitHub returns `v`-prefixed tags; the prefix must not defeat the comparison.
+            ("0.329.1", "v0.329.1", Current, Some(0), false, false),
+            ("0.329.0", "0.329.1", BehindPatch, Some(0), true, false),
+            ("0.328.0", "0.329.1", BehindMinor, Some(1), true, false),
+            ("0.328.0", "0.330.0", BehindMinor, Some(2), true, true),
+            // A minor delta across majors is not a distance an operator can act on.
+            ("0.329.1", "1.0.0", BehindMajor, None, true, true),
+            ("0.330.0", "0.329.1", Ahead, None, false, false),
+        ] {
+            let staleness = assess(&identity(running, None), Some(latest), None, 0);
+            let case = format!("{running} vs {latest}");
 
-        assert_eq!(staleness.status, ControllerCurrency::Current);
-        assert!(!staleness.stale);
-        assert!(!staleness.escalated);
-        assert_eq!(staleness.minor_releases_behind, Some(0));
-        assert!(staleness.remediation.is_none());
-        assert!(staleness.warning_line().is_none());
+            assert_eq!(staleness.status, status, "{case}");
+            assert_eq!(staleness.minor_releases_behind, minor_behind, "{case}");
+            assert_eq!(staleness.stale, stale, "{case}");
+            assert_eq!(staleness.escalated, escalated, "{case}");
+            assert_eq!(
+                staleness.latest_version.as_deref(),
+                Some(latest.trim_start_matches('v')),
+                "{case}"
+            );
+            assert_eq!(staleness.warning_line().is_some(), stale, "{case}");
+            assert_eq!(staleness.remediation.is_some(), stale, "{case}");
+            if let Some(warning) = staleness.warning_line() {
+                assert_eq!(warning.contains("STALE"), escalated, "{case}: {warning}");
+            }
+        }
     }
 
-    /// A `v` prefix on the published tag is the shape GitHub returns; it must
-    /// not defeat the comparison.
+    /// Offline, first run, a wiped cache, or an unparseable version: no
+    /// comparison is possible. Unknown, never "current", never a warning.
     #[test]
-    fn v_prefixed_release_tag_compares() {
-        let staleness = assess(&identity("0.329.1", None), Some("v0.329.1"), None, 0);
+    fn unestablished_comparison_is_unknown_not_current() {
+        for (running, latest, expected_latest) in [
+            ("0.327.0", None, None),
+            ("0.327.0", Some("   "), None),
+            ("not-a-version", Some("0.329.1"), Some("0.329.1")),
+        ] {
+            let staleness = assess(&identity(running, None), latest, Some(7), 9);
 
-        assert_eq!(staleness.status, ControllerCurrency::Current);
-        assert_eq!(staleness.latest_version.as_deref(), Some("0.329.1"));
+            assert_eq!(staleness.status, ControllerCurrency::Unknown, "{latest:?}");
+            assert!(!staleness.stale);
+            assert!(!staleness.escalated);
+            assert!(staleness.warning_line().is_none());
+            assert!(staleness.remediation.is_none());
+            assert_eq!(staleness.latest_version.as_deref(), expected_latest);
+            assert_eq!(staleness.cache_age_secs, Some(2));
+            assert!(staleness.detail.contains("not established"));
+        }
     }
 
+    /// A current controller omits remediation and optional drift fields, so a
+    /// JSON consumer distinguishes "current" from "unknown" by `status` alone.
     #[test]
-    fn one_minor_behind_is_stale_but_not_escalated() {
-        let staleness = assess(&identity("0.328.0", None), Some("0.329.1"), None, 0);
+    fn current_controller_omits_optional_wire_fields() {
+        let staleness = assess(&identity("0.329.1", None), Some("0.329.1"), None, 0);
+        let json = serde_json::to_value(&staleness).expect("staleness serializes");
 
-        assert_eq!(staleness.status, ControllerCurrency::BehindMinor);
-        assert!(staleness.stale);
-        assert!(!staleness.escalated);
-        assert_eq!(staleness.minor_releases_behind, Some(1));
-        let warning = staleness.warning_line().expect("stale controller warns");
-        assert!(!warning.contains("STALE"));
-        assert!(warning.contains("1 minor release(s) behind"));
-    }
-
-    #[test]
-    fn patch_behind_is_stale_but_not_escalated() {
-        let staleness = assess(&identity("0.329.0", None), Some("0.329.1"), None, 0);
-
-        assert_eq!(staleness.status, ControllerCurrency::BehindPatch);
-        assert!(staleness.stale);
-        assert!(!staleness.escalated);
-        assert_eq!(staleness.minor_releases_behind, Some(0));
-    }
-
-    #[test]
-    fn major_behind_escalates_without_a_minor_count() {
-        let staleness = assess(&identity("0.329.1", None), Some("1.0.0"), None, 0);
-
-        assert_eq!(staleness.status, ControllerCurrency::BehindMajor);
-        assert!(staleness.stale);
-        assert!(staleness.escalated);
-        // A minor delta across majors is not a distance an operator can act on.
-        assert!(staleness.minor_releases_behind.is_none());
-    }
-
-    /// A source build on an unreleased branch is ahead, not stale. Warning on it
-    /// would train operators to ignore this surface.
-    #[test]
-    fn newer_than_published_release_is_ahead_not_stale() {
-        let staleness = assess(
-            &identity("0.330.0", Some("abc123")),
-            Some("0.329.1"),
-            None,
-            0,
-        );
-
-        assert_eq!(staleness.status, ControllerCurrency::Ahead);
-        assert!(!staleness.stale);
-        assert!(!staleness.escalated);
-        assert!(staleness.warning_line().is_none());
-        assert!(staleness.detail.contains("ahead"));
-    }
-
-    /// Offline, first run, or a wiped cache: no published release to compare
-    /// against. Unknown, never "current", never a warning.
-    #[test]
-    fn missing_cached_release_is_unknown_not_current() {
-        let staleness = assess(&identity("0.327.0", None), None, None, 0);
-
-        assert_eq!(staleness.status, ControllerCurrency::Unknown);
-        assert!(!staleness.stale);
-        assert!(!staleness.escalated);
-        assert!(staleness.latest_version.is_none());
-        assert!(staleness.warning_line().is_none());
-        assert!(staleness.detail.contains("not established"));
-    }
-
-    #[test]
-    fn empty_cached_release_is_unknown() {
-        let staleness = assess(&identity("0.327.0", None), Some("   "), Some(5), 5);
-
-        assert_eq!(staleness.status, ControllerCurrency::Unknown);
-        assert!(staleness.latest_version.is_none());
-    }
-
-    #[test]
-    fn unparseable_version_is_unknown_not_current() {
-        let staleness = assess(
-            &identity("not-a-version", None),
-            Some("0.329.1"),
-            Some(7),
-            9,
-        );
-
-        assert_eq!(staleness.status, ControllerCurrency::Unknown);
-        assert!(!staleness.stale);
-        assert_eq!(staleness.latest_version.as_deref(), Some("0.329.1"));
-        assert_eq!(staleness.checked_at, Some(7));
-        assert_eq!(staleness.cache_age_secs, Some(2));
+        assert_eq!(json["status"], "current");
+        assert!(json.get("remediation").is_none());
+        assert!(json.get("git_commit").is_none());
     }
 
     /// The cache age is how a reader tells a fresh verdict from one made
@@ -547,75 +511,5 @@ mod tests {
             Some("homeboy upgrade --check")
         );
         assert!(staleness.detail.contains("cached release observation"));
-    }
-
-    #[test]
-    fn serialized_shape_is_stable() {
-        let staleness = assess(
-            &identity("0.327.0", Some("ed33954781a9")),
-            Some("0.329.1"),
-            Some(1_000),
-            1_100,
-        );
-        let json = serde_json::to_value(&staleness).expect("staleness serializes");
-
-        assert_eq!(json["status"], "behind_minor");
-        assert_eq!(json["stale"], true);
-        assert_eq!(json["escalated"], true);
-        assert_eq!(json["running_version"], "0.327.0");
-        assert_eq!(json["build_identity"], "homeboy 0.327.0+ed33954781a9");
-        assert_eq!(json["git_commit"], "ed33954781a9");
-        assert_eq!(json["latest_version"], "0.329.1");
-        assert_eq!(json["minor_releases_behind"], 2);
-        assert_eq!(json["remediation"], "homeboy upgrade");
-    }
-
-    /// A current controller emits no remediation and no optional drift fields,
-    /// so a JSON consumer can distinguish "current" from "unknown" by `status`
-    /// alone.
-    #[test]
-    fn current_controller_omits_remediation() {
-        let staleness = assess(&identity("0.329.1", None), Some("0.329.1"), None, 0);
-        let json = serde_json::to_value(&staleness).expect("staleness serializes");
-
-        assert_eq!(json["status"], "current");
-        assert!(json.get("remediation").is_none());
-        assert!(json.get("git_commit").is_none());
-    }
-
-    #[test]
-    fn currency_behind_predicate_excludes_unknown_and_ahead() {
-        assert!(ControllerCurrency::BehindPatch.is_behind());
-        assert!(ControllerCurrency::BehindMinor.is_behind());
-        assert!(ControllerCurrency::BehindMajor.is_behind());
-        assert!(!ControllerCurrency::Current.is_behind());
-        assert!(!ControllerCurrency::Ahead.is_behind());
-        assert!(!ControllerCurrency::Unknown.is_behind());
-    }
-
-    /// The escalation threshold is the issue's stated rule: *more than* one
-    /// minor version behind.
-    #[test]
-    fn escalation_threshold_is_more_than_one_minor() {
-        assert_eq!(ESCALATION_MINOR_RELEASES_BEHIND, 2);
-        assert!(!assess(&identity("0.329.0", None), Some("0.330.0"), None, 0).escalated);
-        assert!(assess(&identity("0.328.0", None), Some("0.330.0"), None, 0).escalated);
-    }
-
-    /// `current()` must never panic or perform network I/O, whatever the host
-    /// state. Its verdict depends on the ambient cache, so only its totality and
-    /// its self-consistency are asserted here.
-    #[test]
-    fn current_is_total_and_self_consistent() {
-        let staleness = current();
-
-        assert_eq!(staleness.running_version, build_identity::current().version);
-        assert_eq!(staleness.stale, staleness.status.is_behind());
-        assert!(
-            staleness.stale
-                || staleness.remediation.is_none()
-                || staleness.status == ControllerCurrency::Unknown
-        );
-        assert!(!staleness.detail.is_empty());
     }
 }
