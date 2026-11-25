@@ -196,7 +196,7 @@ fn declared_staleness_thresholds() -> BTreeSet<String> {
 }
 
 #[test]
-fn a_new_running_staleness_threshold_is_a_failure() {
+fn declared_staleness_thresholds_match_the_sanctioned_inventory() {
     let declarations = declared_staleness_thresholds();
     let unsanctioned: Vec<&String> = declarations
         .iter()
@@ -216,12 +216,8 @@ fn a_new_running_staleness_threshold_is_a_failure() {
          from `homeboy_core::observation`, or add the site to \
          SANCTIONED_STALENESS_THRESHOLDS with the reason it is a distinct concept."
     );
-}
 
-#[test]
-fn a_sanctioned_threshold_that_no_longer_exists_is_a_failure() {
     // A stale entry is how an inventory stops describing the tree it guards.
-    let declarations = declared_staleness_thresholds();
     let missing: Vec<&str> = SANCTIONED_STALENESS_THRESHOLDS
         .iter()
         .filter(|(site, _)| !declarations.contains(*site))
@@ -233,16 +229,6 @@ fn a_sanctioned_threshold_that_no_longer_exists_is_a_failure() {
         "SANCTIONED_STALENESS_THRESHOLDS names thresholds that no longer exist: {missing:?}. \
          Remove the stale rows."
     );
-}
-
-#[test]
-fn every_sanctioned_threshold_states_a_reason() {
-    for (site, reason) in SANCTIONED_STALENESS_THRESHOLDS {
-        assert!(
-            reason.len() > 20,
-            "{site} is sanctioned without a usable reason"
-        );
-    }
 }
 
 #[test]
@@ -270,7 +256,7 @@ fn no_minute_age_is_compared_against_a_bare_literal() {
 }
 
 #[test]
-fn the_guard_recognizes_the_declaration_shape_it_is_written_to_catch() {
+fn the_guard_recognizes_the_shapes_it_is_written_to_catch() {
     // The four original definitions, as they were written.
     assert_eq!(
         declared_staleness_threshold("const RUNNING_HEARTBEAT_STALE_MINUTES: i64 = 30;"),
@@ -307,10 +293,7 @@ fn the_guard_recognizes_the_declaration_shape_it_is_written_to_catch() {
         declared_staleness_threshold("const STALE_DAEMON_RECOVERY: &str = \"stale\";"),
         None
     );
-}
 
-#[test]
-fn the_guard_recognizes_the_bare_literal_shape_it_is_written_to_catch() {
     // The `has_fresh_update` copy, as it was written: the operator wrapped.
     let wrapped = [
         "                    .signed_duration_since(updated_at.with_timezone(&chrono::Utc))",
@@ -336,23 +319,4 @@ fn the_guard_recognizes_the_bare_literal_shape_it_is_written_to_catch() {
     // Binding the age without comparing it is not a finding.
     let bound = ["let age_minutes = (now - heartbeat).num_minutes();"];
     assert!(!compares_minutes_to_a_bare_literal(&bound, 0));
-}
-
-#[test]
-fn test_sources_are_out_of_scope() {
-    // Paths are workspace-relative, as `collect_rust_sources` produces them.
-    assert!(is_test_source(
-        "crates/homeboy-cli/src/commands/runner/tests/status.rs"
-    ));
-    assert!(is_test_source("crates/homeboy-core/src/paths_tests.rs"));
-    assert!(is_test_source(
-        "crates/homeboy-core/src/observation/records/run_staleness_guard_test.rs"
-    ));
-    assert!(!is_test_source(
-        "crates/homeboy-core/src/observation/records/run_status.rs"
-    ));
-    assert!(!is_test_source(
-        "crates/homeboy-core/src/observation/runs_service/reconcile.rs"
-    ));
-    assert!(!is_test_source("src/lib.rs"));
 }

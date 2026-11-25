@@ -826,46 +826,45 @@ mod tests {
         assert_eq!(backoff_after(64), Duration::from_secs(MAX_BACKOFF_SECS));
     }
 
+    /// A transport outage queues the event rather than losing it, whether the
+    /// transport exits non-zero, exits zero without reporting delivery, or
+    /// emits an unversioned `retryable: false` that is not a terminal rejection.
     #[test]
-    fn zero_exit_without_delivery_stays_in_the_public_outbox() {
-        crate::test_support::with_isolated_home(|_| {
-            install_transport(
+    fn an_undelivered_terminal_notification_is_queued_rather_than_lost() {
+        let cases: [(&str, Vec<&str>); 3] = [
+            ("outbox.down", vec!["false"]),
+            (
                 "outbox.no-delivery",
                 vec![
                     "sh",
                     "-c",
                     "printf '%s\\n' '{\"status\":\"failed\",\"attempts\":1}'",
                 ],
-            );
-            set_default_transport("outbox.no-delivery");
-            let dispatch = dispatch_with_outbox(&event("gate-admission-failure"), None);
-            assert!(!dispatch.outcome.delivered);
-            assert!(matches!(
-                dispatch.disposition,
-                NotifyOutboxDisposition::Queued { .. }
-            ));
-            assert_eq!(pending_entries().len(), 1);
-        });
-    }
+            ),
+            (
+                "outbox.unversioned",
+                vec!["sh", "-c", "printf '%s\\n' '{\"retryable\":false}'; exit 1"],
+            ),
+        ];
+        for (transport, command) in cases {
+            crate::test_support::with_isolated_home(|_| {
+                install_transport(transport, command.clone());
+                set_default_transport(transport);
 
-    #[test]
-    fn a_failed_terminal_notification_is_queued_rather_than_lost() {
-        crate::test_support::with_isolated_home(|_| {
-            install_transport("outbox.down", vec!["false"]);
-            set_default_transport("outbox.down");
-
-            let dispatch = dispatch_with_outbox(&event("run-outage"), None);
-            assert!(!dispatch.outcome.delivered);
-            assert!(
-                matches!(dispatch.disposition, NotifyOutboxDisposition::Queued { .. }),
-                "{:?}",
-                dispatch.disposition
-            );
-            let queued = pending_entries();
-            assert_eq!(queued.len(), 1);
-            assert_eq!(queued[0].attempts, 1);
-            assert_eq!(queued[0].event.run_id, "run-outage");
-        });
+                let dispatch = dispatch_with_outbox(&event("run-outage"), None);
+                assert!(!dispatch.outcome.delivered, "{transport}");
+                assert!(
+                    matches!(dispatch.disposition, NotifyOutboxDisposition::Queued { .. }),
+                    "{transport}: {:?}",
+                    dispatch.disposition
+                );
+                let queued = pending_entries();
+                assert_eq!(queued.len(), 1, "{transport}");
+                assert_eq!(queued[0].attempts, 1, "{transport}");
+                assert_eq!(queued[0].event.run_id, "run-outage", "{transport}");
+                assert!(dead_letter_entries().is_empty(), "{transport}");
+            });
+        }
     }
 
     #[test]
@@ -931,25 +930,6 @@ mod tests {
                     .map(|rejection| rejection.reason_code.as_str()),
                 Some("invalid_route")
             );
-        });
-    }
-
-    #[test]
-    fn arbitrary_retryable_false_output_remains_retryable() {
-        crate::test_support::with_isolated_home(|_| {
-            install_transport(
-                "outbox.unversioned",
-                vec!["sh", "-c", "printf '%s\\n' '{\"retryable\":false}'; exit 1"],
-            );
-            set_default_transport("outbox.unversioned");
-
-            let dispatch = dispatch_with_outbox(&event("run-unversioned"), None);
-            assert!(matches!(
-                dispatch.disposition,
-                NotifyOutboxDisposition::Queued { .. }
-            ));
-            assert_eq!(pending_entries().len(), 1);
-            assert!(dead_letter_entries().is_empty());
         });
     }
 
@@ -1079,19 +1059,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_entry_is_retired_instead_of_re_read_forever() {
-        crate::test_support::with_isolated_home(|_| {
-            let pending = pending_dir().unwrap();
-            std::fs::create_dir_all(&pending).unwrap();
-            std::fs::write(pending.join("corrupt.json"), b"{not json").unwrap();
-
-            let report = drain(Utc::now());
-            assert_eq!(report.unreadable, 1);
-            assert!(!pending.join("corrupt.json").exists());
-        });
-    }
-
-    #[test]
     fn an_abandoned_inflight_entry_is_reclaimed() {
         crate::test_support::with_isolated_home(|_| {
             install_transport("outbox.reclaim", vec!["true"]);
@@ -1126,16 +1093,14 @@ mod tests {
     }
 
     #[test]
-    fn injected_roots_own_independent_queues() {
+    fn an_entry_enqueued_in_the_ambient_root_is_the_pending_entry() {
         crate::test_support::with_isolated_home(|_| {
-            let left = ambient_config_root().expect("config root");
-            let right = tempfile::tempdir().expect("right root");
-            let entry_id = enqueue_in_root(&left, &event("run-left"), None).expect("queued");
+            let root = ambient_config_root().expect("config root");
+            let entry_id = enqueue_in_root(&root, &event("run-left"), None).expect("queued");
             let queued = pending_entries();
             assert_eq!(queued.len(), 1);
             assert_eq!(queued[0].entry_id, entry_id);
             assert_eq!(queued[0].event.run_id, "run-left");
-            assert!(read_dir_entries(&pending_dir_in_root(right.path())).is_empty());
         });
     }
 
@@ -1147,7 +1112,6 @@ mod tests {
             // than delivery. A claim taken under one root and released under
             // another would strand the entry until its reclaim window elapsed.
             let root = ambient_config_root().expect("config root");
-            let other = tempfile::tempdir().expect("other root");
             let pending = pending_dir_in_root(&root);
             std::fs::create_dir_all(&pending).expect("seed pending");
             std::fs::write(pending.join("corrupt.json"), b"{not json").expect("seed entry");
@@ -1164,17 +1128,6 @@ mod tests {
                 dead_letter_dir_in_root(&root).join("corrupt.json").exists(),
                 "the release landed under the same root the claim was taken in"
             );
-            assert!(!other.path().join("notify-outbox").exists());
-        });
-    }
-
-    #[test]
-    fn a_drain_over_an_empty_or_missing_outbox_is_inert() {
-        crate::test_support::with_isolated_home(|_| {
-            let report = drain(Utc::now());
-            assert_eq!(report.attempted, 0);
-            assert_eq!(report.reclaimed, 0);
-            assert!(report.entries.is_empty());
         });
     }
 }

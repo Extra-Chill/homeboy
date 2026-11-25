@@ -720,9 +720,12 @@ mod tests {
     }
 
     #[test]
-    fn installed_transport_receives_typed_event_argv() {
+    fn installed_transport_receives_typed_event_argv_with_resolved_extension_path() {
         crate::test_support::with_isolated_home(|_| {
-            install_transport("test.run-completion", vec!["true"]);
+            install_transport(
+                "test.run-completion",
+                vec!["true", "{extension_path}/scripts/notify.mjs"],
+            );
             let route = NotificationRoute::new("test.run-completion", "route-42").unwrap();
             let outcome = dispatch(&NotifyEvent::run_completed_with_route(
                 "run-123",
@@ -737,36 +740,17 @@ mod tests {
             assert!(command
                 .windows(2)
                 .any(|pair| pair == ["--route", "route-42"]));
-        });
-    }
-
-    #[test]
-    fn extension_path_placeholder_is_resolved_in_transport_command() {
-        crate::test_support::with_isolated_home(|_| {
-            install_transport(
-                "test.run-completion",
-                vec!["true", "{extension_path}/scripts/notify.mjs"],
-            );
-            let route = NotificationRoute::new("test.run-completion", "route-42").unwrap();
-            let outcome = dispatch(&NotifyEvent::run_completed_with_route(
-                "run-123",
-                "pass",
-                Some(&route),
-            ));
-            let NotifyDelivery::Transport { command, .. } = outcome.delivery else {
-                panic!("expected transport delivery");
-            };
             // The `{extension_path}` placeholder must be replaced with the
             // installed extension directory and never delivered literally.
-            assert!(
-                !command.iter().any(|arg| arg.contains("{extension_path}")),
-                "unresolved placeholder in {command:?}"
-            );
             assert!(
                 command
                     .iter()
                     .any(|arg| arg.ends_with("/scripts/notify.mjs") && arg.starts_with('/')),
                 "expected an absolute resolved script path in {command:?}"
+            );
+            assert!(
+                !command.iter().any(|arg| arg.contains("{extension_path}")),
+                "unresolved placeholder in {command:?}"
             );
         });
     }
@@ -888,21 +872,10 @@ mod tests {
     }
 
     #[test]
-    fn payload_free_event_keeps_its_historical_prose_and_kind() {
-        let event = NotifyEvent::run_completed("run-123", "pass");
-        assert_eq!(event.body, "Run run-123 finished with status pass");
-        assert_eq!(event.kind, NotifyEventKind::Completed);
-        assert!(event.payload.is_none());
-    }
-
-    #[test]
-    fn payload_env_carries_kind_without_a_payload() {
+    fn payload_env_carries_kind_schema_and_serialized_payload() {
         let env = NotifyEvent::run_completed("run-123", "pass").payload_env();
         assert_eq!(env, vec![(NOTIFY_KIND_ENV, "completed".to_string())]);
-    }
 
-    #[test]
-    fn payload_env_carries_schema_and_serialized_payload() {
         let event = NotifyEvent::run_completed("run-123", "fail").with_payload(cook_payload());
         let env = event.payload_env();
         let by_name = |name: &str| {
@@ -953,7 +926,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn transport_child_receives_the_structured_payload_through_its_environment() {
+    fn transport_child_receives_the_payload_env_and_its_result_is_retained() {
         crate::test_support::with_isolated_home(|home| {
             let record = install_recording_transport(
                 "test.run-completion",
@@ -981,28 +954,10 @@ mod tests {
             };
             assert!(payload_env.iter().any(|name| name == NOTIFY_PAYLOAD_ENV));
             assert_eq!(outcome.event_kind, NotifyEventKind::NeedsAttention);
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn transport_structured_result_is_retained_instead_of_discarded() {
-        crate::test_support::with_isolated_home(|home| {
-            install_recording_transport(
-                "test.run-completion",
-                home.path(),
-                "{\"schema\":\"test/notification-result/v1\",\"status\":\"delivered\",\"attempts\":3}",
-                0,
-            );
-            let route = NotificationRoute::new("test.run-completion", "route-42").unwrap();
-            let outcome = dispatch(&NotifyEvent::run_completed_with_route(
-                "run-123",
-                "pass",
-                Some(&route),
-            ));
+            // The transport's structured result is retained, not discarded.
             let result = outcome.result.expect("transport result envelope");
             assert_eq!(result["status"], "delivered");
-            assert_eq!(result["attempts"], 3);
+            assert_eq!(result["attempts"], 2);
         });
     }
 

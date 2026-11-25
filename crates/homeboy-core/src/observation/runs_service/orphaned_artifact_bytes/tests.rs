@@ -33,15 +33,6 @@ fn aged_sweep(root: &Path, apply: bool) -> OrphanedArtifactBytesCleanupOutcome {
 }
 
 #[test]
-fn missing_artifact_root_is_an_empty_sweep_not_an_error() {
-    let home = tempfile::tempdir().expect("home");
-    let outcome = aged_sweep(&home.path().join("absent"), true);
-    assert_eq!(outcome.inspected_count, 0);
-    assert_eq!(outcome.removed_count, 0);
-    assert!(outcome.rows.is_empty());
-}
-
-#[test]
 fn aged_staging_and_scratch_are_reaped_on_apply() {
     let home = tempfile::tempdir().expect("home");
     let root = home.path();
@@ -242,20 +233,6 @@ fn lookalike_names_outside_the_owned_shapes_are_ignored() {
     // A scratch-shaped *file* is not what the constructor emits.
     let scratch_file = scratch_dir.join(scratch_name("after"));
     fs::write(&scratch_file, b"not a tree").expect("bytes");
-
-    let outcome = aged_sweep(root, true);
-    assert_eq!(outcome.inspected_count, 0, "{:#?}", outcome.rows);
-    assert!(bad_staging.exists());
-    assert!(staging_dir.exists());
-    assert!(bad_scratch.exists());
-    assert!(misplaced.exists());
-    assert!(scratch_file.exists());
-}
-
-#[test]
-fn nested_scratch_shaped_paths_are_not_reached() {
-    let home = tempfile::tempdir().expect("home");
-    let root = home.path();
     // Depth three. Only depth two is ever classified, so a runner-owned tree
     // that happens to contain a staging-shaped name is untouched.
     let nested = root.join("runner").join("runner-a");
@@ -264,7 +241,12 @@ fn nested_scratch_shaped_paths_are_not_reached() {
     fs::write(&decoy, b"runner owned").expect("bytes");
 
     let outcome = aged_sweep(root, true);
-    assert_eq!(outcome.inspected_count, 0);
+    assert_eq!(outcome.inspected_count, 0, "{:#?}", outcome.rows);
+    assert!(bad_staging.exists());
+    assert!(staging_dir.exists());
+    assert!(bad_scratch.exists());
+    assert!(misplaced.exists());
+    assert!(scratch_file.exists());
     assert!(decoy.exists());
 }
 

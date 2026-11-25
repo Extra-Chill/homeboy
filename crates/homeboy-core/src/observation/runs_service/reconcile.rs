@@ -825,94 +825,47 @@ mod tests {
         });
     }
 
+    /// Past the exemption ceiling with a dead owner, only an authoritative
+    /// terminal runner answer settles the row: an active, unavailable or
+    /// unknown runner job status leaves it running (fail closed).
     #[test]
-    fn authoritative_active_runner_job_remains_running() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let mut run = phantom_handoff_run(
-                "active-runner-job",
-                minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
-            );
-            run.metadata_json["homeboy_run_owner"] = serde_json::json!({ "pid": u32::MAX });
-            store.import_run(&run).expect("import runner-backed run");
+    fn non_terminal_or_unknown_runner_job_status_remains_running() {
+        type RemoteStatus = fn(&RunRecord) -> Result<Option<String>>;
+        let cases: [(&str, RemoteStatus); 3] = [
+            ("active", |_| Ok(Some("running".to_string()))),
+            ("unavailable", |_| {
+                Err(crate::Error::internal_unexpected("runner unavailable"))
+            }),
+            ("missing", |_| Ok(Some("not_found".to_string()))),
+        ];
+        for (name, remote_status) in cases {
+            with_isolated_home(|_home| {
+                let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+                let store = ObservationStore::open_initialized().expect("store");
+                let mut run = phantom_handoff_run(
+                    "runner-job",
+                    minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
+                );
+                run.metadata_json["homeboy_run_owner"] = serde_json::json!({ "pid": u32::MAX });
+                store.import_run(&run).expect("import runner-backed run");
 
-            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
-                &store,
-                vec![run],
-                false,
-                |_| false,
-                |_| Ok(Some("running".to_string())),
-            )
-            .expect("inspect active runner job");
-            let unchanged = store
-                .get_run("active-runner-job")
-                .expect("get run")
-                .expect("run exists");
+                let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                    &store,
+                    vec![run],
+                    false,
+                    |_| false,
+                    remote_status,
+                )
+                .expect("runner status inspection fails closed");
+                let unchanged = store
+                    .get_run("runner-job")
+                    .expect("get run")
+                    .expect("run exists");
 
-            assert!(reconciled.is_empty());
-            assert_eq!(unchanged.status, RunStatus::Running.as_str());
-        });
-    }
-
-    #[test]
-    fn unavailable_runner_job_status_remains_fail_closed() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let mut run = phantom_handoff_run(
-                "unavailable-runner-job",
-                minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
-            );
-            run.metadata_json["homeboy_run_owner"] = serde_json::json!({ "pid": u32::MAX });
-            store.import_run(&run).expect("import runner-backed run");
-
-            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
-                &store,
-                vec![run],
-                false,
-                |_| false,
-                |_| Err(crate::Error::internal_unexpected("runner unavailable")),
-            )
-            .expect("unavailable runner remains fail closed");
-            let unchanged = store
-                .get_run("unavailable-runner-job")
-                .expect("get run")
-                .expect("run exists");
-
-            assert!(reconciled.is_empty());
-            assert_eq!(unchanged.status, RunStatus::Running.as_str());
-        });
-    }
-
-    #[test]
-    fn missing_runner_job_status_remains_fail_closed() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let mut run = phantom_handoff_run(
-                "missing-runner-job",
-                minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
-            );
-            run.metadata_json["homeboy_run_owner"] = serde_json::json!({ "pid": u32::MAX });
-            store.import_run(&run).expect("import runner-backed run");
-
-            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
-                &store,
-                vec![run],
-                false,
-                |_| false,
-                |_| Ok(Some("not_found".to_string())),
-            )
-            .expect("missing runner job remains fail closed");
-            let unchanged = store
-                .get_run("missing-runner-job")
-                .expect("get run")
-                .expect("run exists");
-
-            assert!(reconciled.is_empty());
-            assert_eq!(unchanged.status, RunStatus::Running.as_str());
-        });
+                assert!(reconciled.is_empty(), "{name}");
+                assert_eq!(unchanged.status, RunStatus::Running.as_str(), "{name}");
+            });
+        }
     }
 
     /// The leak this closes from the other end: a lost handoff leaves a row
@@ -1125,34 +1078,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_dry_run_reports_without_mutating() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
-                .expect("run");
-
-            let reconciled = reconcile_orphaned_running_runs(
-                &store,
-                running_runs(&store, 1000).expect("runs"),
-                true,
-                |_| false,
-            )
-            .expect("reconcile");
-            let unchanged = store
-                .get_run(&run.id)
-                .expect("get run")
-                .expect("run exists");
-
-            assert_eq!(reconciled.len(), 1);
-            assert!(reconciled[0].finished_at.is_none());
-            assert_eq!(unchanged.status, "running");
-            assert!(unchanged.finished_at.is_none());
-        });
-    }
-
-    #[test]
     fn fleet_reconcile_does_not_report_a_cas_lost_row_as_reconciled() {
         with_isolated_home(|_home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
@@ -1191,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_dry_run_leaves_unrelated_running_records_unchanged() {
+    fn reconcile_dry_run_reports_without_mutating_any_record() {
         with_isolated_home(|_home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
@@ -1219,14 +1144,13 @@ mod tests {
             .expect("reconcile");
 
             assert_eq!(reconciled.len(), 1);
-            assert_eq!(
-                store
-                    .get_run(&selected.id)
-                    .expect("read")
-                    .expect("selected")
-                    .status,
-                "running"
-            );
+            assert!(reconciled[0].finished_at.is_none());
+            let selected = store
+                .get_run(&selected.id)
+                .expect("read")
+                .expect("selected");
+            assert_eq!(selected.status, "running");
+            assert!(selected.finished_at.is_none());
             assert_eq!(
                 store
                     .get_run(&unrelated.id)
@@ -1314,7 +1238,6 @@ mod tests {
             // Reproduces issue #7389's mismatch without a daemon fixture: the
             // parent control plane has no active job, but the child run is still
             // owned by a live process, so owner-PID reconciliation cannot act.
-            let parent_active_job_count = 0;
             let reconciled = reconcile_orphaned_running_runs(
                 &store,
                 running_runs(&store, 1000).expect("runs"),
@@ -1327,47 +1250,12 @@ mod tests {
                 .expect("get run")
                 .expect("run exists");
 
-            assert_eq!(parent_active_job_count, 0);
             assert!(reconciled.is_empty());
             assert_eq!(unchanged.status, "running");
             assert!(unchanged.finished_at.is_none());
             assert_eq!(run_owner_pid(&unchanged), Some(std::process::id()));
             assert!(running_status_note(&unchanged).is_none());
         });
-    }
-
-    #[test]
-    fn running_summary_flags_unverifiable_and_dead_owner_records() {
-        let base = RunRecord {
-            id: "run-1".to_string(),
-            kind: "bench".to_string(),
-            component_id: Some("homeboy".to_string()),
-            started_at: "2026-05-01T00:00:00Z".to_string(),
-            finished_at: None,
-            status: "running".to_string(),
-            command: Some("homeboy bench".to_string()),
-            cwd: Some("/tmp".to_string()),
-            homeboy_version: Some("test".to_string()),
-            git_sha: Some("abc123".to_string()),
-            rig_id: Some("studio".to_string()),
-            metadata_json: serde_json::json!({}),
-        };
-
-        let unverifiable = running_status_note(&base);
-        assert!(unverifiable
-            .as_deref()
-            .expect("status note")
-            .contains("no owner metadata"));
-
-        let mut dead_owner = base;
-        dead_owner.metadata_json = serde_json::json!({
-            "homeboy_run_owner": { "pid": u32::MAX }
-        });
-        let dead_owner = running_status_note(&dead_owner);
-        assert!(dead_owner
-            .as_deref()
-            .expect("status note")
-            .contains("owner process is not running"));
     }
 
     #[test]

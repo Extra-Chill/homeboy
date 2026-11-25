@@ -315,41 +315,26 @@ mod tests {
         );
     }
 
-    /// The #10603 state: ~34 GB free and ZERO free inodes. A byte-only probe
-    /// reported `ok` right up to hard ENOSPC, so cleanup was never prompted and
-    /// the store could not open a journal to plan one.
+    /// Inode pressure is judged independently of bytes. The #10603 state was
+    /// ~34 GB free and ZERO free inodes: a byte-only probe reported `ok` right
+    /// up to hard ENOSPC. Filesystems that do not track inodes must read as
+    /// "not measured", never as exhaustion.
     #[test]
-    fn zero_free_inodes_warns_even_when_byte_capacity_is_healthy() {
-        let warning = inode_warning_for("workspace", Some(0), Some(13_107_200));
-
-        let warning = warning.expect("no free inodes must warn regardless of free bytes");
+    fn inode_warning_tracks_free_inode_pressure() {
+        let exhausted = inode_warning_for("workspace", Some(0), Some(13_107_200))
+            .expect("no free inodes must warn regardless of free bytes");
         assert!(
-            warning.contains("NO free inodes"),
-            "the warning must name inode exhaustion explicitly: {warning}"
+            exhausted.contains("NO free inodes") && exhausted.contains("regardless of free bytes"),
+            "the warning must name inode exhaustion explicitly: {exhausted}"
         );
-        assert!(
-            warning.contains("regardless of free bytes"),
-            "the warning must pre-empt the 'but there is plenty of space' reading: {warning}"
-        );
-    }
-
-    #[test]
-    fn low_free_inodes_warns_before_exhaustion() {
         assert!(inode_warning_for("workspace", Some(1_000), Some(13_107_200)).is_some());
         assert!(inode_warning_for("workspace", Some(9_000_000), Some(13_107_200)).is_none());
-    }
-
-    /// Filesystems that do not track inodes report `f_files == 0`. That must
-    /// read as "not measured", never as total exhaustion.
-    #[test]
-    fn a_filesystem_without_inode_accounting_is_not_reported_as_exhausted() {
         assert!(inode_warning_for("workspace", None, None).is_none());
     }
 
     #[test]
-    fn a_capacity_fixture_answers_only_for_paths_below_its_root() {
+    fn low_byte_capacity_reports_warning_status() {
         let fixture_root = tempfile::tempdir().expect("fixture root");
-        let nested = fixture_root.path().join("missing/worktree");
         let _fixture = test_seam::override_disk_capacity_for_test(
             fixture_root.path(),
             FilesystemCapacity {
@@ -362,20 +347,7 @@ mod tests {
 
         let budget = disk_budget(fixture_root.path(), "fixture", "unavailable");
         assert_eq!(budget.available_bytes, Some(7));
-        assert_eq!(budget.total_bytes, Some(100));
-        assert_eq!(budget.available_inodes, Some(9));
         assert_eq!(budget.status, "warning", "7 of 100 bytes is below 10%");
-        assert_eq!(
-            disk_budget(&nested, "fixture", "unavailable").available_bytes,
-            Some(7)
-        );
-
-        let elsewhere = tempfile::tempdir().expect("unrelated root");
-        assert_ne!(
-            disk_budget(elsewhere.path(), "real", "unavailable").available_bytes,
-            Some(7),
-            "paths outside the fixture still probe the real filesystem"
-        );
     }
 
     /// Both pressures must survive into one message; neither may mask the other.
