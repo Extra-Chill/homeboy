@@ -1647,6 +1647,24 @@ impl ObservationStore {
             .map_err(sqlite_error("read pending unmaterialized Cook admissions"))
     }
 
+    /// Whether a workflow instance's controller job is still active in the
+    /// daemon ledger. That job, not the process that created the row, owns
+    /// the instance's run: a restarted daemon resumes it in place.
+    pub fn workflow_instance_job_is_active(&self, instance: &str) -> Result<bool> {
+        if self.connection.path().is_none_or(str::is_empty) {
+            return Ok(false);
+        }
+        self.connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM daemon_jobs WHERE active = 1 \
+                 AND json_extract(body, '$.controller_job.job_type') = 'workflow' \
+                 AND json_extract(body, '$.controller_job.public_request.instance') = ?1)",
+                [instance],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error("read active workflow instance job"))
+    }
+
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
         Ok(self.list_runs_page(filter)?.runs)
     }

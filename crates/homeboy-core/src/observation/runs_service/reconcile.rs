@@ -181,6 +181,11 @@ where
         if handoff_is_transferring(run) {
             continue;
         }
+        // A workflow row belongs to its controller job, which a restarted
+        // daemon resumes in place; the creating process's exit proves nothing.
+        if run.kind == "workflow" && store.workflow_instance_job_is_active(&run.id)? {
+            continue;
+        }
         // An unavailable or malformed runner answer cannot prove terminality.
         // Leave the row running rather than falling back to daemon-PID or age
         // heuristics that could contradict live remote work.
