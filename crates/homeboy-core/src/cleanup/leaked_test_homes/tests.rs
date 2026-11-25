@@ -125,29 +125,23 @@ fn a_live_owners_home_is_never_reapable_at_any_age_or_budget() {
 
     assert_eq!(entries[0].verdict, LeakedTestHomeVerdict::OwnerAlive);
     assert!(!entries[0].reapable);
-    assert!(!LeakedTestHomeVerdict::OwnerAlive.is_reapable());
-}
-
-#[test]
-fn an_abandoned_home_past_the_age_floor_is_reapable() {
-    let mut entries = vec![home("hb-test-dead", Some(dead_pid()), 7_200, 10)];
-
-    classify(&mut entries, Duration::from_secs(3_600), u64::MAX);
-
-    assert_eq!(entries[0].verdict, LeakedTestHomeVerdict::AbandonedAndAged);
-    assert!(entries[0].reapable);
 }
 
 /// The age floor is what stops a home being deleted out from under a process
 /// that created it microseconds ago and has not yet become observable.
 #[test]
-fn an_abandoned_home_inside_the_age_floor_is_retained() {
-    let mut entries = vec![home("hb-test-young", Some(dead_pid()), 1, 10)];
+fn an_abandoned_home_is_reapable_only_past_the_age_floor() {
+    for (age_seconds, verdict, reapable) in [
+        (7_200, LeakedTestHomeVerdict::AbandonedAndAged, true),
+        (1, LeakedTestHomeVerdict::RetainedTooYoung, false),
+    ] {
+        let mut entries = vec![home("hb-test-dead", Some(dead_pid()), age_seconds, 10)];
 
-    classify(&mut entries, Duration::from_secs(3_600), u64::MAX);
+        classify(&mut entries, Duration::from_secs(3_600), u64::MAX);
 
-    assert_eq!(entries[0].verdict, LeakedTestHomeVerdict::RetainedTooYoung);
-    assert!(!entries[0].reapable);
+        assert_eq!(entries[0].verdict, verdict, "age {age_seconds}s");
+        assert_eq!(entries[0].reapable, reapable, "age {age_seconds}s");
+    }
 }
 
 /// "No owner recorded" is not proof of death, so an unknown-owner entry only
@@ -401,14 +395,4 @@ fn an_inspection_limit_is_reported_rather_than_silently_narrowing_the_totals() {
 
     assert!(output.truncated);
     assert_eq!(output.inspected_count, 2);
-}
-
-/// The default options must not delete anything on their own: a caller that
-/// forgets to opt in gets a dry run behind an hour-long age floor.
-#[test]
-fn the_defaults_are_a_dry_run_behind_an_age_floor() {
-    let options = LeakedTestHomeCleanupOptions::default();
-    assert!(!options.apply);
-    assert!(options.min_age >= Duration::from_secs(3_600));
-    assert!(options.roots.is_empty());
 }

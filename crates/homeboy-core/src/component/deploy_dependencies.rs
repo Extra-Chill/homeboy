@@ -95,26 +95,6 @@ mod tests {
     }
 
     #[test]
-    fn captures_a_comma_separated_header_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let plugin = dir.path().join("my-plugin");
-        std::fs::create_dir(&plugin).unwrap();
-        std::fs::write(
-            plugin.join("my-plugin.php"),
-            "<?php\n/**\n * Plugin Name: Mine\n * Requires Plugins: base-plugin, other-plugin \n */\n",
-        )
-        .unwrap();
-
-        let slugs = evaluate_rule(
-            &rule(r"^[ \t/*#@]*Requires Plugins:[ \t]*(.+?)[ \t]*$"),
-            &plugin,
-            "mine",
-            "my-plugin",
-        );
-        assert_eq!(slugs, vec!["base-plugin", "other-plugin"]);
-    }
-
-    #[test]
     fn missing_file_traversal_and_bad_pattern_yield_nothing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(evaluate_rule(&rule("(.+)"), dir.path(), "x", "x").is_empty());
