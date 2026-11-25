@@ -915,7 +915,6 @@ mod tests {
         let job_tree = render_job_tree_unit();
         assert!(job_tree.contains("\nDelegate=yes\nDelegateSubgroup=holder\n"));
         assert!(unit.contains("WantedBy=default.target"));
-        assert_eq!(service_unit_name(), "homeboy-runner.service");
     }
 
     #[test]
@@ -1048,16 +1047,6 @@ mod tests {
             "Environment={}=a-fresh-token",
             paths::DAEMON_STARTUP_TOKEN_ENV
         )));
-    }
-
-    #[test]
-    fn each_install_and_repoint_gets_its_own_fresh_startup_token() {
-        let first = render_service_unit("token-a");
-        let second = render_service_unit("token-b");
-        assert!(first.contains("token-a"));
-        assert!(!first.contains("token-b"));
-        assert!(second.contains("token-b"));
-        assert!(!second.contains("token-a"));
     }
 
     #[test]

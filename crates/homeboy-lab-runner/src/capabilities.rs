@@ -1115,7 +1115,25 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
-    pub(crate) use crate::test_support::ssh_runner;
+    use crate::test_support::ssh_runner;
+
+    fn local_runner(
+        env: HashMap<String, String>,
+        resources: HashMap<String, serde_json::Value>,
+    ) -> Runner {
+        Runner {
+            id: "local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env,
+            secret_env: Default::default(),
+            resources,
+            policy: RunnerPolicy::default(),
+        }
+    }
+
     #[test]
     fn capability_preflight_uses_injected_homeboy_command() {
         let mut runner = ssh_runner();
@@ -1204,47 +1222,13 @@ mod tests {
     }
 
     #[test]
-    fn prepared_lab_runner_capability_converts_to_preflight() {
-        let preflight: RunnerCapabilityPreflight =
-            prepare_lab_runner_capability(LabRunnerCapabilityContract {
-                command: "test".to_string(),
-                required_tools: vec![
-                    RunnerRequiredTool::new("runtime"),
-                    RunnerRequiredTool::new("workspace-manager"),
-                ],
-                required_capabilities: Vec::new(),
-            })
-            .into();
-
-        assert_eq!(preflight.command, "test");
-        assert_eq!(
-            preflight.required_tools,
-            vec![
-                RunnerRequiredTool::git(),
-                RunnerRequiredTool::new("runtime"),
-                RunnerRequiredTool::new("workspace-manager"),
-            ]
-        );
-    }
-
-    #[test]
     fn opaque_capability_blocks_then_admits_a_connected_fresh_runner() {
         let plan = prepare_lab_runner_capability(LabRunnerCapabilityContract {
             command: "capability audit".to_string(),
             required_tools: Vec::new(),
             required_capabilities: vec!["capability.alpha".to_string()],
         });
-        let mut runner = Runner {
-            id: "local".to_string(),
-            kind: RunnerKind::Local,
-            server_id: None,
-            workspace_root: None,
-            settings: RunnerSettings::default(),
-            env: HashMap::new(),
-            secret_env: Default::default(),
-            resources: Default::default(),
-            policy: RunnerPolicy::default(),
-        };
+        let mut runner = local_runner(HashMap::new(), HashMap::new());
 
         let missing = evaluate_lab_runner_capabilities_for_runner(
             &runner,
@@ -1279,13 +1263,8 @@ mod tests {
             .status()
             .expect("make fake command executable");
         assert!(status.success());
-        let runner = Runner {
-            id: "local".to_string(),
-            kind: RunnerKind::Local,
-            server_id: None,
-            workspace_root: None,
-            settings: RunnerSettings::default(),
-            env: [(
+        let runner = local_runner(
+            [(
                 "PATH".to_string(),
                 format!(
                     "{}:{}",
@@ -1295,10 +1274,8 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-            secret_env: Default::default(),
-            resources: Default::default(),
-            policy: RunnerPolicy::default(),
-        };
+            HashMap::new(),
+        );
         let preflight = RunnerCapabilityPreflight {
             command: "test".to_string(),
             required_tool_capabilities: vec![RunnerToolCapabilityRequirement {
@@ -1332,113 +1309,59 @@ mod tests {
         assert_eq!(error.details["runner_id"], "lab");
     }
 
+    /// An explicit runner is eligible only when it has every required tool
+    /// and declared capability; a missing one is named with explicit-runner
+    /// remediation.
     #[test]
-    fn lab_runner_gate_allows_capable_runner() {
-        let plan = PreparedLabRunnerCapability {
-            command: "lint".to_string(),
-            required_tools: vec![
-                RunnerRequiredTool::git(),
-                RunnerRequiredTool::new("runtime"),
-                RunnerRequiredTool::new("workspace-manager"),
-            ],
-            required_capabilities: Vec::new(),
-        };
-        let capabilities = RunnerCapabilitySnapshot {
-            tools: [
-                RunnerRequiredTool::git(),
-                RunnerRequiredTool::new("runtime"),
-                RunnerRequiredTool::new("workspace-manager"),
-            ]
-            .into_iter()
-            .collect(),
-            tool_probe_evidence: BTreeMap::new(),
-            commands: BTreeSet::new(),
-            tool_capabilities: BTreeSet::new(),
-            failed_toolchain_probes: HashMap::new(),
-            components: BTreeSet::new(),
-        };
-
-        assert_eq!(
-            evaluate_lab_runner_capabilities(
-                "lab",
-                &plan,
-                &capabilities,
-                LabRunnerGateMode::Explicit,
-            ),
-            LabRunnerGateDecision::Eligible
-        );
-    }
-
-    #[test]
-    fn lab_runner_gate_reports_missing_tool_for_explicit_runner() {
+    fn lab_runner_gate_admits_only_runners_with_every_requirement() {
         let plan = PreparedLabRunnerCapability {
             command: "test".to_string(),
             required_tools: vec![
                 RunnerRequiredTool::git(),
                 RunnerRequiredTool::new("workspace-manager"),
             ],
-            required_capabilities: Vec::new(),
-        };
-        let capabilities = RunnerCapabilitySnapshot {
-            tools: [RunnerRequiredTool::git()].into_iter().collect(),
-            tool_probe_evidence: BTreeMap::new(),
-            commands: BTreeSet::new(),
-            tool_capabilities: BTreeSet::new(),
-            failed_toolchain_probes: HashMap::new(),
-            components: BTreeSet::new(),
-        };
-
-        let decision = evaluate_lab_runner_capabilities(
-            "lab",
-            &plan,
-            &capabilities,
-            LabRunnerGateMode::Explicit,
-        );
-
-        let LabRunnerGateDecision::Missing {
-            missing_tools,
-            reason,
-            remediation,
-            ..
-        } = decision
-        else {
-            panic!("expected missing tool decision");
-        };
-        assert_eq!(
-            missing_tools,
-            vec![RunnerRequiredTool::new("workspace-manager")]
-        );
-        assert!(reason.contains("Lab offload runner 'lab'"));
-        assert!(reason.contains("workspace-manager"));
-        assert!(remediation
-            .iter()
-            .any(|item| item.contains("omit --runner")));
-    }
-
-    #[test]
-    fn lab_runner_gate_refuses_a_runner_missing_a_declared_capability() {
-        let plan = PreparedLabRunnerCapability {
-            command: "agent-task".to_string(),
-            required_tools: vec![RunnerRequiredTool::git()],
             required_capabilities: vec!["browser".to_string()],
         };
-        let decision = evaluate_lab_runner_capabilities(
-            "lab",
-            &plan,
-            &RunnerCapabilitySnapshot {
-                tools: [RunnerRequiredTool::git()].into_iter().collect(),
-                tool_probe_evidence: BTreeMap::new(),
-                commands: BTreeSet::new(),
-                tool_capabilities: BTreeSet::new(),
-                failed_toolchain_probes: HashMap::new(),
-                components: BTreeSet::new(),
-            },
-            LabRunnerGateMode::Explicit,
-        );
-        let LabRunnerGateDecision::Missing { missing_tools, .. } = decision else {
-            panic!("runner without declared capability must be refused");
+        let snapshot = |tools: &[&str]| RunnerCapabilitySnapshot {
+            tools: tools
+                .iter()
+                .map(|tool| RunnerRequiredTool::new(*tool))
+                .collect(),
+            ..Default::default()
         };
-        assert_eq!(missing_tools, vec![RunnerRequiredTool::new("browser")]);
+        let evaluate = |tools: &[&str]| {
+            evaluate_lab_runner_capabilities(
+                "lab",
+                &plan,
+                &snapshot(tools),
+                LabRunnerGateMode::Explicit,
+            )
+        };
+
+        assert_eq!(
+            evaluate(&["git", "workspace-manager", "browser"]),
+            LabRunnerGateDecision::Eligible
+        );
+        for (tools, missing) in [
+            (&["git", "browser"][..], "workspace-manager"),
+            (&["git", "workspace-manager"][..], "browser"),
+        ] {
+            let LabRunnerGateDecision::Missing {
+                missing_tools,
+                reason,
+                remediation,
+                ..
+            } = evaluate(tools)
+            else {
+                panic!("runner without {missing} must be refused");
+            };
+            assert_eq!(missing_tools, vec![RunnerRequiredTool::new(missing)]);
+            assert!(reason.contains("Lab offload runner 'lab'"));
+            assert!(reason.contains(missing));
+            assert!(remediation
+                .iter()
+                .any(|item| item.contains("omit --runner")));
+        }
     }
 
     #[test]
@@ -1481,11 +1404,7 @@ mod tests {
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
-            tool_probe_evidence: BTreeMap::new(),
-            commands: BTreeSet::new(),
-            tool_capabilities: BTreeSet::new(),
-            failed_toolchain_probes: HashMap::new(),
-            components: BTreeSet::new(),
+            ..Default::default()
         };
 
         let decision = evaluate_lab_runner_capabilities(
@@ -1509,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_capability_preflight_reports_missing_tools_components_and_env() {
+    fn runner_capability_preflight_reports_missing_tools_commands_components_and_env() {
         let preflight = RunnerCapabilityPreflight {
             command: "test".to_string(),
             required_tools: vec![
@@ -1517,19 +1436,31 @@ mod tests {
                 RunnerRequiredTool::new("workspace-manager"),
             ],
             required_commands: vec!["zip".to_string()],
-            required_tool_capabilities: Vec::new(),
-            required_toolchain_probes: Vec::new(),
             required_components: vec!["fixture-a".to_string(), "fixture-b".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
-            timeout: None,
+            ..Default::default()
         };
+        let satisfied = RunnerCapabilitySnapshot {
+            tools: [
+                RunnerRequiredTool::git(),
+                RunnerRequiredTool::new("workspace-manager"),
+            ]
+            .into_iter()
+            .collect(),
+            commands: ["zip".to_string()].into_iter().collect(),
+            components: ["fixture-a".to_string(), "fixture-b".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let env = HashMap::from([("HOMEBOY_TOKEN".to_string(), "present".to_string())]);
+        validate_runner_capability_preflight("lab", &preflight, &satisfied, &env)
+            .expect("capability parity passes");
+
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
-            tool_probe_evidence: BTreeMap::new(),
-            commands: BTreeSet::new(),
-            tool_capabilities: BTreeSet::new(),
-            failed_toolchain_probes: HashMap::new(),
             components: ["fixture-a".to_string()].into_iter().collect(),
+            ..Default::default()
         };
 
         let err =
@@ -1600,11 +1531,7 @@ mod tests {
             tools: [RunnerRequiredTool::new("playwright")]
                 .into_iter()
                 .collect(),
-            tool_probe_evidence: BTreeMap::new(),
-            commands: BTreeSet::new(),
-            tool_capabilities: BTreeSet::new(),
-            failed_toolchain_probes: HashMap::new(),
-            components: BTreeSet::new(),
+            ..Default::default()
         };
         validate_runner_capability_preflight("lab", &preflight, &capable, &HashMap::new())
             .expect("a runner providing the declared capability passes");
@@ -1619,41 +1546,6 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("tools: playwright"));
-    }
-
-    #[test]
-    fn runner_capability_preflight_accepts_matching_requirements() {
-        let preflight = RunnerCapabilityPreflight {
-            command: "lint".to_string(),
-            required_tools: vec![
-                RunnerRequiredTool::git(),
-                RunnerRequiredTool::new("runtime"),
-            ],
-            required_commands: vec!["zip".to_string()],
-            required_tool_capabilities: Vec::new(),
-            required_toolchain_probes: Vec::new(),
-            required_components: vec!["fixture-a".to_string()],
-            required_env: vec!["HOMEBOY_TOKEN".to_string()],
-            timeout: None,
-        };
-        let capabilities = RunnerCapabilitySnapshot {
-            tools: [
-                RunnerRequiredTool::git(),
-                RunnerRequiredTool::new("runtime"),
-            ]
-            .into_iter()
-            .collect(),
-            tool_probe_evidence: BTreeMap::new(),
-            commands: ["zip".to_string()].into_iter().collect(),
-            tool_capabilities: BTreeSet::new(),
-            failed_toolchain_probes: HashMap::new(),
-            components: ["fixture-a".to_string()].into_iter().collect(),
-        };
-        let mut env = HashMap::new();
-        env.insert("HOMEBOY_TOKEN".to_string(), "present".to_string());
-
-        validate_runner_capability_preflight("lab", &preflight, &capabilities, &env)
-            .expect("capability parity passes");
     }
 
     #[test]
@@ -1674,21 +1566,15 @@ mod tests {
         )
         .expect("write git on PATH");
 
-        let runner = Runner {
-            id: "local".to_string(),
-            kind: RunnerKind::Local,
-            server_id: None,
-            workspace_root: None,
-            settings: RunnerSettings::default(),
-            env: HashMap::from([
+        let runner = local_runner(
+            HashMap::from([
                 ("HOMEBOY_COMMAND".to_string(), homeboy.display().to_string()),
                 (
                     "PATH".to_string(),
                     format!("{}:/bin", fixture.path().display()),
                 ),
             ]),
-            secret_env: Default::default(),
-            resources: HashMap::from([(
+            HashMap::from([(
                 "tools".to_string(),
                 json!({
                     "git": {
@@ -1697,8 +1583,7 @@ mod tests {
                     }
                 }),
             )]),
-            policy: RunnerPolicy::default(),
-        };
+        );
         let preflight = RunnerCapabilityPreflight {
             command: "agent-task cook".to_string(),
             required_tools: vec![RunnerRequiredTool::homeboy(), RunnerRequiredTool::git()],
@@ -1772,20 +1657,13 @@ mod tests {
         )
         .expect("write tool");
 
-        let mut runner = Runner {
-            id: "local".to_string(),
-            kind: RunnerKind::Local,
-            server_id: None,
-            workspace_root: None,
-            settings: RunnerSettings::default(),
-            env: HashMap::from([(
+        let mut runner = local_runner(
+            HashMap::from([(
                 "HOMEBOY_WP_CODEBOX_BIN".to_string(),
                 bin.to_string_lossy().to_string(),
             )]),
-            secret_env: Default::default(),
-            resources: Default::default(),
-            policy: RunnerPolicy::default(),
-        };
+            HashMap::new(),
+        );
         let preflight = RunnerCapabilityPreflight {
             command: "bench".to_string(),
             required_tool_capabilities: vec![RunnerToolCapabilityRequirement {
@@ -1827,17 +1705,7 @@ mod tests {
 
     #[test]
     fn toolchain_probe_rejects_a_present_command_when_its_usable_probe_fails() {
-        let runner = Runner {
-            id: "local".to_string(),
-            kind: RunnerKind::Local,
-            server_id: None,
-            workspace_root: None,
-            settings: RunnerSettings::default(),
-            env: HashMap::new(),
-            secret_env: Default::default(),
-            resources: Default::default(),
-            policy: RunnerPolicy::default(),
-        };
+        let runner = local_runner(HashMap::new(), HashMap::new());
         let preflight = RunnerCapabilityPreflight {
             command: "lint".to_string(),
             required_commands: vec!["sh".to_string()],

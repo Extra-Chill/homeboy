@@ -588,30 +588,20 @@ mod tests {
     }
 
     #[test]
-    fn explicit_job_binary_is_not_replaced_by_runner_configuration() {
-        let mut env = HashMap::from([(
-            "HOMEBOY_COMMAND".to_string(),
-            "/build-b/homeboy".to_string(),
-        )]);
+    fn configured_binary_fills_in_only_when_the_job_selects_none() {
+        for (selected, expected) in [
+            (Some("/build-b/homeboy"), "/build-b/homeboy"),
+            (None, "/build-a/homeboy"),
+        ] {
+            let mut env = HashMap::new();
+            if let Some(selected) = selected {
+                env.insert("HOMEBOY_COMMAND".to_string(), selected.to_string());
+            }
 
-        normalize_runner_command_env_for_homeboy_path(&mut env, Some("/build-a/homeboy"));
+            normalize_runner_command_env_for_homeboy_path(&mut env, Some("/build-a/homeboy"));
 
-        assert_eq!(
-            env.get("HOMEBOY_COMMAND"),
-            Some(&"/build-b/homeboy".to_string())
-        );
-    }
-
-    #[test]
-    fn configured_binary_is_used_when_job_does_not_select_one() {
-        let mut env = HashMap::new();
-
-        normalize_runner_command_env_for_homeboy_path(&mut env, Some("/build-a/homeboy"));
-
-        assert_eq!(
-            env.get("HOMEBOY_COMMAND"),
-            Some(&"/build-a/homeboy".to_string())
-        );
+            assert_eq!(env["HOMEBOY_COMMAND"], expected, "{selected:?}");
+        }
     }
 
     #[test]
@@ -644,188 +634,96 @@ mod tests {
         assert!(!env.contains_key("HOMEBOY_COMMAND"));
     }
 
+    /// Every path-bearing surface (`--setting`, `--setting-json`, path-like
+    /// env, path argv flags, passthrough args) that carries an unmapped
+    /// controller-local path fails before dispatch and names the surface.
     #[test]
-    fn preflight_rejects_split_path_setting_with_unmapped_controller_path() {
+    fn preflight_rejects_unmapped_controller_paths_on_every_surface() {
         let controller = tempfile::tempdir().expect("controller");
         let source = controller.path().join("primary");
-        let fixture = controller.path().join("fixture-root");
+        let local = controller.path().join("local");
         fs::create_dir_all(&source).expect("source");
-        fs::create_dir_all(&fixture).expect("fixture");
-        let command = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--setting".to_string(),
-            format!("fixture_root={}", fixture.display()),
-        ];
-
-        let err = preflight_remote_path_bearing_surfaces(
-            "Lab offload",
-            "lab-runner",
-            &command,
-            &HashMap::new(),
-            &source,
-            "/runner/workspaces/primary",
-            &[],
-        )
-        .expect_err("unmapped path setting must fail locally");
-
-        assert!(err.message.contains("lab-runner"));
-        assert!(err.message.contains("controller-local absolute paths"));
-        assert!(err
-            .details
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| id.contains("--setting fixture_root")));
-        assert!(err
-            .details
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| id.contains("exists locally: true")));
-    }
-
-    #[test]
-    fn preflight_rejects_inline_json_setting_with_unmapped_controller_path() {
-        let controller = tempfile::tempdir().expect("controller");
-        let source = controller.path().join("primary");
-        let nested = controller.path().join("nested");
-        fs::create_dir_all(&source).expect("source");
-        fs::create_dir_all(&nested).expect("nested");
-        let command = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            format!(
-                "--setting-json=config_paths={}",
-                serde_json::json!({ "fixtures": [nested.display().to_string()] })
+        fs::create_dir_all(&local).expect("local");
+        let local = local.display().to_string();
+        let argv = |args: &[&str]| -> Vec<String> {
+            ["homeboy"]
+                .iter()
+                .chain(args)
+                .map(|arg| arg.to_string())
+                .collect()
+        };
+        let macos_temp = "/var/folders/ab/cd/T/homeboy-shared-state";
+        let setting = format!("fixture_root={local}");
+        let setting_json = format!(
+            "--setting-json=config_paths={}",
+            serde_json::json!({ "fixtures": [local] })
+        );
+        let cases: Vec<(Vec<String>, HashMap<String, String>, Vec<&str>)> = vec![
+            (
+                argv(&["bench", "--setting", &setting]),
+                HashMap::new(),
+                vec!["--setting fixture_root", "exists locally: true", &local],
+            ),
+            (
+                argv(&["bench", &setting_json]),
+                HashMap::new(),
+                vec!["--setting-json config_paths", &local],
+            ),
+            (
+                argv(&["test"]),
+                HashMap::from([("TOOL_ROOT".to_string(), local.clone())]),
+                vec!["env `TOOL_ROOT`", &local],
+            ),
+            (
+                argv(&["agent-task", "dispatch", "--cwd", &local]),
+                HashMap::new(),
+                vec!["arg `--cwd`", &local],
+            ),
+            (
+                argv(&[
+                    "bench",
+                    "sample",
+                    "--path",
+                    "/runner/workspaces/primary",
+                    "--",
+                    "--shared-state",
+                    macos_temp,
+                ]),
+                HashMap::new(),
+                vec!["arg `--shared-state`", macos_temp],
             ),
         ];
 
-        let err = preflight_remote_path_bearing_surfaces(
-            "Lab offload",
-            "lab-runner",
-            &command,
-            &HashMap::new(),
-            &source,
-            "/runner/workspaces/primary",
-            &[],
-        )
-        .expect_err("unmapped json path setting must fail locally");
+        for (command, env, expected) in cases {
+            let err = preflight_remote_path_bearing_surfaces(
+                "Lab offload",
+                "lab-runner",
+                &command,
+                &env,
+                &source,
+                "/runner/workspaces/primary",
+                &[],
+            )
+            .expect_err("unmapped controller path must fail locally");
 
-        let id = err
-            .details
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        assert!(id.contains("--setting-json config_paths"));
-        assert!(id.contains(&nested.display().to_string()));
-    }
-
-    #[test]
-    fn preflight_rejects_path_like_env_override_with_controller_path() {
-        let controller = tempfile::tempdir().expect("controller");
-        let source = controller.path().join("primary");
-        let tools = controller.path().join("tools");
-        fs::create_dir_all(&source).expect("source");
-        fs::create_dir_all(&tools).expect("tools");
-        let env = HashMap::from([("TOOL_ROOT".to_string(), tools.display().to_string())]);
-
-        let err = preflight_remote_path_bearing_surfaces(
-            "Lab offload",
-            "lab-runner",
-            &["homeboy".to_string(), "test".to_string()],
-            &env,
-            &source,
-            "/runner/workspaces/primary",
-            &[],
-        )
-        .expect_err("unmapped path env must fail locally");
-
-        let id = err
-            .details
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        assert!(id.contains("env `TOOL_ROOT`"));
-        assert!(id.contains(&tools.display().to_string()));
-    }
-
-    #[test]
-    fn preflight_rejects_path_bearing_argv_flag_with_controller_path() {
-        let controller = tempfile::tempdir().expect("controller");
-        let source = controller.path().join("primary");
-        let cwd = controller.path().join("workload");
-        fs::create_dir_all(&source).expect("source");
-        fs::create_dir_all(&cwd).expect("cwd");
-        let command = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "dispatch".to_string(),
-            "--cwd".to_string(),
-            cwd.display().to_string(),
-        ];
-
-        let err = preflight_remote_path_bearing_surfaces(
-            "Lab offload",
-            "lab-runner",
-            &command,
-            &HashMap::new(),
-            &source,
-            "/runner/workspaces/primary",
-            &[],
-        )
-        .expect_err("unmapped argv path flag must fail locally");
-
-        let id = err
-            .details
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        assert!(id.contains("arg `--cwd`"));
-        assert!(id.contains(&cwd.display().to_string()));
-    }
-
-    #[test]
-    fn preflight_rejects_macos_temp_shared_state_after_passthrough() {
-        let controller = tempfile::tempdir().expect("controller");
-        let source = controller.path().join("primary");
-        fs::create_dir_all(&source).expect("source");
-        let command = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "sample".to_string(),
-            "--path".to_string(),
-            "/runner/workspaces/primary".to_string(),
-            "--".to_string(),
-            "--shared-state".to_string(),
-            "/var/folders/ab/cd/T/homeboy-shared-state".to_string(),
-        ];
-
-        let err = preflight_remote_path_bearing_surfaces(
-            "Lab offload",
-            "linux-lab",
-            &command,
-            &HashMap::new(),
-            &source,
-            "/runner/workspaces/primary",
-            &[],
-        )
-        .expect_err("macOS controller temp path after passthrough must fail before dispatch");
-
-        let id = err
-            .details
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        assert!(err.message.contains("linux-lab"));
-        assert!(err.message.contains("controller-local absolute paths"));
-        assert!(id.contains("arg `--shared-state`"));
-        assert!(id.contains("/var/folders/ab/cd/T/homeboy-shared-state"));
-        assert!(err
-            .details
-            .get("tried")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|hints| hints.iter().any(|hint| hint
-                .as_str()
-                .is_some_and(|hint| hint.contains("use a runner-local path")))));
+            assert!(err.message.contains("lab-runner"), "{command:?}");
+            assert!(
+                err.message.contains("controller-local absolute paths"),
+                "{command:?}"
+            );
+            let id = err.details["id"].as_str().unwrap_or_default();
+            for fragment in expected {
+                assert!(id.contains(fragment), "{command:?}: {id}");
+            }
+            assert!(
+                err.details["tried"]
+                    .as_array()
+                    .is_some_and(|hints| hints.iter().any(|hint| hint
+                        .as_str()
+                        .is_some_and(|hint| hint.contains("use a runner-local path")))),
+                "{command:?}"
+            );
+        }
     }
 
     #[test]
