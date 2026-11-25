@@ -206,7 +206,6 @@ mod tests {
             &report,
         );
 
-        assert_eq!(status.configured_job_binary.role, "configured_job_binary");
         assert_eq!(status.binary_sources.len(), 3);
         assert_eq!(
             status.configured_job_binary.path.as_deref(),

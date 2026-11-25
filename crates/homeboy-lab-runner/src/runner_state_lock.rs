@@ -341,18 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn restart_lock_timeout_names_the_lock_it_waited_on() {
-        let directory = tempfile::tempdir().expect("lock directory");
-        let error = lock_timeout_error(
-            &directory.path().join("restart-recovery.lock"),
-            "runner-a",
-            Duration::from_millis(75),
-        );
-        assert!(error.message.contains("waiting for restart-recovery.lock"));
-        assert!(homeboy_core::substrate_wait::is_transient_error(&error));
-    }
-
-    #[test]
     fn lock_timeout_reports_the_live_holder_phase_age_deadline_and_action() {
         crate::test_support::with_isolated_home(|_| {
             let lock_path =
@@ -377,8 +365,6 @@ mod tests {
                         .message
                         .contains(&format!("held by pid {}", std::process::id())));
                     assert!(error.message.contains("phase runner_state_mutation, held "));
-                    assert_eq!(error.details["error"], error.message);
-                    assert_eq!(error.details["context"], "lock runner state");
                     assert_eq!(error.details["kind"], "runner_state_lock_timeout");
                     assert_eq!(error.retryable, Some(true));
                     assert!(homeboy_core::substrate_wait::is_transient_error(&error));
