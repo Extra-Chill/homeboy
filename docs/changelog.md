@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.17] - 2026-11-25
+
+### Changed
+- prune redundant tests in remaining contract files
+- prune and fold low-value tests in small crates (homeboy-error, paths, redaction, review, product-identity)
+
 ## [0.497.16] - 2026-11-25
 
 ### Changed
