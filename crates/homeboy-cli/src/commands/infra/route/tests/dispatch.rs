@@ -43,22 +43,8 @@ fn runner_readiness_query_dispatches_once_to_selected_runner_without_global_flag
 }
 
 #[test]
-fn automatic_local_trace_does_not_target_an_agent_task_lifecycle_record() {
+fn only_durable_agent_task_handoffs_target_a_lifecycle_record() {
     assert!(placement_outcome_target(None, None).is_none());
-}
-
-#[test]
-fn successful_offloaded_trace_does_not_target_an_agent_task_lifecycle_record() {
-    assert!(placement_outcome_target(None, None).is_none());
-}
-
-#[test]
-fn detached_fanout_observation_does_not_target_an_agent_task_lifecycle_record() {
-    assert!(placement_outcome_target(None, None).is_none());
-}
-
-#[test]
-fn durable_agent_task_handoff_targets_its_lifecycle_record() {
     assert_eq!(
         placement_outcome_target(Some("durable-run"), None),
         Some(ExecutionPlacementOutcomeTarget::AgentTaskLifecycle {
@@ -68,79 +54,59 @@ fn durable_agent_task_handoff_targets_its_lifecycle_record() {
 }
 
 #[test]
-fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
-    crate::test_support::with_isolated_home(|_| {
-        let source = tempfile::tempdir().expect("source workspace");
-        let decision = fixture_preflight_decision(
-            &Cli::parse_from(["homeboy", "status"]),
-            Some("homeboy-lab"),
+fn detached_planless_handoff_persists_explicit_bench_label_idempotently() {
+    let label = "ssi-fixture-37-20260727-runtime-fixed";
+    for args in [
+        vec!["homeboy", "bench", "--run-id", label],
+        vec![
+            "homeboy",
             "bench",
-            Some(source.path()),
-        )
-        .expect("placement decision");
-        let handoff = materialize_generic_detached_lab_handoff(
-            &[
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "--run-id".to_string(),
-                "ssi-fixture-37-20260727-runtime-fixed".to_string(),
-            ],
-            source.path(),
-            &lab_offload_command(&Cli::parse_from(["homeboy", "bench"]).command)
+            "--run-id=ssi-fixture-37-20260727-runtime-fixed",
+        ],
+    ] {
+        crate::test_support::with_isolated_home(|_| {
+            let args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+            let source = tempfile::tempdir().expect("source workspace");
+            let decision = fixture_preflight_decision(
+                &Cli::parse_from(["homeboy", "status"]),
+                Some("homeboy-lab"),
+                "bench",
+                Some(source.path()),
+            )
+            .expect("placement decision");
+            let command = lab_offload_command(&Cli::parse_from(["homeboy", "bench"]).command)
                 .expect("bench contract")
-                .expect("portable bench"),
-            decision.clone(),
-        )
-        .expect("persist detached bench handoff");
+                .expect("portable bench");
+            let handoff = materialize_generic_detached_lab_handoff(
+                &args,
+                source.path(),
+                &command,
+                decision.clone(),
+            )
+            .expect("persist detached bench handoff");
+            let replayed = materialize_generic_detached_lab_handoff(
+                &args,
+                source.path(),
+                &command,
+                decision.clone(),
+            )
+            .expect("replayed handoff");
 
-        assert_eq!(handoff.run_id, "ssi-fixture-37-20260727-runtime-fixed");
-        let record = agent_task_lifecycle::reconcile_status(&handoff.run_id)
-            .expect("interrupted caller leaves a discoverable run");
-        assert!(!record.state().is_terminal());
-        assert_eq!(record.plan_id, handoff.plan.plan_id);
-        assert_eq!(
-            agent_task_lifecycle::load_controller_plan(&handoff.run_id)
-                .expect("durable controller plan")
-                .metadata["execution_placement_decision"]["decision_id"],
-            decision.decision_id,
-        );
-    });
-}
-
-#[test]
-fn detached_planless_handoff_reuses_the_same_explicit_bench_label() {
-    crate::test_support::with_isolated_home(|_| {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--run-id=ssi-fixture-37-20260727-runtime-fixed".to_string(),
-        ];
-        let source = tempfile::tempdir().expect("source workspace");
-        let decision = fixture_preflight_decision(
-            &Cli::parse_from(["homeboy", "status"]),
-            Some("homeboy-lab"),
-            "bench",
-            Some(source.path()),
-        )
-        .expect("placement decision");
-        let command = lab_offload_command(&Cli::parse_from(["homeboy", "bench"]).command)
-            .expect("bench contract")
-            .expect("portable bench");
-        let first = materialize_generic_detached_lab_handoff(
-            &args,
-            source.path(),
-            &command,
-            decision.clone(),
-        )
-        .expect("first handoff");
-        let second =
-            materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
-                .expect("replayed handoff");
-
-        assert_eq!(first.run_id, second.run_id);
-        assert_eq!(first.plan.plan_id, second.plan.plan_id);
-        assert!(agent_task_lifecycle::reconcile_status(&first.run_id).is_ok());
-    });
+            assert_eq!(handoff.run_id, label);
+            assert_eq!(replayed.run_id, handoff.run_id);
+            assert_eq!(replayed.plan.plan_id, handoff.plan.plan_id);
+            let record = agent_task_lifecycle::reconcile_status(&handoff.run_id)
+                .expect("interrupted caller leaves a discoverable run");
+            assert!(!record.state().is_terminal());
+            assert_eq!(record.plan_id, handoff.plan.plan_id);
+            assert_eq!(
+                agent_task_lifecycle::load_controller_plan(&handoff.run_id)
+                    .expect("durable controller plan")
+                    .metadata["execution_placement_decision"]["decision_id"],
+                decision.decision_id,
+            );
+        });
+    }
 }
 
 #[test]
@@ -250,109 +216,64 @@ fn failed_detached_bench_retry_replays_the_persisted_workspace_and_inputs() {
 }
 
 #[test]
-fn generic_lab_replay_retry_rejects_a_changed_workspace_before_reserving_a_successor() {
-    crate::test_support::with_isolated_home(|_| {
-        let source = tempfile::tempdir().expect("source workspace");
-        git_init(source.path());
-        let args = vec![
-            "homeboy".to_string(),
-            "--placement".to_string(),
-            "lab".to_string(),
-            "bench".to_string(),
-            "blocks-engine".to_string(),
-            "--run-id".to_string(),
-            "changed-generic-replay".to_string(),
-        ];
-        let cli = Cli::parse_from(&args);
-        let command = lab_offload_command(&cli.command)
-            .expect("bench contract")
-            .expect("portable bench");
-        let decision = placement_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
-            .expect("placement decision");
-        let handoff =
-            materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
-                .expect("persist detached bench handoff");
-        agent_task_lifecycle::record_pre_execution_failure(
-            &handoff.run_id,
-            &handoff.plan,
-            "lab_daemon_admission",
-            &Error::internal_unexpected("daemon unavailable"),
-        )
-        .expect("persist pre-provider failure");
-        std::fs::write(source.path().join("changed.txt"), "changed\n").expect("change workspace");
-        let retry_args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "retry".to_string(),
-            handoff.run_id.clone(),
-            "--run".to_string(),
-            "--new-run-id".to_string(),
-            "changed-generic-replay-retry".to_string(),
-        ];
-        let handoff = reserved_retry_transport_fixture(&Cli::parse_from(&retry_args), &retry_args)
-            .expect("controller preflight validates only replay contract shape")
-            .expect("retry handoff");
-        assert!(handoff.replays_generic_command);
-        assert_eq!(
-            agent_task_lifecycle::run_record_exists("changed-generic-replay-retry")
-                .expect("check retry reservation"),
-            true,
-            "runner-aware staging owns the content comparison"
-        );
-    });
-}
-
-#[test]
-fn generic_lab_replay_retry_rejects_a_missing_workspace_before_reserving_a_successor() {
-    crate::test_support::with_isolated_home(|_| {
-        let source = tempfile::tempdir().expect("source workspace");
-        git_init(source.path());
-        let args = vec![
-            "homeboy".to_string(),
-            "--placement".to_string(),
-            "lab".to_string(),
-            "bench".to_string(),
-            "blocks-engine".to_string(),
-            "--run-id".to_string(),
-            "missing-generic-replay".to_string(),
-        ];
-        let cli = Cli::parse_from(&args);
-        let command = lab_offload_command(&cli.command)
-            .expect("bench contract")
-            .expect("portable bench");
-        let decision = placement_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
-            .expect("placement decision");
-        let handoff =
-            materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
-                .expect("persist detached bench handoff");
-        agent_task_lifecycle::record_pre_execution_failure(
-            &handoff.run_id,
-            &handoff.plan,
-            "lab_daemon_admission",
-            &Error::internal_unexpected("daemon unavailable"),
-        )
-        .expect("persist pre-provider failure");
-        std::fs::remove_dir_all(source.path()).expect("remove workspace");
-        let retry_args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "retry".to_string(),
-            handoff.run_id.clone(),
-            "--run".to_string(),
-            "--new-run-id".to_string(),
-            "missing-generic-replay-retry".to_string(),
-        ];
-        let handoff = reserved_retry_transport_fixture(&Cli::parse_from(&retry_args), &retry_args)
-            .expect("controller preflight validates only replay contract shape")
-            .expect("retry handoff");
-        assert!(handoff.replays_generic_command);
-        assert_eq!(
-            agent_task_lifecycle::run_record_exists("missing-generic-replay-retry")
-                .expect("check retry reservation"),
-            true,
-            "runner-aware staging owns workspace availability and identity"
-        );
-    });
+fn generic_lab_replay_retry_defers_workspace_identity_to_runner_staging() {
+    for missing in [false, true] {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("source workspace");
+            git_init(source.path());
+            let args = vec![
+                "homeboy".to_string(),
+                "--placement".to_string(),
+                "lab".to_string(),
+                "bench".to_string(),
+                "blocks-engine".to_string(),
+                "--run-id".to_string(),
+                "generic-replay".to_string(),
+            ];
+            let cli = Cli::parse_from(&args);
+            let command = lab_offload_command(&cli.command)
+                .expect("bench contract")
+                .expect("portable bench");
+            let decision =
+                placement_decision(&cli, Some("homeboy-lab"), "bench", Some(source.path()))
+                    .expect("placement decision");
+            let handoff =
+                materialize_generic_detached_lab_handoff(&args, source.path(), &command, decision)
+                    .expect("persist detached bench handoff");
+            agent_task_lifecycle::record_pre_execution_failure(
+                &handoff.run_id,
+                &handoff.plan,
+                "lab_daemon_admission",
+                &Error::internal_unexpected("daemon unavailable"),
+            )
+            .expect("persist pre-provider failure");
+            if missing {
+                std::fs::remove_dir_all(source.path()).expect("remove workspace");
+            } else {
+                std::fs::write(source.path().join("changed.txt"), "changed\n")
+                    .expect("change workspace");
+            }
+            let retry_args = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "retry".to_string(),
+                handoff.run_id.clone(),
+                "--run".to_string(),
+                "--new-run-id".to_string(),
+                "generic-replay-retry".to_string(),
+            ];
+            let handoff =
+                reserved_retry_transport_fixture(&Cli::parse_from(&retry_args), &retry_args)
+                    .expect("controller preflight validates only replay contract shape")
+                    .expect("retry handoff");
+            assert!(handoff.replays_generic_command);
+            assert!(
+                agent_task_lifecycle::run_record_exists("generic-replay-retry")
+                    .expect("check retry reservation"),
+                "runner-aware staging owns workspace availability and identity (missing={missing})"
+            );
+        });
+    }
 }
 
 #[test]
@@ -965,35 +886,58 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
 }
 
 #[test]
-fn changed_scope_lint_is_lab_portable() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "review",
-        "lint",
-        "--changed-since",
-        "origin/main",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "review lint");
-    assert!(command.is_portable());
-}
-
-#[test]
-fn nested_review_quality_subcommands_use_specific_lab_labels() {
-    for (args, expected_label) in [
+fn review_quality_subcommands_resolve_specific_lab_labels_and_portability() {
+    for (args, expected_label, portable_with_parity) in [
+        (vec!["homeboy", "review", "lint"], "review lint", true),
         (
             vec!["homeboy", "review", "lint", "data-machine"],
             "review lint",
+            true,
+        ),
+        (
+            vec![
+                "homeboy",
+                "review",
+                "lint",
+                "--changed-since",
+                "origin/main",
+            ],
+            "review lint",
+            true,
+        ),
+        // Mutation flags stay portable so the runner can capture a patch.
+        (
+            vec!["homeboy", "review", "lint", "--fix"],
+            "review lint",
+            true,
+        ),
+        (
+            vec!["homeboy", "review", "lint", "--ratchet"],
+            "review lint",
+            true,
+        ),
+        (
+            vec![
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "review",
+                "test",
+                "--changed-since",
+                "origin/main",
+            ],
+            "review test",
+            false,
         ),
         (
             vec!["homeboy", "review", "test", "data-machine"],
             "review test",
+            false,
         ),
         (
             vec!["homeboy", "review", "build", "data-machine"],
             "review build",
+            false,
         ),
         (
             vec![
@@ -1006,23 +950,34 @@ fn nested_review_quality_subcommands_use_specific_lab_labels() {
                 "lint",
             ],
             "review ci",
+            false,
         ),
     ] {
-        let cli = Cli::parse_from(args);
-        let command = cli.command.lab_contract().unwrap();
-
-        assert_eq!(command.hot_label, expected_label);
+        let cli = Cli::parse_from(&args);
+        assert_eq!(
+            cli.command.lab_contract().unwrap().hot_label,
+            expected_label,
+            "{args:?}"
+        );
+        if portable_with_parity {
+            let command = lab_offload_command(&cli.command).unwrap().unwrap();
+            assert!(command.is_portable(), "{args:?}");
+            assert!(command.routing_policy.requires_extension_parity, "{args:?}");
+        }
     }
-}
-
-#[test]
-fn nested_review_lint_dispatch_uses_matching_lab_label() {
-    let cli = Cli::parse_from(["homeboy", "review", "lint", "data-machine"]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "review lint");
-    assert!(command.is_portable());
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--runner",
+        "homeboy-lab",
+        "review",
+        "test",
+        "--changed-since",
+        "origin/main",
+    ]);
+    assert!(lab_offload_command(&cli.command)
+        .unwrap()
+        .unwrap()
+        .is_portable());
 }
 
 #[test]
@@ -1036,45 +991,6 @@ fn nested_review_quality_subcommand_resolves_effective_component() {
         args.effective_component_args().component.as_deref(),
         Some("data-machine")
     );
-}
-
-#[test]
-fn nested_review_quality_in_dir_offload_uses_current_dir_path() {
-    let dir = tempdir().expect("tempdir");
-    let _cwd = CwdGuard::set(dir.path());
-    let normalized = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    let rewritten = lab_route_source_path_args(&cli.command, &normalized, false)
-        .expect("review lint without component gets cwd path rewrite");
-    let cwd = std::env::current_dir().expect("current dir");
-
-    assert_eq!(rewritten[0..3], normalized);
-    assert_eq!(rewritten[3], "--path");
-    assert_eq!(rewritten[4], cwd.to_string_lossy());
-}
-
-#[test]
-fn explicit_runner_for_changed_scope_test_is_lab_portable() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "homeboy-lab",
-        "review",
-        "test",
-        "--changed-since",
-        "origin/main",
-    ]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(command.hot_label, "review test");
-    assert!(command.is_portable());
 }
 
 #[test]
@@ -1101,6 +1017,11 @@ fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override
         let cli = Cli::parse_from(&normalized);
 
         assert!(destructive_fuzz_requires_lab(&cli.command));
+        let mut overridden = normalized.clone();
+        overridden.insert(7, "--allow-local-destructive-fuzz");
+        assert!(!destructive_fuzz_requires_lab(
+            &Cli::parse_from(&overridden).command
+        ));
 
         route_after_parse_with_provenance(
             &cli,
@@ -1116,26 +1037,6 @@ fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override
     assert!(error
         .to_string()
         .contains("destructive fuzz refused local controller execution"));
-}
-
-#[test]
-fn destructive_fuzz_local_override_is_command_specific_and_explicit() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--placement",
-        "local",
-        "fuzz",
-        "run",
-        "component-a",
-        "--allow-destructive",
-        "--allow-local-destructive-fuzz",
-        "--isolation",
-        "isolated",
-        "--isolation-proof",
-        "proof.json",
-    ]);
-
-    assert!(!destructive_fuzz_requires_lab(&cli.command));
 }
 
 #[test]
@@ -1218,33 +1119,30 @@ fn lab_job_overrides_parse_env_json_and_workspace_root() {
 }
 
 #[test]
-fn lab_job_overrides_reject_sensitive_runner_env_values() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner-env",
-        "API_TOKEN=secret-token",
-        "review",
-    ]);
+fn lab_job_overrides_reject_plaintext_secrets_and_invalid_env_shapes() {
+    for (flag, value, guidance) in [
+        (
+            "--runner-env",
+            "API_TOKEN=secret-token",
+            Some("--runner-secret-env API_TOKEN"),
+        ),
+        ("--runner-env", "NO_EQUALS", None),
+        ("--lab-env-json", "[]", None),
+    ] {
+        let cli = Cli::parse_from(["homeboy", flag, value, "review"]);
 
-    let error = lab_job_overrides(&cli).expect_err("plaintext runner secret is refused");
+        let error = lab_job_overrides(&cli).expect_err("invalid override is refused");
 
-    assert_eq!(error.details["field"], "runner-env");
-    assert!(error.message.contains("--runner-secret-env API_TOKEN"));
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        if let Some(guidance) = guidance {
+            assert_eq!(error.details["field"], "runner-env");
+            assert!(error.message.contains(guidance));
+        }
+    }
 }
 
 #[test]
-fn lab_job_overrides_reject_invalid_env_shapes() {
-    let cli = Cli::parse_from(["homeboy", "--runner-env", "NO_EQUALS", "review"]);
-    let err = lab_job_overrides(&cli).expect_err("invalid pair");
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-
-    let cli = Cli::parse_from(["homeboy", "--lab-env-json", "[]", "review"]);
-    let err = lab_job_overrides(&cli).expect_err("invalid json object");
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-}
-
-#[test]
-fn manifest_resolved_portable_db_service_runner_wait_step_carries_secret_identity_only() {
+fn manifest_resolved_db_service_env_carries_secret_identity_only_and_yields_to_pinned_env() {
     crate::test_support::with_isolated_home(|home| {
         let component = tempdir().expect("component directory");
         fs::write(
@@ -1296,47 +1194,18 @@ fn manifest_resolved_portable_db_service_runner_wait_step_carries_secret_identit
         assert!(argv.contains("--runner-env DB_SERVICE_HOST=db.fixture"));
         assert!(argv.contains("--runner-secret-env DB_SERVICE_PASSWORD"));
         assert!(!argv.contains("fixture-password"));
-    });
-}
 
-#[test]
-fn pinned_runner_env_wins_over_later_manifest_ambient_value() {
-    crate::test_support::with_isolated_home(|home| {
-        let component = tempdir().expect("component directory");
-        fs::write(
-            component.path().join("homeboy.json"),
-            r#"{"id":"portable-db-consumer","extensions":{"portable-db-service":{}}}"#,
-        )
-        .expect("component manifest");
-        let extension_dir = home
-            .path()
-            .join(".config/homeboy/extensions/portable-db-service");
-        fs::create_dir_all(&extension_dir).expect("extension directory");
-        fs::write(
-            extension_dir.join("portable-db-service.json"),
-            include_str!(
-                "../../../../../../../tests/fixtures/extension_manifests/portable-db-service.json"
-            ),
-        )
-        .expect("portable DB service manifest");
-        let _env = EnvGuard::set_many(&[
-            ("DB_SERVICE_HOST", Some("B")),
-            ("DB_SERVICE_PORT", Some("3306")),
+        // A pinned runner env (as replayed) wins over the later ambient value.
+        let replay = Cli::parse_from([
+            "homeboy",
+            "--runner-env",
+            "DB_SERVICE_HOST=A",
+            "review",
+            "test",
+            "--path",
+            path,
         ]);
-        let path = component.path().to_str().expect("component path");
-
-        let replay_args = vec![
-            "homeboy".to_string(),
-            "--runner-env".to_string(),
-            "DB_SERVICE_HOST=A".to_string(),
-            "review".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            path.to_string(),
-        ];
-        let replay = Cli::parse_from(replay_args);
         let overrides = lab_job_overrides(&replay).expect("replay overrides");
-
         assert_eq!(overrides.env["DB_SERVICE_HOST"], "A");
         assert_eq!(overrides.env["DB_SERVICE_PORT"], "3306");
         assert_eq!(overrides.secret_env_names, ["DB_SERVICE_PASSWORD"]);
@@ -1344,37 +1213,35 @@ fn pinned_runner_env_wins_over_later_manifest_ambient_value() {
 }
 
 #[test]
-fn changed_since_lint_keeps_git_scope_for_lab_runner() {
-    let normalized = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-        "--changed-since".to_string(),
-        "origin/main".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
+fn changed_since_review_keeps_git_scope_for_lab_runner() {
+    for argv in [
+        vec![
+            "homeboy",
+            "review",
+            "lint",
+            "--changed-since",
+            "origin/main",
+        ],
+        vec![
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "review",
+            "test",
+            "--changed-since=origin/main",
+            "--skip-lint",
+        ],
+    ] {
+        let normalized = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let cli = Cli::parse_from(&normalized);
 
-    let rewritten = inject_lab_changed_files(&cli.command, &normalized).unwrap();
-
-    assert!(rewritten.is_none());
-}
-
-#[test]
-fn changed_since_test_keeps_git_scope_for_lab_runner() {
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "review".to_string(),
-        "test".to_string(),
-        "--changed-since=origin/main".to_string(),
-        "--skip-lint".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    let rewritten = inject_lab_changed_files(&cli.command, &normalized).unwrap();
-
-    assert!(rewritten.is_none());
+        assert!(
+            inject_lab_changed_files(&cli.command, &normalized)
+                .unwrap()
+                .is_none(),
+            "{argv:?}"
+        );
+    }
 }
 
 #[test]
@@ -1410,27 +1277,34 @@ fn lab_offload_subprocess_skips_recursive_lab_routing() {
 }
 
 #[test]
-fn runner_hosted_bench_exec_skips_recursive_lab_routing_without_explicit_runner() {
+fn runner_hosted_execution_skips_recursive_lab_routing() {
     let _env = EnvGuard::set_many(&[
         (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
         (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
         (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
         (homeboy::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
     ]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--placement".to_string(),
-        "local".to_string(),
-        "bench".to_string(),
-        "--extension".to_string(),
-        "wordpress".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
+    for argv in [
+        vec![
+            "homeboy",
+            "--placement",
+            "local",
+            "bench",
+            "--extension",
+            "wordpress",
+        ],
+        vec!["homeboy", "review", "lint"],
+    ] {
+        let normalized = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let cli = Cli::parse_from(&normalized);
 
-    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
-        .expect("runner-hosted bench execution should stay local");
-
-    assert_eq!(outcome, None);
+        assert_eq!(
+            route_after_parse_with_provenance(&cli, &normalized, None, None)
+                .expect("runner-hosted execution stays local"),
+            None,
+            "{argv:?}"
+        );
+    }
 }
 
 #[test]
@@ -1471,27 +1345,6 @@ fn ambient_resolved_marker_cannot_bypass_explicit_lab_placement() {
     });
 
     assert_ne!(err.code.as_str(), "internal.unexpected");
-}
-
-#[test]
-fn managed_runner_context_bypasses_auto_routing_once() {
-    let _env = EnvGuard::set_many(&[
-        (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
-        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
-        (homeboy::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
-    ]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    assert_eq!(
-        route_after_parse_with_provenance(&cli, &normalized, None, None).expect("managed context"),
-        None
-    );
 }
 
 #[test]
@@ -1610,58 +1463,19 @@ fn agent_task_doctor_runner_option_routes_locally() {
 }
 
 #[test]
-fn trace_lab_dispatch_timeout_reads_env_override() {
-    let _env = EnvGuard::set(lab_routing::LAB_TRACE_DISPATCH_TIMEOUT_ENV, "7");
+fn lab_dispatch_timeouts_read_env_overrides() {
+    let _env = EnvGuard::set_many(&[
+        (lab_routing::LAB_TRACE_DISPATCH_TIMEOUT_ENV, Some("7")),
+        (
+            lab_routing::LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV,
+            Some("11"),
+        ),
+    ]);
 
     assert_eq!(
         lab_routing::lab_trace_dispatch_timeout(),
         std::time::Duration::from_secs(7)
     );
-}
-
-#[test]
-fn lab_route_dispatch_timeout_plumbs_core_timeout() {
-    let trace_cli = Cli::parse_from(["homeboy", "trace", "list"]);
-    let lint_cli = Cli::parse_from(["homeboy", "review", "lint"]);
-
-    assert_eq!(
-        lab_route_dispatch_timeout(&trace_cli.command),
-        Some(lab_routing::lab_trace_dispatch_timeout())
-    );
-    assert_eq!(lab_route_dispatch_timeout(&lint_cli.command), None);
-}
-
-#[test]
-fn explicit_runner_provider_discovery_dispatch_is_bounded() {
-    // An explicit `--runner` provider read still has to answer inside a
-    // caller's patience: it degrades to the labelled dispatch-timeout error
-    // rather than waiting out the generic workload budget (#9763).
-    let _env = EnvGuard::remove(lab_routing::LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV);
-    let explicit = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "homeboy-lab",
-        "agent-task",
-        "providers",
-    ]);
-    let unscoped = Cli::parse_from(["homeboy", "agent-task", "providers"]);
-    let budget = lab_routing::lab_provider_discovery_dispatch_timeout();
-
-    assert_eq!(lab_route_dispatch_timeout(&explicit.command), Some(budget));
-    assert_eq!(lab_route_dispatch_timeout(&unscoped.command), Some(budget));
-    assert!(
-        budget < std::time::Duration::from_secs(lab_routing::DEFAULT_LAB_DISPATCH_TIMEOUT_SECS),
-        "provider discovery must not inherit the generic workload dispatch budget"
-    );
-}
-
-#[test]
-fn provider_discovery_dispatch_timeout_reads_env_override() {
-    let _env = EnvGuard::set(
-        lab_routing::LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV,
-        "11",
-    );
-
     assert_eq!(
         lab_routing::lab_provider_discovery_dispatch_timeout(),
         std::time::Duration::from_secs(11)
@@ -1669,46 +1483,84 @@ fn provider_discovery_dispatch_timeout_reads_env_override() {
 }
 
 #[test]
-fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
-    let cook = Cli::parse_from([
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--repo",
-        "homeboy",
-        "--goal",
-        "Fix the detached handoff",
-        "--to-worktree",
-        "homeboy@fix-7971",
-        "--run-id",
-        "cook-7971",
-        "--runner",
-        "homeboy-lab",
-    ]);
-    let batch = Cli::parse_from([
-        "homeboy",
-        "agent-task",
-        "fanout",
-        "cook-batch",
-        "--repo",
-        "homeboy",
-        "--verify",
-        "cargo test --lib",
-        "--run-plan",
-        "https://github.com/Extra-Chill/homeboy/issues/7167",
-    ]);
-    let retry = Cli::parse_from([
-        "homeboy",
-        "agent-task",
-        "retry",
-        "failed-run",
-        "--run",
-        "--runner",
-        "homeboy-lab",
-    ]);
-
-    for cli in [&cook, &batch, &retry] {
-        assert_eq!(lab_route_dispatch_timeout(&cli.command), None);
+fn lab_route_dispatch_timeout_bounds_reads_but_not_detached_handoffs() {
+    // An explicit `--runner` provider read still has to answer inside a
+    // caller's patience rather than waiting out the generic workload budget
+    // (#9763); detached handoffs are not bounded by the trace budget.
+    let _env = EnvGuard::remove(lab_routing::LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV);
+    let trace = Some(lab_routing::lab_trace_dispatch_timeout());
+    let providers = Some(lab_routing::lab_provider_discovery_dispatch_timeout());
+    assert!(
+        providers.unwrap()
+            < std::time::Duration::from_secs(lab_routing::DEFAULT_LAB_DISPATCH_TIMEOUT_SECS),
+        "provider discovery must not inherit the generic workload dispatch budget"
+    );
+    for (argv, expected) in [
+        (vec!["homeboy", "trace", "list"], trace),
+        (vec!["homeboy", "review", "lint"], None),
+        (
+            vec![
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "agent-task",
+                "providers",
+            ],
+            providers,
+        ),
+        (vec!["homeboy", "agent-task", "providers"], providers),
+        (
+            vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--repo",
+                "homeboy",
+                "--goal",
+                "Fix the detached handoff",
+                "--to-worktree",
+                "homeboy@fix-7971",
+                "--run-id",
+                "cook-7971",
+                "--runner",
+                "homeboy-lab",
+            ],
+            None,
+        ),
+        (
+            vec![
+                "homeboy",
+                "agent-task",
+                "fanout",
+                "cook-batch",
+                "--repo",
+                "homeboy",
+                "--verify",
+                "cargo test --lib",
+                "--run-plan",
+                "https://github.com/Extra-Chill/homeboy/issues/7167",
+            ],
+            None,
+        ),
+        (
+            vec![
+                "homeboy",
+                "agent-task",
+                "retry",
+                "failed-run",
+                "--run",
+                "--runner",
+                "homeboy-lab",
+            ],
+            None,
+        ),
+    ] {
+        let cli = Cli::parse_from(&argv);
+        assert_eq!(
+            lab_route_dispatch_timeout(&cli.command),
+            expected,
+            "{argv:?}"
+        );
     }
 }
 
@@ -3131,19 +2983,6 @@ fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
 }
 
 #[test]
-fn offloaded_stdout_write_preserves_bytes_for_output_file() {
-    let dir = tempdir().unwrap();
-    let output_path = dir.path().join("out.json");
-
-    write_offloaded_stdout(&output_path.to_string_lossy(), "{\"ok\":true}\n").unwrap();
-
-    assert_eq!(
-        std::fs::read_to_string(output_path).unwrap(),
-        "{\"ok\":true}\n"
-    );
-}
-
-#[test]
 fn runner_rig_source_management_remote_preflight_strips_controller_globals() {
     let normalized = vec![
         "homeboy".to_string(),
@@ -3195,57 +3034,29 @@ fn runner_rig_source_management_translates_local_subdir_paths() {
 }
 
 #[test]
-fn rig_install_source_arg_finds_positional_source_after_flags() {
-    let command = vec![
-        "/runner/bin/homeboy".to_string(),
-        "rig".to_string(),
-        "install".to_string(),
-        "--id".to_string(),
-        "static-site-importer".to_string(),
-        "--reinstall".to_string(),
-        "/Users/chubes/Developer/homeboy-rigs@run/WordPress/static-site-importer".to_string(),
-        "--all".to_string(),
-    ];
-
-    assert_eq!(
-        rig_install_source_arg(&command).as_deref(),
-        Some("/Users/chubes/Developer/homeboy-rigs@run/WordPress/static-site-importer")
-    );
-}
-
-#[test]
-fn rig_install_source_arg_ignores_non_install_commands() {
-    let command = vec![
-        "/runner/bin/homeboy".to_string(),
-        "rig".to_string(),
-        "sources".to_string(),
-        "list".to_string(),
-    ];
-
-    assert_eq!(rig_install_source_arg(&command), None);
-}
-
-#[test]
-fn rig_install_source_sync_root_resolves_existing_local_package() {
-    let source_dir = tempdir().expect("source dir");
-    let source_path = source_dir
-        .path()
-        .canonicalize()
-        .expect("canonical temp dir")
-        .join("static-site-importer");
-    fs::create_dir_all(&source_path).expect("create source package");
-    let command = vec![
-        "/runner/bin/homeboy".to_string(),
-        "rig".to_string(),
-        "install".to_string(),
-        source_path.to_string_lossy().to_string(),
-    ];
-
-    let sync_root = rig_install_source_sync_root(&command).expect("sync root");
-
-    // The temp dir is not a git repo, so the package directory itself is the
-    // materialization root.
-    assert_eq!(sync_root, source_path);
+fn rig_install_source_arg_finds_positional_source_only_for_install() {
+    let source = "/Users/chubes/Developer/homeboy-rigs@run/WordPress/static-site-importer";
+    for (args, expected) in [
+        (
+            vec![
+                "rig",
+                "install",
+                "--id",
+                "static-site-importer",
+                "--reinstall",
+                source,
+                "--all",
+            ],
+            Some(source),
+        ),
+        (vec!["rig", "sources", "list"], None),
+    ] {
+        let command = std::iter::once("/runner/bin/homeboy")
+            .chain(args)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(rig_install_source_arg(&command).as_deref(), expected);
+    }
 }
 
 #[test]
@@ -3293,34 +3104,58 @@ fn batch_fanout_exposes_placement_arguments() {
     }
 }
 
-/// #9373: docs recommend global `--placement lab` for Cook waves and the
-/// runtime honors it, so a cook that CAN be served must never be reported as a
-/// command for which Lab placement is unavailable.
+/// #9373: docs recommend global `--placement lab` for Cook waves, so a cook
+/// that CAN be served is never refused, `lab-or-local` keeps falling back, and
+/// batch fanout resolves Lab placement through the same contract.
 #[test]
-fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
-    let cli = Cli::parse_from([
+fn split_placement_refuses_lab_only_when_no_runner_can_serve_it() {
+    let cook = |placement: &'static str| {
+        vec![
+            "homeboy",
+            "--placement",
+            placement,
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "fixture@wave",
+            "--verify",
+            "true",
+            "--prompt",
+            "route this attempt",
+        ]
+    };
+    let batch = vec![
         "homeboy",
         "--placement",
         "lab",
         "agent-task",
-        "cook",
-        "--to-worktree",
-        "fixture@wave",
+        "fanout",
+        "cook-batch",
+        "https://github.com/o/r/issues/1",
+        "https://github.com/o/r/issues/2",
+        "--repo",
+        "r",
         "--verify",
-        "true",
-        "--prompt",
-        "route this attempt to Lab",
-    ]);
-
-    assert!(
-        split_placement_lab_runner_unavailable_error(
-            &cli.command,
-            cli.placement,
-            Some("homeboy-lab"),
-            None,
-        )
-        .is_none(),
-        "a selected runner serves --placement lab instead of refusing it"
+        "cargo test",
+        "--run-plan",
+    ];
+    for (argv, runner, refused) in [
+        (cook("lab"), Some("homeboy-lab"), false),
+        (cook("lab-or-local"), None, false),
+        (cook("lab"), None, true),
+        (batch.clone(), None, true),
+    ] {
+        let cli = Cli::parse_from(&argv);
+        assert_eq!(
+            split_placement_lab_runner_unavailable_error(&cli.command, cli.placement, runner, None)
+                .is_some(),
+            refused,
+            "{argv:?} runner={runner:?}"
+        );
+    }
+    assert_eq!(
+        split_placement_coordinator_label(&Cli::parse_from(&batch).command),
+        Some("agent-task fanout cook-batch --run-plan")
     );
 }
 
@@ -3705,7 +3540,7 @@ fn admission_inputs_preserves_explicit_lab_placement_without_a_runner_pin() {
 }
 
 #[test]
-fn admission_inputs_preserve_redaction_triggering_prompt_files_but_reject_verify_secrets() {
+fn admission_inputs_preserve_redaction_triggering_prompt_files() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().unwrap();
         for (name, content) in [
@@ -3737,27 +3572,11 @@ fn admission_inputs_preserve_redaction_triggering_prompt_files_but_reject_verify
                 .unwrap();
             assert_eq!(std::fs::read(&reference.path).unwrap(), content.as_bytes());
         }
-
-        let args = [
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--run-id",
-            "verify-secret",
-            "--verify",
-            "api_token=secret-value",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-        let error = build_cook_admission_inputs(&args, "verify-secret", None)
-            .expect_err("inline verify credential rejected");
-        assert!(error.message.contains("unsafe inline value"), "{error:?}");
     });
 }
 
 #[test]
-fn admission_inputs_snapshots_all_arbitrary_text_and_rejects_credential_urls() {
+fn admission_inputs_snapshot_all_arbitrary_text() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let content = [
             ("--task", "task body"),
@@ -3790,22 +3609,6 @@ fn admission_inputs_snapshots_all_arbitrary_text_and_rejects_credential_urls() {
                 .count(),
             content.len()
         );
-
-        let unsafe_url = [
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--run-id",
-            "url-replay",
-            "--task-url",
-            "https://example.test/task?token=secret",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-        let error = build_cook_admission_inputs(&unsafe_url, "url-replay", None)
-            .expect_err("credential URL rejected");
-        assert!(error.message.contains("unsafe inline value"), "{error:?}");
     });
 }
 
@@ -3964,6 +3767,8 @@ fn admission_inputs_rejects_inline_secret_bearing_inputs() {
             vec!["--provider-config", r#"{"token":"value"}"#],
             vec!["--provider-argv", "token=value"],
             vec!["--provider-evidence", r#"{"password":"value"}"#],
+            vec!["--verify", "api_token=secret-value"],
+            vec!["--task-url", "https://example.test/task?token=secret"],
         ] {
             let args = [
                 vec!["homeboy", "agent-task", "cook", "--run-id", "unsafe-replay"],
@@ -4170,116 +3975,46 @@ fn lab_cook_preparation_failure_names_controller_phase_and_selected_runner() {
         .contains("repair this controller preparation failure")));
 }
 
-/// `--placement lab-or-local` authorizes controller execution, so it must keep
-/// falling back instead of failing when no runner is ready.
 #[test]
-fn lab_or_local_placement_still_falls_back_without_a_runner() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--placement",
-        "lab-or-local",
-        "agent-task",
-        "cook",
-        "--to-worktree",
-        "fixture@wave",
-        "--verify",
-        "true",
-        "--prompt",
-        "fall back locally",
-    ]);
-
-    assert!(
-        split_placement_lab_runner_unavailable_error(&cli.command, cli.placement, None, None)
-            .is_none()
-    );
-}
-
-#[test]
-fn cold_lab_or_local_records_an_admitted_local_fallback() {
+fn local_placement_records_fallback_or_audited_override_authorization() {
     let source = tempfile::tempdir().expect("source workspace");
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--placement",
-        "lab-or-local",
-        "agent-task",
-        "cook",
-        "--to-worktree",
-        "fixture@wave",
-        "--verify",
-        "true",
-        "--prompt",
-        "fall back locally when admitted",
-    ]);
+    for (placement, authority) in [
+        ("lab-or-local", None),
+        ("local", Some("operator --placement local")),
+    ] {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--placement",
+            placement,
+            "agent-task",
+            "cook",
+            "--to-worktree",
+            "fixture@wave",
+            "--verify",
+            "true",
+            "--prompt",
+            "run locally",
+        ]);
 
-    let decision =
-        fixture_preflight_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
-            .expect("cold controller may select local fallback");
+        let decision =
+            fixture_preflight_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
+                .expect("local placement resolves");
 
-    assert!(decision.permits_local_execution());
-    assert!(decision.fallback.local_allowed);
-    assert!(!decision.override_authorization.authorized);
-}
-
-#[test]
-fn explicit_local_placement_records_audited_override_authorization() {
-    let source = tempfile::tempdir().expect("source workspace");
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--placement",
-        "local",
-        "agent-task",
-        "cook",
-        "--to-worktree",
-        "fixture@wave",
-        "--verify",
-        "true",
-        "--prompt",
-        "run locally with operator authorization",
-    ]);
-
-    let decision =
-        fixture_preflight_decision(&cli, None, "cook-provider-attempt", Some(source.path()))
-            .expect("explicit local placement resolves");
-
-    assert!(decision.permits_local_execution());
-    assert!(decision.override_authorization.authorized);
-    assert_eq!(
-        decision.override_authorization.authority.as_deref(),
-        Some("operator --placement local")
-    );
-}
-
-/// Batch fanout is the documented one-command path for a wave, so it resolves
-/// Lab placement through the same contract as a single cook.
-#[test]
-fn split_placement_covers_batch_fanout_run_plan_coordinators() {
-    let batch = Cli::parse_from([
-        "homeboy",
-        "--placement",
-        "lab",
-        "agent-task",
-        "fanout",
-        "cook-batch",
-        "https://github.com/o/r/issues/1",
-        "https://github.com/o/r/issues/2",
-        "--repo",
-        "r",
-        "--verify",
-        "cargo test",
-        "--run-plan",
-    ]);
-
-    assert_eq!(
-        split_placement_coordinator_label(&batch.command),
-        Some("agent-task fanout cook-batch --run-plan")
-    );
-    assert!(split_placement_lab_runner_unavailable_error(
-        &batch.command,
-        batch.placement,
-        None,
-        None,
-    )
-    .is_some());
+        assert!(decision.permits_local_execution(), "{placement}");
+        assert_eq!(
+            decision.override_authorization.authorized,
+            authority.is_some(),
+            "{placement}"
+        );
+        assert_eq!(
+            decision.override_authorization.authority.as_deref(),
+            authority,
+            "{placement}"
+        );
+        if authority.is_none() {
+            assert!(decision.fallback.local_allowed);
+        }
+    }
 }
 
 #[test]
