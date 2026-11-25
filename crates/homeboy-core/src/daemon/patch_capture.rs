@@ -131,10 +131,9 @@ pub(super) fn capture_patch_report(
 
 /// [`capture_patch_report`] against an explicitly injected artifact root.
 ///
-/// The scratch directory and the published `.diff` artifact now come from one
-/// resolution. They used to resolve `artifact_root()` independently inside a
-/// single capture, so the path recorded in the run record could name a
-/// different installation from the one the diff was computed in.
+/// The scratch directory and the published `.diff` artifact come from one
+/// resolution, so the path recorded in the run record names the same
+/// installation the diff was computed in.
 #[allow(
     clippy::too_many_arguments,
     reason = "Mirrors capture_patch_report with the artifact root made explicit."

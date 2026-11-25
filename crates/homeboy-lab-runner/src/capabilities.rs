@@ -1442,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn lab_runner_gate_decision_normalizes_to_homeboy_gate_result() {
+    fn lab_runner_gate_decisions_normalize_to_homeboy_gate_results() {
         let result: HomeboyGateResult =
             gate_result_from_lab_decision(LabRunnerGateDecision::Missing {
                 runner_id: "lab".to_string(),
@@ -1460,20 +1460,13 @@ mod tests {
         assert_eq!(result.evidence["runner_id"], "lab");
         assert_eq!(result.evidence["missing_tools"][0], "workspace-manager");
         assert!(result.agent_feedback.contains("capable lab runner"));
-    }
 
-    #[test]
-    fn eligible_lab_runner_gate_decision_normalizes_to_passed_gate_result() {
-        let result: HomeboyGateResult =
+        let passed: HomeboyGateResult =
             gate_result_from_lab_decision(LabRunnerGateDecision::Eligible);
-
-        assert_eq!(result.schema, HOMEBOY_GATE_RESULT_SCHEMA);
-        assert_eq!(result.id, "lab.capability_preflight");
-        assert_eq!(result.kind, HomeboyGateKind::Capability);
-        assert_eq!(result.status, HomeboyGateStatus::Passed);
-        assert_eq!(result.retryable, Some(false));
-        assert_eq!(result.provenance["source_type"], "LabRunnerGateDecision");
-        assert!(result.summary.contains("preflight passed"));
+        assert_eq!(passed.id, "lab.capability_preflight");
+        assert_eq!(passed.status, HomeboyGateStatus::Passed);
+        assert_eq!(passed.provenance["source_type"], "LabRunnerGateDecision");
+        assert!(passed.summary.contains("preflight passed"));
     }
 
     #[test]

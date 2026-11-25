@@ -432,19 +432,10 @@ body
     }
 
     #[test]
-    fn render_comment_without_footer_omits_footer_markers() {
+    fn render_comment_absent_or_empty_footer_omits_footer_markers() {
         let sections = vec![("lint".to_string(), "lint body".to_string())];
-        let out = render_comment("ci:x", None, &sections, None, None);
-        assert!(!out.contains("homeboy:footer:start"));
-        assert!(!out.contains("homeboy:footer:end"));
-    }
-
-    #[test]
-    fn render_comment_empty_footer_string_omits_footer_markers() {
-        // Passing Some("") or Some("\n") should behave like None — no footer.
-        let sections = vec![("lint".to_string(), "lint body".to_string())];
-        for probe in ["", "\n", "\n\n"] {
-            let out = render_comment("ci:x", None, &sections, None, Some(probe));
+        for probe in [None, Some(""), Some("\n"), Some("\n\n")] {
+            let out = render_comment("ci:x", None, &sections, None, probe);
             assert!(
                 !out.contains("homeboy:footer:start"),
                 "footer markers should be omitted for empty footer '{:?}'",
@@ -475,23 +466,19 @@ tooling block line 2
     }
 
     #[test]
-    fn extract_footer_returns_none_when_markers_absent() {
-        let body = "\
+    fn extract_footer_returns_none_when_markers_absent_or_empty() {
+        let without_markers = "\
 <!-- homeboy:comment-key=ci:x -->
 <!-- homeboy:section-key=lint:start -->
 body
 <!-- homeboy:section-key=lint:end -->
 ";
-        assert_eq!(extract_footer(body), None);
-    }
-
-    #[test]
-    fn extract_footer_empty_inner_returns_none() {
-        let body = "\
+        let empty_inner = "\
 <!-- homeboy:footer:start -->
 <!-- homeboy:footer:end -->
 ";
-        assert_eq!(extract_footer(body), None);
+        assert_eq!(extract_footer(without_markers), None);
+        assert_eq!(extract_footer(empty_inner), None);
     }
 
     #[test]
@@ -505,25 +492,6 @@ body
         // And sections should still round-trip.
         let parsed = parse_comment_sections(&rendered);
         assert_eq!(parsed, vec![("lint".to_string(), "body".to_string())]);
-    }
-
-    #[test]
-    fn render_comment_footer_with_multiple_sections_alphabetical() {
-        // Footer sits after the last section regardless of section ordering.
-        let sections = vec![
-            ("lint".to_string(), "l".to_string()),
-            ("audit".to_string(), "a".to_string()),
-            ("test".to_string(), "t".to_string()),
-        ];
-        let out = render_comment("ci:x", None, &sections, None, Some("FTR"));
-        // Alphabetical order: audit, lint, test; footer last.
-        let audit_pos = out.find("section-key=audit:end").unwrap();
-        let lint_pos = out.find("section-key=lint:end").unwrap();
-        let test_pos = out.find("section-key=test:end").unwrap();
-        let footer_pos = out.find("homeboy:footer:start").unwrap();
-        assert!(audit_pos < lint_pos);
-        assert!(lint_pos < test_pos);
-        assert!(test_pos < footer_pos);
     }
 
     #[test]

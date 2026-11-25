@@ -1,9 +1,8 @@
 //! Cook lifecycle notifications.
 //!
-//! Agent tasks used to emit nothing. A cook could run for twenty minutes and
-//! finish in total silence, so "fan out N tasks and report to my chat thread"
-//! produced N silences followed by N terminations the operator had to go
-//! looking for.
+//! Cooks announce the boundaries an operator acts on, so "fan out N tasks and
+//! report to my chat thread" produces addressable starts and outcomes rather
+//! than silence.
 //!
 //! Emission is deliberately sparse. Cook already reports eight internal phases
 //! (`durable_identity`, `provider_ready`, `provider_start`, `retry`,
@@ -509,8 +508,7 @@ fn terminal_payload(
     }
 
     // The pull request link is the single most useful thing a completed cook
-    // can hand a reviewer, and it was previously discarded along with the rest
-    // of the finalization report.
+    // can hand a reviewer.
     if let Some(finalization) = &report.finalization {
         if let Some(fact) = base_drift_fact(finalization).filter(|_| !cancelled) {
             payload = payload.with_fact("Base", fact);
@@ -622,27 +620,10 @@ fn gate_summary(gates: &[(&str, bool)]) -> String {
 
 /// The cook reached a terminal outcome.
 ///
-/// Delivered at most once per *cook*. The pre-existing exactly-once marker is
-/// keyed on a `runs` row, which dedupes one attempt against the runner-direct
-/// and daemon-backstop paths but cannot dedupe an event whose subject is the
-/// cook. That was tolerable while only the launching thread could deliver;
-/// durable route rehydration (#11115) means a second process reaching the same
-/// terminal boundary — a `--continue` over an already-terminal cook, an adopted
-/// controller — would now re-announce an outcome the operator already has.
-pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str>, exit_code: i32) {
-    // Resolve one lifecycle store for the whole claim/record/confirm/release
-    // protocol. These four steps are a single exactly-once transaction, and a
-    // step that lands in a different home than the claim cannot fail while
-    // getting it wrong (#7505). An unresolvable store is treated exactly as a
-    // lost claim.
-    let Ok(lifecycle_store) =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
-    else {
-        return;
-    };
-    cook_terminal_in_store(&lifecycle_store, report, component, exit_code);
-}
-
+/// Delivered at most once per *cook*. The exactly-once marker on a `runs` row
+/// dedupes one attempt, not the cook, so a second process reaching the same
+/// terminal boundary (a `--continue` over an already-terminal cook, an adopted
+/// controller) claims the cook-level marker before announcing (#11115).
 pub(crate) fn cook_terminal_in_store(
     store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
     report: &AgentTaskCookReport,
@@ -737,11 +718,10 @@ fn cook_terminal_in_store_with(
         // Delivered, or durably queued: either way this cook's outcome will
         // reach its destination without another observer producing it. The
         // claim's exactly-once eligibility is consumed, which is precisely
-        // what `confirm` records. Confirming on `Queued` is the fix for the
-        // three-hour cook whose terminal event used to die with a sixty-second
-        // transport outage: the claim lease is five minutes and the retry
-        // budget is twenty, so leaving the claim merely *held* would let it
-        // expire mid-retry and produce a duplicate.
+        // what `confirm` records. Confirming on `Queued` keeps a terminal
+        // event alive through a transport outage: the claim lease is five
+        // minutes and the retry budget is twenty, so leaving the claim merely
+        // *held* would let it expire mid-retry and produce a duplicate.
         NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
             let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification_in_store(
                 &lifecycle_store,
@@ -750,7 +730,7 @@ fn cook_terminal_in_store_with(
             );
         }
         // Nothing durable exists — no transport is configured, or the queue
-        // could not be written. Release, exactly as before, so a later
+        // could not be written. Release the claim so a later
         // terminal observer is eligible to try again.
         NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
             let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
@@ -923,7 +903,7 @@ fn run_reconciled_payload(
 /// so a reconcile that repeats across daemon restarts announces once.
 pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<&str>) {
     // One store for claim, confirm, and release — the same exactly-once
-    // protocol `cook_terminal` runs, through the same marker (#7505).
+    // protocol `cook_terminal_in_store` runs, through the same marker (#7505).
     let Ok(lifecycle_store) =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
     else {

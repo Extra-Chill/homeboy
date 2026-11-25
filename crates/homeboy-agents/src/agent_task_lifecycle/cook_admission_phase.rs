@@ -4,7 +4,8 @@ use serde_json::Value;
 use super::AgentTaskRunRecord;
 
 /// A detached Cook root's admission phase, derived once from its run state and
-/// `detached_cook_handoff` (#18908). `handoff.state` is no longer stored.
+/// `detached_cook_handoff` (#18908). `handoff.state` is not stored; a stored
+/// label is ignored in favor of the derived phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CookAdmissionPhase<'a> {
     /// Live and awaiting its first attempt at admission `step`.

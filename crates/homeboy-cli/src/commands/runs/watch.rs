@@ -361,8 +361,7 @@ mod tests {
     }
 
     /// A detached Lab handoff settles to `handed_off`. The watch must exit
-    /// rather than hang — it used to hang, because the record was left
-    /// `running` forever (#11107) — and it must not report success: the
+    /// rather than hang (#11107), and it must not report success: the
     /// dispatch succeeded, the dispatched command proved nothing here.
     #[test]
     fn watch_surfaces_a_handed_off_dispatch_as_terminal_without_claiming_success() {

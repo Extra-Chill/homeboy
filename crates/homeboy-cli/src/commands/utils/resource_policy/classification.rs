@@ -148,11 +148,10 @@ pub(super) fn agent_task_resource_behavior(
 /// coordinator owns worktree creation, the durable batch record, and child
 /// dispatch. Only the child cooks it generates are Lab-eligible.
 ///
-/// Previously this guard only matched `run_plan: true`, so a default (neither
-/// `--dry-run` nor `--run-plan`) coordinator invocation fell through to being
-/// treated as a portable, offloadable hot command. That allowed the whole
-/// coordinator to be dispatched to Lab, where it timed out before creating its
-/// local batch record/worktrees and stranded the run (#8025).
+/// The guard covers every coordinator invocation, including the default
+/// (neither `--dry-run` nor `--run-plan`) form: a coordinator dispatched to Lab
+/// times out before creating its local batch record/worktrees and strands the
+/// run (#8025).
 /// A cook-batch and its `batch-prepare` step are controller-local planning:
 /// the batch only admits a workflow, and its children are ordinary Cooks with
 /// their own admission.

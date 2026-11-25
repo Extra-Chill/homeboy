@@ -1480,10 +1480,6 @@ fn synthetic_remote_dispatch_plan(
     plan
 }
 
-// The ambient `record_aggregate()` shim that used to sit here is gone; the
-// remote-dispatch failure recorder was its only caller and now writes the
-// aggregate into the same store it submitted the record to (#7505).
-
 pub(crate) fn record_aggregate_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
@@ -1690,7 +1686,7 @@ pub(crate) fn project_runner_evidence_refs(
 
 /// The authoritative model recorded on an aggregate outcome, if any.
 ///
-/// Recover the runner identity for canonical legacy patch artifacts. Diagnostic
+/// Recover the runner identity for canonical patch artifacts. Diagnostic
 /// artifacts can share an aggregate without participating in promotion.
 fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<String> {
     let runner_ids = aggregate
@@ -1951,7 +1947,7 @@ fn project_terminal_artifacts_in_store(
             });
             // Only artifacts consumed after terminalization need controller
             // bytes. Other declarations remain review metadata and can name a
-            // producer-local path that no longer exists.
+            // producer-local path that is gone.
             if !requires_durable_lab_projection(artifact) {
                 continue;
             }

@@ -202,8 +202,8 @@ impl ExtensionRunner {
         self
     }
 
-    /// Set the run directory, injecting HOMEBOY_RUN_DIR and all legacy
-    /// per-file env vars so extension scripts work with either pattern.
+    /// Set the run directory, injecting HOMEBOY_RUN_DIR and the
+    /// per-sidecar file env vars extension scripts read.
     ///
     /// The extension's own `structured_sidecars` declarations are applied, so a
     /// declared non-default `path` reaches the script instead of being silently
@@ -794,7 +794,7 @@ fn initialize_structured_sidecars(
     Ok(())
 }
 
-/// Preserve failure arrays, project the legacy `{failures, total, passed}`
+/// Preserve failure arrays, project the `{failures, total, passed}`
 /// envelope onto its `failures` array, and replace any other shape with an
 /// empty array. Counts and runner diagnoses belong to `test.results` and
 /// captured output; this sidecar contains only individual failure records.

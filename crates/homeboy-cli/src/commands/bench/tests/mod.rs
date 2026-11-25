@@ -1,18 +1,10 @@
 use super::*;
 use crate::test_support::{git_fixture_output, run_git_fixture_command, with_isolated_home};
-use clap::error::ErrorKind;
 use clap::Parser;
 use homeboy_core::extension::bench::aggregate_comparison;
 use std::fs;
 use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
-
-/// Minimal CLI wrapper to exercise clap parsing of `BenchArgs`.
-#[derive(Parser)]
-struct TestCli {
-    #[command(flatten)]
-    bench: BenchArgs,
-}
 
 fn write_bench_extension(home: &TempDir) {
     let extension_dir = home

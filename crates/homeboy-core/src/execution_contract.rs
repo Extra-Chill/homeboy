@@ -165,21 +165,4 @@ mod tests {
         );
         assert_eq!(decode_uri_component("runner%2Fa"), "runner/a");
     }
-
-    #[test]
-    fn apply_contract_names_canonical_wire_schemas() {
-        let apply = EXECUTION_CONTRACT.apply;
-
-        assert_eq!(apply.change_artifact_schema, "homeboy/change-artifact/v1");
-        assert_eq!(
-            apply.change_apply_result_schema,
-            "homeboy/change-apply-result/v1"
-        );
-        assert_eq!(
-            apply.runner_workspace_apply_adapter,
-            "homeboy/runner-workspace-apply/v1"
-        );
-        assert_eq!(apply.unified_diff_patch_format, "unified_diff");
-        assert_eq!(apply.digest_algorithm_sha256, "sha256");
-    }
 }

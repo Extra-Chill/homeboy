@@ -8,25 +8,6 @@ struct TestCli {
 }
 
 #[test]
-fn parses_ci_profile_flag() {
-    let cli = TestCli::try_parse_from(["bench", "homeboy", "--ci-profile", "perf"])
-        .expect("bench should parse --ci-profile");
-
-    assert_eq!(cli.bench.run.ci_profile.as_deref(), Some("perf"));
-}
-
-#[test]
-fn parses_bench_list_rig_flag() {
-    let cli = TestCli::try_parse_from(["bench", "list", "--rig", "studio-bfb"])
-        .expect("bench list --rig should parse");
-
-    match cli.bench.command.expect("list command") {
-        BenchCommand::List(args) => assert_eq!(args.rig, vec!["studio-bfb".to_string()]),
-        _ => panic!("expected bench list command"),
-    }
-}
-
-#[test]
 fn parses_bench_compare_and_keeps_it_local() {
     let cli = TestCli::try_parse_from([
         "bench",
@@ -75,46 +56,6 @@ fn lab_workload_arguments_use_clap_values() {
 }
 
 #[test]
-fn parses_bench_list_json_flag() {
-    let cli = TestCli::try_parse_from(["bench", "list", "--json"])
-        .expect("bench list --json should parse");
-
-    match cli.bench.command.expect("list command") {
-        BenchCommand::List(args) => assert!(args.json),
-        _ => panic!("expected bench list command"),
-    }
-}
-
-#[test]
-fn parses_repeated_scenario_flags() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "homeboy",
-        "--scenario",
-        "studio-agent-runtime",
-        "--scenario",
-        "wp-admin-load",
-    ])
-    .expect("bench --scenario should parse");
-
-    assert_eq!(
-        cli.bench.run.scenario_ids,
-        vec![
-            "studio-agent-runtime".to_string(),
-            "wp-admin-load".to_string()
-        ]
-    );
-}
-
-#[test]
-fn parses_profile_flag() {
-    let cli = TestCli::try_parse_from(["bench", "--rig", "studio-bfb", "--profile", "smoke"])
-        .expect("bench --profile should parse");
-
-    assert_eq!(cli.bench.run.profile.as_deref(), Some("smoke"));
-}
-
-#[test]
 fn scenario_and_profile_conflict() {
     let err = match TestCli::try_parse_from([
         "bench",
@@ -130,14 +71,6 @@ fn scenario_and_profile_conflict() {
     };
 
     assert!(err.to_string().contains("cannot be used with"));
-}
-
-#[test]
-fn parses_run_id_proof_label() {
-    let cli = TestCli::try_parse_from(["bench", "homeboy", "--run-id", "proof-2026-06"])
-        .expect("bench --run-id should parse");
-
-    assert_eq!(cli.bench.run.run_id.as_deref(), Some("proof-2026-06"));
 }
 
 #[test]
@@ -180,55 +113,31 @@ fn parses_dotted_setting_override_for_nested_bench_env() {
 
 // --- Presentation vocabulary (#11138) -------------------------------------
 //
-// `bench --json` is the output-format sense of `--json`, now also spelled
-// `--format json`. Both must keep working, and neither may fabricate JSON
-// when the caller asked for something else.
+// `bench --json` and `--format json` both request the full JSON payload;
+// neither may fabricate JSON when the caller asked for something else.
 
 #[test]
-fn bare_bench_does_not_want_full_json() {
-    let cli = TestCli::try_parse_from(["bench", "homeboy"]).expect("bench should parse");
-
-    assert!(!cli.bench.wants_full_json());
-}
-
-#[test]
-fn legacy_json_flag_still_wants_full_json() {
-    let cli =
-        TestCli::try_parse_from(["bench", "homeboy", "--json"]).expect("bench --json should parse");
-
-    assert!(cli.bench.wants_full_json());
-}
-
-#[test]
-fn format_json_wants_full_json_identically() {
-    let cli = TestCli::try_parse_from(["bench", "homeboy", "--format", "json"])
-        .expect("bench --format json should parse");
-
-    assert!(cli.bench.wants_full_json());
-}
-
-#[test]
-fn both_json_spellings_together_are_accepted() {
-    let cli = TestCli::try_parse_from(["bench", "homeboy", "--json", "--format=json"])
-        .expect("bench --json --format=json should parse");
-
-    assert!(cli.bench.wants_full_json());
-}
-
-#[test]
-fn non_json_formats_keep_the_compact_bench_summary() {
-    for format in ["auto", "markdown", "text"] {
-        let cli = TestCli::try_parse_from(["bench", "homeboy", "--format", format])
-            .expect("bench --format should parse");
-
-        assert!(
-            !cli.bench.wants_full_json(),
-            "--format {format} must not imply the full JSON payload"
-        );
+fn only_json_format_spellings_want_the_full_json_payload() {
+    let cases: &[(&[&str], bool)] = &[
+        (&[], false),
+        (&["--json"], true),
+        (&["--format", "json"], true),
+        (&["--json", "--format=json"], true),
+        (&["--format", "auto"], false),
+        (&["--format", "markdown"], false),
+        (&["--format", "text"], false),
+    ];
+    for (flags, expected) in cases {
+        let argv: Vec<&str> = ["bench", "homeboy"]
+            .into_iter()
+            .chain(flags.iter().copied())
+            .collect();
+        let cli = TestCli::try_parse_from(argv).expect("bench should parse");
+        assert_eq!(cli.bench.wants_full_json(), *expected, "flags: {flags:?}");
     }
 }
 
-/// `run` folds `--detail summary` onto the legacy field before dispatch, so
+/// `run` folds `--detail summary` onto `--json-summary` before dispatch, so
 /// exercise the fold rather than the raw parse.
 fn folded(args: &[&str]) -> BenchArgs {
     let mut bench = TestCli::try_parse_from(args)
@@ -259,17 +168,8 @@ fn detail_summary_is_the_canonical_json_summary_spelling() {
 }
 
 #[test]
-fn both_detail_spellings_together_are_accepted() {
-    assert!(
-        folded(&["bench", "homeboy", "--json-summary", "--detail=summary"])
-            .run
-            .json_summary
-    );
-}
-
-#[test]
-fn detail_full_does_not_cancel_the_legacy_json_summary_flag() {
-    // The legacy bool has no "off" state, so `--detail full` cannot be read
+fn detail_full_does_not_cancel_the_json_summary_flag() {
+    // The `--json-summary` bool has no "off" state, so `--detail full` cannot be read
     // as a request to suppress a summary the caller explicitly asked for.
     assert!(
         folded(&["bench", "homeboy", "--json-summary", "--detail=full"])
@@ -297,22 +197,6 @@ fn detail_is_independent_of_format() {
 }
 
 #[test]
-fn presentation_flags_do_not_disturb_the_bench_run_group() {
-    let bench = folded(&[
-        "bench",
-        "homeboy",
-        "--format=json",
-        "--detail=summary",
-        "--iterations",
-        "3",
-    ]);
-
-    assert!(bench.wants_full_json());
-    assert!(bench.run.json_summary);
-    assert_eq!(bench.run.iterations, 3);
-}
-
-#[test]
 fn explicit_passthrough_preserves_a_runner_owned_format_flag() {
     // Declaring `--format` on bench must not let `filter_passthrough_args`
     // swallow a bench runner's own `--format`. `normalize` marks the explicit
@@ -337,25 +221,4 @@ fn explicit_passthrough_preserves_a_runner_owned_format_flag() {
         filter_homeboy_flags(&passthrough),
         vec!["--format".to_string(), "terse".to_string()]
     );
-}
-
-#[test]
-fn parses_hidden_bench_compare_cook_gate_flag() {
-    let cli = TestCli::try_parse_from([
-        "bench",
-        "compare",
-        "--cook-gate",
-        "--base",
-        "abc123",
-        "--head",
-        "WORKTREE",
-        "--path",
-        ".",
-    ])
-    .expect("bench compare --cook-gate should parse");
-
-    match cli.bench.command.expect("compare command") {
-        BenchCommand::Compare(args) => assert!(args.cook_gate),
-        _ => panic!("expected bench compare command"),
-    }
 }

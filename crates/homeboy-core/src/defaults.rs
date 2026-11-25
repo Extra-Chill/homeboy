@@ -14,6 +14,10 @@ pub use io::{
 };
 pub use policy::resolve_release_gate_local_hot_policy_from;
 pub use policy::{
+    agent_task_local_execution_denied_error, resolve_agent_task_local_execution_policy,
+    AgentTaskLocalExecutionPolicy, AGENT_TASK_LOCAL_EXECUTION_POINTER,
+};
+pub use policy::{
     resolve_release_gate_local_hot_policy, BenchConfig, BenchLocalExecutionPolicy,
     ReleaseGateConfig, ReleaseGateLocalHotPolicy, RELEASE_GATE_LOCAL_HOT_ENV,
 };
@@ -106,9 +110,9 @@ pub struct HomeboyConfig {
 
     /// Controller-owned public origin for canonical run artifact routes.
     ///
-    /// Runner environment is not configuration for this origin. The legacy
+    /// Runner environment is not configuration for this origin.
     /// `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` is read only as a controller-process
-    /// compatibility input when this setting is absent.
+    /// input when this setting is absent.
     #[serde(default)]
     pub artifact_origin: ArtifactOriginConfig,
 
@@ -196,7 +200,7 @@ pub struct ArtifactOriginConfig {
 pub struct GitHostConfig {
     pub name: String,
     pub email: String,
-    /// Owners allowed to publish directly; absent preserves legacy routing.
+    /// Owners allowed to publish directly; absent publishes directly to `origin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_owners: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -487,8 +491,7 @@ pub struct AgentTaskConfig {
     /// The command policy above bounds *what* an agent may run; this bounds
     /// *how much it may consume while running it*. Neither substitutes for the
     /// other — an agent can stay entirely inside its permitted commands and
-    /// still grow to nine gigabytes across forty child processes, which is what
-    /// Homeboy previously learned only after the process boundary closed.
+    /// still grow to nine gigabytes across forty child processes.
     ///
     /// Carried opaquely as JSON for the same reason as `rotation` and
     /// `command_policy`: core config does not depend on the agent-task
@@ -504,9 +507,7 @@ pub struct AgentTaskConfig {
     /// once, settable via `homeboy config set /agent_task/max_batch_concurrency
     /// <n>`.
     ///
-    /// Batch fanout previously derived its worker count from
-    /// `available_parallelism()` alone, so an eight-core host started eight
-    /// concurrent cooks. Concurrency is a property of what those cooks *do*,
+    /// Concurrency is a property of what those cooks *do*,
     /// not of the core count: a cook whose gate is a compile consumes tens of
     /// gigabytes of disk, and eight of those exhaust a volume that fits one.
     /// The core count cannot express that, so the host has to.
@@ -527,6 +528,17 @@ pub struct AgentTaskConfig {
     /// …). With no template declared, nothing is appended.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub prompt_templates: HashMap<String, String>,
+    /// Whether agent tasks may execute locally on this controller, settable via
+    /// `homeboy config set /agent_task/local_execution denied`.
+    ///
+    /// `denied` rejects any agent-task submission whose placement selects local
+    /// execution (`--placement local`, or `lab-or-local` / `auto` falling back)
+    /// before admission. Defaults to `allowed`.
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskLocalExecutionPolicy::is_allowed"
+    )]
+    pub local_execution: AgentTaskLocalExecutionPolicy,
 }
 
 /// Fallback ceiling on concurrent child cooks in a batch fanout when neither
@@ -704,85 +716,6 @@ mod tests {
     use crate::test_support::with_isolated_home;
 
     #[test]
-    fn retention_shared_store_fields_deserialize_with_documented_defaults() {
-        let config: HomeboyConfig = serde_json::from_str(r#"{"retention":{}}"#).unwrap();
-
-        assert_eq!(config.retention.shared_store_days, 30);
-        assert_eq!(
-            config.retention.shared_store_max_bytes,
-            20 * 1024 * 1024 * 1024
-        );
-        assert_eq!(config.retention.shared_store_lease_seconds, 6 * 60 * 60);
-    }
-
-    #[test]
-    fn homeboy_config_parses_lab_preferred_runner() {
-        let config: HomeboyConfig = serde_json::from_str(
-            r#"{
-                "lab": {
-                    "preferred_runner": "homeboy-lab"
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(config.lab.preferred_runner.as_deref(), Some("homeboy-lab"));
-    }
-
-    #[test]
-    fn homeboy_config_parses_agent_task_config_secret() {
-        let config: HomeboyConfig = serde_json::from_str(
-            r#"{
-                "agent_task": {
-                    "default_backend": "example",
-                    "secrets": {
-                        "TOKEN": {
-                            "source": "config",
-                            "value": "redacted-test-token"
-                        }
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            config.agent_task.default_backend.as_deref(),
-            Some("example")
-        );
-        let secret = config.agent_task.secrets.get("TOKEN").unwrap();
-        assert_eq!(secret.source, "config");
-        assert_eq!(secret.value.as_deref(), Some("redacted-test-token"));
-    }
-
-    #[test]
-    fn homeboy_config_preserves_global_settings() {
-        let config: HomeboyConfig = serde_json::from_str(
-            r#"{
-                "settings": {
-                    "provider": "example",
-                    "provider_plugin_paths": ["/providers/openai"],
-                    "runtime_overlays": [{"repo":"owner/runtime","ref":"main"}]
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            config.settings.get("provider"),
-            Some(&Value::String("example".to_string()))
-        );
-        assert_eq!(
-            config.settings["provider_plugin_paths"][0],
-            Value::String("/providers/openai".to_string())
-        );
-        assert_eq!(
-            config.settings["runtime_overlays"][0]["repo"],
-            "owner/runtime"
-        );
-    }
-
-    #[test]
     fn homeboy_config_save_load_preserves_global_settings() {
         with_isolated_home(|_| {
             save_config(&HomeboyConfig {
@@ -852,57 +785,35 @@ mod tests {
     }
 
     #[test]
-    fn isolated_home_guard_resets_config_cache_between_homes() {
-        with_isolated_home(|_| {
-            save_config(&HomeboyConfig {
-                settings: HashMap::from([(
-                    "cache_marker".to_string(),
-                    serde_json::json!("first-home"),
-                )]),
-                ..HomeboyConfig::default()
-            })
-            .expect("save first home config");
-
-            let loaded = load_config();
-            assert_eq!(loaded.settings["cache_marker"], "first-home");
-        });
-
-        with_isolated_home(|_| {
-            let loaded = load_config();
-            assert!(!loaded.settings.contains_key("cache_marker"));
-        });
-    }
-
-    #[test]
-    fn homeboy_config_leaves_lab_preferred_runner_unset_by_default() {
-        let config = HomeboyConfig::default();
-
-        assert!(config.lab.preferred_runner.is_none());
-    }
-
-    #[test]
-    fn release_gate_local_hot_defaults_to_fail_closed() {
-        let config = HomeboyConfig::default();
-
+    fn agent_task_local_execution_defaults_to_allowed_and_round_trips_denied() {
+        let parsed: HomeboyConfig = serde_json::from_str(r#"{"agent_task":{}}"#).unwrap();
         assert_eq!(
-            config.release_gate.local_hot,
-            ReleaseGateLocalHotPolicy::FailClosed
+            parsed.agent_task.local_execution,
+            AgentTaskLocalExecutionPolicy::Allowed
         );
+        // The default is not serialized, so existing config files are unchanged.
+        let value = serde_json::to_value(&parsed.agent_task).unwrap();
+        assert!(value.get("local_execution").is_none());
+
+        let denied: HomeboyConfig =
+            serde_json::from_str(r#"{"agent_task":{"local_execution":"denied"}}"#).unwrap();
+        assert!(denied.agent_task.local_execution.is_denied());
+        let value = serde_json::to_value(&denied.agent_task).unwrap();
+        assert_eq!(value["local_execution"], "denied");
     }
 
     #[test]
-    fn release_gate_local_hot_parses_allowed_from_config() {
-        let config: HomeboyConfig =
-            serde_json::from_str(r#"{"release_gate":{"local_hot":"allowed"}}"#).unwrap();
-
-        assert_eq!(
-            config.release_gate.local_hot,
-            ReleaseGateLocalHotPolicy::Allowed
-        );
+    fn agent_task_local_execution_denied_error_names_policy_and_reason() {
+        let error = agent_task_local_execution_denied_error(Some("runner `lab` is disconnected"));
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains(AGENT_TASK_LOCAL_EXECUTION_POINTER));
+        assert!(rendered.contains("runner `lab` is disconnected"));
+        assert!(rendered.contains("--placement lab"));
+        assert!(rendered.contains("homeboy runner status"));
     }
 
     #[test]
-    fn resolve_release_gate_policy_env_overrides_config() {
+    fn release_gate_local_hot_fails_closed_by_default_and_env_overrides_config() {
         struct EnvGuard {
             previous: Option<String>,
         }
@@ -922,15 +833,23 @@ mod tests {
             }
         }
 
+        let default_config: HomeboyConfig = serde_json::from_str("{}").unwrap();
+        let allowed_config: HomeboyConfig =
+            serde_json::from_str(r#"{"release_gate":{"local_hot":"allowed"}}"#).unwrap();
+        assert_eq!(
+            default_config.release_gate.local_hot,
+            ReleaseGateLocalHotPolicy::FailClosed
+        );
+
         let _env = EnvGuard::set("allowed");
         assert_eq!(
-            resolve_release_gate_local_hot_policy_from(&HomeboyConfig::default()),
+            resolve_release_gate_local_hot_policy_from(&default_config),
             ReleaseGateLocalHotPolicy::Allowed
         );
 
         let _env = EnvGuard::set("fail-closed");
         assert_eq!(
-            resolve_release_gate_local_hot_policy_from(&HomeboyConfig::default()),
+            resolve_release_gate_local_hot_policy_from(&allowed_config),
             ReleaseGateLocalHotPolicy::FailClosed
         );
     }

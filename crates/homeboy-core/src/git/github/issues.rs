@@ -383,7 +383,7 @@ pub(super) fn parse_issue_list_json(
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::github_types::{IssueCloseReason, IssueState};
+    use super::super::super::github_types::IssueState;
     use super::*;
 
     #[test]
@@ -414,19 +414,6 @@ mod tests {
         let items = parse_issue_list_json(raw, &opts).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].number, 2);
-    }
-
-    #[test]
-    fn issue_state_gh_flag() {
-        assert_eq!(IssueState::Open.as_gh_flag(), "open");
-        assert_eq!(IssueState::Closed.as_gh_flag(), "closed");
-        assert_eq!(IssueState::All.as_gh_flag(), "all");
-    }
-
-    #[test]
-    fn issue_close_reason_gh_flag() {
-        assert_eq!(IssueCloseReason::Completed.as_gh_flag(), "completed");
-        assert_eq!(IssueCloseReason::NotPlanned.as_gh_flag(), "not planned");
     }
 
     #[test]

@@ -1132,9 +1132,8 @@ fn pull_artifacts_to_local(
 /// targets.
 ///
 /// One implementation, shared with the runner download cache writer
-/// (#10586): this substitution used to exist only here, on the `--pull-dir`
-/// path, while the default cache path joined the remote's name unsanitized.
-/// Two copies is how that gap reopens.
+/// (#10586), so the `--pull-dir` path and the default cache path sanitize
+/// remote names identically.
 fn sanitize_artifact_filename(artifact_id: &str) -> String {
     homeboy::core::runner_download_cache::sanitize_artifact_file_name(artifact_id)
 }

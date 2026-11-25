@@ -608,84 +608,59 @@ mod tests {
     }
 
     #[test]
-    fn get_latest_finalized_version_finds_first_semver() {
-        let content = "# Changelog\n\n## Unreleased\n\n## 0.2.16\n\n- Item\n\n## 0.2.15\n";
-        assert_eq!(
-            get_latest_finalized_version(content),
-            Some("0.2.16".to_string())
-        );
-    }
-
-    #[test]
-    fn get_latest_finalized_version_parses_bracketed_format() {
-        let content = "# Changelog\n\n## Unreleased\n\n## [1.0.0]\n\n## 0.2.16\n";
-        // [1.0.0] is now parsed as 1.0.0 (Keep a Changelog format)
-        assert_eq!(
-            get_latest_finalized_version(content),
-            Some("1.0.0".to_string())
-        );
-    }
-
-    #[test]
-    fn get_latest_finalized_version_parses_dated_format() {
-        let content = "# Changelog\n\n## Unreleased\n\n## [1.0.0] - 2025-01-14\n\n## 0.2.16\n";
-        // Full Keep a Changelog format with date
-        assert_eq!(
-            get_latest_finalized_version(content),
-            Some("1.0.0".to_string())
-        );
-    }
-
-    #[test]
-    fn get_latest_finalized_version_returns_none_when_no_versions() {
-        let content = "# Changelog\n\n## Unreleased\n\n- Item\n";
-        assert_eq!(get_latest_finalized_version(content), None);
+    fn get_latest_finalized_version_reads_plain_bracketed_and_dated_headings() {
+        for (content, expected) in [
+            (
+                "# Changelog\n\n## Unreleased\n\n## 0.2.16\n\n- Item\n\n## 0.2.15\n",
+                Some("0.2.16"),
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n## [1.0.0]\n\n## 0.2.16\n",
+                Some("1.0.0"),
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n## [1.0.0] - 2025-01-14\n\n## 0.2.16\n",
+                Some("1.0.0"),
+            ),
+            ("# Changelog\n\n## Unreleased\n\n- Item\n", None),
+        ] {
+            assert_eq!(
+                get_latest_finalized_version(content).as_deref(),
+                expected,
+                "{content}"
+            );
+        }
     }
 
     // === Keep a Changelog Subsection Tests ===
 
     #[test]
-    fn validate_section_content_with_direct_bullets() {
-        let lines = vec!["- Item one", "- Item two"];
-        assert_eq!(
-            validate_section_content(&lines),
-            SectionContentStatus::Valid
-        );
-    }
-
-    #[test]
-    fn validate_section_content_with_subsection_bullets() {
-        let lines = vec![
-            "### Added",
-            "",
-            "- New feature",
-            "",
-            "### Fixed",
-            "",
-            "- Bug fix",
-        ];
-        assert_eq!(
-            validate_section_content(&lines),
-            SectionContentStatus::Valid
-        );
-    }
-
-    #[test]
-    fn validate_section_content_subsections_only() {
-        let lines = vec!["### Added", "", "### Changed", ""];
-        assert_eq!(
-            validate_section_content(&lines),
-            SectionContentStatus::SubsectionsOnly
-        );
-    }
-
-    #[test]
-    fn validate_section_content_empty() {
-        let lines = vec!["", ""];
-        assert_eq!(
-            validate_section_content(&lines),
-            SectionContentStatus::Empty
-        );
+    fn validate_section_content_classifies_bullets_subsections_and_empty() {
+        for (lines, expected) in [
+            (
+                vec!["- Item one", "- Item two"],
+                SectionContentStatus::Valid,
+            ),
+            (
+                vec![
+                    "### Added",
+                    "",
+                    "- New feature",
+                    "",
+                    "### Fixed",
+                    "",
+                    "- Bug fix",
+                ],
+                SectionContentStatus::Valid,
+            ),
+            (
+                vec!["### Added", "", "### Changed", ""],
+                SectionContentStatus::SubsectionsOnly,
+            ),
+            (vec!["", ""], SectionContentStatus::Empty),
+        ] {
+            assert_eq!(validate_section_content(&lines), expected, "{lines:?}");
+        }
     }
 
     #[test]
@@ -928,56 +903,35 @@ mod tests {
         assert!(out.contains("- add Codex runtime support"));
     }
 
-    // === count_unreleased_entries Tests ===
-
     #[test]
-    fn count_unreleased_entries_with_direct_bullets() {
-        let content =
-            "# Changelog\n\n## Unreleased\n\n- Item one\n- Item two\n- Item three\n\n## 0.1.0\n";
+    fn count_unreleased_entries_counts_dash_and_asterisk_bullets_only() {
         let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 3);
-    }
-
-    #[test]
-    fn count_unreleased_entries_with_subsection_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature one\n- Feature two\n\n### Fixed\n\n- Bug fix\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 3);
-    }
-
-    #[test]
-    fn count_unreleased_entries_empty_section() {
-        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 0);
-    }
-
-    #[test]
-    fn count_unreleased_entries_no_section() {
-        let content = "# Changelog\n\n## 0.1.0\n- Initial release\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 0);
-    }
-
-    #[test]
-    fn count_unreleased_entries_subsections_only_no_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 0);
-    }
-
-    #[test]
-    fn count_unreleased_entries_with_asterisk_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n* Item one\n* Item two\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 2);
-    }
-
-    #[test]
-    fn count_unreleased_entries_mixed_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n- Dash item\n* Asterisk item\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 2);
+        for (content, expected) in [
+            (
+                "# Changelog\n\n## Unreleased\n\n- Item one\n- Item two\n- Item three\n\n## 0.1.0\n",
+                3,
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature one\n- Feature two\n\n### Fixed\n\n- Bug fix\n\n## 0.1.0\n",
+                3,
+            ),
+            ("# Changelog\n\n## Unreleased\n\n## 0.1.0\n", 0),
+            ("# Changelog\n\n## 0.1.0\n- Initial release\n", 0),
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n",
+                0,
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n- Dash item\n* Asterisk item\n\n## 0.1.0\n",
+                2,
+            ),
+        ] {
+            assert_eq!(
+                count_unreleased_entries(content, &aliases),
+                expected,
+                "{content}"
+            );
+        }
     }
 
     #[test]

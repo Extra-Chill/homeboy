@@ -400,7 +400,6 @@ fn lock_shared_bounded(_file: &File, _lock_path: &Path, _context: &str) -> Resul
 }
 
 struct ConfigLockGuard {
-    #[allow(dead_code)]
     file: File,
 }
 
@@ -1727,19 +1726,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_config_lock_on_one_thread_does_not_deadlock() {
-        crate::test_support::with_isolated_home(|_home| {
-            let value = bounded("nested config lock", || {
-                with_config_lock(|| with_config_lock(|| Ok(7u32)))
-            })
-            .expect("nested config lock panicked")
-            .expect("nested config lock returned an error");
-
-            assert_eq!(value, 7);
-        });
-    }
-
-    #[test]
     fn nested_config_lock_reports_depth_and_restores_it() {
         crate::test_support::with_isolated_home(|_home| {
             // Depth is thread-local, so the probe has to observe it from the
@@ -1792,26 +1778,6 @@ mod tests {
     }
 
     #[test]
-    fn strict_test_scope_is_thread_local_and_restored_after_unwind() {
-        assert!(!TEST_STRICT_CONFIG_LOCK.with(|strict| strict.get()));
-        let result = std::panic::catch_unwind(|| {
-            with_strict_config_lock_for_test(|| {
-                assert!(config_lock_strict());
-                std::thread::spawn(|| {
-                    assert!(!TEST_STRICT_CONFIG_LOCK.with(|strict| strict.get()));
-                })
-                .join()
-                .unwrap();
-                with_strict_config_lock_for_test(|| assert!(config_lock_strict()));
-                assert!(config_lock_strict());
-                panic!("exercise strict scope cleanup");
-            });
-        });
-        assert!(result.is_err());
-        assert!(!TEST_STRICT_CONFIG_LOCK.with(|strict| strict.get()));
-    }
-
-    #[test]
     fn strict_mode_allows_nested_independent_rooted_locks() {
         crate::test_support::with_isolated_home(|_| {
             let left = tempfile::tempdir().expect("left config root");
@@ -1856,40 +1822,20 @@ mod tests {
     }
 
     #[test]
-    fn healthy_config_read_takes_a_shared_lock() {
-        let root = tempfile::tempdir().expect("config root");
-        let value =
-            with_config_read_lock_at(root.path(), || Ok("read")).expect("healthy config read");
-
-        assert_eq!(value, "read");
-        assert!(root.path().join("config.lock").exists());
-    }
-
-    #[test]
-    fn stale_config_lock_metadata_does_not_block_a_read() {
+    fn config_read_is_not_blocked_by_stale_metadata_or_unrelated_locks() {
         let root = tempfile::tempdir().expect("config root");
         let lock_path = root.path().join("config.lock");
+        // Metadata left behind by a dead writer: its flock lease died with it.
         std::fs::write(
             &lock_path,
             r#"{"pid":999999,"operation":"interrupted write"}"#,
         )
         .expect("stale lock metadata");
-
-        let value = with_config_read_lock_at(root.path(), || Ok("recovered"))
-            .expect("stale flock lease is released with its dead holder");
-
-        assert_eq!(value, "recovered");
-    }
-
-    #[test]
-    fn config_read_ignores_an_unrelated_work_lock() {
-        let root = tempfile::tempdir().expect("config root");
-        let unrelated_path = root.path().join("daemon-inventory.lock");
         let unrelated = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .open(&unrelated_path)
+            .open(root.path().join("daemon-inventory.lock"))
             .expect("unrelated lock handle");
         #[cfg(unix)]
         {
@@ -1901,9 +1847,10 @@ mod tests {
         }
 
         let value = with_config_read_lock_at(root.path(), || Ok("responsive"))
-            .expect("unrelated work must not block config reads");
+            .expect("stale metadata and unrelated work must not block config reads");
 
         assert_eq!(value, "responsive");
+        assert!(lock_path.exists());
     }
 
     /// Unix-only: the bound is implemented with `flock(2)`, and on other

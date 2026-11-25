@@ -2850,7 +2850,6 @@ mod tests {
             pr_title: "fix(agent-task): guard the reload render path".to_string(),
             summary: "Fix the reload crash.".to_string(),
             what_changed: vec!["Guard the null render path.".to_string()],
-            verification: Vec::new(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
             delivery: Vec::new(),

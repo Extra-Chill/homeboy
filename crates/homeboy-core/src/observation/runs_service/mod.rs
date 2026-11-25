@@ -179,9 +179,8 @@ pub fn retain_terminal_runs(
         ));
     }
     let cutoffs = options.age_policy.cutoffs(Utc::now());
-    // The store and artifact root are resolved once for the whole sweep. Both
-    // used to be re-derived inside each per-run plan call, which meant one
-    // connection open plus a full migration ladder per candidate run.
+    // The store and artifact root are resolved once for the whole sweep, so a
+    // candidate run costs no extra connection open or migration ladder.
     //
     // The artifact root comes from the store rather than from process state,
     // so the bytes this sweep removes are the ones the rows it read actually

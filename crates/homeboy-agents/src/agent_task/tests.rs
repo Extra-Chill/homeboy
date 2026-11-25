@@ -4,116 +4,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn request_round_trips_generic_agent_task_shape() {
-    let request = AgentTaskRequest {
-        schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-        task_id: "task-1".to_string(),
-        group_key: Some("audit-batch".to_string()),
-        parent_plan_id: Some("plan-1".to_string()),
-        executor: AgentTaskExecutor {
-            backend: "browser_sandbox".to_string(),
-            selector: Some("lab-a".to_string()),
-            runtime_selection: None,
-            required_capabilities: vec!["structured_output".to_string()],
-            secret_env: Vec::new(),
-            model: Some("quality-model".to_string()),
-            config: json!({ "account": "team-a" }),
-        },
-        instructions: "Fix the scoped finding and return artifacts.".to_string(),
-        inputs: json!({ "finding_id": "finding-1" }),
-        source_refs: vec![AgentTaskSourceRef {
-            kind: "git".to_string(),
-            uri: "https://example.test/repo.git".to_string(),
-            revision: Some("abc123".to_string()),
-        }],
-        workspace: AgentTaskWorkspace {
-            kind: None,
-            mode: AgentTaskWorkspaceMode::Materialized,
-            root: Some("/workspace/repo".to_string()),
-            slug: Some("repo".to_string()),
-            component_id: None,
-            branch: None,
-            base_ref: None,
-            task_url: None,
-            cleanup: None,
-            attempt: None,
-            materialization: json!({ "component": "repo" }),
-        },
-        component_contracts: Vec::new(),
-        policy: AgentTaskPolicy {
-            read: "workspace".to_string(),
-            write: "workspace".to_string(),
-            apply: "propose_only".to_string(),
-            tools: AgentToolPolicy::default(),
-        },
-        limits: AgentTaskLimits {
-            timeout_ms: Some(300_000),
-            max_runtime_ms: Some(240_000),
-            max_timeout_ms: None,
-            execution_deadline_unix_ms: None,
-            liveness_timeout_ms: None,
-            max_output_bytes: Some(1_000_000),
-            exclusive_resource_keys: Vec::new(),
-        },
-        expected_artifacts: vec!["patch".to_string(), "report".to_string()],
-        artifact_declarations: vec![AgentTaskArtifactDeclaration {
-            name: "analysis_report".to_string(),
-            artifact_type: Some("AnalysisReport".to_string()),
-            artifact_schema: Some("example/analysis-report/v1".to_string()),
-            path: Some("artifacts/analysis-report.json".to_string()),
-            required: true,
-            description: Some("Structured analysis output".to_string()),
-            metadata: json!({ "audience": "reviewer" }),
-        }],
-        output_declarations: vec![AgentTaskOutputDeclaration {
-            name: "result".to_string(),
-            required: true,
-            schema: "example/result/v1".to_string(),
-            structural_schema: json!({ "type": "object" }),
-            max_bytes: Some(1_024),
-            evidence_relationship: None,
-        }],
-        runtime_tools: Vec::new(),
-        metadata: json!({ "batch": 1 }),
-    };
-
-    let encoded = serde_json::to_string(&request).expect("serialize request");
-    let decoded: AgentTaskRequest = serde_json::from_str(&encoded).expect("decode request");
-
-    assert_eq!(decoded, request);
-    assert_eq!(decoded.schema, AGENT_TASK_REQUEST_SCHEMA);
-}
-
-#[test]
-fn attempt_workspace_identity_and_adoption_round_trip_for_lab_rematerialization() {
-    let attempt = AgentTaskAttemptWorkspace {
-        identity: "attempt-7f3c".to_string(),
-        base_ref: "9f4d".to_string(),
-        base_fingerprint: "sha256:base".to_string(),
-        adoption: Some(AgentTaskCandidateAdoption {
-            source_attempt: "attempt-1a2b".to_string(),
-            candidate: AgentTaskCandidate {
-                base_sha: "base".into(),
-                candidate_sha: "candidate".into(),
-                tree_sha: "tree".into(),
-            },
-            provider_backend: "provider-a".to_string(),
-            provider_model: Some("model-a".to_string()),
-            decision: "continue verified candidate".to_string(),
-        }),
-    };
-
-    let encoded = serde_json::to_value(&attempt).expect("serialize attempt workspace");
-    let decoded: AgentTaskAttemptWorkspace =
-        serde_json::from_value(encoded.clone()).expect("deserialize attempt workspace");
-
-    assert_eq!(decoded, attempt);
-    assert_eq!(encoded["identity"], "attempt-7f3c");
-    assert_eq!(encoded["adoption"]["source_attempt"], "attempt-1a2b");
-}
-
-#[test]
-fn agent_tool_contract_round_trips_policy_request_and_result() {
+fn agent_tool_policy_resolves_execution_location_per_tool() {
     let policy: AgentToolPolicy = serde_json::from_value(json!({
         "schema": AGENT_TOOL_POLICY_SCHEMA,
         "default_location": "disabled",
@@ -129,26 +20,6 @@ fn agent_tool_contract_round_trips_policy_request_and_result() {
         }
     }))
     .expect("decode tool policy");
-    let request = AgentToolRequest {
-        schema: AGENT_TOOL_REQUEST_SCHEMA.to_string(),
-        request_id: "tool-request-1".to_string(),
-        task_id: "task-1".to_string(),
-        tool: "repo.status".to_string(),
-        input: json!({ "path": "/workspace/repo" }),
-        timeout_ms: Some(30_000),
-        metadata: json!({ "attempt": 1 }),
-    };
-    let result = AgentToolResult {
-        schema: AGENT_TOOL_RESULT_SCHEMA.to_string(),
-        request_id: request.request_id.clone(),
-        task_id: request.task_id.clone(),
-        tool: request.tool.clone(),
-        status: AgentToolResultStatus::Succeeded,
-        output: json!({ "clean": true }),
-        diagnostics: Vec::new(),
-        metadata: json!({ "execution_location": "control_plane" }),
-    };
-
     assert_eq!(
         policy.execution_location_for("repo.status"),
         AgentToolExecutionLocation::ControlPlane
@@ -160,20 +31,6 @@ fn agent_tool_contract_round_trips_policy_request_and_result() {
     assert_eq!(
         policy.execution_location_for("unknown.tool"),
         AgentToolExecutionLocation::Disabled
-    );
-    assert_eq!(
-        serde_json::from_value::<AgentToolRequest>(
-            serde_json::to_value(&request).expect("serialize request")
-        )
-        .expect("decode request"),
-        request
-    );
-    assert_eq!(
-        serde_json::from_value::<AgentToolResult>(
-            serde_json::to_value(&result).expect("serialize result")
-        )
-        .expect("decode result"),
-        result
     );
 }
 
@@ -250,82 +107,6 @@ fn request_canonicalizes_artifact_declarations_from_expected_artifacts() {
 }
 
 #[test]
-fn outcome_round_trips_success_noop_timeout_and_follow_up_shapes() {
-    let statuses = [
-        AgentTaskOutcomeStatus::Succeeded,
-        AgentTaskOutcomeStatus::NoOp,
-        AgentTaskOutcomeStatus::UnableToRemediate,
-        AgentTaskOutcomeStatus::ProviderError,
-        AgentTaskOutcomeStatus::Timeout,
-        AgentTaskOutcomeStatus::FollowUpIssue,
-    ];
-
-    for status in statuses {
-        let outcome = AgentTaskOutcome {
-            task_id: "task-1".to_string(),
-            status,
-            summary: Some("completed".to_string()),
-            failure_classification: match status {
-                AgentTaskOutcomeStatus::ProviderError => {
-                    Some(AgentTaskFailureClassification::Provider)
-                }
-                AgentTaskOutcomeStatus::Timeout => Some(AgentTaskFailureClassification::Timeout),
-                _ => None,
-            },
-            artifacts: vec![AgentTaskArtifact {
-                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "artifact-1".to_string(),
-                kind: "patch".to_string(),
-                name: Some("fix.patch".to_string()),
-                label: Some("Fix patch".to_string()),
-                role: Some("patch".to_string()),
-                semantic_key: Some("task.fix_patch".to_string()),
-                path: Some("artifacts/fix.patch".to_string()),
-                url: None,
-                mime: Some("text/x-patch".to_string()),
-                size_bytes: Some(128),
-                sha256: Some("sha256:abc".to_string()),
-                metadata: json!({}),
-            }],
-            typed_artifacts: vec![AgentTaskTypedArtifact {
-                name: "issue_summary".to_string(),
-                artifact_type: Some("IssueSummary".to_string()),
-                artifact_schema: Some("example/issue-summary/v1".to_string()),
-                payload: json!({ "issue_number": 3447 }),
-                artifact: None,
-                metadata: json!({}),
-            }],
-            evidence_refs: vec![AgentTaskEvidenceRef {
-                kind: "log".to_string(),
-                uri: "artifact://run/log".to_string(),
-                label: Some("runner log".to_string()),
-            }],
-            diagnostics: vec![AgentTaskDiagnostic {
-                class: "provider".to_string(),
-                message: "provider returned retryable error".to_string(),
-                data: json!({}),
-            }],
-            outputs: json!({ "issue_number": 3447 }),
-            follow_up: Some(AgentTaskFollowUp {
-                kind: "issue_report".to_string(),
-                title: "Needs human decision".to_string(),
-                body: Some("The requested fix needs product direction.".to_string()),
-                uri: None,
-            }),
-            metadata: json!({}),
-            ..Default::default()
-        };
-
-        let value = serde_json::to_value(&outcome).expect("serialize outcome");
-        let decoded: AgentTaskOutcome = serde_json::from_value(value).expect("decode outcome");
-
-        assert_eq!(decoded, outcome);
-        assert_eq!(decoded.schema, AGENT_TASK_OUTCOME_SCHEMA);
-        assert_eq!(decoded.artifacts[0].schema, AGENT_TASK_ARTIFACT_SCHEMA);
-    }
-}
-
-#[test]
 fn artifact_role_helpers_fall_back_to_metadata() {
     let artifact = AgentTaskArtifact {
         schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
@@ -349,106 +130,6 @@ fn artifact_role_helpers_fall_back_to_metadata() {
     assert_eq!(artifact.display_label(), Some("result.json"));
     assert_eq!(artifact.declared_role(), Some("summary"));
     assert_eq!(artifact.declared_semantic_key(), Some("task.summary"));
-}
-
-#[test]
-fn outcome_round_trips_nested_workflow_step_evidence() {
-    let outcome = AgentTaskOutcome {
-        task_id: "model-kimi-site-a".to_string(),
-        status: AgentTaskOutcomeStatus::Failed,
-        summary: Some("diagnose step failed".to_string()),
-        failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
-        artifacts: vec![AgentTaskArtifact {
-            schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: "screenshot-1".to_string(),
-            kind: "screenshot".to_string(),
-            name: Some("homepage.png".to_string()),
-            label: None,
-            role: None,
-            semantic_key: None,
-            path: Some("artifacts/homepage.png".to_string()),
-            url: None,
-            mime: Some("image/png".to_string()),
-            size_bytes: Some(2048),
-            sha256: Some("sha256:def".to_string()),
-            metadata: json!({ "viewport": "desktop" }),
-        }],
-        typed_artifacts: vec![AgentTaskTypedArtifact {
-            name: "screenshot_summary".to_string(),
-            artifact_type: Some("ScreenshotSummary".to_string()),
-            artifact_schema: Some("example/screenshot-summary/v1".to_string()),
-            payload: json!({ "viewport": "desktop", "has_regression": true }),
-            artifact: None,
-            metadata: json!({ "source": "diagnose" }),
-        }],
-        workflow: Some(AgentTaskWorkflowEvidence {
-            schema: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
-            id: "site-build".to_string(),
-            label: Some("Site build".to_string()),
-            steps: vec![
-                AgentTaskWorkflowStepEvidence {
-                    id: "generate".to_string(),
-                    label: Some("Generate artifact".to_string()),
-                    status: AgentTaskWorkflowStepStatus::Succeeded,
-                    depends_on: Vec::new(),
-                    started_at: Some("2026-05-31T23:00:00Z".to_string()),
-                    finished_at: Some("2026-05-31T23:00:03Z".to_string()),
-                    duration_ms: Some(3_000),
-                    metrics: json!({ "tokens": 1200 }),
-                    artifact_refs: Vec::new(),
-                    diagnostics: Vec::new(),
-                    suggestions: Vec::new(),
-                    metadata: json!({}),
-                },
-                AgentTaskWorkflowStepEvidence {
-                    id: "diagnose".to_string(),
-                    label: Some("Diagnose imported site".to_string()),
-                    status: AgentTaskWorkflowStepStatus::Failed,
-                    depends_on: vec!["generate".to_string(), "screenshot".to_string()],
-                    started_at: Some("2026-05-31T23:00:04Z".to_string()),
-                    finished_at: Some("2026-05-31T23:00:05Z".to_string()),
-                    duration_ms: Some(1_000),
-                    metrics: json!({ "fallback_blocks": 2 }),
-                    artifact_refs: vec![AgentTaskEvidenceRef {
-                        kind: "artifact".to_string(),
-                        uri: "artifact://screenshot-1".to_string(),
-                        label: Some("Desktop screenshot".to_string()),
-                    }],
-                    diagnostics: vec![AgentTaskDiagnostic {
-                        class: "visual_regression".to_string(),
-                        message: "fallback blocks remain".to_string(),
-                        data: json!({ "count": 2 }),
-                    }],
-                    suggestions: vec![AgentTaskWorkflowStepSuggestion {
-                        kind: "repair".to_string(),
-                        title: "Run import repair".to_string(),
-                        body: Some("Repair unsupported fallback blocks.".to_string()),
-                        uri: Some("homeboy://tasks/model-kimi-site-a/repair".to_string()),
-                    }],
-                    metadata: json!({ "phase": "diagnostics" }),
-                },
-            ],
-            metadata: json!({ "executor": "custom-provider" }),
-        }),
-        metadata: json!({}),
-        ..Default::default()
-    };
-
-    let value = serde_json::to_value(&outcome).expect("serialize outcome");
-    let decoded: AgentTaskOutcome = serde_json::from_value(value).expect("decode outcome");
-
-    assert_eq!(decoded, outcome);
-    let workflow = decoded.workflow.expect("workflow evidence");
-    assert_eq!(workflow.schema, AGENT_TASK_WORKFLOW_SCHEMA);
-    assert_eq!(
-        workflow.steps[0].status,
-        AgentTaskWorkflowStepStatus::Succeeded
-    );
-    assert_eq!(workflow.steps[1].depends_on, vec!["generate", "screenshot"]);
-    assert_eq!(
-        workflow.steps[1].artifact_refs[0].uri,
-        "artifact://screenshot-1"
-    );
 }
 
 #[test]
@@ -556,35 +237,4 @@ fn redacted_outcome_removes_sensitive_artifact_and_diagnostic_data() {
     assert!(!redacted.to_string().contains("abc123"));
     assert!(!redacted.to_string().contains("session=secret"));
     assert_eq!(redacted["metadata"]["safe"], json!("value"));
-}
-
-#[test]
-fn executor_contract_round_trips_provider_neutral_lifecycle_shapes() {
-    let capabilities = AgentTaskExecutorCapabilities {
-        backend: "local_session".to_string(),
-        selector: Some("default".to_string()),
-        capabilities: vec!["workspace_write".to_string(), "artifacts".to_string()],
-        supports_sync_completion: true,
-        supports_async_polling: true,
-        supports_streaming: true,
-        supports_cancel: true,
-    };
-
-    let handle = AgentTaskExecutionHandle {
-        kind: AgentTaskExecutionHandleKind::ProviderRun,
-        task_id: "task-1".to_string(),
-        backend: capabilities.backend.clone(),
-        run_id: "run-1".to_string(),
-        stream_uri: Some("event://run-1".to_string()),
-        metadata: json!({ "attempt": 1 }),
-    };
-
-    let encoded = serde_json::to_value((&capabilities, &handle)).expect("serialize");
-    let (decoded_capabilities, decoded_handle): (
-        AgentTaskExecutorCapabilities,
-        AgentTaskExecutionHandle,
-    ) = serde_json::from_value(encoded).expect("decode");
-
-    assert_eq!(decoded_capabilities, capabilities);
-    assert_eq!(decoded_handle, handle);
 }

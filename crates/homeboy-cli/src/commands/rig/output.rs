@@ -171,7 +171,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rig_list_returns_rows_under_entities_only() {
+    fn rig_list_returns_rows_under_entities() {
         let output = RigCommandOutput::List(RigListOutput::new(vec![RigSummary {
             id: "studio-bfb".to_string(),
             declared_id: None,
@@ -187,10 +187,6 @@ mod tests {
         assert_eq!(value["variant"], "list");
         assert_eq!(value["payload"]["command"], "rig.list");
         assert_eq!(value["payload"]["entities"][0]["id"], "studio-bfb");
-        assert!(
-            value["payload"].get("rigs").is_none(),
-            "legacy mirror removed (#15742)"
-        );
     }
 
     #[test]
@@ -199,7 +195,6 @@ mod tests {
             .expect("serialize rig list");
 
         assert_eq!(value["payload"]["entities"], serde_json::json!([]));
-        assert!(value["payload"].get("rigs").is_none());
     }
 
     #[test]

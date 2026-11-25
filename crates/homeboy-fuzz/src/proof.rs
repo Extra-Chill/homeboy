@@ -833,7 +833,7 @@ mod tests {
             Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0")
         );
         assert!(proof.component.is_exact());
-        // Exact rig identity — already in run metadata, previously unprojected.
+        // Exact rig identity projected from run metadata.
         let rig = proof.rig.as_ref().expect("rig identity");
         assert_eq!(
             rig.revision.as_deref(),

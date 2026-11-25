@@ -99,8 +99,20 @@ fn newest_n_releases_per_repo_are_retained_and_the_rest_are_candidates() {
     })
     .expect("plan release artifact retention");
 
+    // Candidate metrics describe removable entries only, never the inspected
+    // total; reporting the inspected total is what made `candidate_count: 588,
+    // applied_count: 1` read as a 587-resource failure in #9483.
     assert_eq!(output.inspected_count, 5);
     assert_eq!(output.candidate_count, 3);
+    assert_eq!(output.skipped_count, 2);
+    assert_eq!(
+        output.estimated_bytes,
+        ["0_24_2", "0_24_1", "0_24_0"]
+            .iter()
+            .map(|superseded| version(&output, superseded).size_bytes)
+            .sum::<u64>()
+    );
+    assert!(output.estimated_bytes < output.total_size_bytes);
     assert!(!version(&output, "0_24_4").eligible, "newest is retained");
     assert!(!version(&output, "0_24_3").eligible, "within count budget");
     for superseded in ["0_24_2", "0_24_1", "0_24_0"] {
@@ -172,34 +184,10 @@ fn a_byte_budget_binds_before_the_count_budget_for_a_large_repository() {
     assert!(version(&output, "0_21_1").retention_reasons.is_empty());
 }
 
-/// Rule 1 of the safety contract. A bound must never empty a repository.
+/// Rule 1 of the safety contract. A bound must never empty a repository, in
+/// the plan or in an apply with the tightest possible budgets.
 #[test]
 fn the_latest_release_survives_every_budget() {
-    let store = TempDir::new().expect("release store");
-    plain_release(store.path(), "wp-codebox", "0_26_7", 4_096, day(400));
-
-    let output = cleanup_release_artifacts(ReleaseArtifactCleanupOptions {
-        max_count_per_repo: 0,
-        max_bytes_per_repo: 0,
-        ..options(store.path())
-    })
-    .expect("plan release artifact retention");
-
-    let latest = version(&output, "0_26_7");
-    assert_eq!(latest.rank, 0);
-    assert!(!latest.eligible);
-    assert_eq!(
-        latest.retention_reasons,
-        vec![REASON_LATEST.to_string()],
-        "the newest release is protected by rank, not by a budget"
-    );
-    assert_eq!(output.candidate_count, 0);
-    assert_eq!(output.estimated_bytes, 0);
-}
-
-/// An apply with the tightest possible budgets still cannot empty a repository.
-#[test]
-fn apply_never_removes_the_only_release_a_repository_has() {
     let store = TempDir::new().expect("release store");
     let only = plain_release(store.path(), "wp-codebox", "0_26_7", 4_096, day(400));
 
@@ -211,43 +199,24 @@ fn apply_never_removes_the_only_release_a_repository_has() {
     })
     .expect("apply release artifact retention");
 
+    let latest = version(&output, "0_26_7");
+    assert_eq!(latest.rank, 0);
+    assert!(!latest.eligible);
+    assert_eq!(
+        latest.retention_reasons,
+        vec![REASON_LATEST.to_string()],
+        "the newest release is protected by rank, not by a budget"
+    );
+    assert_eq!(output.candidate_count, 0);
     assert_eq!(output.removed_count, 0);
     assert_eq!(output.reclaimed_bytes, 0);
     assert!(only.is_dir(), "the current release is still on disk");
 }
 
 /// The accounting bug the layout invites: two names, one inode. A naive
-/// `st_size` sum reports ~2x the disk a removal returns.
-#[test]
-fn size_accounting_counts_a_hardlinked_pair_once() {
-    let store = TempDir::new().expect("release store");
-    let payload = 128 * 1024;
-    let dir = hardlinked_release(store.path(), "wp-codebox", "0_24_5", payload, day(1));
-
-    let usage = measure_release_version(&dir);
-
-    assert_eq!(
-        usage.logical_bytes,
-        (payload * 2) as u64,
-        "the naive sum sees both names"
-    );
-    assert_eq!(
-        usage.hardlink_duplicate_bytes, payload as u64,
-        "exactly one of the two names is a duplicate"
-    );
-    // Allocated bytes carry the directory's own blocks, so the payload is a
-    // floor rather than an equality. The load-bearing claim is that it is
-    // nowhere near the doubled figure.
-    assert!(usage.allocated_bytes >= payload as u64);
-    assert!(
-        usage.allocated_bytes < (payload as u64 * 3) / 2,
-        "hardlinked bytes must not be billed twice: {} vs {payload}",
-        usage.allocated_bytes
-    );
-}
-
-/// The correction has to reach the reported reclaim, not just the measurement
-/// helper, or the policy over-reports by ~2x exactly as #14223 describes.
+/// `st_size` sum reports ~2x the disk a removal returns, so the reported
+/// reclaim has to be hardlink-corrected or the policy over-reports exactly as
+/// #14223 describes.
 #[test]
 fn reported_reclaimable_bytes_are_hardlink_corrected() {
     let store = TempDir::new().expect("release store");
@@ -264,6 +233,7 @@ fn reported_reclaimable_bytes_are_hardlink_corrected() {
     assert_eq!(output.candidate_count, 1);
     let candidate = version(&output, "0_24_4");
     assert_eq!(candidate.logical_bytes, (payload * 2) as u64);
+    assert_eq!(candidate.hardlink_duplicate_bytes, payload as u64);
     assert!(
         output.estimated_bytes < (payload as u64 * 3) / 2,
         "estimated bytes must be allocated, not doubled: {}",
@@ -344,36 +314,6 @@ fn eligibility_and_retention_reasons_can_never_disagree() {
     assert_eq!(applied.reclaimed_bytes, planned_bytes);
 }
 
-/// `candidate_count` and `estimated_bytes` describe removable entries only,
-/// never the inspected total. Reporting the inspected total is what made
-/// `candidate_count: 588, applied_count: 1` read as a 587-resource failure in
-/// #9483.
-#[test]
-fn candidate_metrics_describe_only_removable_versions() {
-    let store = TempDir::new().expect("release store");
-    for (index, version) in ["0_1_0", "0_2_0", "0_3_0"].into_iter().enumerate() {
-        plain_release(
-            store.path(),
-            "wp-codebox",
-            version,
-            1_024,
-            day(9 - index as u64),
-        );
-    }
-
-    let output = cleanup_release_artifacts(ReleaseArtifactCleanupOptions {
-        max_count_per_repo: 2,
-        ..options(store.path())
-    })
-    .expect("plan release artifact retention");
-
-    assert_eq!(output.inspected_count, 3);
-    assert_eq!(output.candidate_count, 1);
-    assert_eq!(output.skipped_count, 2);
-    assert_eq!(output.estimated_bytes, version(&output, "0_1_0").size_bytes);
-    assert!(output.estimated_bytes < output.total_size_bytes);
-}
-
 /// Rule 2: a sweep racing a publication retains rather than deletes.
 ///
 /// Rank alone cannot cover this. Rank is assigned by age, so the newest entry
@@ -444,32 +384,6 @@ fn an_absent_store_reports_that_it_was_not_inspected() {
     assert!(output.skip_reason.is_some());
     assert_eq!(output.candidate_count, 0);
     assert_eq!(output.estimated_bytes, 0);
-}
-
-/// Defaults must bound nothing until a caller resolves a policy. An unbounded
-/// default that silently deleted would be a far worse failure than the
-/// unbounded growth this module exists to stop.
-#[test]
-fn default_options_plan_no_removals() {
-    let store = TempDir::new().expect("release store");
-    for (index, version) in ["0_1_0", "0_2_0", "0_3_0"].into_iter().enumerate() {
-        plain_release(
-            store.path(),
-            "wp-codebox",
-            version,
-            1_024,
-            day(9 - index as u64),
-        );
-    }
-
-    let output = cleanup_release_artifacts(ReleaseArtifactCleanupOptions {
-        root: Some(store.path().to_path_buf()),
-        ..ReleaseArtifactCleanupOptions::default()
-    })
-    .expect("plan release artifact retention");
-
-    assert_eq!(output.inspected_count, 3);
-    assert_eq!(output.candidate_count, 0);
 }
 
 /// Neither budget may be widened by a symlink pointing outside the store.

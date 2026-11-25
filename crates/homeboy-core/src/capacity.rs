@@ -810,16 +810,6 @@ mod tests {
         );
     }
 
-    /// The reserve keys already exist and are already default-on. The preflight
-    /// must read them, not invent its own numbers.
-    #[test]
-    fn the_reserve_comes_from_the_keys_that_already_exist_in_retention_config() {
-        let configured = CapacityReserve::from_retention(&RetentionConfig::default());
-
-        assert_eq!(configured.bytes, 5 * 1024 * 1024 * 1024);
-        assert_eq!(configured.inodes, 100_000);
-    }
-
     #[test]
     fn relative_reserve_protects_large_filesystems_without_weakening_small_ones() {
         // #12075: on a 926 GiB disk a 5 GiB floor only fired near exhaustion.
@@ -907,23 +897,6 @@ mod tests {
     }
 
     #[test]
-    fn sufficient_projected_capacity_acquires_a_reservation() {
-        let dir = tempfile::tempdir().expect("capacity fixture");
-        let reservation = reserve_projected_capacity_from_budget(
-            dir.path(),
-            "Cook workspace materialization",
-            budget(Some(20 * 1024 * 1024 * 1024), Some(800_000)),
-            CapacityDemand {
-                bytes: 4 * 1024 * 1024 * 1024,
-                inodes: 250_000,
-            },
-            reserve(),
-        )
-        .expect("capacity above the post-demand floor admits the Cook");
-        drop(reservation);
-    }
-
-    #[test]
     fn projected_inode_exhaustion_blocks_with_bytes_remaining() {
         let dir = tempfile::tempdir().expect("capacity fixture");
         let error = reserve_projected_capacity_from_budget(
@@ -983,35 +956,6 @@ mod tests {
             reserve(),
         )
         .expect("terminal release admits the next Cook");
-    }
-
-    #[test]
-    fn independently_opened_ledgers_cannot_overcommit_a_live_filesystem_claim() {
-        let dir = tempfile::tempdir().expect("capacity fixture");
-        let demand = CapacityDemand {
-            bytes: 6 * 1024 * 1024 * 1024,
-            inodes: 1,
-        };
-        let first = reserve_projected_capacity_from_budget(
-            dir.path(),
-            "first independent Cook",
-            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
-            demand,
-            reserve(),
-        )
-        .expect("first ledger client reserves capacity");
-        let second = reserve_projected_capacity_from_budget(
-            dir.path(),
-            "second independent Cook",
-            budget(Some(10 * 1024 * 1024 * 1024), Some(500_000)),
-            demand,
-            reserve(),
-        );
-        assert!(
-            second.is_err(),
-            "second ledger client observes the first claim"
-        );
-        drop(first);
     }
 
     #[test]

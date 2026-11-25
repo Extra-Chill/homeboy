@@ -37,8 +37,8 @@ pub fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
 
-// Included legacy tests retain their pre-extraction crate paths without exposing
-// a compatibility surface from the production homeboy-core package.
+// Included tests resolve `homeboy::` and `homeboy_core::` crate paths without
+// exposing those aliases from the production homeboy-core package.
 #[cfg(test)]
 extern crate self as homeboy;
 extern crate self as homeboy_core;

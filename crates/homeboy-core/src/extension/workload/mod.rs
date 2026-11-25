@@ -49,7 +49,7 @@ pub const WORKLOAD_PATH_METADATA_KEY: &str = "workload_path";
 pub const SAFETY_CLASS_SOURCE_METADATA_KEY: &str = "safety_class_source";
 
 /// A rig-owned workload file, resolved above this crate and passed in as
-/// plain data. `id` is the file stem, the same rule the legacy fuzz
+/// plain data. `id` is the file stem, the same rule the fuzz
 /// command uses for rig workload files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RigWorkloadFile {

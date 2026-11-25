@@ -81,30 +81,4 @@ mod tests {
             failures.join("\n  ")
         );
     }
-
-    #[test]
-    fn fanout_cook_batch_accepts_preview_without_dry_run_alias() {
-        let command = agent_task_command();
-        let cook_batch = command
-            .find_subcommand("fanout")
-            .expect("fanout command")
-            .find_subcommand("cook-batch")
-            .expect("cook-batch command");
-        let preview = cook_batch
-            .get_arguments()
-            .find(|arg| arg.get_long() == Some("preview"))
-            .expect("cook-batch exposes --preview");
-        assert!(
-            preview
-                .get_help()
-                .is_some_and(|help| !help.to_string().trim().is_empty()),
-            "--preview must carry help text"
-        );
-        // The historical `--dry-run` spelling was deleted (#15742); `--preview`
-        // is the one verb.
-        assert!(
-            preview.get_all_aliases().is_none(),
-            "--preview carries no aliases"
-        );
-    }
 }

@@ -114,7 +114,7 @@ pub(crate) fn resolve_shared_lib_dir(
         None => shared_asset_integrity::read_manifest(&active),
     };
     let Some(expected) = expected else {
-        // Legacy copy without an integrity manifest and no reachable source:
+        // Installed copy without an integrity manifest and no reachable source:
         // nothing to validate against.
         return SharedLibResolution::Ready {
             dir: active,
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_copy_without_manifest_or_source_is_trusted() {
+    fn copy_without_manifest_or_source_is_trusted() {
         let config = tempfile::tempdir().unwrap();
         let active = active_shared_lib_dir(config.path());
         write_lib(&active, &[("runner-harness.sh", "harness\n")]);

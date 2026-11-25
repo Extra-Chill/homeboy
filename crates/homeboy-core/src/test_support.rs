@@ -564,8 +564,8 @@ pub fn wait_at_file_gate(variable: &str) -> crate::Result<()> {
 ///
 /// Constructing this type does not mutate the parent process. Prefer
 /// [`HermeticTestContext::command`] for subprocess tests. `HomeGuard` exists
-/// only for legacy in-process tests whose dependencies still read environment
-/// variables directly.
+/// only for in-process tests whose dependencies read environment variables
+/// directly.
 pub struct HermeticTestContext {
     _store_isolation: crate::paths::ObservationStoreIsolation,
     root: TempDir,
@@ -1081,7 +1081,7 @@ impl HomeGuard {
         // they read it under a lock instead of racing this `setenv` from
         // worker threads a test spawns inside itself (#7505).
         crate::paths::set_home_root_override(Some(context.home().to_path_buf()));
-        // Preserve the legacy in-process data fallback while the subprocess
+        // In-process tests resolve data roots through XDG while the subprocess
         // context uses explicit paths. Unit tests assert this resolver's XDG
         // behavior, so an inherited explicit data root must not override it.
         std::env::set_var("XDG_CONFIG_HOME", context.home().join(".config"));
@@ -1435,10 +1435,10 @@ fn tempdir_with_cached_exec_base(
         // Not exec-capable (e.g. `noexec` mount) — drop it and try the next
         // candidate rather than handing back a dir scripts cannot run from.
     }
-    // The fallback keeps the owned prefix. It used to be a bare `TempDir::new`,
-    // which produced an *unmarked* `.tmpXXXXXX` directory — invisible to the
-    // in-process sweep below and to the `leaked-test-homes` cleanup category,
-    // because both identify a home by its name. On any host where no candidate
+    // The fallback keeps the owned prefix. An *unmarked* `.tmpXXXXXX` directory
+    // would be invisible to the in-process sweep below and to the
+    // `leaked-test-homes` cleanup category, because both identify a home by its
+    // name. On any host where no candidate
     // root passes the exec probe, that is every isolated home in the run, and it
     // leaks with nothing able to recognize it (#11073).
     tempfile::Builder::new()
@@ -2221,7 +2221,7 @@ mod tests {
     /// The runner must hand the test a temp root it can execute from (#12345),
     /// and that root must not sit inside the repository (#12377).
     ///
-    /// It used to `unset TMPDIR TMP TEMP`, dropping every test onto the shared
+    /// Unsetting `TMPDIR TMP TEMP` would drop every test onto the shared
     /// system `/tmp`. On a host that mounts `/tmp` noexec that is not a loud
     /// failure: bash's PATH search calls `access(X_OK)`, Linux fails it on a
     /// noexec mount, so a mock executable written into the temp dir is SKIPPED
@@ -2675,8 +2675,8 @@ mod tests {
     /// The marker is the only thing that makes a leaked home recognizable after
     /// its process is gone, so *every* allocation path has to carry it —
     /// including the fallback taken when no candidate root passes the exec
-    /// probe. That path used to hand back an unmarked `.tmpXXXXXX` directory,
-    /// which no sweep and no cleanup category could attribute (#11073).
+    /// probe; an unmarked `.tmpXXXXXX` directory is one no sweep and no cleanup
+    /// category could attribute (#11073).
     #[cfg(unix)]
     #[test]
     fn every_allocation_path_marks_its_tempdir_including_the_fallback() {
@@ -2710,11 +2710,11 @@ mod tests {
         }
     }
 
-    /// Directories written before the PID prefix existed must stay on the age
-    /// heuristic rather than being misread as owned by PID-less garbage.
+    /// PID-less directory names stay on the age heuristic rather than being
+    /// misread as owned by whatever digits follow the prefix.
     #[cfg(unix)]
     #[test]
-    fn legacy_and_malformed_tempdir_names_report_no_owner() {
+    fn pid_less_and_malformed_tempdir_names_report_no_owner() {
         for name in [
             "hb-test-AbCdEf",
             "hb-test-",
@@ -2755,11 +2755,11 @@ mod tests {
         // This process is unambiguously alive.
         let live = root.path().join(owned_tempdir_prefix() + "livexx");
         // No PID segment and freshly created — the age fallback must keep it.
-        let legacy_fresh = root.path().join("hb-test-legacyx");
+        let pid_less_fresh = root.path().join("hb-test-nopidx");
         // Not ours at all.
         let unrelated = root.path().join("someone-elses-dir");
 
-        for path in [&dead, &active_tmp, &live, &legacy_fresh, &unrelated] {
+        for path in [&dead, &active_tmp, &live, &pid_less_fresh, &unrelated] {
             fs::create_dir_all(path).expect("seed sweep fixture");
             fs::write(path.join("payload"), b"x").expect("seed payload");
         }
@@ -2773,7 +2773,7 @@ mod tests {
         );
         assert!(live.exists(), "a live owner's tempdir must be preserved");
         assert!(
-            legacy_fresh.exists(),
+            pid_less_fresh.exists(),
             "a recent PID-less tempdir must survive on the age heuristic"
         );
         assert!(

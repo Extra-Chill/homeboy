@@ -248,66 +248,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_run_dir() {
+    fn run_dir_lifecycle_creates_reopens_and_cleans_up() {
         let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
-        assert!(run_dir.path().is_dir());
-
-        // Well-known paths
-        assert!(run_dir
-            .step_file(files::LINT_FINDINGS)
-            .to_string_lossy()
-            .ends_with("lint-findings.json"));
-        assert!(run_dir
-            .step_file(files::TEST_RESULTS)
-            .to_string_lossy()
-            .ends_with("test-results.json"));
-
-        // Cleanup
         let path = run_dir.path().to_path_buf();
-        run_dir.cleanup();
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn test_path() {
-        crate::test_support::with_isolated_home(|_| {
-            let run_dir = RunDir::create().expect("should create run dir");
-            assert!(run_dir.path().is_dir());
-            run_dir.cleanup();
-        });
-    }
-
-    #[test]
-    fn test_annotations_dir() {
-        let _guard = crate::test_support::home_env_guard();
-        let run_dir = RunDir::create().expect("should create run dir");
+        assert!(path.is_dir());
         assert!(run_dir.annotations_dir().is_dir());
-        run_dir.cleanup();
-    }
 
-    #[test]
-    fn test_step_file() {
-        let _guard = crate::test_support::home_env_guard();
-        let run_dir = RunDir::create().expect("should create run dir");
-        assert!(run_dir
-            .step_file(files::TRACE_RESULTS)
-            .to_string_lossy()
-            .ends_with("trace.json"));
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn no_declarations_exports_only_run_dir() {
-        let _guard = crate::test_support::home_env_guard();
-        let run_dir = RunDir::create().expect("should create run dir");
-        let env_vars = run_dir.sidecar_env_vars(&[]);
-        let expected = vec![(
-            "HOMEBOY_RUN_DIR".to_string(),
-            run_dir.path().to_string_lossy().to_string(),
-        )];
-        assert_eq!(env_vars, expected);
-        run_dir.cleanup();
+        let existing = RunDir::from_existing(path.clone()).expect("existing run dir should load");
+        assert_eq!(existing.path(), path.as_path());
+        existing.cleanup();
+        assert!(!path.exists());
     }
 
     fn declaration(
@@ -331,40 +282,19 @@ mod tests {
     }
 
     #[test]
-    fn declared_sidecar_path_overrides_the_default_env_var() {
+    fn only_declared_sidecars_are_exported_beside_run_dir() {
         let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
-
-        let env_vars =
-            run_dir.sidecar_env_vars(&[declaration("lint.findings", "custom/findings.json")]);
-
-        assert_eq!(
-            value_of(&env_vars, "HOMEBOY_LINT_FINDINGS_FILE"),
-            run_dir
-                .step_file("custom/findings.json")
-                .to_string_lossy()
-                .as_ref()
+        let run_dir_var = (
+            "HOMEBOY_RUN_DIR".to_string(),
+            run_dir.path().to_string_lossy().to_string(),
         );
-        assert_eq!(env_vars.len(), 2);
 
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn only_declared_lint_findings_is_exported() {
-        let _guard = crate::test_support::home_env_guard();
-        let run_dir = RunDir::create().expect("should create run dir");
-
-        let declared =
-            run_dir.sidecar_env_vars(&[declaration("lint.findings", files::LINT_FINDINGS)]);
-
+        assert_eq!(run_dir.sidecar_env_vars(&[]), vec![run_dir_var.clone()]);
         assert_eq!(
-            declared,
+            run_dir.sidecar_env_vars(&[declaration("lint.findings", files::LINT_FINDINGS)]),
             vec![
-                (
-                    "HOMEBOY_RUN_DIR".to_string(),
-                    run_dir.path().to_string_lossy().to_string()
-                ),
+                run_dir_var,
                 (
                     "HOMEBOY_LINT_FINDINGS_FILE".to_string(),
                     run_dir
@@ -418,25 +348,6 @@ mod tests {
                 run_dir.step_file("custom/output").to_string_lossy()
             );
         }
-    }
-
-    #[test]
-    fn test_from_existing() {
-        let _guard = crate::test_support::home_env_guard();
-        let run_dir = RunDir::create().expect("should create run dir");
-        let path = run_dir.path().to_path_buf();
-        let existing = RunDir::from_existing(path.clone()).expect("existing run dir should load");
-        assert_eq!(existing.path(), path.as_path());
-        existing.cleanup();
-    }
-
-    #[test]
-    fn test_cleanup() {
-        let _guard = crate::test_support::home_env_guard();
-        let run_dir = RunDir::create().expect("should create run dir");
-        let path = run_dir.path().to_path_buf();
-        run_dir.cleanup();
-        assert!(!path.exists());
     }
 
     #[test]
@@ -498,17 +409,10 @@ mod tests {
     }
 
     #[test]
-    fn read_step_output_missing_returns_none() {
-        let _guard = crate::test_support::home_env_guard();
-        let run_dir = RunDir::create().expect("should create run dir");
-        assert!(run_dir.read_step_output(files::LINT_FINDINGS).is_none());
-        run_dir.cleanup();
-    }
-
-    #[test]
     fn read_step_output_present() {
         let _guard = crate::test_support::home_env_guard();
         let run_dir = RunDir::create().expect("should create run dir");
+        assert!(run_dir.read_step_output(files::TEST_RESULTS).is_none());
         let path = run_dir.step_file(files::TEST_RESULTS);
         std::fs::write(&path, r#"{"total":10,"passed":10,"failed":0}"#).expect("write test file");
 

@@ -358,49 +358,29 @@ mod tests {
     }
 
     #[test]
-    fn resolve_hooks_returns_empty_when_no_hooks() {
-        let component = Component::new(
-            "test".to_string(),
-            "/tmp/test".to_string(),
-            "".to_string(),
-            None,
-        );
-        let commands = resolve_hooks(&component, HookEvent::PreVersionBump).unwrap();
-        assert!(commands.is_empty());
-    }
-
-    #[test]
-    fn resolve_hooks_returns_component_hooks() {
+    fn resolve_hooks_returns_only_component_hooks_for_event() {
         let mut component = Component::new(
             "test".to_string(),
             "/tmp/test".to_string(),
             "".to_string(),
             None,
         );
+        assert!(resolve_hooks(&component, HookEvent::PreVersionBump)
+            .unwrap()
+            .is_empty());
+
         component
             .hooks
             .insert(HookEvent::PreVersionBump, vec!["echo hello".to_string()]);
+        component
+            .hooks
+            .insert(HookEvent::PostDeploy, vec!["echo deploy".to_string()]);
         let commands = resolve_hooks(&component, HookEvent::PreVersionBump).unwrap();
         assert_eq!(commands, vec!["echo hello".to_string()]);
     }
 
     #[test]
-    fn resolve_hooks_ignores_unrelated_events() {
-        let mut component = Component::new(
-            "test".to_string(),
-            "/tmp/test".to_string(),
-            "".to_string(),
-            None,
-        );
-        component
-            .hooks
-            .insert(HookEvent::PostDeploy, vec!["echo deploy".to_string()]);
-        let commands = resolve_hooks(&component, HookEvent::PreVersionBump).unwrap();
-        assert!(commands.is_empty());
-    }
-
-    #[test]
-    fn resolve_hooks_with_project_none_matches_resolve_hooks() {
+    fn resolve_hooks_with_project_without_matching_project_hooks_matches_resolve_hooks() {
         let mut component = Component::new(
             "test".to_string(),
             "/tmp/test".to_string(),
@@ -410,11 +390,20 @@ mod tests {
         component
             .hooks
             .insert(HookEvent::PostDeploy, vec!["echo component".to_string()]);
+        let empty: HashMap<HookEvent, Vec<String>> = HashMap::new();
+        let unrelated = HashMap::from([(
+            HookEvent::PreVersionBump,
+            vec!["wp cache purge".to_string()],
+        )]);
 
-        assert_eq!(
-            resolve_hooks_with_project(&component, None, HookEvent::PostDeploy).unwrap(),
-            resolve_hooks(&component, HookEvent::PostDeploy).unwrap()
-        );
+        let expected = resolve_hooks(&component, HookEvent::PostDeploy).unwrap();
+        for project_hooks in [None, Some(&empty), Some(&unrelated)] {
+            assert_eq!(
+                resolve_hooks_with_project(&component, project_hooks, HookEvent::PostDeploy)
+                    .unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -455,47 +444,6 @@ mod tests {
                 ]
             );
         });
-    }
-
-    #[test]
-    fn resolve_hooks_with_project_ignores_project_hooks_for_unrelated_event() {
-        let component = Component::new(
-            "test".to_string(),
-            "/tmp/test".to_string(),
-            "".to_string(),
-            None,
-        );
-        let project_hooks =
-            HashMap::from([(HookEvent::PostDeploy, vec!["wp cache purge".to_string()])]);
-
-        let commands =
-            resolve_hooks_with_project(&component, Some(&project_hooks), HookEvent::PreVersionBump)
-                .unwrap();
-        assert!(commands.is_empty());
-    }
-
-    #[test]
-    fn resolve_hooks_with_project_omits_project_only_hooks_when_no_project_hooks_declared() {
-        // A project with an empty `hooks` map (or without one at all) must
-        // resolve identically to `None` — adding the field must not change
-        // existing components' behavior.
-        let component = Component::new(
-            "test".to_string(),
-            "/tmp/test".to_string(),
-            "".to_string(),
-            None,
-        );
-        let empty_project_hooks: HashMap<HookEvent, Vec<String>> = HashMap::new();
-
-        assert_eq!(
-            resolve_hooks_with_project(
-                &component,
-                Some(&empty_project_hooks),
-                HookEvent::PostDeploy
-            )
-            .unwrap(),
-            Vec::<String>::new()
-        );
     }
 
     #[test]
@@ -541,15 +489,6 @@ mod tests {
             )
             .is_err());
         });
-    }
-
-    #[test]
-    fn run_commands_succeeds_with_empty_list() {
-        let result =
-            run_commands(&[], "/tmp", HookEvent::PostRelease, HookFailureMode::Fatal).unwrap();
-        assert!(result.all_succeeded);
-        assert!(result.commands.is_empty());
-        assert_eq!(result.event, "post:release");
     }
 
     #[test]
@@ -629,26 +568,17 @@ mod tests {
         assert_eq!(result.commands.len(), 1);
         assert_eq!(result.commands[0].command, "echo /var/www/site");
         assert_eq!(result.commands[0].stdout.trim(), "/var/www/site");
-    }
 
-    #[test]
-    fn run_project_scoped_hooks_remote_is_empty_when_event_not_declared() {
-        let target_hooks = HashMap::from([(
-            HookEvent::PostDeploy,
-            vec!["echo should-not-run".to_string()],
-        )]);
-
-        let result = run_project_scoped_hooks_remote(
+        let undeclared = run_project_scoped_hooks_remote(
             &local_ssh_client(),
             &target_hooks,
-            HookEvent::PostDeployProject,
+            HookEvent::PostRelease,
             HookFailureMode::NonFatal,
-            &HashMap::new(),
+            &vars,
         )
         .unwrap();
-
-        assert!(result.all_succeeded);
-        assert!(result.commands.is_empty());
+        assert!(undeclared.all_succeeded);
+        assert!(undeclared.commands.is_empty());
     }
 
     #[test]

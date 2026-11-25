@@ -692,11 +692,6 @@ impl FuzzCompareHotspotPolicy {
 /// extension manifest command they resolve (`replay_command` vs
 /// `minimize_command`) -- a distinction the private `ReplayLikeMode` enum in
 /// `replay.rs` already carries.
-///
-/// They used to be two field-for-field clap structs, plus a third private
-/// `ReplayLikeArgs` copy in `replay.rs` that both were rebuilt into
-/// field-by-field before use. The same eleven arguments were declared three
-/// times, and the only thing that ever differed between them was help text.
 #[derive(Args, Clone)]
 pub(crate) struct FuzzReplayLikeArgs {
     /// Component ID used to resolve the extension replay/minimize command.

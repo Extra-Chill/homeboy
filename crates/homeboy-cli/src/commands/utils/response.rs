@@ -280,10 +280,7 @@ pub struct CommandAgentTaskRef {
 /// envelope.
 ///
 /// `artifacts` and `evidence` on [`CommandActionableMetadata`] both hold this
-/// shape. They used to hold two structurally identical types
-/// (`CommandArtifactRef` / `CommandEvidenceRef`); the distinction was never in
-/// the type, only in which field the value landed in.
-/// Collapsed in #10310; the serialized shape is unchanged.
+/// shape; the distinction is which field the value lands in, not the type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandArtifactRef {
     pub id: String,
@@ -1323,9 +1320,8 @@ fn is_partial_upgrade_outcome(data: &Value) -> bool {
 }
 
 /// Lift `failure_kind` + `failure_message` already present on a failed
-/// `runner connect` payload. Exit 20 used to serialize as "without reporting a
-/// failure cause" even when the connect report named `daemon_startup_failure`
-/// and the unreachable-daemon message (#14715).
+/// `runner connect` payload, so exit 20 reports the cause the connect report
+/// names (for example `daemon_startup_failure`) (#14715).
 fn runner_connect_failure_diagnostics(exit_code: i32, data: &Value) -> Option<CommandDiagnostics> {
     let report = runner_connect_failure_report(data)?;
     let failure_kind = report
@@ -3710,10 +3706,9 @@ mod tests {
     }
 
     /// `--recover` finishes git state and then reports, by design, that
-    /// publication still has to run. No step failed, so `failure` is null. This
-    /// is the payload that used to render "release step unknown (unknown)
-    /// failed: release step failed without a reported error" while the release
-    /// was holding the one command that finishes it.
+    /// publication still has to run. No step failed, so `failure` is null, and
+    /// the summary must name the command that finishes the release rather than
+    /// an unknown failed step.
     fn recovered_incomplete_payload() -> Value {
         json!({
             "schema": "homeboy/release-operator-summary/v1",
@@ -4199,10 +4194,8 @@ mod tests {
     }
 
     /// #10305: a payload that *declares* an actionable contract but gets it
-    /// wrong used to be indistinguishable from one that declared nothing. The
-    /// key was removed from `data` and the parse failure was swallowed by
-    /// `unwrap_or_default()`, so the orchestrator saw a well-formed envelope
-    /// asserting there was no run.
+    /// wrong must stay distinguishable from one that declared nothing, rather
+    /// than presenting a well-formed envelope asserting there was no run.
     #[test]
     fn malformed_actionable_metadata_is_reported_instead_of_silently_dropped() {
         let response = cli_response_for_json_result_for_command(
@@ -4288,64 +4281,6 @@ mod tests {
 
         assert_eq!(value["run"]["id"], "run-7");
         assert!(value.get("contract_warnings").is_none());
-    }
-
-    /// The envelope stayed backward compatible: `contract_warnings` is additive
-    /// and optional, so a consumer compiled against the pre-change v3 shape
-    /// still parses a new envelope that carries warnings.
-    #[test]
-    fn pre_change_v3_consumer_still_parses_an_envelope_carrying_contract_warnings() {
-        /// The v3 envelope exactly as it existed before `contract_warnings`,
-        /// standing in for an already-deployed client.
-        #[derive(Deserialize)]
-        #[allow(dead_code)]
-        struct LegacyV3Envelope {
-            schema: String,
-            command: String,
-            #[serde(default)]
-            operation: Option<String>,
-            success: bool,
-            exit_code: i32,
-            status: String,
-            #[serde(default)]
-            run: Option<CommandRunRef>,
-            #[serde(default)]
-            refs: CommandResultRefs,
-            #[serde(default)]
-            summary: Option<String>,
-            #[serde(default)]
-            next_actions: Vec<CommandNextAction>,
-            #[serde(default)]
-            artifacts: Vec<CommandArtifactRef>,
-            #[serde(default)]
-            evidence: Vec<CommandArtifactRef>,
-            #[serde(default)]
-            diagnostics: Option<Value>,
-            #[serde(default)]
-            data: Option<Value>,
-        }
-
-        let response = cli_response_for_json_result_for_command(
-            &Ok(json!({
-                "run_id": "run-9",
-                ACTIONABLE_METADATA_KEY: { "run": { "id": "run-9" } }
-            })),
-            0,
-            "observe",
-            None,
-        );
-        let serialized = serde_json::to_string(&response).expect("serialize envelope");
-
-        // Precondition: this envelope really does carry the new field.
-        let raw: Value = serde_json::from_str(&serialized).expect("raw json");
-        assert_eq!(raw["contract_warnings"].as_array().map(Vec::len), Some(1));
-
-        let legacy: LegacyV3Envelope =
-            serde_json::from_str(&serialized).expect("pre-change consumer still parses");
-        assert_eq!(legacy.schema, COMMAND_RESULT_SCHEMA);
-        assert_eq!(legacy.command, "observe");
-        assert_eq!(legacy.status, "succeeded");
-        assert!(legacy.success);
     }
 
     #[test]

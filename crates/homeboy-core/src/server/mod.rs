@@ -184,7 +184,7 @@ pub struct RunnerPolicy {
 
 /// Secret-env + policy security configuration shared by runner-shaped structs.
 /// Flattened so the on-wire JSON (`secret_env`, `policy`, each with its
-/// `skip_serializing_if`) is identical to the previously inlined fields.
+/// `skip_serializing_if`) sits directly on the parent object.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerSecurityConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

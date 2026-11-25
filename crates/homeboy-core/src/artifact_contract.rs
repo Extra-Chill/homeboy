@@ -1,14 +1,9 @@
 //! Re-exports the pure artifact contract type from `homeboy-lifecycle-contract`
 //! and provides the one conversion that couples it to `ArtifactRef`.
 //!
-//! Historically this module also carried `artifact_contract_from_record` and
-//! `artifact_contract_from_ref`, plus an `EvidenceContract` re-export. All three
-//! had zero call sites workspace-wide and were removed in #10310. The module
-//! docs also used to claim these conversions "cannot live in the leaf contract
-//! crate" because they couple to `ArtifactRecord` — but `ArtifactRecord` is
-//! itself defined in `homeboy-lifecycle-contract`. The real reason the surviving
-//! conversion lives here is `ArtifactRef`, which is owned by core's
-//! `artifact_ref` module, which lifecycle-contract does not depend on.
+//! The conversion lives here rather than in the leaf contract crate because
+//! `ArtifactRef` is owned by core's `artifact_ref` module, which
+//! lifecycle-contract does not depend on.
 
 use crate::artifact_ref::{ArtifactRef, ARTIFACT_REF_SCHEMA};
 

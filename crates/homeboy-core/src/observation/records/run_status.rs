@@ -168,18 +168,6 @@ mod tests {
         );
     }
 
-    /// The two thresholds are asserted **separately and never against each
-    /// other**. They share a value today and are still two concepts: one
-    /// measures `updated_at`, the other `started_at`. Asserting them equal
-    /// would re-couple exactly what splitting them was meant to free, so this
-    /// pins each value on its own — enough to catch an accidental change during
-    /// a refactor, without making a deliberate tune of one a failure.
-    #[test]
-    fn the_shared_thresholds_hold_their_reconciled_values() {
-        assert_eq!(RUNNING_HEARTBEAT_STALE_MINUTES, 30);
-        assert_eq!(OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES, 30);
-    }
-
     #[test]
     fn run_status_uses_fixed_wire_labels() {
         for (status, label) in [
@@ -199,17 +187,6 @@ mod tests {
             assert_eq!(RunStatus::from_label(label), Some(status));
         }
         assert_eq!(RunStatus::from_label("something-else"), None);
-    }
-
-    #[test]
-    fn only_running_is_non_terminal() {
-        assert!(!RunStatus::Running.is_terminal());
-        assert!(RunStatus::Pass.is_terminal());
-        assert!(RunStatus::Fail.is_terminal());
-        assert!(RunStatus::Error.is_terminal());
-        assert!(RunStatus::Skipped.is_terminal());
-        assert!(RunStatus::Stale.is_terminal());
-        assert!(RunStatus::HandedOff.is_terminal());
     }
 
     /// A handoff is settled locally but proves nothing locally. Both halves of

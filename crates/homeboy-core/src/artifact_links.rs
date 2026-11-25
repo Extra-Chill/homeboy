@@ -673,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_origin_uses_typed_config_before_legacy_environment() {
+    fn controller_origin_uses_typed_config_before_environment() {
         crate::test_support::with_isolated_home(|_| {
             let _env = EnvGuard::set(PUBLIC_ARTIFACT_BASE_URL_ENV, "https://runner.example.test");
             let mut config = crate::defaults::HomeboyConfig::default();

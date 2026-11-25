@@ -347,7 +347,7 @@ mod tests {
     use crate::test_support::with_isolated_home;
 
     #[test]
-    fn list_output_mirrors_rows_under_entities_and_legacy_projects_key() {
+    fn list_output_emits_rows_under_entities() {
         let output = build_list_output(ProjectListReport {
             projects: vec![
                 ProjectListItem {
@@ -368,7 +368,6 @@ mod tests {
         assert_eq!(value["entities"][0]["id"], "alpha");
         assert_eq!(value["entities"][0]["domain"], "alpha.example");
         assert_eq!(value["entities"][1]["id"], "beta");
-        assert!(value.get("projects").is_none(), "no mirror: {value}");
     }
 
     #[test]

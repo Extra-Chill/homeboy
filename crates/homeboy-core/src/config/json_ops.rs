@@ -313,77 +313,16 @@ mod tests {
     }
 
     #[test]
-    fn merge_config_accepts_known_fields() {
+    fn merge_config_accepts_known_fields_including_zero_values() {
         let mut config = TestConfig {
             name: "test".to_string(),
             ..Default::default()
         };
-        let patch = serde_json::json!({"description": "hello"});
-        let result = merge_config(&mut config, patch, &[]);
-        assert!(result.is_ok());
+        // `tags: []` is a zero value skip_serializing_if omits from output, but
+        // it is still a known field and must not be reported as unknown.
+        let patch = serde_json::json!({"description": "hello", "tags": []});
+        merge_config(&mut config, patch, &[]).expect("known fields merge");
         assert_eq!(config.description, Some("hello".to_string()));
-    }
-
-    #[test]
-    fn merge_config_allows_zero_value_for_known_fields() {
-        // Setting a known field to an empty/zero value should not be rejected,
-        // even though skip_serializing_if will omit it from output.
-        let mut config = TestConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        };
-        // tags starts empty; patching with empty array is a valid zero-value
-        // that skip_serializing_if would omit, but it's still a known field.
-        let patch = serde_json::json!({"tags": []});
-        let result = merge_config(&mut config, patch, &[]);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn merge_config_accepts_modules_plural() {
-        let mut config = TestConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        };
-        let patch = serde_json::json!({"extensions": {"wordpress": {}}});
-        let result = merge_config(&mut config, patch, &[]);
-        assert!(result.is_ok());
-        assert!(config.extensions.is_some());
-    }
-
-    /// Regression for #1169: `normalize_keys_to_snake_case` used to recurse
-    /// into every object, rewriting `HashMap<String, _>` lookup keys that
-    /// happened to contain hyphens or mixed case. The fix normalizes only the
-    /// top level. Nested keys (including component IDs like `simple-dark-mode`)
-    /// must now survive verbatim.
-    #[test]
-    fn merge_config_preserves_hyphenated_nested_keys() {
-        let mut config = TestConfig {
-            name: "test".to_string(),
-            ..Default::default()
-        };
-        // Patch has a top-level camelCase key (should normalize to snake_case)
-        // and a nested hyphenated key (must stay verbatim).
-        let patch = serde_json::json!({
-            "extensions": {
-                "simple-dark-mode": {
-                    "cli_path": "lando wp"
-                }
-            }
-        });
-        let result = merge_config(&mut config, patch, &[]);
-        assert!(result.is_ok(), "merge failed: {:?}", result.err());
-        let ext = config.extensions.expect("extensions present");
-        assert!(
-            ext.contains_key("simple-dark-mode"),
-            "hyphenated key was mangled; got keys: {:?}",
-            ext.keys().collect::<Vec<_>>()
-        );
-        assert!(
-            !ext.contains_key("simple_dark_mode"),
-            "hyphenated key was silently rewritten to snake_case; got keys: {:?}",
-            ext.keys().collect::<Vec<_>>()
-        );
     }
 
     /// Top-level camelCase / PascalCase keys still normalize to snake_case so
@@ -410,10 +349,9 @@ mod tests {
         assert!(config.extensions.is_some());
     }
 
-    /// Dots, spaces, and mixed case inside nested map keys must all be
-    /// preserved. Covers hook names, variable names, and other user-defined
-    /// identifiers that may legitimately contain characters that `to_snake_case`
-    /// would mangle.
+    /// `normalize_keys_to_snake_case` normalizes only the top level. Dots,
+    /// spaces, mixed case and hyphens inside nested map keys (component IDs like
+    /// `simple-dark-mode`, hook names, variable names) survive verbatim (#1169).
     #[test]
     fn merge_config_preserves_arbitrary_nested_key_shapes() {
         let mut config = TestConfig {
@@ -425,13 +363,17 @@ mod tests {
                 "with.dot":       { "cli_path": "a" },
                 "with space":     { "cli_path": "b" },
                 "MixedCaseID":    { "cli_path": "c" },
-                "kebab-case-id":  { "cli_path": "d" }
+                "simple-dark-mode": { "cli_path": "d" }
             }
         });
         let result = merge_config(&mut config, patch, &[]);
         assert!(result.is_ok(), "merge failed: {:?}", result.err());
         let ext = config.extensions.expect("extensions present");
-        for key in ["with.dot", "with space", "MixedCaseID", "kebab-case-id"] {
+        assert!(
+            !ext.contains_key("simple_dark_mode"),
+            "hyphenated key was silently rewritten to snake_case"
+        );
+        for key in ["with.dot", "with space", "MixedCaseID", "simple-dark-mode"] {
             assert!(
                 ext.contains_key(key),
                 "nested key {:?} was mangled; got keys: {:?}",

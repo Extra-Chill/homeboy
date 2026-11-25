@@ -427,9 +427,7 @@ mod tests {
     /// Build metadata is the one place `semver::Version` deliberately diverges
     /// from spec §10 precedence. `Ord` must agree with `Eq`, and `Eq` includes
     /// build metadata, so `1.2.3+build.5` and `1.2.3` are ordered rather than
-    /// equal. This test previously asserted `Ordering::Equal` and had been
-    /// failing since `706627296` adopted the crate — nothing ran it, because
-    /// member-crate lib tests were never executed in CI (#10477).
+    /// equal (#10477).
     ///
     /// The divergence is harmless for tag selection and is asserted as such
     /// below: build metadata breaks a tie deterministically and can never
@@ -459,9 +457,8 @@ mod tests {
         assert!(build < v("v1.2.4"));
         assert!(build > v("v1.2.3-beta.1"));
 
-        // The regression the hand-rolled compare produced: `v1.x.3` used to
-        // parse as `(1, 0, 3)` and could win a `max_by` against a real tag.
-        // It is now rejected, so it can never participate in the comparison.
+        // `v1.x.3` is rejected rather than read as `(1, 0, 3)`, so it can
+        // never win a `max_by` against a real tag.
         let mut tags = ["v1.2.3-beta.1", "v1.x.3", "v1.2.3", "v0.9.9"]
             .into_iter()
             .filter_map(|tag| release_tag_version(tag, None))

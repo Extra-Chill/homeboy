@@ -820,8 +820,9 @@ printf '%s' '{"entrypoints":[{"page_path":"/index.html","page_url":"http://127.0
     }
 
     #[test]
-    fn browser_capture_accepts_legacy_provider_payload_without_evidence() {
-        let browser = capture_provider_payload(provider_payload(None)).expect("legacy capture");
+    fn browser_capture_accepts_provider_payload_without_evidence() {
+        let browser =
+            capture_provider_payload(provider_payload(None)).expect("capture without evidence");
         let report = shape_report(Path::new("/artifact"), browser, 160).expect("shape");
         let element =
             &serde_json::to_value(&report).expect("serialize")["entrypoints"][0]["elements"][0];

@@ -34,6 +34,7 @@ pub(super) use command_step::run_command_step;
 /// writes, instead of a second copy that can drift.
 pub(super) use lifecycle_step::step_key as lifecycle_step_key;
 
+#[cfg(test)]
 pub(crate) fn run_pipeline(
     state_store: &RigStateStore,
     rig: &RigSpec,

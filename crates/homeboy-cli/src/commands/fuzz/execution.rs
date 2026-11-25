@@ -1277,8 +1277,7 @@ fn resolve_local_fuzz_artifact_ref(path: &str, artifacts_dir: &Path) -> FuzzArti
         }
     } else if trimmed.starts_with("..") {
         // A relative ref is by contract relative to the artifact root, so
-        // escaping it is unambiguously a producer error. This was previously
-        // discarded through the same branch as a remote URI.
+        // escaping it is unambiguously a producer error, not a remote URI.
         FuzzArtifactRefResolution::Escapes
     } else {
         let joined = artifacts_dir.join(candidate);

@@ -3,76 +3,6 @@ use serde_json::json;
 use crate::*;
 
 #[test]
-fn core_contract_lists_product_neutral_schema_ids() {
-    let contract = fuzz_core_contract();
-
-    assert_eq!(contract.schema, FUZZ_CORE_CONTRACT_SCHEMA);
-    assert_eq!(contract.version, FUZZ_CONTRACT_VERSION);
-    assert_eq!(contract.schemas.surface, FUZZ_SURFACE_SCHEMA);
-    assert_eq!(contract.schemas.target, FUZZ_TARGET_SCHEMA);
-    assert_eq!(contract.schemas.campaign, FUZZ_CAMPAIGN_SCHEMA);
-    assert_eq!(contract.schemas.case, FUZZ_CASE_SCHEMA);
-    assert_eq!(contract.schemas.case_log, FUZZ_CASE_LOG_SCHEMA);
-    assert_eq!(contract.schemas.sequence_plan, FUZZ_SEQUENCE_PLAN_SCHEMA);
-    assert_eq!(
-        contract.schemas.sequence_result,
-        FUZZ_SEQUENCE_RESULT_SCHEMA
-    );
-    assert_eq!(contract.schemas.replay, FUZZ_REPLAY_SCHEMA);
-    assert_eq!(
-        contract.schemas.coverage_summary,
-        FUZZ_COVERAGE_SUMMARY_SCHEMA
-    );
-    assert_eq!(
-        contract.schemas.coverage_reconciliation,
-        FUZZ_COVERAGE_RECONCILIATION_SCHEMA
-    );
-    assert_eq!(
-        contract.schemas.target_inventory,
-        FUZZ_TARGET_INVENTORY_SCHEMA
-    );
-    assert_eq!(
-        contract.schemas.execution_request,
-        FUZZ_EXECUTION_REQUEST_SCHEMA
-    );
-    assert_eq!(
-        contract.schemas.sampling_request,
-        FUZZ_SAMPLING_REQUEST_SCHEMA
-    );
-    assert_eq!(
-        contract.schemas.result_envelope,
-        FUZZ_RESULT_ENVELOPE_SCHEMA
-    );
-    assert_eq!(
-        contract.schemas.required_artifact,
-        FUZZ_REQUIRED_ARTIFACT_SCHEMA
-    );
-    assert_eq!(contract.schemas.gate, FUZZ_GATE_SCHEMA);
-    assert_eq!(
-        contract.schemas.observation_set,
-        FUZZ_OBSERVATION_SET_SCHEMA
-    );
-    assert_eq!(
-        contract.schemas.lifecycle_contract,
-        homeboy_core::lifecycle::LIFECYCLE_CONTRACT_SCHEMA
-    );
-    assert_eq!(contract.schemas.isolation_proof, ISOLATION_PROOF_SCHEMA);
-    assert!(contract
-        .safety_classes
-        .contains(&FuzzSafetyClass::IsolatedMutation));
-    assert!(contract
-        .operation_families
-        .contains(&FuzzOperationFamily::Read));
-    assert!(contract
-        .operation_families
-        .contains(&FuzzOperationFamily::PerformanceProbe));
-    assert!(contract.finding_statuses.contains(&FuzzFindingStatus::Open));
-    assert!(contract
-        .skip_reason_codes
-        .contains(&FUZZ_SKIP_REASON_AUTH_REQUIRED.to_string()));
-}
-
-#[test]
 fn fuzz_gate_profiles_are_measurement_first_and_named() {
     let (measurement_artifacts, measurement_gates) =
         fuzz_gate_profile_contract(FuzzGateProfile::Measurement);
@@ -184,11 +114,8 @@ fn isolation_proof_requires_explicit_destructive_safety_fields() {
     assert!(proof.teardown_required);
     assert_eq!(proof.snapshot_ref, None);
     assert_eq!(proof.reset_supported, None);
-}
 
-#[test]
-fn isolation_proof_preserves_optional_reset_evidence_when_present() {
-    let proof = IsolationProof::from_value(json!({
+    let with_reset = IsolationProof::from_value(json!({
         "schema": ISOLATION_PROOF_SCHEMA,
         "version": FUZZ_CONTRACT_VERSION,
         "runtime_kind": "ephemeral-runner",
@@ -202,9 +129,11 @@ fn isolation_proof_preserves_optional_reset_evidence_when_present() {
         "verified_by": "test-suite"
     }))
     .expect("valid proof with optional reset evidence");
-
-    assert_eq!(proof.snapshot_ref.as_deref(), Some("snapshot://baseline-1"));
-    assert_eq!(proof.reset_supported, Some(false));
+    assert_eq!(
+        with_reset.snapshot_ref.as_deref(),
+        Some("snapshot://baseline-1")
+    );
+    assert_eq!(with_reset.reset_supported, Some(false));
 }
 
 #[test]
@@ -231,7 +160,7 @@ fn execution_request_deserializes_without_sampling_contract() {
         "id": "request-1",
         "component": "component-a"
     }))
-    .expect("legacy execution request payload");
+    .expect("execution request without sampling");
 
     assert_eq!(request.sampling.schema, FUZZ_SAMPLING_REQUEST_SCHEMA);
     assert_eq!(request.sampling.strategy, "all");

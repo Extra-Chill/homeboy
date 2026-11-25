@@ -1,7 +1,6 @@
 //! Generic coordination primitives in the observation store (#15947).
 //!
-//! Three shapes cover the file-backed coordination stores Homeboy used to keep
-//! beside the database:
+//! Three shapes cover coordination state kept in the database:
 //!
 //! - **records**: mutable keyed state guarded by a revision compare-and-set;
 //! - **leases**: claims, exclusive leases and counting semaphores, with a

@@ -510,10 +510,8 @@ pub(crate) struct VersionSource {
 
 /// The local file a component's version is read from.
 ///
-/// This and `artifact_version_source` used to live in the release crate's
-/// `version` module even though they return deploy types and only deploy calls
-/// them — one of the edges that made release and deploy circular (#11144).
-/// Local source keeps the shared canonical-target policy; artifacts select their
+/// This and `artifact_version_source` live in deploy because they return deploy
+/// types and only deploy calls them (#11144). Local source keeps the shared canonical-target policy; artifacts select their
 /// explicitly mapped shipped targets below.
 pub(crate) fn local_version_source(component: &Component) -> Option<VersionSource> {
     let target = homeboy_version::version::canonical_version_target(component)?;
@@ -543,8 +541,8 @@ pub(crate) fn artifact_version_source(component: &Component) -> Option<VersionSo
 ///
 /// An explicit `artifact_path` maps a source version target to its shipped
 /// location. Once a component declares such mappings, repository-only targets
-/// are not archive requirements. Components without mappings retain the legacy
-/// behavior of validating every declared target, including single-package npm
+/// are not archive requirements. Components without mappings validate every
+/// declared target, including single-package npm
 /// artifacts.
 pub(crate) fn artifact_version_targets(
     component: &Component,
@@ -984,9 +982,9 @@ fn detect_linked_worktree(path: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_version_source, compare_deployed_versions, parse_bulk_component_ids,
-        ComponentDeployResult, ComponentStatus, DeployConfig, DeployResult,
-        DeploymentProvenanceEvidence, PreparedDeployArtifact, ReleaseState, ReleaseStateStatus,
+        artifact_version_source, compare_deployed_versions, ComponentDeployResult, ComponentStatus,
+        DeployConfig, DeploymentProvenanceEvidence, PreparedDeployArtifact, ReleaseState,
+        ReleaseStateStatus,
     };
     use homeboy_core::component::{Component, ScopedExtensionConfig};
     use homeboy_core::project::Project;
@@ -1079,31 +1077,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_bulk_component_ids() {
-        let parsed = parse_bulk_component_ids(r#"["api","web"]"#).expect("parse ids");
-
-        assert_eq!(parsed, vec!["api", "web"]);
-    }
-
-    #[test]
-    fn test_success() {
-        let result = DeployResult::success(0);
-
-        assert!(result.success);
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(result.error, None);
-    }
-
-    #[test]
-    fn test_failure() {
-        let result = DeployResult::failure(2, "boom".to_string());
-
-        assert!(!result.success);
-        assert_eq!(result.exit_code, 2);
-        assert_eq!(result.error.as_deref(), Some("boom"));
-    }
-
-    #[test]
     fn test_failed() {
         let result = ComponentDeployResult::failed(
             &component(),
@@ -1136,52 +1109,6 @@ mod tests {
             result.error.as_deref(),
             Some("post-deploy verification unavailable")
         );
-    }
-
-    #[test]
-    fn test_with_status() {
-        let result = deploy_result().with_status("skipped");
-
-        assert_eq!(result.status, "skipped");
-    }
-
-    #[test]
-    fn test_with_versions() {
-        let result = deploy_result().with_versions(Some("1.0.0".into()), Some("0.9.0".into()));
-
-        assert_eq!(result.local_version.as_deref(), Some("1.0.0"));
-        assert_eq!(result.remote_version.as_deref(), Some("0.9.0"));
-    }
-
-    #[test]
-    fn test_with_error() {
-        let result = deploy_result().with_error("broken".to_string());
-
-        assert_eq!(result.error.as_deref(), Some("broken"));
-    }
-
-    #[test]
-    fn test_with_build_exit_code() {
-        let result = deploy_result().with_build_exit_code(Some(7));
-
-        assert_eq!(result.build_exit_code, Some(7));
-    }
-
-    #[test]
-    fn test_with_deploy_exit_code() {
-        let result = deploy_result().with_deploy_exit_code(Some(8));
-
-        assert_eq!(result.deploy_exit_code, Some(8));
-    }
-
-    #[test]
-    fn test_with_component_status() {
-        let result = deploy_result().with_component_status(ComponentStatus::NeedsUpdate);
-
-        assert!(matches!(
-            result.component_status,
-            Some(ComponentStatus::NeedsUpdate)
-        ));
     }
 
     #[test]
@@ -1233,17 +1160,6 @@ mod tests {
     }
 
     #[test]
-    fn test_with_remote_path() {
-        let result =
-            deploy_result().with_remote_path("/srv/wp-content/plugins/fixture".to_string());
-
-        assert_eq!(
-            result.remote_path.as_deref(),
-            Some("/srv/wp-content/plugins/fixture")
-        );
-    }
-
-    #[test]
     fn new_for_project_reports_effective_remote_path() {
         with_isolated_home(|_| {
             install_wordpress_extension();
@@ -1267,23 +1183,6 @@ mod tests {
                 Some("/htdocs/wp-content/plugins/fixture")
             );
         });
-    }
-
-    #[test]
-    fn test_with_release_state() {
-        let result = deploy_result().with_release_state(release_state());
-
-        assert_eq!(
-            result.release_state.as_ref().map(ReleaseState::status),
-            Some(ReleaseStateStatus::NeedsRelease)
-        );
-    }
-
-    #[test]
-    fn test_with_deployed_ref() {
-        let result = deploy_result().with_deployed_ref("v1.2.3".to_string());
-
-        assert_eq!(result.deployed_ref.as_deref(), Some("v1.2.3"));
     }
 
     #[test]

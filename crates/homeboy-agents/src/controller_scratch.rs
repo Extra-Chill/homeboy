@@ -453,8 +453,8 @@ fn prune_stranded_worktree_registration(registration: &ControllerScratchGitWorkt
 /// Unregister every linked Git worktree inside a scratch lease using Git's own
 /// lifecycle operation, before the lease's bytes are removed.
 ///
-/// This is the #10568 defect in one line: cleanup used to `remove_dir_all` the
-/// lease, which deletes a *registered* worktree behind Git's back and leaves
+/// Removing the lease with `remove_dir_all` alone would delete a *registered*
+/// worktree behind Git's back and leave
 /// `<repo>/.git/worktrees/<id>` alive in a shared repository, inflating every
 /// worktree inventory for months (Git only expires registrations during `gc`,
 /// after `gc.worktreePruneExpire`).

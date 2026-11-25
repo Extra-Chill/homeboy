@@ -368,8 +368,7 @@ impl BenchPhaseGroups {
 
     /// True when no policy declared any phase tag — i.e. every metric
     /// name is in the `untagged` bucket. Used to suppress the
-    /// `phase_groups` field entirely so back-compat consumers see no
-    /// change in the JSON envelope.
+    /// `phase_groups` field entirely so the JSON envelope omits it.
     pub(in crate::extension::bench::report) fn is_phaseless(&self) -> bool {
         self.cold.is_empty() && self.warm.is_empty() && self.amortized.is_empty()
     }

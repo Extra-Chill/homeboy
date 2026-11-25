@@ -634,9 +634,8 @@ impl RigSourceContext {
     /// A linked rig source can disappear when its managed worktree is cleaned
     /// up. When the active checkout contains the same rig declaration, refresh
     /// the installed link through the normal install ownership checks.
-    /// This used to resolve its own roots. It now receives them: a boundary is
-    /// only a boundary while nothing above it can supply one, and every caller
-    /// can (#7505).
+    /// Roots are supplied by the caller rather than resolved here, because every
+    /// caller can supply them (#7505).
     pub fn load_for_invocation_at(
         config_root: &Path,
         id: &str,
@@ -784,8 +783,8 @@ mod schema_error_tests {
     }
 
     #[test]
-    fn component_detection_skips_recognized_schemas() {
-        let value: serde_json::Value = serde_json::from_str(
+    fn component_detection_names_only_the_unrecognized_schema() {
+        let recognized: serde_json::Value = serde_json::from_str(
             r#"{
                 "components": {
                     "with_path": { "path": "~/dev/foo" },
@@ -794,14 +793,9 @@ mod schema_error_tests {
             }"#,
         )
         .expect("value");
-        assert_eq!(component_with_unrecognized_schema(&value), None);
-    }
-
-    #[test]
-    fn component_detection_finds_unrecognized_schema() {
-        let value = rig_value_with_unrecognized_component();
+        assert_eq!(component_with_unrecognized_schema(&recognized), None);
         assert_eq!(
-            component_with_unrecognized_schema(&value),
+            component_with_unrecognized_schema(&rig_value_with_unrecognized_component()),
             Some("legacy".to_string())
         );
     }

@@ -1807,7 +1807,7 @@ mod tests {
     }
 
     #[test]
-    fn batched_probe_command_rejects_newline_and_tab_names_like_before() {
+    fn batched_probe_command_rejects_newline_and_tab_names() {
         for name in ["line\nbreak.txt", "tab\tname.txt"] {
             let temp = tempfile::tempdir().expect("temp");
             let root = temp.path().join("plugin");

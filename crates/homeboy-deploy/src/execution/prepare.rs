@@ -177,9 +177,8 @@ pub(crate) fn prepare_component_deploy(
     // This is a deploy-time safety net; the primary resolution happens in
     // resolve_project_component (#812).
     //
-    // Fallible since #11119: an unresolved multi-extension `remote_path_inference`
-    // conflict used to collapse to an empty path and deploy anyway. Fail the
-    // component deploy instead.
+    // An unresolved multi-extension `remote_path_inference` conflict fails the
+    // component deploy rather than deploying to an empty path (#11119).
     let effective_remote_path = component_remote_path(component).map_err(|error| {
         ComponentDeployResult::failed(
             component,
