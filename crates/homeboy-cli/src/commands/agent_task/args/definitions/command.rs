@@ -112,6 +112,8 @@ pub enum AgentTaskCommand {
     Cook(Box<AgentTaskCookArgs>),
     /// Attach candidate-bound review findings to an existing Cook.
     CookFeedback(CookFeedbackArgs),
+    /// Land a batch of published Cook PRs, with bounded flake retries and repair feedback.
+    BatchLand(super::super::super::landing::BatchLandArgs),
     /// Run an `AgentTaskPlan` through the built-in Pi provider.
     RunPlan(RunPlanArgs),
     /// Execute a previously submitted durable run.

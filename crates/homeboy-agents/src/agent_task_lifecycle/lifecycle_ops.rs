@@ -3227,6 +3227,26 @@ pub fn record_cook_progress_with_activity_in_store(
     record.ok_or_else(|| Error::internal_unexpected("Cook progress record was unchanged"))
 }
 
+/// Append a landing decision to the child Cook before performing its side effect.
+pub fn record_cook_landing_event_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    event: Value,
+) -> Result<AgentTaskRunRecord> {
+    lifecycle_store
+        .mutate_record(run_id, |record| {
+            let events = record
+                .ensure_metadata_object()
+                .entry("landing_events".to_string())
+                .or_insert_with(|| json!([]));
+            if let Some(events) = events.as_array_mut() {
+                events.push(json!({"at": now_timestamp(), "event": event}));
+            }
+            true
+        })?
+        .ok_or_else(|| Error::internal_unexpected("Cook landing event record was unchanged"))
+}
+
 pub fn record_cook_observer_event_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
