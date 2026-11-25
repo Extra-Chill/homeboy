@@ -151,9 +151,6 @@ pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
     CookRunState::accepted_lab_handoff(record)
 }
 
-// The ambient `expire_unaccepted_lab_handoff()` shim that used to sit here is
-// gone; the reconciler was its only caller and now expires inside the store it read the handoff from (#7505).
-
 /// The store-rooted counterpart of [`expire_unaccepted_lab_handoff`].
 ///
 /// Expiry and acceptance race for the same run, and only one may win. The

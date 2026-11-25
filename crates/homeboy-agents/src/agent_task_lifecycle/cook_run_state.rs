@@ -3,18 +3,11 @@
 //! Owns execution-owner observations and their shared liveness decision.
 //! Discovery, stale annotation and action eligibility project this decision;
 //! provider process candidates never substitute for an execution owner.
-//! A Cook run's state used to be re-derived by every verb from raw record
-//! fields: `status` read the lifecycle state, `recover` read a progress
-//! label, `regate` read the same label again, and action eligibility kept its
-//! own per-action state tests. When the label and the state disagreed (a
-//! terminal `candidate_recoverable` record whose last Cook exit reported
-//! `in_flight`), `status` named `recover` and `recover` refused the run as
-//! still in flight (#17976, #17384, #17489, #17295).
-//!
-//! [`CookRunState::of`] is now the single classifier over the authoritative
+//! [`CookRunState::of`] is the single classifier over the authoritative
 //! lifecycle record, and [`legal_actions`] is the single eligibility table.
-//! Status, recover, regate and the action-eligibility report read both instead
-//! of classifying on their own. [`CookRunPhase::transition`] is the phase
+//! Status, recover, regate and the action-eligibility report read both rather
+//! than classifying from raw record fields, so they cannot disagree about a
+//! run (#17976, #17384, #17489, #17295). [`CookRunPhase::transition`] is the phase
 //! transition table the record's writers are held to.
 //!
 //! The record's `RunExecutionState` is the only owner of the execution phase;
@@ -1376,30 +1369,6 @@ mod tests {
             assert_eq!(CookRunState::of(&next).phase, phase);
             transition_record(&next, Some(&next)).unwrap();
         }
-    }
-
-    #[test]
-    fn record_with_retired_cook_run_state_key_still_loads() {
-        let legacy = record(RunExecutionState::Running, serde_json::json!({}));
-        let mut fixture = serde_json::to_value(&legacy).unwrap();
-        fixture["cook_run_state"] = serde_json::json!({
-            "phase": "running"
-        });
-        fixture["lab_handoff"] = serde_json::json!({
-            "state": "accepted", "authority": "runner_daemon", "runner_id": "lab",
-            "runner_job_id": "job", "accepted_at": "2026-06-01T00:00:00Z",
-            "workspace_lifecycle_revision": 0
-        });
-        let loaded: AgentTaskRunRecord = serde_json::from_value(fixture.clone()).unwrap();
-        assert!(serde_json::to_value(&loaded)
-            .unwrap()
-            .get("cook_run_state")
-            .is_none());
-        assert_eq!(
-            serde_json::to_value(&loaded).unwrap()["lab_handoff"],
-            fixture["lab_handoff"]
-        );
-        assert_eq!(CookRunState::of(&loaded).phase, P::Running);
     }
 
     #[test]
