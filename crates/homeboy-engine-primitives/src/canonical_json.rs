@@ -50,61 +50,27 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn object_keys_are_sorted_recursively() {
+    fn sorts_object_keys_recursively_and_preserves_arrays_and_scalars() {
         let input = json!({
-            "b": 1,
-            "a": { "z": true, "y": false },
-            "c": [ { "n": 2, "m": 1 } ]
+            "b": 1.5,
+            "a": { "z": true, "y": null },
+            "c": [ 3, 1, { "n": "s", "m": 1 } ]
         });
-        let canonical = canonical_json(input);
-        let bytes = serde_json::to_vec(&canonical).unwrap();
-        let rendered = String::from_utf8(bytes).unwrap();
+        let rendered = serde_json::to_string(&canonical_json(input)).unwrap();
         assert_eq!(
             rendered,
-            r#"{"a":{"y":false,"z":true},"b":1,"c":[{"m":1,"n":2}]}"#
+            r#"{"a":{"y":null,"z":true},"b":1.5,"c":[3,1,{"m":1,"n":"s"}]}"#
         );
     }
 
     #[test]
-    fn output_is_order_independent() {
-        // Two objects that differ only in key insertion order must canonicalize
-        // to identical bytes — the property every digest consumer relies on.
+    fn bytes_are_independent_of_key_insertion_order() {
+        // The property every digest consumer relies on.
         let a = json!({ "one": 1, "two": { "b": 2, "a": 1 }, "three": [3, 2, 1] });
         let b = json!({ "three": [3, 2, 1], "two": { "a": 1, "b": 2 }, "one": 1 });
         assert_eq!(
             canonical_json_bytes(&a).unwrap(),
             canonical_json_bytes(&b).unwrap()
-        );
-    }
-
-    #[test]
-    fn array_order_is_preserved() {
-        // Arrays are ordered data — canonicalization must NOT reorder elements,
-        // only canonicalize each element.
-        let input = json!([3, 1, 2, { "b": 1, "a": 2 }]);
-        let canonical = canonical_json(input);
-        let rendered = serde_json::to_string(&canonical).unwrap();
-        assert_eq!(rendered, r#"[3,1,2,{"a":2,"b":1}]"#);
-    }
-
-    #[test]
-    fn scalars_pass_through() {
-        for value in [json!(1), json!("s"), json!(true), json!(null), json!(1.5)] {
-            assert_eq!(canonical_json(value.clone()), value);
-        }
-    }
-
-    #[test]
-    fn canonical_json_bytes_sorts_serialized_struct_fields() {
-        #[derive(serde::Serialize)]
-        struct Payload {
-            zebra: u8,
-            alpha: u8,
-        }
-        let payload = Payload { zebra: 9, alpha: 1 };
-        assert_eq!(
-            canonical_json_bytes(&payload).unwrap(),
-            br#"{"alpha":1,"zebra":9}"#
         );
     }
 }

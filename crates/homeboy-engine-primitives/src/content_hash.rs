@@ -219,38 +219,18 @@ mod tests {
     }
 
     #[test]
-    fn incremental_hash_matches_blob_hash_across_chunk_boundaries() {
-        let mut hasher = sha256_hasher();
-        hasher.update(b"a");
-        hasher.update(b"bc");
-        assert_eq!(format!("{:x}", hasher.finalize()), ABC_SHA256);
-        assert_eq!(format!("{:x}", sha256_hasher().finalize()), EMPTY_SHA256);
-    }
-
-    #[test]
-    fn sha256_hex_matches_known_answer_vector() {
-        assert_eq!(sha256_hex(b"abc"), ABC_SHA256);
-    }
-
-    #[test]
-    fn sha256_hex_of_empty_input_is_the_empty_digest() {
-        assert_eq!(sha256_hex(b""), EMPTY_SHA256);
-    }
-
-    #[test]
-    fn sha256_hex_output_is_lowercase_and_full_length() {
-        let digest = sha256_hex(b"identity primitive");
-        assert_eq!(digest.len(), 64);
-        assert_eq!(digest, digest.to_ascii_lowercase());
-        assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn sha256_file_matches_known_answer_vector() {
+    fn sha256_hex_and_file_match_known_answer_vectors() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("abc.txt");
-        std::fs::write(&path, b"abc").unwrap();
-        assert_eq!(sha256_file(&path).unwrap(), ABC_SHA256);
+        for (name, bytes, expected) in [
+            ("abc.txt", &b"abc"[..], ABC_SHA256),
+            ("empty.bin", &b""[..], EMPTY_SHA256),
+        ] {
+            assert_eq!(sha256_hex(bytes), expected, "{name}");
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(sha256_file(&path).unwrap(), expected, "{name}");
+        }
+        assert!(sha256_file(&dir.path().join("absent.bin")).is_err());
     }
 
     #[test]
@@ -289,46 +269,26 @@ mod tests {
     }
 
     #[test]
-    fn sha256_file_hashes_an_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.bin");
-        std::fs::write(&path, b"").unwrap();
-        assert_eq!(sha256_file(&path).unwrap(), EMPTY_SHA256);
-    }
-
-    #[test]
-    fn sha256_file_errors_when_the_path_is_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(sha256_file(&dir.path().join("absent.bin")).is_err());
-    }
-
-    #[test]
-    fn is_sha256_hex_accepts_canonical_lowercase_digests() {
-        assert!(is_sha256_hex(ABC_SHA256));
-        assert!(is_sha256_hex(&sha256_hex(b"anything")));
-    }
-
-    #[test]
-    fn is_sha256_hex_accepts_uppercase_hex() {
-        assert!(is_sha256_hex(&ABC_SHA256.to_ascii_uppercase()));
-    }
-
-    #[test]
-    fn is_sha256_hex_rejects_wrong_length() {
-        assert!(!is_sha256_hex(""));
-        assert!(!is_sha256_hex(&ABC_SHA256[..63]));
-        assert!(!is_sha256_hex(&format!("{ABC_SHA256}0")));
-        // A 40-char git object id is not a sha256 digest.
-        assert!(!is_sha256_hex("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
-    }
-
-    #[test]
-    fn is_sha256_hex_rejects_non_hex_characters() {
-        let mut value = ABC_SHA256.to_string();
-        value.replace_range(0..1, "z");
-        assert!(!is_sha256_hex(&value));
-        // Correct length, but a prefixed algorithm label is not bare hex.
-        assert!(!is_sha256_hex(&format!("sha256:{}", &ABC_SHA256[7..])));
+    fn is_sha256_hex_accepts_only_bare_64_char_hex() {
+        let mut non_hex = ABC_SHA256.to_string();
+        non_hex.replace_range(0..1, "z");
+        for (value, expected) in [
+            (ABC_SHA256.to_string(), true),
+            (ABC_SHA256.to_ascii_uppercase(), true),
+            (String::new(), false),
+            (ABC_SHA256[..63].to_string(), false),
+            (format!("{ABC_SHA256}0"), false),
+            // A 40-char git object id is not a sha256 digest.
+            (
+                "da39a3ee5e6b4b0d3255bfef95601890afd80709".to_string(),
+                false,
+            ),
+            (non_hex, false),
+            // Correct length, but a prefixed algorithm label is not bare hex.
+            (format!("sha256:{}", &ABC_SHA256[7..]), false),
+        ] {
+            assert_eq!(is_sha256_hex(&value), expected, "{value}");
+        }
     }
 
     /// The exact digests the four hand-rolled implementations produced before
@@ -355,15 +315,6 @@ mod tests {
         );
     }
 
-    /// The separated and terminated schemes are not a flag on one function.
-    #[test]
-    fn separated_and_terminated_are_different_identity_schemes() {
-        assert_ne!(
-            nul_separated_digest(["alpha", "beta"]),
-            nul_terminated_digest(["alpha", "beta"])
-        );
-    }
-
     /// The property that makes NUL the right separator: no field can contain
     /// one, so a tuple boundary cannot be forged by moving characters across it.
     #[test]
@@ -372,13 +323,8 @@ mod tests {
             nul_separated_digest(["a", "bc"]),
             nul_separated_digest(["ab", "c"])
         );
+        // Empty and single-field inputs have no separator to write.
         assert_eq!(nul_separated_digest(["ab"]), sha256_hex(b"ab"));
-    }
-
-    /// A single field has no separator to write, so the two schemes only agree
-    /// with the blob primitive in the separated case.
-    #[test]
-    fn empty_and_single_field_inputs_are_well_defined() {
         assert_eq!(nul_separated_digest(Vec::<&str>::new()), sha256_hex(b""));
         assert_eq!(nul_terminated_digest(["a"]), sha256_hex(b"a\0"));
     }

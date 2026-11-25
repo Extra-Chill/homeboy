@@ -35,26 +35,25 @@ mod tests {
     #[test]
     fn bounded_items_reports_omitted_metadata() {
         let items = [1, 2, 3, 4];
-        let (shown, metadata) = bounded_items(&items, 2);
-
-        assert_eq!(shown, &[1, 2]);
-        assert_eq!(metadata.items_seen, 4);
-        assert_eq!(metadata.items_rendered, 2);
-        assert_eq!(metadata.item_limit, 2);
-        assert_eq!(metadata.omitted_item_count, 2);
-        assert!(metadata.truncated);
-    }
-
-    #[test]
-    fn bounded_items_handles_zero_limit() {
-        let items = [1, 2, 3];
-        let (shown, metadata) = bounded_items(&items, 0);
-
-        assert!(shown.is_empty());
-        assert_eq!(metadata.items_seen, 3);
-        assert_eq!(metadata.items_rendered, 0);
-        assert_eq!(metadata.item_limit, 0);
-        assert_eq!(metadata.omitted_item_count, 3);
-        assert!(metadata.truncated);
+        for (limit, shown_len, omitted, truncated) in [
+            (2, 2, 2, true),
+            (0, 0, 4, true),
+            (4, 4, 0, false),
+            (10, 4, 0, false),
+        ] {
+            let (shown, metadata) = bounded_items(&items, limit);
+            assert_eq!(shown, &items[..shown_len], "limit {limit}");
+            assert_eq!(
+                metadata,
+                DetailOutputMetadata {
+                    items_seen: 4,
+                    items_rendered: shown_len,
+                    item_limit: limit,
+                    omitted_item_count: omitted,
+                    truncated,
+                },
+                "limit {limit}"
+            );
+        }
     }
 }

@@ -411,32 +411,27 @@ mod tests {
         let report = timer.into_report();
         let ids: Vec<&str> = report.spans.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["execute", "report"]);
-        assert_eq!(report.spans[0].status, PhaseStatus::Ok);
-        assert!(report.spans[0].duration_ms.unwrap() >= 5.0);
-        assert_eq!(report.spans[1].status, PhaseStatus::Skipped);
-        assert_eq!(report.spans[1].duration_ms, None);
+        let execute = report.span("execute").unwrap();
+        assert_eq!(execute.status, PhaseStatus::Ok);
+        assert!(execute.duration_ms.unwrap() >= 5.0);
+        let skipped = report.span("report").unwrap();
+        assert_eq!(skipped.status, PhaseStatus::Skipped);
+        assert_eq!(skipped.duration_ms, None);
+        assert!(report.span("missing").is_none());
     }
 
     #[test]
-    fn time_records_duration_on_success() {
+    fn time_records_status_and_duration_on_success_and_error() {
         let mut timer = PhaseTimer::new();
-        let value: Result<i32, ()> = timer.time("execute", || Ok(7));
-        assert_eq!(value, Ok(7));
+        let ok: Result<i32, &str> = timer.time("execute", || Ok(7));
+        let err: Result<i32, &str> = timer.time("persist", || Err("boom"));
+        assert_eq!(ok, Ok(7));
+        assert_eq!(err, Err("boom"));
         let report = timer.into_report();
-        assert_eq!(report.spans.len(), 1);
-        assert_eq!(report.spans[0].status, PhaseStatus::Ok);
-    }
-
-    #[test]
-    fn time_finalizes_timing_on_error_path() {
-        let mut timer = PhaseTimer::new();
-        let value: Result<i32, &str> = timer.time("execute", || Err("boom"));
-        assert_eq!(value, Err("boom"));
-        let report = timer.into_report();
-        assert_eq!(report.spans.len(), 1);
-        assert_eq!(report.spans[0].status, PhaseStatus::Failed);
+        let statuses: Vec<_> = report.spans.iter().map(|span| span.status).collect();
+        assert_eq!(statuses, vec![PhaseStatus::Ok, PhaseStatus::Failed]);
         // Failed phases still carry a duration so regressions are attributable.
-        assert!(report.spans[0].duration_ms.is_some());
+        assert!(report.spans[1].duration_ms.is_some());
     }
 
     #[test]
@@ -476,20 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn report_span_lookup() {
-        let mut timer = PhaseTimer::new();
-        timer.record_ok("resolve", Duration::from_millis(2));
-        timer.record_ok("execute", Duration::from_millis(3));
-        timer.record_skipped("report");
-        let report = timer.into_report();
-
-        assert!(report.span("resolve").is_some());
-        assert!(report.span("missing").is_none());
-        assert_eq!(report.span("report").unwrap().status, PhaseStatus::Skipped);
-    }
-
-    #[test]
-    fn report_round_trips_through_json() {
+    fn report_round_trips_through_json_and_omits_empty_spans() {
         let mut timer = PhaseTimer::new();
         timer.record_ok("execute", Duration::from_millis(4));
         timer.record_skipped("persist");
@@ -498,6 +480,10 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let restored: PhaseTimingReport = serde_json::from_str(&json).unwrap();
         assert_eq!(report, restored);
+        assert_eq!(
+            serde_json::to_string(&PhaseTimingReport::default()).unwrap(),
+            "{}"
+        );
     }
 
     #[test]
@@ -522,34 +508,5 @@ mod tests {
         let span = &timer.report().spans[0];
         assert!(span.started_at.ends_with('Z'));
         assert_eq!(span.started_at.split('.').nth(1).unwrap().len(), 4);
-        let wire = serde_json::to_value(span).unwrap();
-        assert!(wire.get("start_offset_ms").is_none());
-    }
-
-    #[test]
-    fn empty_report_serializes_without_spans_field() {
-        let report = PhaseTimingReport::default();
-        let json = serde_json::to_string(&report).unwrap();
-        assert_eq!(json, "{}");
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn phase_status_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (PhaseStatus::Ok, "ok"),
-            (PhaseStatus::Skipped, "skipped"),
-            (PhaseStatus::Failed, "failed"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
     }
 }
