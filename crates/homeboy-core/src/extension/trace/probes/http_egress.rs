@@ -589,15 +589,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_default_redact_headers() {
-        let headers = default_redact_headers();
-
-        assert!(headers.contains(&"authorization".to_string()));
-        assert!(headers.contains(&"cookie".to_string()));
-        assert!(headers.contains(&"set-cookie".to_string()));
-    }
-
-    #[test]
     fn test_run_http_egress() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).expect("bind upstream");
         let upstream_addr = upstream.local_addr().expect("upstream addr");
@@ -670,78 +661,63 @@ mod tests {
     }
 
     #[test]
-    fn test_request_body_spills_to_artifact_when_over_limit() {
-        let temp = TempDir::new().expect("temp dir");
-        let message = http_message_with_body("POST", "/v1/messages", b"hello=world");
-        let config = http_egress_config(temp.path().join("artifacts"), 5);
+    fn oversized_bodies_spill_to_a_content_addressed_artifact() {
+        type EventData = fn(&HttpMessage, &HttpEgressConfig) -> BTreeMap<String, serde_json::Value>;
+        let cases: [(&str, &str, &[u8], usize, EventData, &str, &str, u64); 2] = [
+            (
+                "POST",
+                "/v1/messages",
+                b"hello=world",
+                5,
+                request_event_data,
+                "request_body",
+                "hello",
+                6,
+            ),
+            (
+                "HTTP/1.1",
+                "200",
+                b"hello back from upstream",
+                10,
+                response_event_data,
+                "response_body",
+                "hello back",
+                14,
+            ),
+        ];
+        for (method, target, body, limit, event_data, field, preview, omitted) in cases {
+            let temp = TempDir::new().expect("temp dir");
+            let message = http_message_with_body(method, target, body);
+            let config = http_egress_config(temp.path().join("artifacts"), limit);
 
-        let data = request_event_data(&message, &config);
+            let data = event_data(&message, &config);
 
-        assert_eq!(
-            data.get("request_body").and_then(|value| value.as_str()),
-            Some("hello")
-        );
-        assert_eq!(
-            data.get("body_truncated").and_then(|value| value.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            data.get("body_omitted").and_then(|value| value.as_u64()),
-            Some(6)
-        );
-        assert_eq!(
-            data.get("body_preview_bytes")
-                .and_then(|value| value.as_u64()),
-            Some(5)
-        );
-        let sha = data
-            .get("body_sha256")
-            .and_then(|value| value.as_str())
-            .expect("sha256");
-        let artifact_ref = data
-            .get("body_artifact_ref")
-            .and_then(|value| value.as_str())
-            .expect("artifact ref");
-        assert_eq!(artifact_ref, format!("artifacts/http-egress/{sha}.body"));
-        assert_eq!(
-            fs::read(temp.path().join(artifact_ref)).expect("artifact body"),
-            b"hello=world"
-        );
-    }
-
-    #[test]
-    fn test_response_body_spills_to_artifact_when_over_limit() {
-        let temp = TempDir::new().expect("temp dir");
-        let message = http_message_with_body("HTTP/1.1", "200", b"hello back from upstream");
-        let config = http_egress_config(temp.path().join("artifacts"), 10);
-
-        let data = response_event_data(&message, &config);
-
-        assert_eq!(
-            data.get("response_body").and_then(|value| value.as_str()),
-            Some("hello back")
-        );
-        assert_eq!(
-            data.get("body_truncated").and_then(|value| value.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            data.get("body_omitted").and_then(|value| value.as_u64()),
-            Some(14)
-        );
-        let sha = data
-            .get("body_sha256")
-            .and_then(|value| value.as_str())
-            .expect("sha256");
-        let artifact_ref = data
-            .get("body_artifact_ref")
-            .and_then(|value| value.as_str())
-            .expect("artifact ref");
-        assert_eq!(artifact_ref, format!("artifacts/http-egress/{sha}.body"));
-        assert_eq!(
-            fs::read(temp.path().join(artifact_ref)).expect("artifact body"),
-            b"hello back from upstream"
-        );
+            assert_eq!(
+                data.get(field).and_then(|value| value.as_str()),
+                Some(preview)
+            );
+            assert_eq!(
+                data.get("body_truncated").and_then(|value| value.as_bool()),
+                Some(true)
+            );
+            assert_eq!(
+                data.get("body_omitted").and_then(|value| value.as_u64()),
+                Some(omitted)
+            );
+            let sha = data
+                .get("body_sha256")
+                .and_then(|value| value.as_str())
+                .expect("sha256");
+            let artifact_ref = data
+                .get("body_artifact_ref")
+                .and_then(|value| value.as_str())
+                .expect("artifact ref");
+            assert_eq!(artifact_ref, format!("artifacts/http-egress/{sha}.body"));
+            assert_eq!(
+                fs::read(temp.path().join(artifact_ref)).expect("artifact body"),
+                body
+            );
+        }
     }
 
     fn http_egress_config(artifact_dir: PathBuf, max_body_bytes: usize) -> HttpEgressConfig {

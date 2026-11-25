@@ -51,12 +51,6 @@ impl MonorepoContext {
             tag_prefix: component_id.to_string(),
         })
     }
-
-    /// Format a version as a component-scoped tag name.
-    /// e.g. "1.2.3" -> "api-client-v1.2.3"
-    pub fn format_tag(&self, version: &str) -> String {
-        format!("{}-v{}", self.tag_prefix, version)
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1176,35 +1170,121 @@ mod tests {
     }
 
     #[test]
-    fn parse_conventional_commit_feat() {
-        assert_eq!(
-            parse_conventional_commit("feat: Add new feature"),
-            CommitCategory::Feature
-        );
-        assert_eq!(
-            parse_conventional_commit("feat(scope): Add scoped feature"),
-            CommitCategory::Feature
-        );
+    fn parse_conventional_commit_classifies_subjects() {
+        use CommitCategory::*;
+        for (subject, expected) in [
+            ("feat: Add new feature", Feature),
+            ("feat(scope): Add scoped feature", Feature),
+            ("feat: add version display", Feature),
+            ("fix: Fix a bug", Fix),
+            ("fix: version parsing bug", Fix),
+            ("feat!: Breaking change", Breaking),
+            ("BREAKING CHANGE: Something big", Breaking),
+            ("docs: Update README", Docs),
+            ("docs(api): Add endpoint docs", Docs),
+            ("chore: cleanup", Chore),
+            ("chore(deps): bump lodash to 4.17.21", Chore),
+            ("Merge pull request #45 from feature-branch", Merge),
+            ("Merge branch 'main' into feature", Merge),
+            ("Merge remote-tracking branch 'origin/main'", Merge),
+            ("Merge origin/main into feature-branch", Merge),
+            ("v0.2.3", Release),
+            ("0.2.3", Release),
+            ("1.0", Release),
+            ("Bump version to 0.2.2", Release),
+            ("bump to v0.3.0", Release),
+            ("Bump version to 0.2.2 and add error logging", Release),
+            ("version bump to 0.2.1", Release),
+            ("Version 0.4.0", Release),
+            ("release: v0.2.3", Release),
+            ("release v0.4.0", Release),
+            ("chore(release): v1.0.0", Release),
+            ("Release 0.5.0", Release),
+            ("Random commit message", Other),
+            ("Update plugin URI", Other),
+            ("added claude.md", Other),
+            ("Initial plan", Other),
+        ] {
+            assert_eq!(parse_conventional_commit(subject), expected, "{subject}");
+        }
     }
 
     #[test]
-    fn parse_conventional_commit_fix() {
-        assert_eq!(
-            parse_conventional_commit("fix: Fix a bug"),
-            CommitCategory::Fix
-        );
+    fn strip_conventional_prefix_removes_only_valid_prefixes() {
+        for (subject, expected) in [
+            ("feat: Add feature", "Add feature"),
+            ("fix(shell): Fix escaping", "Fix escaping"),
+            (
+                "feat(#741): delete AgentType class",
+                "delete AgentType class",
+            ),
+            (
+                "feat(agent-task): surface local cook provider execution in logs",
+                "surface local cook provider execution in logs",
+            ),
+            (
+                "fix(lab/runner): converge stale daemon",
+                "converge stale daemon",
+            ),
+            ("chore(a.b): tidy", "tidy"),
+            ("feat!: drop legacy API", "drop legacy API"),
+            ("feat(agent-task)!: drop legacy API", "drop legacy API"),
+            ("feat(): weird", "feat(): weird"),
+            (
+                "Reverted the change: because reasons",
+                "Reverted the change: because reasons",
+            ),
+            ("Regular commit message", "Regular commit message"),
+        ] {
+            assert_eq!(strip_conventional_prefix(subject), expected, "{subject}");
+        }
     }
 
     #[test]
-    fn parse_conventional_commit_breaking() {
-        assert_eq!(
-            parse_conventional_commit("feat!: Breaking change"),
-            CommitCategory::Breaking
-        );
-        assert_eq!(
-            parse_conventional_commit("BREAKING CHANGE: Something big"),
-            CommitCategory::Breaking
-        );
+    fn is_docs_file_matches_markdown_and_docs_directories_only() {
+        for (path, expected) in [
+            ("README.md", true),
+            ("path/to/file.md", true),
+            ("docs/api/reference.md", true),
+            ("src/docs/readme.txt", true),
+            ("src/main.rs", false),
+            ("lib/extension.js", false),
+            ("Cargo.toml", false),
+            ("src/component.tsx", false),
+        ] {
+            assert_eq!(is_docs_file(path), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn recommended_bump_takes_highest_releasable_category() {
+        let commit = |category| CommitInfo {
+            hash: "a1".to_string(),
+            subject: "subject".to_string(),
+            category,
+        };
+        use CommitCategory::*;
+        for (categories, expected) in [
+            (vec![Fix, Feature, Breaking], Some(SemverBump::Major)),
+            (vec![Docs, Chore], None),
+            (vec![Other, Fix], Some(SemverBump::Patch)),
+        ] {
+            let commits: Vec<_> = categories.into_iter().map(commit).collect();
+            assert_eq!(recommended_bump_from_commits(&commits), expected);
+        }
+    }
+
+    #[test]
+    fn latest_tag_ignores_channel_and_describe_shaped_tags() {
+        let (dir, path) = init_repo();
+        git(&path, &["tag", "v2.1.1"]);
+        commit_file(&dir, &path, "one.txt", "one\n", "fix: one");
+        git(&path, &["tag", "v2.1.1-1-gabc1234"]);
+        commit_file(&dir, &path, "two.txt", "two\n", "fix: two");
+        git(&path, &["tag", "v2"]);
+
+        assert_eq!(get_latest_tag(&path).unwrap(), Some("v2.1.1".to_string()));
+        assert!(exact_release_version_from_tag("v2.1.1-1-gabc1234", None).is_none());
     }
 
     #[test]
@@ -1329,14 +1409,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_conventional_commit_other() {
-        assert_eq!(
-            parse_conventional_commit("Random commit message"),
-            CommitCategory::Other
-        );
-    }
-
-    #[test]
     fn is_conventional_subject_requires_known_type_and_message() {
         for (subject, expected) in [
             ("feat(release): add serial release mode", true),
@@ -1350,149 +1422,6 @@ mod tests {
         ] {
             assert_eq!(is_conventional_subject(subject), expected, "{subject}");
         }
-    }
-
-    #[test]
-    fn strip_conventional_prefix_works() {
-        assert_eq!(
-            strip_conventional_prefix("feat: Add feature"),
-            "Add feature"
-        );
-        assert_eq!(
-            strip_conventional_prefix("fix(shell): Fix escaping"),
-            "Fix escaping"
-        );
-        assert_eq!(
-            strip_conventional_prefix("Regular commit"),
-            "Regular commit"
-        );
-    }
-
-    #[test]
-    fn strip_conventional_prefix_handles_issue_number_scope() {
-        assert_eq!(
-            strip_conventional_prefix("feat(#741): delete AgentType class"),
-            "delete AgentType class"
-        );
-        assert_eq!(
-            strip_conventional_prefix("fix(#730): queue-add uses unified check-duplicate"),
-            "queue-add uses unified check-duplicate"
-        );
-        assert_eq!(
-            strip_conventional_prefix("feat(#123): add new feature"),
-            "add new feature"
-        );
-    }
-
-    #[test]
-    fn strip_conventional_prefix_handles_hyphenated_scope() {
-        assert_eq!(
-            strip_conventional_prefix(
-                "feat(agent-task): surface local cook provider execution in logs"
-            ),
-            "surface local cook provider execution in logs"
-        );
-        assert_eq!(
-            strip_conventional_prefix(
-                "test(agent-task): cover local cook logs surfacing running provider execution"
-            ),
-            "cover local cook logs surfacing running provider execution"
-        );
-    }
-
-    #[test]
-    fn strip_conventional_prefix_handles_punctuated_scopes() {
-        assert_eq!(
-            strip_conventional_prefix("fix(lab/runner): converge stale daemon"),
-            "converge stale daemon"
-        );
-        assert_eq!(strip_conventional_prefix("chore(a.b): tidy"), "tidy");
-    }
-
-    #[test]
-    fn strip_conventional_prefix_handles_breaking_change_marker() {
-        assert_eq!(
-            strip_conventional_prefix("feat!: drop legacy API"),
-            "drop legacy API"
-        );
-        assert_eq!(
-            strip_conventional_prefix("feat(agent-task)!: drop legacy API"),
-            "drop legacy API"
-        );
-    }
-
-    #[test]
-    fn strip_conventional_prefix_leaves_non_conventional_subjects() {
-        // Empty scope is not a valid conventional prefix.
-        assert_eq!(strip_conventional_prefix("feat(): weird"), "feat(): weird");
-        // A multi-word phrase before the colon is not a single type token.
-        assert_eq!(
-            strip_conventional_prefix("Reverted the change: because reasons"),
-            "Reverted the change: because reasons"
-        );
-        // A subject with no ": " separator is returned unchanged.
-        assert_eq!(
-            strip_conventional_prefix("Regular commit message"),
-            "Regular commit message"
-        );
-    }
-
-    #[test]
-    fn is_docs_file_recognizes_markdown() {
-        assert!(is_docs_file("README.md"));
-        assert!(is_docs_file("CLAUDE.md"));
-        assert!(is_docs_file("changelog.md"));
-        assert!(is_docs_file("path/to/file.md"));
-    }
-
-    #[test]
-    fn is_docs_file_recognizes_docs_directory() {
-        assert!(is_docs_file("docs/guide.md"));
-        assert!(is_docs_file("docs/api/reference.md"));
-        assert!(is_docs_file("docs/commands/init.md"));
-        assert!(is_docs_file("src/docs/readme.txt"));
-        assert!(is_docs_file("path/to/docs/file.txt"));
-    }
-
-    #[test]
-    fn is_docs_file_rejects_code() {
-        assert!(!is_docs_file("src/main.rs"));
-        assert!(!is_docs_file("lib/extension.js"));
-        assert!(!is_docs_file("Cargo.toml"));
-        assert!(!is_docs_file("package.json"));
-        assert!(!is_docs_file("src/component.tsx"));
-    }
-
-    #[test]
-    fn parse_conventional_commit_docs() {
-        assert_eq!(
-            parse_conventional_commit("docs: Update README"),
-            CommitCategory::Docs
-        );
-        assert_eq!(
-            parse_conventional_commit("docs(api): Add endpoint docs"),
-            CommitCategory::Docs
-        );
-    }
-
-    #[test]
-    fn parse_conventional_commit_merge() {
-        assert_eq!(
-            parse_conventional_commit("Merge pull request #45 from feature-branch"),
-            CommitCategory::Merge
-        );
-        assert_eq!(
-            parse_conventional_commit("Merge branch 'main' into feature"),
-            CommitCategory::Merge
-        );
-        assert_eq!(
-            parse_conventional_commit("Merge remote-tracking branch 'origin/main'"),
-            CommitCategory::Merge
-        );
-        assert_eq!(
-            parse_conventional_commit("Merge origin/main into feature-branch"),
-            CommitCategory::Merge
-        );
     }
 
     #[test]
@@ -1557,200 +1486,12 @@ mod tests {
     }
 
     #[test]
-    fn classify_release_bare_version() {
-        // Bare version tags: "v0.2.3", "0.2.3"
-        assert_eq!(parse_conventional_commit("v0.2.3"), CommitCategory::Release);
-        assert_eq!(parse_conventional_commit("0.2.3"), CommitCategory::Release);
-        assert_eq!(parse_conventional_commit("v1.0.0"), CommitCategory::Release);
-        assert_eq!(parse_conventional_commit("1.0"), CommitCategory::Release);
-    }
-
-    #[test]
-    fn classify_release_bump_patterns() {
-        // "Bump version to X.Y.Z" and variants
-        assert_eq!(
-            parse_conventional_commit("Bump version to 0.2.2"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("bump to v0.3.0"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("Bump version to 0.2.2 and add error logging"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("version bump to 0.2.1"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("Version 0.4.0"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("Bump version to 0.2.1"),
-            CommitCategory::Release
-        );
-    }
-
-    #[test]
-    fn classify_release_prefix_patterns() {
-        // "release: vX.Y.Z" and variants
-        assert_eq!(
-            parse_conventional_commit("release: v0.2.3"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("release v0.4.0"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("chore(release): v1.0.0"),
-            CommitCategory::Release
-        );
-        assert_eq!(
-            parse_conventional_commit("Release 0.5.0"),
-            CommitCategory::Release
-        );
-    }
-
-    #[test]
-    fn classify_release_does_not_match_feature_commits() {
-        // These should NOT be classified as Release
-        assert_eq!(
-            parse_conventional_commit("feat: add version display"),
-            CommitCategory::Feature
-        );
-        assert_eq!(
-            parse_conventional_commit("fix: version parsing bug"),
-            CommitCategory::Fix
-        );
-        assert_eq!(
-            parse_conventional_commit("Update plugin URI"),
-            CommitCategory::Other
-        );
-        assert_eq!(
-            parse_conventional_commit("added claude.md"),
-            CommitCategory::Other
-        );
-        assert_eq!(
-            parse_conventional_commit("Initial plan"),
-            CommitCategory::Other
-        );
-        // chore: without a version number should still be Chore
-        assert_eq!(
-            parse_conventional_commit("chore: cleanup"),
-            CommitCategory::Chore
-        );
-        // chore(deps) with a version-like number should still be Chore
-        // (only chore(release)-style with a bare version after colon is Release)
-        assert_eq!(
-            parse_conventional_commit("chore(deps): bump lodash to 4.17.21"),
-            CommitCategory::Chore
-        );
-    }
-
-    #[test]
-    fn release_category_skipped_in_changelog() {
-        assert!(CommitCategory::Release.to_changelog_entry_type().is_none());
-    }
-
-    #[test]
     fn merge_and_release_categories_skipped_in_changelog() {
         assert!(CommitCategory::Merge.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Docs.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Chore.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Release.to_changelog_entry_type().is_none());
         assert!(CommitCategory::Feature.to_changelog_entry_type().is_some());
-    }
-
-    #[test]
-    fn recommended_bump_prefers_highest_severity() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "fix: patch fix".to_string(),
-                category: CommitCategory::Fix,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "feat: add feature".to_string(),
-                category: CommitCategory::Feature,
-            },
-            CommitInfo {
-                hash: "c3".to_string(),
-                subject: "refactor!: break API".to_string(),
-                category: CommitCategory::Breaking,
-            },
-        ];
-
-        assert_eq!(
-            recommended_bump_from_commits(&commits),
-            Some(SemverBump::Major)
-        );
-    }
-
-    #[test]
-    fn recommended_bump_ignores_docs_and_chore() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "docs: update".to_string(),
-                category: CommitCategory::Docs,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "chore: cleanup".to_string(),
-                category: CommitCategory::Chore,
-            },
-        ];
-
-        assert_eq!(recommended_bump_from_commits(&commits), None);
-    }
-
-    #[test]
-    fn recommended_bump_from_fix_and_other_is_patch() {
-        let commits = vec![
-            CommitInfo {
-                hash: "a1".to_string(),
-                subject: "random commit".to_string(),
-                category: CommitCategory::Other,
-            },
-            CommitInfo {
-                hash: "b2".to_string(),
-                subject: "fix: bug".to_string(),
-                category: CommitCategory::Fix,
-            },
-        ];
-
-        assert_eq!(
-            recommended_bump_from_commits(&commits),
-            Some(SemverBump::Patch)
-        );
-    }
-
-    #[test]
-    fn latest_tag_ignores_channel_tag_at_head() {
-        let (dir, path) = init_repo();
-        git(&path, &["tag", "v2.1.1"]);
-        commit_file(&dir, &path, "one.txt", "one\n", "fix: one");
-        commit_file(&dir, &path, "two.txt", "two\n", "fix: two");
-        commit_file(&dir, &path, "three.txt", "three\n", "fix: three");
-        git(&path, &["tag", "v2"]);
-
-        assert_eq!(get_latest_tag(&path).unwrap(), Some("v2.1.1".to_string()));
-    }
-
-    #[test]
-    fn latest_tag_requires_exact_semver_tag() {
-        let (dir, path) = init_repo();
-        git(&path, &["tag", "v2.1.1"]);
-        commit_file(&dir, &path, "fix.txt", "fix\n", "fix: one");
-        git(&path, &["tag", "v2.1.1-1-gabc1234"]);
-
-        assert_eq!(get_latest_tag(&path).unwrap(), Some("v2.1.1".to_string()));
-        assert!(exact_release_version_from_tag("v2.1.1-1-gabc1234", None).is_none());
     }
 
     #[test]
@@ -1850,18 +1591,6 @@ mod tests {
             get_previous_tag_before_with_prefix(&path, "module-v1.2.0", Some("module")).unwrap(),
             Some("module-v1.1.0".to_string())
         );
-    }
-
-    #[test]
-    fn monorepo_context_format_tag() {
-        let ctx = MonorepoContext {
-            git_root: "/repo".to_string(),
-            path_prefix: "wordpress".to_string(),
-            path_prefixes: vec!["wordpress".to_string()],
-            tag_prefix: "wordpress".to_string(),
-        };
-        assert_eq!(ctx.format_tag("1.2.3"), "wordpress-v1.2.3");
-        assert_eq!(ctx.format_tag("0.1.0"), "wordpress-v0.1.0");
     }
 
     #[test]

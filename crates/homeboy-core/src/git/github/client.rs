@@ -158,32 +158,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_token_prefers_gh_token_env() {
-        let token = select_github_token(
-            Some(" env-gh-token \n".to_string()),
-            Some("github-token".to_string()),
-            || Some("cli-token".to_string()),
-        );
-
-        assert_eq!(token.as_deref(), Some("env-gh-token"));
-    }
-
-    #[test]
-    fn github_token_falls_back_to_github_token_env() {
-        let token = select_github_token(
-            Some("  ".to_string()),
-            Some("github-token".to_string()),
-            || Some("cli-token".to_string()),
-        );
-
-        assert_eq!(token.as_deref(), Some("github-token"));
-    }
-
-    #[test]
-    fn github_token_falls_back_to_gh_auth_token() {
-        let token = select_github_token(None, None, || Some("cli-token".to_string()));
-
-        assert_eq!(token.as_deref(), Some("cli-token"));
+    fn github_token_prefers_gh_token_then_github_token_then_gh_cli() {
+        let cli = || Some("cli-token".to_string());
+        for (gh_token, github_token, expected) in [
+            (
+                Some(" env-gh-token \n"),
+                Some("github-token"),
+                "env-gh-token",
+            ),
+            (Some("  "), Some("github-token"), "github-token"),
+            (None, None, "cli-token"),
+        ] {
+            let token = select_github_token(
+                gh_token.map(str::to_string),
+                github_token.map(str::to_string),
+                cli,
+            );
+            assert_eq!(token.as_deref(), Some(expected));
+        }
     }
 
     #[test]
