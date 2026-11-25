@@ -176,8 +176,7 @@ fn plan_has_step(plan: &HomeboyPlan, step_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        lab_offload_metadata, lab_offload_metadata_with_workspace_mapping,
-        lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload,
+        lab_offload_metadata, lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload,
         LAB_OFFLOAD_METADATA_SCHEMA,
     };
     use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
@@ -306,38 +305,12 @@ mod tests {
     }
 
     #[test]
-    fn lab_offload_metadata_records_workspace_mapping_when_supplied() {
+    fn lab_offload_metadata_embeds_supplied_workspace_mapping_and_runner_workload() {
         let plan = lab_plan();
         let mapping = serde_json::json!({
             "schema": "homeboy/workspace-map/v1",
-            "workspaces": [
-                {
-                    "role": "primary",
-                    "local_path": "/Users/user/Developer/app",
-                    "remote_path": "/srv/homeboy/_lab_workspaces/app-abc",
-                    "sync_mode": "snapshot",
-                    "snapshot_identity": "snapshot:abc"
-                }
-            ]
+            "workspaces": [{"role": "primary", "remote_path": "/srv/homeboy/app"}]
         });
-
-        let metadata = lab_offload_metadata_with_workspace_mapping(
-            &plan,
-            "explicit",
-            Some("lab"),
-            Some("direct_ssh"),
-            "offloaded",
-            Some("/srv/homeboy/_lab_workspaces/app-abc"),
-            None,
-            Some(&mapping),
-        );
-
-        assert_eq!(metadata["workspace_mapping"], mapping);
-    }
-
-    #[test]
-    fn lab_offload_metadata_records_lab_runner_workload_when_supplied() {
-        let plan = lab_plan();
         let workload = LabRunnerWorkload {
             schema: LAB_RUNNER_WORKLOAD_SCHEMA.to_string(),
             workload_id: "workload-1".to_string(),
@@ -395,34 +368,14 @@ mod tests {
             "offloaded",
             Some("/srv/homeboy/app"),
             None,
-            None,
+            Some(&mapping),
             Some(&workload),
         );
 
+        assert_eq!(metadata["workspace_mapping"], mapping);
         assert_eq!(
-            metadata["runner_workload"]["schema"],
-            LAB_RUNNER_WORKLOAD_SCHEMA
-        );
-        assert_eq!(metadata["runner_workload"]["workload_id"], "workload-1");
-        assert_eq!(
-            metadata["runner_workload"]["kind"]["command_family"],
-            "quality"
-        );
-        assert_eq!(
-            metadata["runner_workload"]["assignment"]["runner_id"],
-            "lab"
-        );
-        assert_eq!(
-            metadata["runner_workload"]["required_extensions"][0],
-            "browser"
-        );
-        assert_eq!(
-            metadata["runner_workload"]["required_extension_revisions"][0]["extension_id"],
-            "browser"
-        );
-        assert_eq!(
-            metadata["runner_workload"]["required_extension_revisions"][0]["source_revision"],
-            "abc1234"
+            metadata["runner_workload"],
+            serde_json::to_value(&workload).expect("serialize workload")
         );
     }
 
