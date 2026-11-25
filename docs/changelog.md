@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.3] - 2026-11-25
+
+### Changed
+- prune redundant lab/workspace tests, dead command-prefix input, and history comments
+- prune retired gate sentinel, test-only provider env wrapper and non-earning scheduler/gate tests
+- prune notify, observation and reconcile tests file-by-file
+- prune low-value trace, workload, gate and git tests file-by-file
+- prune duplicate and low-value tests in homeboy-core observation
+
 ## [0.497.2] - 2026-11-25
 
 ### Changed
