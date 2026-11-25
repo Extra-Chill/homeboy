@@ -73,6 +73,35 @@ fn detached_admission_preserves_live_launcher_past_deadline_until_supervision() 
     assert!(!supervised.state().is_terminal());
 }
 
+/// Under concurrent launches the claim can land after the lease (#19166). The
+/// live process that wrote the placeholder still owns it until it claims.
+#[test]
+fn unclaimed_placeholder_survives_its_lease_while_its_writer_lives() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "slow-claim-placeholder";
+    record_detached_cook_handoff_parent_in_store(&store, cook_id).expect("write placeholder");
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                json!("2020-01-01T00:00:00Z");
+            true
+        })
+        .expect("simulate a claim delayed past the lease");
+
+    assert!(
+        !expire_detached_cook_admission_in_store(&store, cook_id).expect("reconcile admission"),
+        "a live placeholder writer still owns the admission after the lease"
+    );
+    let claimed = claim_detached_cook_handoff_parent_in_store(&store, cook_id, "late-launcher")
+        .expect("the delayed claim still lands");
+    assert_eq!(
+        claimed.metadata["detached_cook_handoff"]["launcher_id"],
+        "late-launcher"
+    );
+    assert!(!claimed.state().is_terminal());
+}
+
 #[test]
 fn detached_admission_expires_dead_launcher_even_before_fallback_deadline() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
