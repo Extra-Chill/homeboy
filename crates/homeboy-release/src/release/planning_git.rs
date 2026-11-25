@@ -281,10 +281,11 @@ fn source_remote(component: &Component) -> String {
 mod tests {
     use super::{check_default_branch, validate_remote_sync, DefaultBranchRequirement};
     use homeboy_core::component::Component;
+    use std::path::{Path, PathBuf};
 
     use homeboy_core::test_support::run_git_command as run_git;
 
-    fn git_component(dir: &std::path::Path) -> Component {
+    fn git_component(dir: &Path) -> Component {
         Component {
             id: "fixture".to_string(),
             local_path: dir.to_string_lossy().to_string(),
@@ -292,173 +293,39 @@ mod tests {
         }
     }
 
-    fn configure_git_user(dir: &std::path::Path) {
+    fn configure_git_user(dir: &Path) {
         run_git(dir, &["config", "user.email", "test@example.com"]);
         run_git(dir, &["config", "user.name", "Test"]);
     }
 
-    #[test]
-    fn test_validate_default_branch_allows_default_branch() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path();
-        run_git(dir, &["init", "-q"]);
-        run_git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-
-        check_default_branch(&git_component(dir), DefaultBranchRequirement::AtTip)
-            .expect("main should be allowed");
+    fn commit_readme(dir: &Path, content: &str, message: &str) {
+        std::fs::write(dir.join("README.md"), content).expect("write fixture");
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", message]);
     }
 
-    #[test]
-    fn test_validate_default_branch_allows_detached_default_tip() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
+    /// Bare `main` remote seeded with one commit, plus a configured clone of it
+    /// at `<root>/checkout`. Returns `(seed, checkout)`.
+    fn remote_with_checkout(root: &Path) -> (PathBuf, PathBuf) {
+        let remote = root.join("remote.git").to_string_lossy().to_string();
+        let seed = root.join("seed");
+        let checkout = root.join("checkout");
 
         run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
+            root,
+            &["init", "--bare", "--initial-branch", "main", &remote],
         );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
+        run_git(root, &["clone", &remote, "seed"]);
         configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        commit_readme(&seed, "fixture\n", "Initial commit");
         run_git(&seed, &["push", "-q", "origin", "main"]);
 
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        run_git(&checkout, &["checkout", "-q", "--detach", "origin/main"]);
-
-        check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
-            .expect("detached default tip should be allowed");
-    }
-
-    /// The release plan detaches by construction when a caller nominates a
-    /// prepared ref, so every default-branch check on that path has to agree
-    /// that a detached tip is the default branch. `AtTip` alone is not enough:
-    /// planning the push and the ancestry check run against the same detached
-    /// checkout.
-    #[test]
-    fn test_detached_default_tip_passes_every_default_branch_check() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        run_git(root, &["clone", &remote, "checkout"]);
         configure_git_user(&checkout);
-        run_git(&checkout, &["checkout", "-q", "--detach", "origin/main"]);
-
-        let component = git_component(&checkout);
-
-        check_default_branch(&component, DefaultBranchRequirement::AtTip)
-            .expect("detached default tip should be allowed");
-        check_default_branch(&component, DefaultBranchRequirement::BasedOnDefault)
-            .expect("detached default tip should satisfy ancestry");
-        assert_eq!(
-            check_default_branch(&component, DefaultBranchRequirement::AtTip)
-                .expect("detached default tip should plan a push"),
-            "main"
-        );
+        (seed, checkout)
     }
 
-    /// A detached HEAD that is not the default branch must still be refused,
-    /// and the refusal has to name the branch it would push to rather than
-    /// reporting only that HEAD is detached.
-    #[test]
-    fn test_release_push_branch_blocks_detached_non_default_commits() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "initial\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-        std::fs::write(seed.join("README.md"), "tip\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Tip commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        configure_git_user(&checkout);
-        run_git(&checkout, &["checkout", "-q", "--detach", "origin/main~1"]);
-
-        let err = check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
-            .expect_err("detached older commit should not plan a push");
-        assert!(err.message.contains("detached HEAD"));
-        assert!(err.message.contains("main"));
-    }
-
-    #[test]
-    fn test_validate_default_branch_blocks_detached_non_default_commits() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "initial\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-        std::fs::write(seed.join("README.md"), "tip\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Tip commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        configure_git_user(&checkout);
-        run_git(&checkout, &["checkout", "-q", "--detach", "origin/main~1"]);
-        let old_revision = git_revision(&checkout, "HEAD");
-        let default_revision = git_revision(&checkout, "origin/main");
-
-        let err = check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
-            .expect_err("detached older commit should fail");
-        assert!(err.message.contains(&old_revision));
-        assert!(err.message.contains(&default_revision));
-
-        run_git(&checkout, &["checkout", "-q", "--orphan", "unrelated"]);
-        std::fs::write(checkout.join("README.md"), "unrelated\n").expect("write fixture");
-        run_git(&checkout, &["add", "."]);
-        run_git(&checkout, &["commit", "-q", "-m", "Unrelated commit"]);
-        run_git(&checkout, &["checkout", "-q", "--detach"]);
-        let unrelated_revision = git_revision(&checkout, "HEAD");
-
-        let err = check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
-            .expect_err("detached unrelated commit should fail");
-        assert!(err.message.contains(&unrelated_revision));
-        assert!(err.message.contains(&default_revision));
-    }
-
-    fn git_revision(dir: &std::path::Path, reference: &str) -> String {
+    fn git_revision(dir: &Path, reference: &str) -> String {
         let output = std::process::Command::new("git")
             .args(["rev-parse", reference])
             .current_dir(dir)
@@ -472,43 +339,16 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_default_branch_allows_default_branch_with_non_origin_remote() {
-        // A framework-agnostic orchestrator must release repos whose remote is
-        // not named `origin`. Clone, rename the remote to `upstream`, and verify
-        // the default-branch validation still resolves the default through the
-        // renamed remote.
-        let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        configure_git_user(&checkout);
-        run_git(&checkout, &["remote", "rename", "origin", "upstream"]);
-
-        check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
-            .expect("default branch should be allowed through a non-origin remote");
-    }
-
-    #[test]
-    fn test_validate_default_branch_blocks_non_default_branch() {
+    fn default_branch_check_matches_local_branch_name_without_remote() {
         let temp = tempfile::tempdir().expect("tempdir");
         let dir = temp.path();
         run_git(dir, &["init", "-q"]);
-        run_git(dir, &["symbolic-ref", "HEAD", "refs/heads/feature"]);
+        run_git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
 
+        check_default_branch(&git_component(dir), DefaultBranchRequirement::AtTip)
+            .expect("main should be allowed");
+
+        run_git(dir, &["symbolic-ref", "HEAD", "refs/heads/feature"]);
         let err = check_default_branch(&git_component(dir), DefaultBranchRequirement::AtTip)
             .expect_err("feature should fail");
 
@@ -518,62 +358,68 @@ mod tests {
             .contains("branch 'feature' because the repo default branch is 'main'"));
     }
 
+    /// A detached HEAD that is not the default tip must be refused, naming the
+    /// branch it would push to and both revisions involved.
     #[test]
-    fn test_validate_default_branch_allows_release_branch_at_remote_default_tip() {
+    fn default_branch_check_blocks_detached_non_default_commits() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        let (seed, checkout) = remote_with_checkout(temp.path());
+        commit_readme(&seed, "tip\n", "Tip commit");
         run_git(&seed, &["push", "-q", "origin", "main"]);
+        run_git(&checkout, &["fetch", "-q", "origin"]);
+        run_git(&checkout, &["checkout", "-q", "--detach", "origin/main~1"]);
+        let old_revision = git_revision(&checkout, "HEAD");
+        let default_revision = git_revision(&checkout, "origin/main");
 
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        run_git(&checkout, &["checkout", "-q", "-b", "release-local"]);
+        let err = check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
+            .expect_err("detached older commit should fail");
+        assert!(err.message.contains("detached HEAD"));
+        assert!(err.message.contains("main"));
+        assert!(err.message.contains(&old_revision));
+        assert!(err.message.contains(&default_revision));
+
+        run_git(&checkout, &["checkout", "-q", "--orphan", "unrelated"]);
+        commit_readme(&checkout, "unrelated\n", "Unrelated commit");
+        run_git(&checkout, &["checkout", "-q", "--detach"]);
+        let unrelated_revision = git_revision(&checkout, "HEAD");
+
+        let err = check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
+            .expect_err("detached unrelated commit should fail");
+        assert!(err.message.contains(&unrelated_revision));
+        assert!(err.message.contains(&default_revision));
+    }
+
+    #[test]
+    fn default_branch_check_resolves_default_through_non_origin_remote() {
+        // A framework-agnostic orchestrator must release repos whose remote is
+        // not named `origin`.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_, checkout) = remote_with_checkout(temp.path());
+        run_git(&checkout, &["remote", "rename", "origin", "upstream"]);
 
         check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
-            .expect("release branch at origin/main tip should pass");
+            .expect("default branch should be allowed through a non-origin remote");
+    }
+
+    #[test]
+    fn default_branch_check_allows_release_branch_at_remote_default_tip() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_, checkout) = remote_with_checkout(temp.path());
+        run_git(&checkout, &["checkout", "-q", "-b", "release-local"]);
+
         assert_eq!(
             check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
-                .expect("push branch"),
+                .expect("release branch at origin/main tip should pass"),
             "main"
         );
     }
 
     #[test]
-    fn test_validate_default_branch_blocks_feature_branch_ahead_of_remote_default() {
+    fn default_branch_check_blocks_feature_branch_ahead_of_remote_default() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        configure_git_user(&checkout);
+        let (_, checkout) = remote_with_checkout(temp.path());
         run_git(&checkout, &["checkout", "-q", "-b", "feature"]);
-        std::fs::write(checkout.join("README.md"), "fixture\nfeature\n").expect("write feature");
-        run_git(&checkout, &["add", "."]);
-        run_git(&checkout, &["commit", "-q", "-m", "Feature commit"]);
+        commit_readme(&checkout, "fixture\nfeature\n", "Feature commit");
 
         let err = check_default_branch(&git_component(&checkout), DefaultBranchRequirement::AtTip)
             .expect_err("feature branch ahead of origin/main should fail");
@@ -587,30 +433,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_default_branch_ancestry_blocks_default_branch_not_based_on_remote_default() {
+    fn default_branch_ancestry_blocks_default_branch_not_based_on_remote_default() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        configure_git_user(&checkout);
+        let (_, checkout) = remote_with_checkout(temp.path());
         run_git(&checkout, &["checkout", "--orphan", "replacement"]);
-        std::fs::write(checkout.join("README.md"), "replacement\n").expect("write fixture");
-        run_git(&checkout, &["add", "."]);
-        run_git(&checkout, &["commit", "-q", "-m", "Replacement root"]);
+        commit_readme(&checkout, "replacement\n", "Replacement root");
         run_git(&checkout, &["branch", "-M", "main"]);
 
         let err = check_default_branch(
@@ -626,30 +453,11 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_head_reachable_from_default_branch_blocks_detached_unreachable_head() {
+    fn default_branch_reachability_blocks_detached_unreachable_head() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        configure_git_user(&checkout);
+        let (_, checkout) = remote_with_checkout(temp.path());
         run_git(&checkout, &["checkout", "--orphan", "replacement"]);
-        std::fs::write(checkout.join("README.md"), "replacement\n").expect("write fixture");
-        run_git(&checkout, &["add", "."]);
-        run_git(&checkout, &["commit", "-q", "-m", "Replacement root"]);
+        commit_readme(&checkout, "replacement\n", "Replacement root");
         run_git(&checkout, &["checkout", "--detach"]);
 
         let err = check_default_branch(
@@ -668,74 +476,27 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_remote_sync() {
+    fn remote_sync_fast_forwards_behind_checkout() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        configure_git_user(&checkout);
-
-        std::fs::write(seed.join("README.md"), "fixture\nsecond\n").expect("write update");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Second commit"]);
+        let (seed, checkout) = remote_with_checkout(temp.path());
+        commit_readme(&seed, "fixture\nsecond\n", "Second commit");
         run_git(&seed, &["push", "-q", "origin", "main"]);
 
         validate_remote_sync(&git_component(&checkout)).expect("checkout should fast-forward");
 
         assert_eq!(
-            std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&checkout)
-                .output()
-                .expect("read HEAD")
-                .stdout,
-            std::process::Command::new("git")
-                .args(["rev-parse", "origin/main"])
-                .current_dir(&checkout)
-                .output()
-                .expect("read origin/main")
-                .stdout
+            git_revision(&checkout, "HEAD"),
+            git_revision(&checkout, "origin/main")
         );
     }
 
-    /// One entry point, one set of resolved facts: all three requirements must
-    /// agree that a detached checkout of the remote default tip is releasable
-    /// through the default branch.
+    /// The release plan detaches by construction when a caller nominates a
+    /// prepared ref, so every requirement must agree that a detached checkout
+    /// of the remote default tip is releasable through the default branch.
     #[test]
-    fn test_check_default_branch_requirements_agree_on_detached_default_tip() {
+    fn default_branch_requirements_agree_on_detached_default_tip() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let remote = temp.path().join("remote.git");
-        let seed = temp.path().join("seed");
-        let checkout = temp.path().join("checkout");
-        let remote_str = remote.to_string_lossy().to_string();
-
-        run_git(
-            temp.path(),
-            &["init", "--bare", "--initial-branch", "main", &remote_str],
-        );
-        run_git(temp.path(), &["clone", &remote_str, "seed"]);
-        configure_git_user(&seed);
-        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
-        run_git(&seed, &["add", "."]);
-        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
-        configure_git_user(&checkout);
+        let (_, checkout) = remote_with_checkout(temp.path());
         run_git(&checkout, &["checkout", "-q", "--detach", "origin/main"]);
 
         let component = git_component(&checkout);

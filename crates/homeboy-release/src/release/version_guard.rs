@@ -123,51 +123,45 @@ mod tests {
     }
 
     #[test]
-    fn rejects_direct_php_and_package_version_bumps() {
-        let php = component("plugin.php", r"Version:\s*([0-9.]+)");
-        let package = component("package.json", r#""version"\s*:\s*"([0-9.]+)""#);
-
-        assert_eq!(
-            detect_manual_release_owned_mutations(
-                &php,
-                &[mutation(
+    fn flags_only_changes_to_the_configured_version() {
+        let package_pattern = r#""version"\s*:\s*"([0-9.]+)""#;
+        let cases = [
+            (
+                component("plugin.php", r"Version:\s*([0-9.]+)"),
+                mutation(
                     "plugin.php",
                     "/*\n * Version: 1.0.0\n */",
-                    "/*\n * Version: 1.0.1\n */"
-                )],
-                None
-            )
-            .len(),
-            1
-        );
-        assert_eq!(
-            detect_manual_release_owned_mutations(
-                &package,
-                &[mutation(
+                    "/*\n * Version: 1.0.1\n */",
+                ),
+                1,
+            ),
+            (
+                component("package.json", package_pattern),
+                mutation(
                     "package.json",
                     r#"{"version":"1.0.0"}"#,
-                    r#"{"version":"1.0.1"}"#
-                )],
-                None
-            )
-            .len(),
-            1
-        );
-    }
+                    r#"{"version":"1.0.1"}"#,
+                ),
+                1,
+            ),
+            // Manifest edits that leave the configured version unchanged are fine.
+            (
+                component("package.json", package_pattern),
+                mutation(
+                    "package.json",
+                    r#"{"version":"1.0.0","description":"before"}"#,
+                    r#"{"version":"1.0.0","description":"after"}"#,
+                ),
+                0,
+            ),
+        ];
 
-    #[test]
-    fn ignores_manifest_edits_when_the_configured_version_is_unchanged() {
-        let component = component("package.json", r#""version"\s*:\s*"([0-9.]+)""#);
-        let violations = detect_manual_release_owned_mutations(
-            &component,
-            &[mutation(
-                "package.json",
-                r#"{"version":"1.0.0","description":"before"}"#,
-                r#"{"version":"1.0.0","description":"after"}"#,
-            )],
-            None,
-        );
-        assert!(violations.is_empty());
+        for (component, mutation, expected) in cases {
+            assert_eq!(
+                detect_manual_release_owned_mutations(&component, &[mutation], None).len(),
+                expected
+            );
+        }
     }
 
     #[test]
