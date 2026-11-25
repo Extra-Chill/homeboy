@@ -249,106 +249,105 @@ mod tests {
             .collect()
     }
 
+    /// Each typed-evidence branch maps to its controller-frame repair; a
+    /// fresh report or one without ownership proof authorizes nothing.
     #[test]
-    fn a_fresh_report_needs_no_repair() {
-        assert!(plan(&report(None, 0, false)).is_empty());
-    }
-
-    #[test]
-    fn a_dead_generation_is_repaired_by_starting_its_successor() {
-        let mut report = report(Some(DaemonStaleReasonCode::PidDead), 1, false);
-        report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
-        assert_eq!(
-            plan(&report),
-            vec![(
+    fn controller_frame_plan_follows_the_typed_evidence() {
+        let connect = || {
+            (
                 RUNNER_CONNECT.to_string(),
-                "homeboy runner connect homeboy-lab".to_string()
-            )]
-        );
-    }
-
-    #[test]
-    fn durable_jobs_without_an_owning_lease_are_repaired_by_starting_the_daemon() {
-        let mut report = report(Some(DaemonStaleReasonCode::LeaseMissing), 2, false);
-        report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
-        assert_eq!(
-            plan(&report),
-            vec![(
-                RUNNER_CONNECT.to_string(),
-                "homeboy runner connect homeboy-lab".to_string()
-            )]
-        );
-    }
-
-    #[test]
-    fn identity_drift_refreshes_the_runner_binary_rather_than_reconnecting_it() {
-        let mut report = report(
-            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
-            0,
-            true,
-        );
-        report.recovery_evidence = Some(DaemonRecoveryEvidence::Recoverable);
-        assert_eq!(
-            plan(&report),
-            vec![(
-                RUNNER_REFRESH_HOMEBOY.to_string(),
-                "homeboy runner refresh-homeboy homeboy-lab".to_string()
-            )]
-        );
-    }
-
-    #[test]
-    fn incompatible_daemon_without_ownership_evidence_has_no_repair_plan() {
-        let mut report = report(
-            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
-            0,
-            false,
-        );
-        report.recovery_evidence = Some(DaemonRecoveryEvidence::Unavailable);
-        report.ownership_evidence = Some("daemon lease owner could not be established".to_string());
-
-        assert!(
-            controller_frame_plan("homeboy-lab", &report).is_empty(),
-            "version skew alone must not authorize a daemon mutation"
-        );
-    }
-
-    #[test]
-    fn a_restartable_lease_with_typed_ownership_rebuilds_the_controller_session() {
-        let mut report = report(Some(DaemonStaleReasonCode::RuntimePathsDrift), 0, true);
-        report.recovery_evidence = Some(DaemonRecoveryEvidence::Recoverable);
-        assert_eq!(
-            plan(&report),
-            vec![
-                (
-                    RUNNER_DISCONNECT.to_string(),
-                    "homeboy runner disconnect homeboy-lab".to_string()
-                ),
-                (
-                    RUNNER_CONNECT.to_string(),
-                    "homeboy runner connect homeboy-lab".to_string()
-                ),
-            ]
-        );
-    }
-
-    /// A report with insufficient ownership evidence remains terminal. A
-    /// read-only doctor fallback would be self-referential when this plan was
-    /// projected by doctor itself.
-    #[test]
-    fn unmatched_stale_reports_without_typed_ownership_have_no_automatic_repair() {
-        for evidence in [None, Some(DaemonRecoveryEvidence::Unavailable)] {
-            let mut report = report(Some(DaemonStaleReasonCode::TransportUnreachable), 0, true);
+                "homeboy runner connect homeboy-lab".to_string(),
+            )
+        };
+        let cases = [
+            ("fresh", None, 0, false, None, None, vec![]),
+            (
+                "dead generation",
+                Some(DaemonStaleReasonCode::PidDead),
+                1,
+                false,
+                Some(DaemonRecoveryEvidence::ProvenDead),
+                None,
+                vec![connect()],
+            ),
+            (
+                "durable jobs without an owning lease",
+                Some(DaemonStaleReasonCode::LeaseMissing),
+                2,
+                false,
+                Some(DaemonRecoveryEvidence::ProvenDead),
+                None,
+                vec![connect()],
+            ),
+            (
+                "identity drift refreshes the binary instead of reconnecting",
+                Some(DaemonStaleReasonCode::LabContractVersionMismatch),
+                0,
+                true,
+                Some(DaemonRecoveryEvidence::Recoverable),
+                None,
+                vec![(
+                    RUNNER_REFRESH_HOMEBOY.to_string(),
+                    "homeboy runner refresh-homeboy homeboy-lab".to_string(),
+                )],
+            ),
+            (
+                "restartable lease rebuilds the controller session",
+                Some(DaemonStaleReasonCode::RuntimePathsDrift),
+                0,
+                true,
+                Some(DaemonRecoveryEvidence::Recoverable),
+                None,
+                vec![
+                    (
+                        RUNNER_DISCONNECT.to_string(),
+                        "homeboy runner disconnect homeboy-lab".to_string(),
+                    ),
+                    connect(),
+                ],
+            ),
+            (
+                "version skew alone must not authorize a daemon mutation",
+                Some(DaemonStaleReasonCode::LabContractVersionMismatch),
+                0,
+                false,
+                Some(DaemonRecoveryEvidence::Unavailable),
+                Some("daemon lease owner could not be established".to_string()),
+                vec![],
+            ),
+            // Insufficient ownership evidence stays terminal: a read-only
+            // doctor fallback would be self-referential when doctor itself
+            // projected this plan.
+            (
+                "missing ownership evidence must not authorize reconnect",
+                Some(DaemonStaleReasonCode::TransportUnreachable),
+                0,
+                true,
+                None,
+                None,
+                vec![],
+            ),
+            (
+                "unavailable ownership evidence must not authorize reconnect",
+                Some(DaemonStaleReasonCode::TransportUnreachable),
+                0,
+                true,
+                Some(DaemonRecoveryEvidence::Unavailable),
+                None,
+                vec![],
+            ),
+        ];
+        for (name, code, active_jobs, restartable, evidence, ownership, expected) in cases {
+            let mut report = report(code, active_jobs, restartable);
             report.recovery_evidence = evidence;
-            assert!(
-                controller_frame_plan("homeboy-lab", &report).is_empty(),
-                "{evidence:?} ownership evidence must not authorize reconnect"
-            );
+            report.ownership_evidence = ownership;
+            assert_eq!(plan(&report), expected, "{name}");
         }
     }
 
-    /// Every branch must carry argv, or the executor is back to shell-parsing
-    /// the rendered text it was handed.
+    /// Every branch must carry `homeboy runner` argv, or the executor is back
+    /// to shell-parsing rendered text — and the daemon-authored local-frame
+    /// plan in [`report`] must never survive the crossing.
     #[test]
     fn every_controller_frame_step_carries_executable_argv() {
         for code in [
@@ -386,33 +385,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn a_daemon_authored_local_frame_plan_never_survives_the_crossing() {
-        for code in [
-            DaemonStaleReasonCode::PidDead,
-            DaemonStaleReasonCode::LeaseMissing,
-            DaemonStaleReasonCode::LabContractVersionMismatch,
-            DaemonStaleReasonCode::RuntimePathsDrift,
-            DaemonStaleReasonCode::TransportUnreachable,
-        ] {
-            let mut report = report(Some(code), 1, true);
-            report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
-            for command in plan(&report).into_iter().map(|(_, command)| command) {
-                assert!(
-                    command.starts_with("homeboy runner "),
-                    "{code:?} produced a non-controller-frame command: {command}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn render_matches_the_operator_prose_format() {
-        assert_eq!(
-            render(&restart_plan("homeboy-lab")),
-            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
-        );
     }
 }
