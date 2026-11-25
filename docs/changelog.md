@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.8] - 2026-11-25
+
+### Changed
+- prune and fold low-value homeboy-cli tests (wave 2, slice 1/16)
+
 ## [0.497.7] - 2026-11-25
 
 ### Changed
