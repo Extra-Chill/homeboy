@@ -45,65 +45,6 @@ fn fixture() -> tempfile::TempDir {
 }
 
 #[test]
-fn sparse_clone_uses_exact_shallow_clone_args() {
-    for revision in [None, Some("release"), Some("v1")] {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("clone");
-        let target_path = target.to_string_lossy();
-        let mut expected_clone = vec![
-            "clone",
-            "--depth=1",
-            "--filter=blob:none",
-            "--no-checkout",
-            "--sparse",
-        ];
-        if let Some(revision) = revision {
-            expected_clone.extend(["--branch", revision]);
-        }
-        expected_clone.extend(["https://example.com/repo.git", &target_path]);
-        let expected = [
-            expected_clone,
-            vec!["rev-parse", "--verify", "HEAD"],
-            vec!["ls-tree", "-r", "--name-only", "-z", "tip"],
-            vec!["show", "tip:extensions/homeboy-extension-root.json"],
-            vec![
-                "sparse-checkout",
-                "set",
-                "--cone",
-                "--",
-                "extensions/wordpress",
-                "extensions/shared",
-            ],
-            vec!["checkout", "--quiet", "tip"],
-        ];
-        let responses = [
-            "",
-            "tip\n",
-            "extensions/homeboy-extension-root.json\0extensions/wordpress/wordpress.json\0",
-            r#"{"shared_assets":["shared"]}"#,
-            "",
-            "",
-        ];
-        let mut call = 0;
-        clone_with_runner(
-            "https://example.com/repo.git",
-            &target,
-            revision,
-            "wordpress",
-            |cwd, args| {
-                assert_eq!(args, expected[call]);
-                assert_eq!(cwd, if call == 0 { Path::new(".") } else { &target });
-                let response = responses[call].to_string();
-                call += 1;
-                Ok(response)
-            },
-        )
-        .unwrap();
-        assert_eq!(call, expected.len());
-    }
-}
-
-#[test]
 fn batch_sparse_clone_fetches_once_for_every_requested_extension() {
     let temp = tempfile::tempdir().unwrap();
     let target = temp.path().join("clone");

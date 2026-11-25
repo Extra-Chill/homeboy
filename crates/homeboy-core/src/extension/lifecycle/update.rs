@@ -741,44 +741,11 @@ mod transaction_tests {
 
     #[test]
     fn rollback_restores_the_prior_clean_revision() {
-        let repo = tempdir().expect("repo");
-        if !git_succeeds(repo.path(), &["init", "--quiet"]) {
-            return;
-        }
-        std::fs::write(repo.path().join("extension.json"), "before").expect("before");
-        if !git_succeeds(repo.path(), &["add", "."])
-            || !git_succeeds(
-                repo.path(),
-                &[
-                    "-c",
-                    "user.email=test@example.com",
-                    "-c",
-                    "user.name=test",
-                    "commit",
-                    "-m",
-                    "before",
-                    "--quiet",
-                ],
-            )
-        {
-            return;
-        }
+        let repo = committed_repo();
         let before = git::short_head_revision(repo.path()).expect("before revision");
         std::fs::write(repo.path().join("extension.json"), "after").expect("after");
         assert!(git_succeeds(repo.path(), &["add", "."]));
-        assert!(git_succeeds(
-            repo.path(),
-            &[
-                "-c",
-                "user.email=test@example.com",
-                "-c",
-                "user.name=test",
-                "commit",
-                "-m",
-                "after",
-                "--quiet",
-            ],
-        ));
+        assert!(commit(repo.path(), "after"));
 
         restore_linked_checkout(repo.path(), None, Some(&before));
 
@@ -870,137 +837,57 @@ mod transaction_tests {
         );
     }
 
+    /// A forced update that began dirty must never reset the worktree on
+    /// failure, for in-place and linked checkouts alike; the error tells the
+    /// user to reconcile it by hand instead.
     #[test]
     fn forced_dirty_failure_preserves_user_changes_without_rollback() {
-        let repo = committed_repo();
-        let prior = git::short_head_revision(repo.path()).expect("prior revision");
-        let metadata = read_in_place_metadata(repo.path());
-        std::fs::write(repo.path().join("user-notes.txt"), "keep me").expect("dirty user file");
-        std::fs::write(repo.path().join("extension.json"), "failed refreshed state")
-            .expect("failed refresh mutation");
+        for linked in [false, true] {
+            let repo = committed_repo();
+            let prior = git::short_head_revision(repo.path()).expect("prior revision");
+            let metadata = read_in_place_metadata(repo.path());
+            std::fs::write(repo.path().join("user-notes.txt"), "keep me").expect("dirty user file");
+            std::fs::write(repo.path().join("extension.json"), "failed refreshed state")
+                .expect("failed refresh mutation");
 
-        let error = compensate_or_preserve_dirty(
-            Error::internal_unexpected("setup failed"),
-            false,
-            repo.path(),
-            None,
-            Some(&prior),
-            &metadata,
-        );
+            let failure = Error::internal_unexpected("update failed");
+            let error = if linked {
+                compensate_or_preserve_dirty_linked(failure, false, repo.path(), None, Some(&prior))
+            } else {
+                compensate_or_preserve_dirty(
+                    failure,
+                    false,
+                    repo.path(),
+                    None,
+                    Some(&prior),
+                    &metadata,
+                )
+            };
 
-        assert!(repo.path().join("user-notes.txt").exists());
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join("extension.json")).expect("mutated content"),
-            "failed refreshed state"
-        );
-        assert!(error
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("did not reset")));
-        assert!(error
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("git -C")));
-    }
-
-    #[test]
-    fn forced_dirty_pull_failure_preserves_user_changes_without_rollback() {
-        let repo = committed_repo();
-        let prior = git::short_head_revision(repo.path()).expect("prior revision");
-        let metadata = read_in_place_metadata(repo.path());
-        std::fs::write(repo.path().join("user-notes.txt"), "keep me").expect("dirty user file");
-
-        let error = compensate_or_preserve_dirty(
-            Error::internal_unexpected("pull failed"),
-            false,
-            repo.path(),
-            None,
-            Some(&prior),
-            &metadata,
-        );
-
-        assert!(repo.path().join("user-notes.txt").exists());
-        assert!(error
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("did not reset")));
-    }
-
-    #[test]
-    fn forced_dirty_linked_failure_preserves_user_changes_without_rollback() {
-        let repo = committed_repo();
-        let prior = git::short_head_revision(repo.path()).expect("prior revision");
-        std::fs::write(repo.path().join("user-notes.txt"), "keep me").expect("dirty user file");
-        std::fs::write(repo.path().join("extension.json"), "failed refreshed state")
-            .expect("failed refresh mutation");
-
-        let error = compensate_or_preserve_dirty_linked(
-            Error::internal_unexpected("compatibility failed"),
-            false,
-            repo.path(),
-            None,
-            Some(&prior),
-        );
-
-        assert!(repo.path().join("user-notes.txt").exists());
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join("extension.json")).expect("mutated content"),
-            "failed refreshed state"
-        );
-        assert!(error
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("uncompensated")));
-    }
-
-    #[test]
-    fn single_linked_forced_dirty_pull_failure_preserves_user_changes() {
-        let repo = committed_repo();
-        let prior = git::short_head_revision(repo.path()).expect("prior revision");
-        std::fs::write(repo.path().join("user-notes.txt"), "keep me").expect("dirty user file");
-
-        let error = compensate_or_preserve_dirty_linked(
-            Error::internal_unexpected("remote pull failed"),
-            false,
-            repo.path(),
-            None,
-            Some(&prior),
-        );
-
-        assert!(repo.path().join("user-notes.txt").exists());
-        assert!(error
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("did not reset")));
-    }
-
-    #[test]
-    fn single_linked_forced_dirty_post_refresh_failure_preserves_user_changes() {
-        let repo = committed_repo();
-        let prior = git::short_head_revision(repo.path()).expect("prior revision");
-        std::fs::write(repo.path().join("user-notes.txt"), "keep me").expect("dirty user file");
-        std::fs::write(
-            repo.path().join("extension.json"),
-            "incompatible refreshed state",
-        )
-        .expect("post-refresh mutation");
-
-        let error = preserve_dirty_error(
-            Error::internal_unexpected("compatibility failed"),
-            false,
-            repo.path(),
-        );
-
-        assert!(repo.path().join("user-notes.txt").exists());
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join("extension.json")).expect("mutated content"),
-            "incompatible refreshed state"
-        );
-        assert!(error
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("reconcile")));
-        assert!(git::short_head_revision(repo.path()).is_some_and(|revision| revision == prior));
+            assert!(
+                repo.path().join("user-notes.txt").exists(),
+                "linked={linked}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.path().join("extension.json"))
+                    .expect("mutated content"),
+                "failed refreshed state",
+                "linked={linked}"
+            );
+            assert_eq!(
+                git::short_head_revision(repo.path()).as_deref(),
+                Some(prior.as_str())
+            );
+            for expected in ["did not reset", "git -C"] {
+                assert!(
+                    error
+                        .hints
+                        .iter()
+                        .any(|hint| hint.message.contains(expected)),
+                    "linked={linked}: missing {expected}"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]

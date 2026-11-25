@@ -353,27 +353,20 @@ mod cleanliness_tests {
     use super::*;
 
     #[test]
-    fn modified_and_untracked_status_lines_yield_paths() {
-        assert_eq!(
-            dirty_path_from_status_line(" M rust/lint.sh").as_deref(),
-            Some("rust/lint.sh")
-        );
-        assert_eq!(
-            dirty_path_from_status_line("?? rust/new-step.sh").as_deref(),
-            Some("rust/new-step.sh")
-        );
-        assert_eq!(
-            dirty_path_from_status_line("M  rust/lint.sh").as_deref(),
-            Some("rust/lint.sh")
-        );
-    }
-
-    #[test]
-    fn rename_status_lines_report_the_current_path() {
-        assert_eq!(
-            dirty_path_from_status_line("R  rust/old.sh -> rust/new.sh").as_deref(),
-            Some("rust/new.sh")
-        );
+    fn status_lines_yield_the_current_path() {
+        for (line, expected) in [
+            (" M rust/lint.sh", "rust/lint.sh"),
+            ("?? rust/new-step.sh", "rust/new-step.sh"),
+            ("M  rust/lint.sh", "rust/lint.sh"),
+            // Renames report `old -> new`; the new path is the one on disk.
+            ("R  rust/old.sh -> rust/new.sh", "rust/new.sh"),
+        ] {
+            assert_eq!(
+                dirty_path_from_status_line(line).as_deref(),
+                Some(expected),
+                "{line}"
+            );
+        }
     }
 
     #[test]
@@ -413,16 +406,6 @@ mod cleanliness_tests {
         }
     }
 
-    #[test]
-    fn a_missing_extension_directory_is_unknown_not_clean() {
-        let missing = Path::new("/nonexistent/homeboy/extension/for/cleanliness");
-
-        assert_eq!(
-            read_source_cleanliness_at(missing),
-            ExtensionSourceCleanliness::Unknown
-        );
-    }
-
     use crate::test_support::run_git_command as git;
 
     fn commit_all(path: &Path) {
@@ -434,46 +417,28 @@ mod cleanliness_tests {
     }
 
     #[test]
-    fn a_non_git_extension_directory_is_unknown_not_clean() {
+    fn missing_or_non_git_extension_directories_are_unknown_not_clean() {
+        let missing = Path::new("/nonexistent/homeboy/extension/for/cleanliness");
+        assert_eq!(
+            read_source_cleanliness_at(missing),
+            ExtensionSourceCleanliness::Unknown
+        );
+
         let dir = tempfile::tempdir().expect("extension dir");
         std::fs::write(dir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
-
         assert_eq!(
             read_source_cleanliness_at(dir.path()),
             ExtensionSourceCleanliness::Unknown
         );
     }
 
+    /// A committed checkout is clean, stays clean with Homeboy's generated
+    /// install metadata written beside it, and turns dirty on a real edit.
     #[test]
-    fn a_committed_extension_checkout_is_clean() {
-        let dir = tempfile::tempdir().expect("extension dir");
-        std::fs::write(dir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
-        commit_all(dir.path());
-
-        assert_eq!(
-            read_source_cleanliness_at(dir.path()),
-            ExtensionSourceCleanliness::Clean
-        );
-    }
-
-    #[test]
-    fn an_edited_but_uncommitted_extension_checkout_is_dirty() {
+    fn committed_checkout_is_clean_until_extension_source_is_edited() {
         let dir = tempfile::tempdir().expect("extension dir");
         std::fs::write(dir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
         std::fs::write(dir.path().join("lint.sh"), "echo committed\n").expect("step");
-        commit_all(dir.path());
-        std::fs::write(dir.path().join("lint.sh"), "echo edited\n").expect("edit");
-
-        assert_eq!(
-            dirty_paths(read_source_cleanliness_at(dir.path())),
-            Some(vec!["lint.sh".to_string()])
-        );
-    }
-
-    #[test]
-    fn generated_install_metadata_does_not_make_a_checkout_dirty() {
-        let dir = tempfile::tempdir().expect("extension dir");
-        std::fs::write(dir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
         commit_all(dir.path());
         std::fs::write(dir.path().join(".source-url"), "https://example.test/rust")
             .expect("source url");
@@ -483,6 +448,12 @@ mod cleanliness_tests {
         assert_eq!(
             read_source_cleanliness_at(dir.path()),
             ExtensionSourceCleanliness::Clean
+        );
+
+        std::fs::write(dir.path().join("lint.sh"), "echo edited\n").expect("edit");
+        assert_eq!(
+            dirty_paths(read_source_cleanliness_at(dir.path())),
+            Some(vec!["lint.sh".to_string()])
         );
     }
 

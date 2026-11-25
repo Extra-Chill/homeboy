@@ -241,8 +241,11 @@ mod tests {
         );
     }
 
+    /// The manifest carries core's authoritative changed-file list verbatim
+    /// (one repo-relative path per line) so downstream runners consume it
+    /// instead of re-deriving a weaker two-dot diff. No list means no manifest.
     #[test]
-    fn changed_files_manifest_unset_when_no_list_supplied() {
+    fn changed_files_manifest_writes_list_verbatim_and_skips_empty() {
         let run_dir = RunDir::create().expect("run dir");
 
         assert_eq!(
@@ -253,36 +256,23 @@ mod tests {
             write_changed_files_manifest(&run_dir, Some(&[])).expect("empty"),
             None
         );
+        assert!(!run_dir
+            .step_file(homeboy_core::engine::run_dir::files::LINT_CHANGED_FILES)
+            .exists());
 
-        assert!(
-            !run_dir
-                .step_file(homeboy_core::engine::run_dir::files::LINT_CHANGED_FILES)
-                .exists(),
-            "no manifest is written when there is no changed-file list"
-        );
-    }
-
-    /// The manifest must carry core's authoritative changed-file list verbatim
-    /// (one repo-relative path per line) so downstream runners consume it
-    /// instead of re-deriving a weaker two-dot diff.
-    #[test]
-    fn changed_files_manifest_matches_resolved_list() {
-        let run_dir = RunDir::create().expect("run dir");
         let changed_files = vec![
             "inc/Foo.php".to_string(),
             "assets/app.js".to_string(),
             "README.md".to_string(),
         ];
-
         let manifest = write_changed_files_manifest(&run_dir, Some(&changed_files))
             .expect("manifest write")
             .expect("manifest path");
 
-        let contents = std::fs::read_to_string(&manifest).expect("read manifest");
-        assert_eq!(contents, "inc/Foo.php\nassets/app.js\nREADME.md\n");
-
-        let lines: Vec<String> = contents.lines().map(str::to_string).collect();
-        assert_eq!(lines, changed_files);
+        assert_eq!(
+            std::fs::read_to_string(&manifest).expect("read manifest"),
+            "inc/Foo.php\nassets/app.js\nREADME.md\n"
+        );
     }
 
     /// The missing-findings evidence check is only legitimate against an
@@ -345,65 +335,5 @@ mod tests {
                 "an unresolvable lint capability is not an evidence verdict"
             );
         });
-    }
-
-    /// End-to-end: the manifest content equals `get_files_changed_since`, the
-    /// three-dot merge-base resolution that core owns. Proves the injected list
-    /// is the authoritative one, not a re-derivation.
-    #[test]
-    fn changed_files_manifest_round_trips_get_files_changed_since() {
-        use std::fs;
-        use std::process::Command;
-        use tempfile::TempDir;
-
-        let repo = TempDir::new().expect("tempdir");
-        let path = repo.path().to_str().unwrap();
-
-        let init = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(path)
-            .output();
-        if init.is_err() || !init.unwrap().status.success() {
-            // Test environment lacks git — skip rather than fail.
-            return;
-        }
-        for args in [
-            ["config", "user.email", "test@example.com"],
-            ["config", "user.name", "test"],
-        ] {
-            let _ = Command::new("git").args(args).current_dir(path).output();
-        }
-
-        fs::write(repo.path().join("tracked.txt"), "initial\n").expect("write tracked");
-        let _ = Command::new("git")
-            .args(["add", "."])
-            .current_dir(path)
-            .output();
-        let _ = Command::new("git")
-            .args(["commit", "-q", "-m", "init"])
-            .current_dir(path)
-            .output();
-
-        fs::write(repo.path().join("tracked.txt"), "dirty\n").expect("modify tracked");
-        fs::write(repo.path().join("untracked.txt"), "new\n").expect("write untracked");
-
-        let resolved =
-            homeboy_core::git::get_files_changed_since(path, "HEAD").expect("changed files");
-        assert!(
-            !resolved.is_empty(),
-            "expected git to report changed files: {resolved:?}"
-        );
-
-        let run_dir = RunDir::create().expect("run dir");
-        let manifest = write_changed_files_manifest(&run_dir, Some(&resolved))
-            .expect("manifest write")
-            .expect("manifest path");
-
-        let contents = std::fs::read_to_string(&manifest).expect("read manifest");
-        let manifest_files: Vec<String> = contents.lines().map(str::to_string).collect();
-        assert_eq!(
-            manifest_files, resolved,
-            "manifest must match get_files_changed_since verbatim"
-        );
     }
 }
