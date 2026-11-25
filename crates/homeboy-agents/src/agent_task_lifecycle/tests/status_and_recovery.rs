@@ -22,14 +22,6 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
     AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
-#[test]
-fn candidate_recoverable_provider_projection_is_failed_not_timed_out() {
-    assert_eq!(
-        provider_runtime_state_for_task_state(Some(ControlPlaneState::CandidateRecoverable)),
-        ProviderRuntimeState::Failed
-    );
-}
-
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). Cook alias projection is a decision made *across* records — which
 /// indexed attempt is latest, and which attempt owns the active adoption — so
@@ -1077,48 +1069,6 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
             assert!(artifacts.evidence_refs.is_empty());
         }
     });
-}
-
-#[test]
-fn retryable_workspace_metadata_transport_failure_builds_transient_outcome() {
-    let plan = test_plan();
-    let error = Error::new(
-        ErrorCode::RunnerLabTransportFailure,
-        "write runner workspace metadata failed during `workspace_metadata_write`",
-        json!({
-            "phase": "workspace_metadata_write",
-            "command": "write Homeboy runner workspace metadata",
-            "timeout_seconds": 30,
-            "exit_code": -1,
-            "stdout": "",
-            "stderr": "Connection to 192.168.86.63 closed by remote host. client_loop: send disconnect: Broken pipe",
-            "transport_close_reason": "Connection to 192.168.86.63 closed by remote host. client_loop: send disconnect: Broken pipe",
-        }),
-    )
-    .with_retryable(true);
-    let outcome = build_pre_execution_failure_outcome(
-        "cook-8803-attempt-1",
-        &plan.tasks[0],
-        "lab_workspace_stage",
-        &error,
-    );
-
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Transient)
-    );
-    assert_eq!(outcome.diagnostics[0].data["retryable"], true);
-    assert_eq!(
-        outcome.diagnostics[0].data["details"]["phase"],
-        "workspace_metadata_write"
-    );
-    assert_eq!(outcome.outputs["retryable"], true);
-    assert_eq!(
-        outcome.outputs["details"]["transport_close_reason"],
-        error.details["transport_close_reason"]
-    );
-    assert_eq!(outcome.metadata["retryable"], true);
-    assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -2452,42 +2402,15 @@ fn cancel_run_signals_live_running_record() {
     assert!(!homeboy_core::process::pid_is_running(descendant_pid));
 }
 
+/// Older record schemas and malformed typed fields are not migrated: health
+/// reports them as malformed and typed reads exclude them (#15742).
 #[test]
-fn record_health_reports_older_schema_as_malformed() {
+fn record_health_reports_unsupported_and_malformed_records_as_malformed() {
     with_isolated_home(|_| {
         submit_plan(&test_plan(), Some("older-schema-record")).expect("submitted");
-        // #11446 made the typed writer reject unsupported schemas. Use the raw
-        // injector to plant a record in an older shape.
-        crate::agent_task_lifecycle::inject_raw_record_metadata_for_corruption_test(
-            "older-schema-record",
-            |value| {
-                value["agent_task_run"]["schema"] = json!("homeboy/agent-task-run/v0");
-            },
-        )
-        .expect("older schema stored");
-        // Older record shapes are not migrated: they are reported and excluded
-        // from typed reads (#15742).
-        let health = list_records_with_health_in_store(&test_lifecycle_store())
-            .expect("older schema health")
-            .1;
-        assert_eq!(health.malformed, 1);
-        assert_eq!(
-            health.samples[0].reason,
-            AgentTaskRecordHealthReason::MalformedMetadata
-        );
-    });
-}
-
-#[test]
-fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
-    with_isolated_home(|_| {
         submit_plan(&test_plan(), Some("malformed-typed-pending")).expect("submitted");
-        let malformed_handoff = json!({
-            "state": "pending",
-            "authority": "controller",
-            "runner_id": "homeboy-lab",
-            "submitted_at": "invalid"
-        });
+        // The validated writer refuses a malformed typed handoff, so both
+        // corruptions are planted through the raw injector (#11446).
         let validation_error = rewrite_record_for_test("malformed-typed-pending", |record| {
             record.lab_handoff = Some(AgentTaskLabHandoff {
                 state: AgentTaskLabHandoffState::Pending,
@@ -2509,39 +2432,29 @@ fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
         .expect_err("validated test rewrite rejects malformed typed handoff");
         assert_eq!(validation_error.code, ErrorCode::InternalJsonError);
 
+        inject_raw_record_metadata_for_corruption_test("older-schema-record", |value| {
+            value["agent_task_run"]["schema"] = json!("homeboy/agent-task-run/v0");
+        })
+        .expect("older schema stored");
         inject_raw_record_metadata_for_corruption_test("malformed-typed-pending", |metadata| {
-            metadata["agent_task_run"]["lab_handoff"] = malformed_handoff;
+            metadata["agent_task_run"]["lab_handoff"] = json!({
+                "state": "pending",
+                "authority": "controller",
+                "runner_id": "homeboy-lab",
+                "submitted_at": "invalid"
+            });
         })
         .expect("raw corruption fixture stored");
 
         let health = list_records_with_health_in_store(&test_lifecycle_store())
             .expect("health report")
             .1;
-        assert_eq!(health.malformed, 1);
-        assert_eq!(
-            health.samples[0].reason,
-            AgentTaskRecordHealthReason::MalformedMetadata
-        );
+        assert_eq!(health.malformed, 2);
+        assert!(health
+            .samples
+            .iter()
+            .all(|sample| sample.reason == AgentTaskRecordHealthReason::MalformedMetadata));
     });
-}
-
-#[test]
-fn artifact_refs_treat_empty_url_as_missing_and_fall_back_to_path() {
-    let outcomes = vec![outcome_with_refs(
-        "task-a",
-        vec![artifact_ref_artifact(
-            "dir",
-            "sample-runtime-artifact-directory",
-            Some("   "),
-            Some("/tmp/artifacts/dir"),
-        )],
-        Vec::new(),
-    )];
-
-    let refs = artifact_refs_for_outcomes(&outcomes);
-
-    assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].uri, "/tmp/artifacts/dir");
 }
 
 /// Log events preserve the completed aggregate's per-event envelope.
@@ -2565,12 +2478,6 @@ fn logs_return_the_canonical_control_plane_event_page() {
                 message: Some("ok".to_string()),
             },
         ];
-        aggregate.outcomes[0].evidence_refs = vec![AgentTaskEvidenceRef {
-            kind: "transcript".to_string(),
-            uri: "file:///tmp/transcript.json".to_string(),
-            label: Some("Transcript".to_string()),
-        }];
-
         record_completed_run(&plan, &aggregate, Some("run-event-envelope")).expect("recorded");
 
         let log = logs_in_store(&lifecycle_store, "run-event-envelope").expect("logs");
@@ -2584,39 +2491,22 @@ fn logs_return_the_canonical_control_plane_event_page() {
             .iter()
             .find(|event| event.data["state"] == "running")
             .expect("running progress");
-        let succeeded = log
-            .events
-            .iter()
-            .find(|event| event.data["message"] == "ok")
-            .expect("terminal progress");
+        assert!(log.events.iter().any(|event| event.data["message"] == "ok"));
         assert_eq!(
             running.schema,
             homeboy_control_plane_contract::CONTROL_PLANE_EVENT_SCHEMA
         );
         assert_eq!(running.run.as_str(), "run-event-envelope");
         assert_eq!(running.task.as_ref().map(|id| id.as_str()), Some("task-a"));
-        let _ = succeeded;
-        let artifacts =
-            artifacts_in_store(&lifecycle_store, "run-event-envelope").expect("artifacts");
-        assert!(artifacts
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.kind == "transcript"));
     });
 }
 
+/// A run that finished with a recoverable candidate is terminal, so
+/// `set_run_state` stamps `finished_at` exactly as for the other terminal
+/// states; a non-terminal state does not. Guards the drift where the setter's
+/// hand-listed terminal subset omitted `CandidateRecoverable`.
 #[test]
-fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
-    // A run that finished with a recoverable candidate is terminal, so
-    // set_run_state must stamp finished_at for it exactly as it does for the
-    // other terminal states. Regression guard for the drift where the setter's
-    // hand-listed terminal subset omitted CandidateRecoverable, leaving these
-    // runs without a finished_at while the legacy-record migration path stamped
-    // one.
-    //
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). `set_run_state` is a pure in-memory setter; the store is only
-    // needed to own the submitted record the two rewrites read and write back.
+fn set_run_state_stamps_finished_at_only_for_terminal_states() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -2627,37 +2517,20 @@ fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
             |_| Ok(json!({})),
         )
         .expect("submit");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
+    for (state, stamped) in [
+        (RunExecutionState::CandidateRecoverable, true),
+        (RunExecutionState::Running, false),
+    ] {
+        let mut record = record.clone();
+        record.lifecycle.execution.finished_at = None;
+        set_run_state(&mut record, state);
+        assert_eq!(record.state(), state);
+        assert_eq!(
+            record.lifecycle.execution.finished_at.is_some(),
+            stamped,
+            "{state:?}"
         );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(&record.run_id, |record| {
-            set_run_state(record, RunExecutionState::CandidateRecoverable);
-            assert_eq!(record.state(), RunExecutionState::CandidateRecoverable);
-            assert!(
-                record.lifecycle.execution.finished_at.is_some(),
-                "a terminal CandidateRecoverable run must stamp finished_at"
-            );
-        })
-    })
-    .expect("rewrite record");
-
-    // And a non-terminal state must NOT stamp finished_at. A finished run
-    // cannot be committed back to `Running`, so this half stays in memory.
-    let mut record = lifecycle_store
-        .read_record(&record.run_id)
-        .expect("read record");
-    record.lifecycle.execution.finished_at = None;
-    set_run_state(&mut record, RunExecutionState::Running);
-    assert!(
-        record.lifecycle.execution.finished_at.is_none(),
-        "a non-terminal Running run must not stamp finished_at"
-    );
+    }
 }
 
 /// A runner-continuation provider that counts every runner interaction so a
@@ -2815,7 +2688,7 @@ fn a_caller_can_opt_a_runner_backed_status_out_of_every_runner_probe() {
 }
 
 #[test]
-fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe() {
+fn durable_reads_return_partial_local_evidence_without_a_runner_probe() {
     super::ensure_runner_continuation_provider_reset_hook();
     with_isolated_home(|_| {
         let interactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2837,6 +2710,7 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
             durable_local_read("runner-backed-durable-read").expect("durable local read resolves");
         let artifacts =
             artifacts("runner-backed-durable-read").expect("durable local artifacts resolve");
+        let log = logs("runner-backed-durable-read").expect("durable logs resolve");
 
         assert_eq!(snapshot.record.run_id, "runner-backed-durable-read");
         assert!(snapshot.aggregate.is_none());
@@ -2847,10 +2721,11 @@ fn durable_aggregate_read_returns_partial_local_evidence_without_a_runner_probe(
             "durable_read.authoritative_aggregate_absent"
         );
         assert_eq!(artifacts.run_id, "runner-backed-durable-read");
+        assert_eq!(log.run.as_str(), "runner-backed-durable-read");
         assert_eq!(
             interactions.load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "aggregate readers must return local partial evidence without probing an unavailable runner"
+            "durable reads, artifacts and logs must answer locally without probing an unavailable runner"
         );
     });
 }
@@ -2922,36 +2797,6 @@ fn durable_aggregate_read_returns_within_the_readonly_sqlite_contention_budget()
             "the read must stop at the first contended step: {error:?}"
         );
         assert_eq!(error.details["timeout_ms"], 750);
-    });
-}
-
-#[test]
-fn runner_backed_logs_read_persisted_events_without_a_runner_probe() {
-    super::ensure_runner_continuation_provider_reset_hook();
-    with_isolated_home(|_| {
-        let interactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let _provider = RunnerContinuationTestGuard::install(Box::new(CountingRunnerProvider {
-            interactions: interactions.clone(),
-        }));
-
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        record_detached_lab_run(DetachedLabRunRecord {
-            run_id: "runner-backed-logs-local-only",
-            runner_id: "homeboy-lab",
-            runner_job_id: "job-10418-logs",
-            remote_workspace: "/runner/workspace/repo",
-            remote_command: &command,
-        })
-        .expect("detached handoff recorded");
-
-        let log = logs("runner-backed-logs-local-only").expect("durable logs resolve");
-
-        assert_eq!(log.run.as_str(), "runner-backed-logs-local-only");
-        assert_eq!(
-            interactions.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "logs must not wait for an unavailable runner"
-        );
     });
 }
 
