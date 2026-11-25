@@ -39,6 +39,14 @@ impl JobCgroup {
         Ok(None)
     }
 
+    pub fn for_job(_job_id: &str) -> io::Result<Option<Self>> {
+        Ok(None)
+    }
+
+    pub fn stop_with_evidence(&self) -> io::Result<Option<String>> {
+        Ok(None)
+    }
+
     pub fn join_before_exec(&self, _command: &mut Command) {}
 
     pub fn kill(&self) {}

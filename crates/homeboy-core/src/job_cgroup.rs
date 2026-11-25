@@ -301,6 +301,55 @@ impl JobCgroup {
         }))
     }
 
+    /// Re-open only the cgroup named for this job, even after its root exits.
+    pub fn for_job(job_id: &str) -> io::Result<Option<Self>> {
+        if job_id.is_empty()
+            || !job_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Ok(None);
+        }
+        let Some(jobs) = jobs_dir() else {
+            return Ok(None);
+        };
+        let dir = jobs.join(job_id);
+        let procs = match fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("cgroup.procs"))
+        {
+            Ok(procs) => procs,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(Self {
+            dir,
+            procs,
+            stopped: AtomicBool::new(false),
+        }))
+    }
+
+    /// Snapshot members before teardown; sessions and nohup do not escape a cgroup.
+    /// Report only after successful teardown, never claim a failed kill succeeded.
+    pub fn stop_with_evidence(&self) -> io::Result<Option<String>> {
+        let members = self.members();
+        let descriptions = members
+            .iter()
+            .map(|pid| {
+                let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .unwrap_or_else(|_| "unknown".to_string());
+                format!("{pid} {}", comm.trim().replace(['\n', '\r'], " "))
+            })
+            .collect::<Vec<_>>();
+        self.stop()?;
+        Ok((!members.is_empty()).then(|| {
+            format!(
+            "killed {} leftover process(es) in job cgroup: {}; use --detach for long-running work",
+            members.len(), descriptions.join(", ")
+        )
+        }))
+    }
+
     fn create_in(
         jobs: &Path,
         job_id: Option<&str>,
@@ -370,14 +419,9 @@ impl JobCgroup {
 
     /// SIGKILL every member at once; the kernel refuses forks that race it.
     pub fn kill(&self) {
-        if fs::write(self.dir.join("cgroup.kill"), "1").is_err() {
-            for pid in self.members() {
-                // SAFETY: plain signal delivery to a member pid.
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                }
-            }
-        }
+        // Never signal snapshot PIDs: they can exit and be reused outside this
+        // cgroup. The kernel operation is scoped to this job even across races.
+        let _ = fs::write(self.dir.join("cgroup.kill"), "1");
     }
 
     /// Kill every member, wait until the cgroup is empty, and remove it.
