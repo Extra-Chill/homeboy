@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.25] - 2026-11-25
+
+### Changed
+- prune and fold execution, bundle, materialization and gate-transport tests file by file
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 5/12)
+- prune implementation-restating and duplicate workspace/workload tests
+
 ## [0.497.24] - 2026-11-25
 
 ### Changed
