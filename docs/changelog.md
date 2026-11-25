@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.6] - 2026-11-25
+
+### Changed
+- prune low-value agent-task command tests (wave 2, homeboy-cli 4/16)
+- prune and fold agent_task command tests (wave 2, homeboy-cli 2/16)
+- prune and fold low-value tests in contract, control-plane, cook verdict, daemon, extension and fuzz command modules
+- prune and fold agent-task status/run/dispatch tests (wave 2, homeboy-cli 3/16)
+- prune and fold server, transfer, snapshot and sidecar tests (wave 2, slice 20/22)
+- prune and fold homeboy-core project/runner/runtime tests (wave 2, slice 19/22)
+- prune and fold low-value tests in ci, cleanup, component, config and contract commands
+- prune and fold low-value bench, agent-task summary and build tests (wave 2, slice 5/16)
+- prune and fold homeboy-core tests (wave 2, slice 21/22)
+- prune worktree and provider tests file by file
+
 ## [0.497.5] - 2026-11-25
 
 ### Changed
