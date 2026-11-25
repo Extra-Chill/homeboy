@@ -1823,6 +1823,11 @@ mod tests {
                 )
                 .expect("persist detached admission");
                 agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                    // The writer is gone; only the lease decides.
+                    record.metadata["detached_cook_handoff"]
+                        .as_object_mut()
+                        .expect("handoff metadata")
+                        .remove("launcher_pid");
                     if legacy {
                         record.metadata["detached_cook_handoff"]
                             .as_object_mut()
