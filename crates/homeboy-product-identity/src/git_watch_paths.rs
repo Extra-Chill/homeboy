@@ -27,79 +27,53 @@ pub(crate) fn git_watch_paths(
 mod tests {
     use super::*;
 
+    /// Shared refs (branches, notes, packed-refs) live in the common git dir
+    /// even for a linked worktree; HEAD and per-worktree refs (bisect,
+    /// worktree) live in the worktree's own git dir; a detached HEAD adds no
+    /// symbolic ref to watch.
     #[test]
-    fn watches_symbolic_ref_in_common_git_directory_for_linked_worktree() {
-        let paths = git_watch_paths(
-            Path::new("/repo/.git/worktrees/feature"),
-            Path::new("/repo/.git"),
-            Some("ref: refs/heads/feature\n"),
-            "refs/notes/homeboy-snapshot",
-        );
+    fn watches_each_ref_in_the_git_directory_that_owns_it() {
+        let common = "/repo/.git";
+        let linked = "/repo/.git/worktrees/feature";
+        let cases = [
+            (
+                common,
+                "ref: refs/heads/main\n",
+                Some("/repo/.git/refs/heads/main"),
+            ),
+            (
+                linked,
+                "ref: refs/heads/feature\n",
+                Some("/repo/.git/refs/heads/feature"),
+            ),
+            (linked, "9e102eb708131db18e55e100cc47262694148056\n", None),
+            (
+                linked,
+                "ref: refs/bisect/good\n",
+                Some("/repo/.git/worktrees/feature/refs/bisect/good"),
+            ),
+            (
+                linked,
+                "ref: refs/worktree/operation\n",
+                Some("/repo/.git/worktrees/feature/refs/worktree/operation"),
+            ),
+        ];
 
-        assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("/repo/.git/worktrees/feature/HEAD"),
-                PathBuf::from("/repo/.git/packed-refs"),
-                PathBuf::from("/repo/.git/refs/notes/homeboy-snapshot"),
-                PathBuf::from("/repo/.git/refs/heads/feature"),
-            ]
-        );
-    }
-
-    #[test]
-    fn watches_primary_worktree_ref_and_packed_refs() {
-        let paths = git_watch_paths(
-            Path::new("/repo/.git"),
-            Path::new("/repo/.git"),
-            Some("ref: refs/heads/main\n"),
-            "refs/notes/homeboy-snapshot",
-        );
-
-        assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("/repo/.git/HEAD"),
-                PathBuf::from("/repo/.git/packed-refs"),
-                PathBuf::from("/repo/.git/refs/notes/homeboy-snapshot"),
-                PathBuf::from("/repo/.git/refs/heads/main"),
-            ]
-        );
-    }
-
-    #[test]
-    fn detached_head_watches_git_metadata_without_a_symbolic_ref() {
-        let paths = git_watch_paths(
-            Path::new("/repo/.git/worktrees/detached"),
-            Path::new("/repo/.git"),
-            Some("9e102eb708131db18e55e100cc47262694148056\n"),
-            "refs/notes/homeboy-snapshot",
-        );
-
-        assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("/repo/.git/worktrees/detached/HEAD"),
-                PathBuf::from("/repo/.git/packed-refs"),
-                PathBuf::from("/repo/.git/refs/notes/homeboy-snapshot"),
-            ]
-        );
-    }
-
-    #[test]
-    fn watches_per_worktree_refs_in_the_linked_git_directory() {
-        let git_dir = Path::new("/repo/.git/worktrees/feature");
-        let common_dir = Path::new("/repo/.git");
-
-        for reference in ["refs/bisect/good", "refs/worktree/operation"] {
+        for (git_dir, head, symbolic) in cases {
             let paths = git_watch_paths(
-                git_dir,
-                common_dir,
-                Some(&format!("ref: {reference}\n")),
+                Path::new(git_dir),
+                Path::new(common),
+                Some(head),
                 "refs/notes/homeboy-snapshot",
             );
 
-            assert_eq!(paths.last(), Some(&git_dir.join(reference)));
+            let mut expected = vec![
+                Path::new(git_dir).join("HEAD"),
+                PathBuf::from("/repo/.git/packed-refs"),
+                PathBuf::from("/repo/.git/refs/notes/homeboy-snapshot"),
+            ];
+            expected.extend(symbolic.map(PathBuf::from));
+            assert_eq!(paths, expected, "HEAD {head:?} in {git_dir}");
         }
     }
 }
