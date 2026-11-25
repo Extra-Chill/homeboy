@@ -294,39 +294,31 @@ mod tests {
         );
     }
 
+    /// Without a canonical source the active copy is used as-is: a
+    /// manifest-backed complete copy and a legacy manifest-less copy are both
+    /// ready, and nothing at all is absent.
     #[test]
-    fn manifest_backed_complete_copy_is_ready() {
-        let config = tempfile::tempdir().unwrap();
-        let active = active_shared_lib_dir(config.path());
-        write_lib(&active, COMPLETE);
-        shared_asset_integrity::write_manifest(&active).unwrap();
-
-        assert_eq!(
-            resolve_shared_lib_dir(config.path(), None),
-            SharedLibResolution::Ready {
-                dir: active,
-                fallback_from: None
+    fn resolves_active_copy_without_canonical_source() {
+        for (files, with_manifest) in [
+            (COMPLETE, true),
+            (&[("runner-harness.sh", "harness\n")][..], false),
+        ] {
+            let config = tempfile::tempdir().unwrap();
+            let active = active_shared_lib_dir(config.path());
+            write_lib(&active, files);
+            if with_manifest {
+                shared_asset_integrity::write_manifest(&active).unwrap();
             }
-        );
-    }
 
-    #[test]
-    fn copy_without_manifest_or_source_is_trusted() {
-        let config = tempfile::tempdir().unwrap();
-        let active = active_shared_lib_dir(config.path());
-        write_lib(&active, &[("runner-harness.sh", "harness\n")]);
+            assert_eq!(
+                resolve_shared_lib_dir(config.path(), None),
+                SharedLibResolution::Ready {
+                    dir: active,
+                    fallback_from: None
+                }
+            );
+        }
 
-        assert_eq!(
-            resolve_shared_lib_dir(config.path(), None),
-            SharedLibResolution::Ready {
-                dir: active,
-                fallback_from: None
-            }
-        );
-    }
-
-    #[test]
-    fn absent_without_active_or_source() {
         let config = tempfile::tempdir().unwrap();
         assert_eq!(
             resolve_shared_lib_dir(config.path(), None),
