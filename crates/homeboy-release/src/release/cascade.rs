@@ -347,12 +347,14 @@ mod tests {
 
     #[test]
     fn cascade_targets_collapse_a_diamond_into_one_release_per_dependent() {
-        // a -> b, a -> c, b -> d, c -> d: `d` depends on both `b` and `c`.
+        // a -> b, a -> c, b -> d, c -> d: `d` depends on both `b` and `c`;
+        // the repeated c -> d edge must not produce a second incoming entry.
         let steps = vec![
             step(1, "a", "b", "pkg/a"),
             step(2, "a", "c", "pkg/a"),
             step(3, "b", "d", "pkg/b"),
             step(4, "c", "d", "pkg/c"),
+            step(5, "c", "d", "pkg/c"),
         ];
 
         let targets = cascade_targets(&steps);
@@ -376,18 +378,8 @@ mod tests {
                     package: "pkg/c".to_string()
                 },
             ],
-            "both incoming edges are grouped onto the single dependent",
+            "distinct incoming edges are grouped onto the single dependent; duplicates collapse",
         );
-    }
-
-    #[test]
-    fn cascade_targets_dedupe_identical_edges() {
-        let steps = vec![step(1, "a", "b", "pkg/a"), step(2, "a", "b", "pkg/a")];
-
-        let targets = cascade_targets(&steps);
-
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].incoming.len(), 1);
     }
 
     #[test]

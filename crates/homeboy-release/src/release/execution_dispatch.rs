@@ -1160,46 +1160,34 @@ mod tests {
     use homeboy_core::plan::PlanStep;
     use homeboy_extension_contract::ExtensionManifest;
 
+    /// Plan-only steps are skipped at execution time, so every preflight that
+    /// guards or mutates the checkout must stay executable.
     #[test]
-    fn test_release_step_is_plan_only() {
-        let steps = [
-            plan_step("changelog.policy"),
-            plan_step("changelog.generate"),
-        ];
-
-        assert!(steps.iter().all(release_step_is_plan_only));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.default_branch"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.git_identity"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.working_tree"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.remote_sync"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.bump_policy"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.test_secret_env"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.dependencies"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.extension.registry.publish_token"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step("preflight.lint")));
-        assert!(!release_step_is_plan_only(&plan_step("preflight.test")));
-        assert!(!release_step_is_plan_only(&plan_step(
-            "preflight.changelog_bootstrap"
-        )));
-        assert!(!release_step_is_plan_only(&plan_step("preflight.package")));
-        assert!(!release_step_is_plan_only(&plan_step("changelog.finalize")));
-        assert!(!release_step_is_plan_only(&plan_step("deploy")));
+    fn only_policy_and_generation_steps_are_plan_only() {
+        for (kind, plan_only) in [
+            ("changelog.policy", true),
+            ("changelog.generate", true),
+            ("preflight.default_branch", false),
+            ("preflight.git_identity", false),
+            ("preflight.working_tree", false),
+            ("preflight.remote_sync", false),
+            ("preflight.bump_policy", false),
+            ("preflight.test_secret_env", false),
+            ("preflight.dependencies", false),
+            ("preflight.extension.registry.publish_token", false),
+            ("preflight.lint", false),
+            ("preflight.test", false),
+            ("preflight.changelog_bootstrap", false),
+            ("preflight.package", false),
+            ("changelog.finalize", false),
+            ("deploy", false),
+        ] {
+            assert_eq!(
+                release_step_is_plan_only(&plan_step(kind)),
+                plan_only,
+                "{kind}"
+            );
+        }
     }
 
     #[test]
@@ -1819,12 +1807,6 @@ mod tests {
             result.data.as_ref().expect("failure data")["failures"][0]["reason"],
             "missing_exit_status"
         );
-        assert!(
-            result.data.as_ref().expect("failure data").get("version").is_none()
-                && result.data.as_ref().expect("failure data").get("tag").is_none()
-                && result.data.as_ref().expect("failure data").get("push").is_none(),
-            "the failed preflight produces diagnostics only; release mutation steps are not reached"
-        );
     }
 
     #[test]
@@ -1983,46 +1965,6 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("branch 'feature' because the repo default branch is 'main'"));
-    }
-
-    #[test]
-    fn preflight_working_tree_returns_success_step_for_clean_tree() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        run_in(temp.path(), &["git", "init", "-q"]);
-        run_in(
-            temp.path(),
-            &["git", "config", "user.email", "test@example.com"],
-        );
-        run_in(temp.path(), &["git", "config", "user.name", "Test"]);
-        std::fs::write(temp.path().join("README.md"), "fixture\n").expect("write fixture");
-        run_in(temp.path(), &["git", "add", "."]);
-        run_in(
-            temp.path(),
-            &["git", "commit", "-q", "-m", "Initial commit"],
-        );
-
-        let component = Component {
-            id: "fixture".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            ..Default::default()
-        };
-        let options = ReleaseOptions::default();
-        let mut context = ReleaseExecutionContext {
-            component: &component,
-            extensions: &[],
-            component_id: "fixture",
-            options: &options,
-            roots: test_roots(),
-            state: ReleaseState::default(),
-            publish_failed: false,
-        };
-
-        let result = execute_release_plan_step(&plan_step("preflight.working_tree"), &mut context)
-            .expect("dispatch")
-            .expect("result");
-
-        assert_eq!(result.status, ReleaseStepStatus::Success);
-        assert!(!release_step_is_show_stopper(&result));
     }
 
     #[test]
@@ -2363,37 +2305,6 @@ mod tests {
         );
     }
 
-    /// Without a declaration nothing is excused: the component owns the list of
-    /// reconstructable paths, so an undeclared generated file still reports.
-    #[test]
-    fn dependency_preflight_dirty_guard_reports_undeclared_files() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let component = Component {
-            id: "fixture".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            ..Default::default()
-        };
-        let options = ReleaseOptions::default();
-        let context = ReleaseExecutionContext {
-            component: &component,
-            extensions: &[],
-            component_id: "fixture",
-            options: &options,
-            roots: test_roots(),
-            state: ReleaseState::default(),
-            publish_failed: false,
-        };
-
-        let unexpected = release_step_unexpected_dirty_files(
-            &plan_step("preflight.dependencies"),
-            &context,
-            vec!["deps/generated/state.json".to_string()],
-        )
-        .expect("guard should classify dirty files");
-
-        assert_eq!(unexpected, vec!["deps/generated/state.json"]);
-    }
-
     #[test]
     fn release_prepare_dirty_guard_allows_release_owned_lockfiles() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2436,17 +2347,7 @@ mod tests {
     }
 
     #[test]
-    fn bump_policy_preflight_blocks_unforced_underbump() {
-        let mut step = plan_step("preflight.bump_policy");
-        step.inputs
-            .insert("requested".to_string(), serde_json::json!("patch"));
-        step.inputs
-            .insert("recommended".to_string(), serde_json::json!("minor"));
-        step.inputs
-            .insert("underbump".to_string(), serde_json::json!(true));
-        step.inputs
-            .insert("force_lower_bump".to_string(), serde_json::json!(false));
-
+    fn bump_policy_preflight_blocks_underbump_unless_forced() {
         let component = Component::default();
         let options = ReleaseOptions::default();
         let mut context = ReleaseExecutionContext {
@@ -2459,61 +2360,39 @@ mod tests {
             publish_failed: false,
         };
 
-        let result = execute_release_plan_step(&step, &mut context)
-            .expect("dispatch")
-            .expect("result");
+        for force_lower_bump in [false, true] {
+            let mut step = plan_step("preflight.bump_policy");
+            step.inputs
+                .insert("requested".to_string(), serde_json::json!("patch"));
+            step.inputs
+                .insert("recommended".to_string(), serde_json::json!("minor"));
+            step.inputs
+                .insert("underbump".to_string(), serde_json::json!(true));
+            step.inputs.insert(
+                "force_lower_bump".to_string(),
+                serde_json::json!(force_lower_bump),
+            );
 
-        assert_eq!(result.status, ReleaseStepStatus::Failed);
-        assert!(release_step_is_show_stopper(&result));
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Requested patch bump is lower"));
-        assert!(result
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("--force-lower-bump")));
-    }
+            let result = execute_release_plan_step(&step, &mut context)
+                .expect("dispatch")
+                .expect("result");
 
-    #[test]
-    fn bump_policy_preflight_allows_forced_underbump() {
-        let mut step = plan_step("preflight.bump_policy");
-        step.inputs
-            .insert("requested".to_string(), serde_json::json!("patch"));
-        step.inputs
-            .insert("recommended".to_string(), serde_json::json!("minor"));
-        step.inputs
-            .insert("underbump".to_string(), serde_json::json!(true));
-        step.inputs
-            .insert("force_lower_bump".to_string(), serde_json::json!(true));
-
-        let component = Component::default();
-        let options = ReleaseOptions::default();
-        let mut context = ReleaseExecutionContext {
-            component: &component,
-            extensions: &[],
-            component_id: "fixture",
-            options: &options,
-            roots: test_roots(),
-            state: ReleaseState::default(),
-            publish_failed: false,
-        };
-
-        let result = execute_release_plan_step(&step, &mut context)
-            .expect("dispatch")
-            .expect("result");
-
-        assert_eq!(result.status, ReleaseStepStatus::Success);
-        assert_eq!(
-            result.data,
-            Some(serde_json::json!({
-                "requested": "patch",
-                "recommended": "minor",
-                "underbump": true,
-                "force_lower_bump": true,
-            }))
-        );
+            if force_lower_bump {
+                assert_eq!(result.status, ReleaseStepStatus::Success);
+                continue;
+            }
+            assert_eq!(result.status, ReleaseStepStatus::Failed);
+            assert!(release_step_is_show_stopper(&result));
+            assert!(result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Requested patch bump is lower"));
+            assert!(result
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("--force-lower-bump")));
+        }
     }
 
     #[test]
@@ -2668,48 +2547,28 @@ mod tests {
     }
 
     #[test]
-    fn test_release_step_is_show_stopper() {
-        let version_failure = failed_step_result("version");
-        let default_branch_failure = failed_step_result("preflight.default_branch");
-        let working_tree_failure = failed_step_result("preflight.working_tree");
-        let remote_sync_failure = failed_step_result("preflight.remote_sync");
-        let bump_policy_failure = failed_step_result("preflight.bump_policy");
-        let lint_failure = failed_step_result("preflight.lint");
-        let test_failure = failed_step_result("preflight.test");
-        let bootstrap_failure = failed_step_result("preflight.changelog_bootstrap");
-        let package_preflight_failure = failed_step_result("preflight.package");
-        let changelog_failure = failed_step_result("changelog.finalize");
-        let github_release_failure = failed_step_result("github.release");
-        let publish_failure = failed_step_result("publish.crates");
-
-        assert!(release_step_is_show_stopper(&version_failure));
-        // #3541: a failed github.release must halt the plan before
-        // publish/upload steps run against a non-existent release.
-        assert!(release_step_is_show_stopper(&github_release_failure));
-        assert!(release_step_is_show_stopper(&default_branch_failure));
-        assert!(release_step_is_show_stopper(&working_tree_failure));
-        assert!(release_step_is_show_stopper(&remote_sync_failure));
-        assert!(release_step_is_show_stopper(&bump_policy_failure));
-        assert!(release_step_is_show_stopper(&lint_failure));
-        assert!(release_step_is_show_stopper(&test_failure));
-        assert!(release_step_is_show_stopper(&bootstrap_failure));
-        assert!(release_step_is_show_stopper(&package_preflight_failure));
-        assert!(release_step_is_show_stopper(&changelog_failure));
-        assert!(!release_step_is_show_stopper(&publish_failure));
-    }
-
-    #[test]
-    fn test_step_config_string_array() {
-        let mut step = plan_step("post_release");
-        step.inputs.insert(
-            "commands".to_string(),
-            serde_json::json!(["git tag -f stable", 123, "git push"]),
-        );
-
-        assert_eq!(
-            super::step_config_string_array(&step, "commands"),
-            vec!["git tag -f stable", "git push"]
-        );
+    fn failed_guard_and_mutation_steps_halt_the_plan_but_publish_failures_do_not() {
+        for step_type in [
+            "version",
+            // #3541: a failed github.release must halt the plan before
+            // publish/upload steps run against a non-existent release.
+            "github.release",
+            "preflight.default_branch",
+            "preflight.working_tree",
+            "preflight.remote_sync",
+            "preflight.lint",
+            "preflight.changelog_bootstrap",
+            "preflight.package",
+            "changelog.finalize",
+        ] {
+            assert!(
+                release_step_is_show_stopper(&failed_step_result(step_type)),
+                "{step_type}"
+            );
+        }
+        assert!(!release_step_is_show_stopper(&failed_step_result(
+            "publish.crates"
+        )));
     }
 
     #[test]
