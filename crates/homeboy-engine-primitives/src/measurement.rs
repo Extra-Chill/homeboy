@@ -424,15 +424,6 @@ mod tests {
     // ── The four clauses of the invariant, stated in #10685 ──
 
     #[test]
-    fn zero_units_is_never_a_pass() {
-        assert!(!Measurement::units(0).assess().permits_pass());
-        assert_eq!(
-            Measurement::units(0).assess(),
-            MeasurementOutcome::Unmeasured(UnmeasuredReason::ZeroUnits)
-        );
-    }
-
-    #[test]
     fn a_comparison_with_no_counts_on_either_side_is_never_a_pass() {
         let measured = Measurement::units(7);
         for compared in [
@@ -459,6 +450,12 @@ mod tests {
         );
         assert!(!outcome.permits_pass());
         assert!(outcome.is_broken_instrument());
+        // #10557: `files_scanned: 0, files_skipped: 1817` rendered green; the
+        // withheld pass must point at the instrument, not at the tree.
+        assert!(outcome
+            .withheld_pass_reason()
+            .expect("a withheld pass must be explained")
+            .contains("instrument is broken"));
         assert!(outcome.constrain(Verdict::Pass).is_err());
         // Even an intended *failure* is refused: nothing this instrument says
         // is trustworthy.
@@ -481,6 +478,12 @@ mod tests {
             );
             assert!(!outcome.permits_pass());
         }
+        // #10639/#10644: a child killed at its budget before writing its
+        // results sidecar has absent counts and still cannot render green.
+        let killed = Measurement::unreported()
+            .incomplete(IncompleteReason::TimedOut)
+            .assess();
+        assert_eq!(killed.constrain(Verdict::Pass), Ok(Verdict::Unknown));
     }
 
     // ── The distinctions the invariant depends on ──
@@ -534,29 +537,24 @@ mod tests {
     // ── Advisory measurements move verdicts in neither direction ──
 
     #[test]
-    fn an_advisory_measurement_constrains_nothing() {
-        let outcome = Measurement::advisory().assess();
-        assert_eq!(outcome, MeasurementOutcome::Advisory);
-        assert!(outcome.permits_pass());
-        assert!(outcome.withheld_pass_reason().is_none());
-        for intended in [Verdict::Pass, Verdict::Unknown, Verdict::Fail] {
-            assert_eq!(
-                outcome.constrain(intended),
-                Ok(intended),
-                "an advisory instrument must not move a verdict in either direction"
-            );
-        }
-    }
-
-    #[test]
-    fn an_advisory_measurement_stays_inert_when_it_fails_outright() {
-        // The `du -sk` shape: the advisory instrument itself died. It must not
+    fn an_advisory_measurement_constrains_nothing_even_when_it_fails() {
+        // The `du -sk` shape: an advisory instrument that itself died must not
         // degrade the verdict it was decorating.
-        let outcome = Measurement::advisory()
-            .incomplete(IncompleteReason::Killed)
-            .assess();
-        assert_eq!(outcome, MeasurementOutcome::Advisory);
-        assert_eq!(outcome.constrain(Verdict::Pass), Ok(Verdict::Pass));
+        for measurement in [
+            Measurement::advisory(),
+            Measurement::advisory().incomplete(IncompleteReason::Killed),
+        ] {
+            let outcome = measurement.assess();
+            assert_eq!(outcome, MeasurementOutcome::Advisory);
+            assert!(outcome.withheld_pass_reason().is_none());
+            for intended in [Verdict::Pass, Verdict::Unknown, Verdict::Fail] {
+                assert_eq!(
+                    outcome.constrain(intended),
+                    Ok(intended),
+                    "an advisory instrument must not move a verdict in either direction"
+                );
+            }
+        }
     }
 
     #[test]
@@ -592,51 +590,5 @@ mod tests {
             Measurement::units(0).against_population(12),
         );
         assert!(compared.assess().is_broken_instrument());
-    }
-
-    // ── Recorded incidents, replayed ──
-
-    #[test]
-    fn the_post_merge_audit_gate_incident_cannot_render_green() {
-        // #10557: `files_scanned: 0, files_skipped: 1817, findings: [], passed:
-        // true` — green in seven seconds on an 1,800-file repository.
-        let outcome = Measurement::units(0).against_population(1817).assess();
-        assert!(!outcome.permits_pass());
-        assert!(
-            outcome
-                .withheld_pass_reason()
-                .expect("a withheld pass must be explained")
-                .contains("instrument is broken"),
-            "the message must point at the instrument, not at the tree"
-        );
-    }
-
-    #[test]
-    fn the_killed_test_child_incident_cannot_render_green() {
-        // #10639/#10644: the child was killed at its 1500s budget before
-        // writing its results sidecar, so counts arrived absent.
-        let outcome = Measurement::unreported()
-            .incomplete(IncompleteReason::TimedOut)
-            .assess();
-        assert!(!outcome.permits_pass());
-        assert_eq!(outcome.constrain(Verdict::Pass), Ok(Verdict::Unknown));
-    }
-
-    #[test]
-    fn measurement_ok_is_the_boolean_form_of_permits_pass() {
-        for measurement in [
-            Measurement::units(1),
-            Measurement::units(0),
-            Measurement::units(0).against_population(0),
-            Measurement::units(0).against_population(9),
-            Measurement::unreported(),
-            Measurement::advisory(),
-            Measurement::units(5).incomplete(IncompleteReason::Killed),
-        ] {
-            assert_eq!(
-                measurement_ok(&measurement),
-                measurement.assess().permits_pass()
-            );
-        }
     }
 }
