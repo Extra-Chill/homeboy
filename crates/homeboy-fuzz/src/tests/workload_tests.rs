@@ -26,27 +26,20 @@ fn workload_from_value_normalizes_structural_fields() {
 }
 
 #[test]
-fn workload_from_value_rejects_wrong_schema() {
-    let error = FuzzWorkload::from_value(json!({
-        "schema": "example/custom/v1",
-        "id": "default",
-        "safety_class": "read_only"
-    }))
-    .expect_err("schema mismatch should fail");
+fn workload_from_value_rejects_invalid_contracts() {
+    let cases = [
+        (
+            json!({ "schema": "example/custom/v1", "id": "default", "safety_class": "read_only" }),
+            "fuzz workload schema must be homeboy/fuzz-workload/v1",
+        ),
+        (
+            json!({ "id": " ", "safety_class": "read_only" }),
+            "workload.id must be non-empty",
+        ),
+    ];
 
-    assert!(
-        error.contains("fuzz workload schema must be homeboy/fuzz-workload/v1"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn workload_from_value_requires_non_empty_id() {
-    let error = FuzzWorkload::from_value(json!({
-        "id": " ",
-        "safety_class": "read_only"
-    }))
-    .expect_err("blank id should fail");
-
-    assert_eq!(error, "workload.id must be non-empty");
+    for (value, expected) in cases {
+        let error = FuzzWorkload::from_value(value).expect_err(expected);
+        assert!(error.contains(expected), "unexpected error: {error}");
+    }
 }
