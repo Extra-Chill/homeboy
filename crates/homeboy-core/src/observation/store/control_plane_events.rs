@@ -569,58 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn append_waits_for_a_competing_writer_longer_than_the_old_scheduler_timeout() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("observations.sqlite");
-        let initialized = ObservationStore::open_initialized_at(&path).unwrap();
-        initialized.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'test', 'now', 'running')", []).unwrap();
-        drop(initialized);
-
-        let blocker = Connection::open(&path).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1100));
-            blocker.execute_batch("COMMIT").unwrap();
-        });
-        let connection = super::super::schema::open_bounded_writer_connection(&path).unwrap();
-        let store = ObservationStore {
-            connection,
-            path: path.clone(),
-            readonly: false,
-            roots: None,
-        };
-        let run = RunId::new("run-1").unwrap();
-        let started = std::time::Instant::now();
-        let event = store
-            .append_control_plane_event(
-                &run,
-                &request("held-writer", "state"),
-                &"a".repeat(64),
-                &"b".repeat(64),
-            )
-            .unwrap();
-        let elapsed = started.elapsed();
-        release.join().unwrap();
-        assert!(
-            elapsed >= std::time::Duration::from_millis(900),
-            "elapsed {elapsed:?}"
-        );
-        assert_eq!(event.sequence, 1);
-        assert_eq!(
-            store
-                .append_control_plane_event(
-                    &run,
-                    &request("held-writer", "state"),
-                    &"a".repeat(64),
-                    &"b".repeat(64),
-                )
-                .unwrap(),
-            event,
-            "successful admission still preserves exact event idempotency"
-        );
-    }
-
-    #[test]
     fn initialized_store_appends_after_a_writer_holds_past_the_former_ten_second_budget() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("observations.sqlite");
@@ -651,6 +599,18 @@ mod tests {
             "elapsed {elapsed:?}"
         );
         assert_eq!(event.sequence, 1);
+        assert_eq!(
+            store
+                .append_control_plane_event(
+                    &run,
+                    &request("normal-timeout", "state"),
+                    &"a".repeat(64),
+                    &"b".repeat(64),
+                )
+                .unwrap(),
+            event,
+            "successful admission still preserves exact event idempotency"
+        );
     }
 
     #[test]
