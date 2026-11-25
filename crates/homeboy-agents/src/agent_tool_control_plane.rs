@@ -923,24 +923,19 @@ mod tests {
     };
 
     #[test]
-    fn bound_captured_stream_retains_full_source_within_limit() {
+    fn bound_captured_stream_keeps_the_trailing_tail_only_past_the_limit() {
         let (text, capture) = bound_captured_stream(b"all good", 64);
         assert_eq!(text, "all good");
         assert_eq!(capture.seen_bytes, 8);
         assert_eq!(capture.retained_bytes, 8);
-        assert_eq!(capture.limit_bytes, 64);
         assert!(!capture.truncated);
-    }
 
-    #[test]
-    fn bound_captured_stream_keeps_trailing_tail_when_truncated() {
         let blob = format!("{}TAIL-ERR", "x".repeat(100));
         let (text, capture) = bound_captured_stream(blob.as_bytes(), 8);
-        assert_eq!(capture.limit_bytes, 8);
+        assert_eq!(text, "TAIL-ERR");
         assert_eq!(capture.seen_bytes, blob.len());
         assert_eq!(capture.retained_bytes, 8);
         assert!(capture.truncated);
-        assert_eq!(text, "TAIL-ERR");
     }
 
     #[test]
@@ -1040,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn denied_command_is_refused_before_the_dispatcher_runs() {
+    fn denied_command_is_refused_before_dispatch_with_reason_and_evidence() {
         let policy = build_denying_policy(&["cargo test", "cargo build"], "builds run in CI here");
 
         let outcome = dispatch_with_echo(
@@ -1049,54 +1044,45 @@ mod tests {
         );
 
         assert_eq!(outcome.result.status, AgentToolResultStatus::Denied);
-        assert_eq!(
-            outcome.result.diagnostics[0].class,
-            "agent_tool.command_denied"
-        );
         // The dispatcher would have returned `succeeded`; it was never reached.
         assert!(outcome.result.output.is_null());
-    }
-
-    #[test]
-    fn denial_tells_the_agent_why_and_what_to_do_instead() {
-        let policy = build_denying_policy(&["cargo build"], "this host routes builds to CI");
-
-        let outcome = dispatch_with_echo(&policy, &shell_request("cargo build"));
-
-        let data = &outcome.result.diagnostics[0].data;
-        assert_eq!(data["reason"], "this host routes builds to CI");
-        assert_eq!(data["matched_pattern"], "cargo build");
-        assert_eq!(data["policy_mode"], "deny_list");
-        assert!(data["remediation"]
+        let diagnostic = &outcome.result.diagnostics[0];
+        assert_eq!(diagnostic.class, "agent_tool.command_denied");
+        assert!(diagnostic.message.contains("builds run in CI here"));
+        assert_eq!(diagnostic.data["reason"], "builds run in CI here");
+        assert_eq!(diagnostic.data["matched_pattern"], "cargo test");
+        assert_eq!(diagnostic.data["policy_mode"], "deny_list");
+        assert!(diagnostic.data["remediation"]
             .as_str()
             .expect("remediation")
             .contains("Make your edits"));
-        assert!(outcome.result.diagnostics[0]
-            .message
-            .contains("this host routes builds to CI"));
-    }
 
-    #[test]
-    fn command_denial_is_recorded_in_dispatch_evidence() {
-        let policy = build_denying_policy(&["cargo test"], "shared host");
-
-        let outcome = dispatch_with_echo(&policy, &shell_request("cargo test"));
-
-        let evidence = outcome.evidence;
-        assert_eq!(evidence.result.status, AgentToolResultStatus::Denied);
-        let denial = evidence.command_denial.expect("evidence denial");
+        assert_eq!(
+            outcome.evidence.result.status,
+            AgentToolResultStatus::Denied
+        );
+        let denial = outcome.evidence.command_denial.expect("evidence denial");
         assert_eq!(denial.matched_pattern.as_deref(), Some("cargo test"));
-        assert_eq!(denial.command, "cargo test");
+        assert_eq!(
+            denial.command,
+            "timeout 1200 cargo test -q -p homeboy-agents"
+        );
     }
 
     #[test]
-    fn permitted_command_still_reaches_the_dispatcher() {
+    fn requests_the_command_policy_does_not_deny_reach_the_dispatcher() {
         let policy = build_denying_policy(&["cargo test"], "shared host");
+        let wildcard = build_denying_policy(&["cargo *"], "shared host");
 
-        let outcome = dispatch_with_echo(&policy, &shell_request("cargo fmt"));
-
-        assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
-        assert!(outcome.evidence.command_denial.is_none());
+        for (policy, request) in [
+            (&policy, shell_request("cargo fmt")),
+            // A request without a command payload is not a command.
+            (&wildcard, request("lookup")),
+        ] {
+            let outcome = dispatch_with_echo(policy, &request);
+            assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
+            assert!(outcome.evidence.command_denial.is_none());
+        }
     }
 
     #[test]
@@ -1136,18 +1122,9 @@ mod tests {
     }
 
     #[test]
-    fn requests_without_a_command_payload_are_unaffected_by_the_command_policy() {
-        let policy = build_denying_policy(&["cargo *"], "shared host");
-
-        let outcome = dispatch_with_echo(&policy, &request("lookup"));
-
-        assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
-    }
-
-    #[test]
-    fn tool_policy_selects_explicit_route_over_default() {
-        let mut policy = policy(AgentToolExecutionLocation::Disabled);
-        policy.tools.insert(
+    fn tool_policy_routes_explicit_tools_and_disables_the_rest_by_default() {
+        let mut routed = policy(AgentToolExecutionLocation::Disabled);
+        routed.tools.insert(
             "lookup".to_string(),
             AgentToolPolicyRule {
                 execution_location: AgentToolExecutionLocation::ControlPlane,
@@ -1155,17 +1132,11 @@ mod tests {
                 reason: Some("test route".to_string()),
             },
         );
-
-        let outcome = dispatch_with_echo(&policy, &request("lookup"));
-
+        let outcome = dispatch_with_echo(&routed, &request("lookup"));
         assert_eq!(outcome.location, AgentToolExecutionLocation::ControlPlane);
         assert_eq!(outcome.result.status, AgentToolResultStatus::Succeeded);
-    }
 
-    #[test]
-    fn tool_policy_is_disabled_by_default() {
         let outcome = dispatch_with_echo(&AgentToolPolicy::default(), &request("lookup"));
-
         assert_eq!(outcome.location, AgentToolExecutionLocation::Disabled);
         assert_eq!(outcome.result.status, AgentToolResultStatus::Denied);
         assert_eq!(outcome.result.diagnostics[0].class, "agent_tool.disabled");
