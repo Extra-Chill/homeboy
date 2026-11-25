@@ -151,23 +151,18 @@ mod pressure_payload_tests {
     use super::pressure_payload;
 
     #[test]
-    fn unwraps_daemon_endpoint_envelope() {
+    fn unwraps_endpoint_envelope_bare_data_and_bare_report() {
         let report = serde_json::json!({ "schema": "homeboy/runner-pressure/v1", "roots": [] });
-        let envelope = serde_json::json!({
-            "success": true,
-            "data": { "status": 200, "endpoint": "runner.inventory", "body": report.clone() },
-        });
-        assert_eq!(pressure_payload(envelope), report);
-    }
-
-    #[test]
-    fn accepts_bare_data_and_bare_report() {
-        let report = serde_json::json!({ "schema": "homeboy/runner-pressure/v1", "roots": [] });
-        assert_eq!(
-            pressure_payload(serde_json::json!({ "data": report.clone() })),
-            report
-        );
-        assert_eq!(pressure_payload(report.clone()), report);
+        for payload in [
+            serde_json::json!({
+                "success": true,
+                "data": { "status": 200, "endpoint": "runner.inventory", "body": report.clone() },
+            }),
+            serde_json::json!({ "data": report.clone() }),
+            report.clone(),
+        ] {
+            assert_eq!(pressure_payload(payload), report);
+        }
     }
 }
 

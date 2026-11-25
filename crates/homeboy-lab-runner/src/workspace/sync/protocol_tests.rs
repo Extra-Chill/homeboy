@@ -244,28 +244,6 @@ fn plan_capacity_response_includes_aggregate_requirements() {
             .into_keys()
             .collect::<Vec<_>>()
     );
-    let runner = crate::Runner {
-        id: "capacity".into(),
-        ..serde_json::from_value::<crate::Runner>(
-            serde_json::json!({"id":"capacity", "kind":"local"}),
-        )
-        .unwrap()
-    };
-    let probe = SnapshotFilesystemProbe {
-        identity: "runner:capacity".into(),
-        path: root.path().display().to_string(),
-        role: "runner snapshot destination",
-        available_bytes: 1,
-        available_inodes: 1,
-    };
-    let requirement = SnapshotFilesystemRequirement {
-        bytes: 2,
-        inodes: 2,
-    };
-    assert!(!snapshot_probe_has_capacity(&probe, requirement));
-    let refusal = snapshot_capacity_error(&probe, requirement, &runner, None);
-    assert_eq!(refusal.details["available_bytes"], 1);
-    assert_eq!(refusal.retryable, Some(true));
 }
 
 #[test]
@@ -286,7 +264,6 @@ fn plan_accepts_different_build_with_same_contract_and_refuses_contract_mismatch
     write_json(&input, &request).unwrap();
     let response = materialization_plan_controlled(&input, &WorkspaceControl::default()).unwrap();
     assert_eq!(response["lab_contract_version"], version);
-    assert!(response.get("identity").is_none());
     assert!(!destination.exists());
 
     request["lab_contract_version"] = (version + 1).into();

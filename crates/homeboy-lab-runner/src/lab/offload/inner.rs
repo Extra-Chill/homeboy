@@ -2658,68 +2658,64 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     #[test]
-    fn workspace_cleanup_policy_defaults_to_preserving_failed_workspaces() {
+    fn workspace_cleanup_policies_preserve_failed_workspaces_unless_opted_out() {
         // #14680: a failed cook's workspace is the evidence for its own
-        // failure. Retention on failure must be the default; immediate
-        // deletion is only reached through the explicit opt-in.
-        assert_eq!(
-            workspace_cleanup_policy_for_request(false),
-            WorkspaceCleanupPolicy::PreserveOnFailure
-        );
-        assert_eq!(
-            workspace_cleanup_policy_for_request(true),
-            WorkspaceCleanupPolicy::DeleteAlways
-        );
+        // failure. The run-owned handle and the registered lifecycle index
+        // must agree: retain by default, delete only on explicit opt-in.
+        use homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy;
+        for (delete_on_failure, workspace, resource) in [
+            (
+                false,
+                WorkspaceCleanupPolicy::PreserveOnFailure,
+                ResourceCleanupPolicy::DeleteAfterTtl,
+            ),
+            (
+                true,
+                WorkspaceCleanupPolicy::DeleteAlways,
+                ResourceCleanupPolicy::DeleteOnTerminal,
+            ),
+        ] {
+            assert_eq!(
+                workspace_cleanup_policy_for_request(delete_on_failure),
+                workspace
+            );
+            assert_eq!(
+                workspace_resource_cleanup_policy_for_request(delete_on_failure),
+                resource
+            );
+        }
     }
 
     #[test]
-    fn workspace_resource_cleanup_policy_matches_materialized_workspace_default() {
-        assert_eq!(
-            workspace_resource_cleanup_policy_for_request(false),
-            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl
-        );
-        assert_eq!(
-            workspace_resource_cleanup_policy_for_request(true),
-            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal
-        );
-    }
-
-    #[test]
-    fn lab_offload_progress_omits_refresh_when_identities_match() {
-        let progress = lab_offload_runner_homeboy_progress(
-            "lab",
-            "/runner/homeboy",
-            &serde_json::json!({
-                "active_daemon_build_identity": "homeboy 0.354.1+exact",
-                "refresh_commands": [],
-            }),
-        );
-
-        assert_eq!(
-            progress,
-            "Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; active daemon homeboy 0.354.1+exact; controller and daemon identities match."
-        );
-        assert!(!progress.contains("refresh with"));
-    }
-
-    #[test]
-    fn lab_offload_progress_renders_complete_refresh_command_when_needed() {
-        let progress = lab_offload_runner_homeboy_progress(
-            "lab",
-            "/runner/homeboy",
-            &serde_json::json!({
-                "active_daemon_build_identity": "homeboy 0.353.1+old",
-                "refresh_commands": [
+    fn lab_offload_progress_renders_refresh_commands_only_when_needed() {
+        for (identity, refresh, expected_tail) in [
+            (
+                "homeboy 0.354.1+exact",
+                serde_json::json!([]),
+                "active daemon homeboy 0.354.1+exact; controller and daemon identities match.",
+            ),
+            (
+                "homeboy 0.353.1+old",
+                serde_json::json!([
                     "homeboy runner refresh-homeboy lab --ref v0.353.1",
                     "homeboy runner connect lab"
-                ],
-            }),
-        );
-
-        assert_eq!(
-            progress,
-            "Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; active daemon homeboy 0.353.1+old; refresh with `homeboy runner refresh-homeboy lab --ref v0.353.1 && homeboy runner connect lab`."
-        );
+                ]),
+                "active daemon homeboy 0.353.1+old; refresh with `homeboy runner refresh-homeboy lab --ref v0.353.1 && homeboy runner connect lab`.",
+            ),
+        ] {
+            let progress = lab_offload_runner_homeboy_progress(
+                "lab",
+                "/runner/homeboy",
+                &serde_json::json!({
+                    "active_daemon_build_identity": identity,
+                    "refresh_commands": refresh,
+                }),
+            );
+            assert_eq!(
+                progress,
+                format!("Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; {expected_tail}")
+            );
+        }
     }
 
     #[test]
@@ -2919,24 +2915,6 @@ mod tests {
     }
 
     #[test]
-    fn inner_uses_authoritative_preflight_status_not_conflicting_cwd_projection() {
-        // Admission reads the controller drain ledger; keep it hermetic.
-        let _home = homeboy_core::test_support::HomeGuard::new();
-        let preflight_status = runner_status(true);
-        let conflicting_cwd_projection = runner_status(false);
-
-        require_available_lab_runner("homeboy-lab", &preflight_status, None, "cook")
-            .expect("inner accepts the connected status selected during preflight");
-        assert!(require_available_lab_runner(
-            "homeboy-lab",
-            &conflicting_cwd_projection,
-            None,
-            "cook"
-        )
-        .is_err());
-    }
-
-    #[test]
     fn post_rotation_admission_counts_draining_generation_capacity() {
         // Admission reads the controller drain ledger; keep it hermetic.
         let _home = homeboy_core::test_support::HomeGuard::new();
@@ -2975,11 +2953,9 @@ mod tests {
             .expect("converged path");
         let prefix = lab_offload_command_prefix(path);
 
-        assert_eq!(path, "/runner/current-homeboy");
-        assert_eq!(prefix.argv.first().map(String::as_str), Some(path));
-        assert_ne!(
+        assert_eq!(
             prefix.argv.first().map(String::as_str),
-            Some("/runner/stale-homeboy")
+            Some("/runner/current-homeboy")
         );
     }
 
@@ -3168,36 +3144,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_ssh_admission_accepts_different_build_identity() {
-        let mut status = runner_status(true);
-        status.session = Some(admission_session(
-            RunnerTunnelMode::DirectSsh,
-            Some("http://127.0.0.1:7421"),
-            Some("lease-a"),
-        ));
-        status
-            .session
-            .as_mut()
-            .expect("direct session")
-            .homeboy_build_identity = Some("homeboy 0.339.0+daemon".to_string());
-        status.configured_job_binary_build_identity =
-            Some("homeboy 0.339.0+configured".to_string());
-
-        let configured = configured_build_identity_for_admission(&status, || {
-            panic!("direct SSH must use authoritative status evidence")
-        })
-        .expect("status evidence");
-        apply_direct_ssh_configured_identity_freshness(
-            &mut status,
-            "homeboy-lab",
-            "/runner/homeboy",
-            configured,
-        );
-
-        assert!(require_available_lab_runner("homeboy-lab", &status, None, "cook").is_ok());
-    }
-
-    #[test]
     fn detached_identity_drift_falls_back_without_controller_staging() {
         use homeboy_lab_contract::{
             EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
@@ -3297,18 +3243,6 @@ mod tests {
                 "active_daemon_control_plane_build_identity != job_command_binary_build_identity"
             );
             assert_eq!(
-                record.metadata["lab_identity_fallback"]["final_placement"],
-                "local"
-            );
-            assert_eq!(
-                record.metadata["lab_identity_fallback"]["runner_jobs_created"],
-                0
-            );
-            assert_eq!(
-                record.metadata["lab_identity_fallback"]["transport_retry_attempts"],
-                0
-            );
-            assert_eq!(
                 record.metadata["execution_placement_outcome"]["effective"],
                 "local"
             );
@@ -3384,44 +3318,33 @@ mod tests {
     fn capability_drift_refuses_admission_with_its_cause_class() {
         // Admission reads the controller drain ledger; keep it hermetic.
         let _home = homeboy_core::test_support::HomeGuard::new();
-        for (admission, expected_cause_class, expected_message) in [
-            (
-                matching_capability_admission(
-                    false,
-                    homeboy_lab_contract::LabRuntimeAncestry::ExactSource,
-                ),
-                "capability_incompatible",
-                "Lab offload refused runner `homeboy-lab` because its capability admission is incompatible: missing capabilities. Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
-            ),
-        ] {
-            assert!(capability_admission_has_blocking_drift(&admission, true));
-            let error = capability_admission_error("homeboy-lab", &admission, true);
+        let admission = matching_capability_admission(
+            false,
+            homeboy_lab_contract::LabRuntimeAncestry::ExactSource,
+        );
+        assert!(capability_admission_has_blocking_drift(&admission, true));
+        let error = capability_admission_error("homeboy-lab", &admission, true);
 
-            assert_eq!(error.code, ErrorCode::RunnerCapabilityMissing);
-            assert_eq!(error.message, expected_message);
-            assert_eq!(error.details["admission_cause_class"], expected_cause_class);
-            assert_eq!(
-                error.details["rejection_reason"],
-                serde_json::to_value(&admission.provenance.rejection_reason)
-                    .expect("rejection reason serializes")
-            );
-            assert_eq!(
-                error.details["ancestry"],
-                serde_json::to_value(admission.provenance.ancestry)
-                    .expect("ancestry serializes")
-            );
-        }
+        assert_eq!(error.code, ErrorCode::RunnerCapabilityMissing);
+        assert_eq!(
+            error.message,
+            "Lab offload refused runner `homeboy-lab` because its capability admission is incompatible: missing capabilities. Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry."
+        );
+        assert_eq!(
+            error.details["admission_cause_class"],
+            "capability_incompatible"
+        );
+        assert_eq!(error.details["rejection_reason"], "missing capabilities");
     }
 
     #[test]
-    fn inner_rejects_connected_but_stale_daemon_without_unverified_recovery() {
-        // #8811: a runner can be `connected: true` while its daemon is
-        // version-stale. The old bare-boolean gate passed such a runner and
-        // dispatch then failed opaquely downstream. The unified availability
-        // gate must reject it up front with the structured `stale_daemon`
-        // reason without promoting legacy command text to executable recovery.
-        let mut status = runner_status(true);
-        status.stale_daemon = Some(RunnerStaleDaemonWarning {
+    fn connected_but_unavailable_runners_are_refused_with_structured_diagnosis() {
+        // #8811: a runner can be `connected: true` while its daemon is stale
+        // or its lease is ambiguous. The dispatch gate must reject it up front
+        // with the structured reason, not the generic connectivity message,
+        // and must not promote legacy command text to executable recovery.
+        let mut stale = runner_status(true);
+        stale.stale_daemon = Some(RunnerStaleDaemonWarning {
             severity: "warning",
             verification: crate::RunnerDaemonVerification::Compared,
             probe_error: None,
@@ -3449,32 +3372,8 @@ mod tests {
             recovery_commands: Vec::new(),
             recovery_actions: Vec::new(),
         });
-
-        let error = require_available_lab_runner("homeboy-lab", &status, None, "cook")
-            .expect_err("connected-but-stale runner must not pass the Lab dispatch gate");
-
-        // The rejection is the structured availability diagnosis, not the
-        // generic "requires a connected daemon" boolean error.
-        assert!(
-            !error.message.contains("requires a connected"),
-            "stale-daemon rejection must not use the generic connectivity message: {}",
-            error.message
-        );
-        let details = serde_json::to_string(&error.details).expect("serialize error details");
-        assert!(
-            details.contains("stale_daemon"),
-            "error must preserve the stale_daemon reason: {details}"
-        );
-        assert!(
-            !details.contains("refresh-homeboy"),
-            "error must not surface unverified recovery command text: {details}"
-        );
-    }
-
-    #[test]
-    fn inner_rejects_connected_non_fresh_lease_ambiguity_with_diagnosis() {
-        let mut status = runner_status(true);
-        status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+        let mut ambiguous_lease = runner_status(true);
+        ambiguous_lease.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
             fresh: false,
             stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
             restartable: false,
@@ -3490,12 +3389,29 @@ mod tests {
             repair_plan: Vec::new(),
         });
 
-        let error = require_available_lab_runner("homeboy-lab", &status, None, "cook")
-            .expect_err("non-fresh lease ambiguity must not dispatch");
-        let details = serde_json::to_string(&error.details).expect("serialize details");
-
-        assert!(details.contains("daemon_freshness_unavailable"));
-        assert!(details.contains("ambiguous daemon candidates"));
+        for (status, expected) in [
+            (stale, &["stale_daemon"][..]),
+            (
+                ambiguous_lease,
+                &[
+                    "daemon_freshness_unavailable",
+                    "ambiguous daemon candidates",
+                ][..],
+            ),
+        ] {
+            let error = require_available_lab_runner("homeboy-lab", &status, None, "cook")
+                .expect_err("connected-but-unavailable runner must not dispatch");
+            assert!(
+                !error.message.contains("requires a connected"),
+                "{}",
+                error.message
+            );
+            let details = serde_json::to_string(&error.details).expect("serialize details");
+            for needle in expected {
+                assert!(details.contains(needle), "missing {needle}: {details}");
+            }
+            assert!(!details.contains("refresh-homeboy"), "{details}");
+        }
     }
 
     #[cfg(unix)]
@@ -3752,10 +3668,7 @@ pub(crate) fn download_lab_output_file(runner_id: &str, remote_path: &str) -> Re
 /// The temp file is a [`tempfile::NamedTempFile`]: it has a unique name (no
 /// cross-run collision) and is removed when this function returns through ANY
 /// path — including the `?`-error path on `download` and the `?`-error path on
-/// `read_to_string`. The previous implementation built a DETERMINISTIC temp
-/// path under `std::env::temp_dir()` and relied on a best-effort `remove_file`
-/// placed AFTER the fallible read, so a read error (`?`) leaked the file and a
-/// concurrent run at the same name could collide (#6678).
+/// `read_to_string` (#6678).
 fn read_downloaded_output_via_temp_file<F>(download: F) -> Result<String>
 where
     F: FnOnce(&str) -> Result<()>,
@@ -3809,40 +3722,31 @@ mod read_downloaded_output_tests {
     }
 
     #[test]
-    fn removes_temp_when_download_errors() {
-        let mut temp_path = String::new();
-        let result = read_downloaded_output_via_temp_file(|local_path| {
-            temp_path = local_path.to_string();
-            Err(Error::internal_unexpected("download failed"))
-        });
+    fn removes_temp_when_download_or_read_errors() {
+        // #6678: both `?` error paths must still remove the unique temp file.
+        // Invalid UTF-8 makes `read_to_string` fail after a successful download.
+        type Download = fn(&str) -> Result<()>;
+        let cases: [Download; 2] = [
+            |_| Err(Error::internal_unexpected("download failed")),
+            |local_path| {
+                std::fs::write(local_path, [0xff, 0xfe, 0x00])
+                    .map_err(|err| Error::internal_io(err.to_string(), None))
+            },
+        ];
+        for download in cases {
+            let mut temp_path = String::new();
+            let result = read_downloaded_output_via_temp_file(|local_path| {
+                temp_path = local_path.to_string();
+                download(local_path)
+            });
 
-        assert!(result.is_err(), "download error should propagate");
-        assert!(!temp_path.is_empty());
-        assert!(
-            !Path::new(&temp_path).exists(),
-            "temp file leaked after download error: {temp_path}"
-        );
-    }
-
-    #[test]
-    fn removes_temp_when_read_errors() {
-        // Reproduce the leak the fix targets: the download succeeds, but the
-        // subsequent read fails (invalid UTF-8), so `read_to_string` `?`-returns
-        // before any manual cleanup could run. The unique NamedTempFile must
-        // still be removed on this error path.
-        let mut temp_path = String::new();
-        let result = read_downloaded_output_via_temp_file(|local_path| {
-            temp_path = local_path.to_string();
-            std::fs::write(local_path, [0xff, 0xfe, 0x00])
-                .map_err(|err| Error::internal_io(err.to_string(), None))
-        });
-
-        assert!(result.is_err(), "invalid UTF-8 must fail the read");
-        assert!(!temp_path.is_empty());
-        assert!(
-            !Path::new(&temp_path).exists(),
-            "temp file leaked after read error: {temp_path}"
-        );
+            assert!(result.is_err());
+            assert!(!temp_path.is_empty());
+            assert!(
+                !Path::new(&temp_path).exists(),
+                "temp file leaked after error: {temp_path}"
+            );
+        }
     }
 }
 

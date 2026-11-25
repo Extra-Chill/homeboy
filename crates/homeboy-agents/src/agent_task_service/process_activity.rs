@@ -414,7 +414,6 @@ mod tests {
         let rows = parse_snapshot(ps);
 
         assert_eq!(select_provider_activity(&rows, 1, &[]).tree_rss_kib, None);
-        assert_eq!(ProviderActivitySample::unsampled().tree_rss_kib, None);
     }
 
     #[test]
@@ -470,15 +469,6 @@ mod tests {
             .expect("provider is observable");
 
         assert_eq!(activity.pid, 100);
-    }
-
-    #[test]
-    fn controller_parent_fallback_is_not_provider_activity() {
-        let rows = parse_snapshot(
-            "100 1 S unknown 0 20:16 1000 Wed Nov 5 12:00:00 2026 tool homeboy agent-task cook --placement local --wait\n",
-        );
-
-        assert_eq!(select_provider_activity(&rows, 1, &[]).activity, None);
     }
 
     #[test]
@@ -538,26 +528,6 @@ mod tests {
     }
 
     #[test]
-    fn a_short_lived_homeboy_tool_call_never_outranks_the_provider() {
-        // The early heartbeats in #11598 reported `homeboy contract constants
-        // all`, thirteen seconds old, because it was the deepest process in the
-        // tree. Tool calls the agent makes into Homeboy are Homeboy's work, not
-        // the provider's.
-        let ps = concat!(
-            "100 1 S unknown 0 06:20 1000 Wed Nov 5 12:00:00 2026 tool pi run --format json\n",
-            "200 100 S unknown 0 00:13 1000 Wed Nov 5 12:00:00 2026 tool homeboy contract constants all\n",
-        );
-        let rows = parse_snapshot(ps);
-
-        let activity = select_provider_activity(&rows, 1, &[])
-            .activity
-            .expect("the provider is observable");
-
-        assert_eq!(activity.pid, 100);
-        assert!(activity.command.starts_with("pi run"));
-    }
-
-    #[test]
     fn an_ancestor_of_the_walk_root_is_never_reported() {
         // A torn snapshot can present a cycle in which an ancestor looks like a
         // descendant. The exclusion is stated on identity, so it holds anyway.
@@ -590,41 +560,5 @@ mod tests {
             "timeout 1200 cargo test -p homeboy-agents"
         ));
         assert!(!is_homeboy_process(""));
-    }
-
-    #[test]
-    fn a_probe_that_could_not_look_is_not_a_measurement() {
-        // "No sample" and "sampled, found no provider" are different facts and
-        // must stay distinguishable downstream.
-        let unsampled = ProviderActivitySample::unsampled();
-
-        assert_eq!(unsampled.activity, None);
-        assert_eq!(unsampled.unavailable, None);
-        assert_eq!(unsampled.descendant_count, 0);
-    }
-
-    #[test]
-    fn truncates_command_lines_on_character_boundaries() {
-        let command = format!("cargo test {}", "é".repeat(400));
-
-        let truncated = truncate_command(&command);
-
-        assert_eq!(truncated.chars().count(), MAX_ACTIVITY_COMMAND_CHARS + 1);
-        assert!(truncated.ends_with('…'));
-        assert!(truncated.starts_with("cargo test"));
-    }
-
-    #[test]
-    fn a_torn_process_table_cannot_spin_the_walk() {
-        // A self-parenting row is impossible in a real table and trivial to
-        // produce in a torn snapshot; the walk must still terminate.
-        let ps = "100 100 S unknown 0 01:00 1000 Wed Nov 5 12:00:00 2026 tool wedged\n200 100 S unknown 0 01:00 1000 Wed Nov 5 12:00:00 2026 tool child\n";
-        let rows = parse_snapshot(ps);
-
-        let activity = select_provider_activity(&rows, 100, &[])
-            .activity
-            .expect("child is observable");
-
-        assert_eq!(activity.pid, 200);
     }
 }

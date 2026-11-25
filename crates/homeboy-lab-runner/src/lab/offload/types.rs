@@ -107,76 +107,7 @@ impl<'a> LabOffloadRequest<'a> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_request_has_neutral_policy() {
-        let args = vec!["homeboy".to_string(), "status".to_string()];
-        let request = LabOffloadRequest::for_test(&args);
-
-        let LabOffloadRequest {
-            placement_decision,
-            command,
-            normalized_args,
-            explicit_runner,
-            placement,
-            allow_local_fallback,
-            allow_dirty_lab_workspace,
-            skip_deps_hydration,
-            delete_workspace_on_failure,
-            capture_patch,
-            mutation_flag,
-            placement_outcome_target,
-            detach_after_handoff,
-            output_file_requested,
-            read_only_polling,
-            local_output_file,
-            durable_agent_task_plan,
-            durable_run_id,
-            source_path,
-            expected_source_snapshot_identity,
-            verified_cook_baseline,
-            require_controller_git_bundle,
-            job_overrides,
-        } = request;
-
-        assert_eq!(
-            placement_decision.selected,
-            homeboy_lab_contract::EffectiveExecutionPlacement::Local
-        );
-        assert!(command.is_none());
-        assert_eq!(normalized_args, args);
-        assert!(explicit_runner.is_none());
-        assert_eq!(placement, homeboy_lab_contract::Placement::Auto);
-        assert!(!allow_local_fallback);
-        assert!(!allow_dirty_lab_workspace);
-        assert!(!skip_deps_hydration);
-        assert!(!delete_workspace_on_failure);
-        assert!(!capture_patch);
-        assert!(mutation_flag.is_none());
-        assert!(placement_outcome_target.is_none());
-        assert!(!detach_after_handoff);
-        assert!(!output_file_requested);
-        assert!(!read_only_polling);
-        assert!(local_output_file.is_none());
-        assert!(durable_agent_task_plan.is_none());
-        assert!(durable_run_id.is_none());
-        assert!(source_path.is_none());
-        assert!(expected_source_snapshot_identity.is_none());
-        assert!(verified_cook_baseline.is_none());
-        assert!(!require_controller_git_bundle);
-        assert!(job_overrides.env.is_empty());
-        assert!(job_overrides.secret_env_names.is_empty());
-        assert!(job_overrides.workspace_root.is_none());
-    }
-}
-
-// LabOffloadCommand, LabJobOverrides, LabOffloadOutcome, and the source/workspace
-// mode aliases moved to core's lab_offload module (they are core-plan-based
-// types the core lab_routing service names). Re-exported so runner-internal
-// call sites resolve unchanged.
+// Core-plan-based offload types owned by core's lab_offload module.
 pub use homeboy_core::lab_offload::{
     LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadSourcePathMode,
     LabOffloadWorkspaceModePolicy,

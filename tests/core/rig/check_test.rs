@@ -49,234 +49,182 @@ fn minimal_rig() -> RigSpec {
     }
 }
 
-#[test]
-fn test_evaluate_rejects_empty_spec() {
+/// Evaluate each `(label, spec, expected_error)` case: `None` must pass,
+/// `Some(fragment)` must fail with a message containing `fragment`.
+fn assert_cases(cases: Vec<(&str, CheckSpec, Option<&str>)>) {
     let rig = minimal_rig();
-    let err = evaluate(&rig, &CheckSpec::default()).expect_err("empty spec rejected");
-    assert!(err.message.contains("must specify one of"));
+    for (label, spec, expected_error) in cases {
+        match expected_error {
+            None => evaluate(&rig, &spec).unwrap_or_else(|e| panic!("{label}: {}", e.message)),
+            Some(fragment) => {
+                let err = evaluate(&rig, &spec).expect_err(label);
+                assert!(
+                    err.message.contains(fragment),
+                    "{label}: expected `{fragment}` in: {}",
+                    err.message
+                );
+            }
+        }
+    }
+}
+
+fn path_string(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 #[test]
-fn test_evaluate_rejects_multiple_probes() {
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        http: Some("http://example.com".to_string()),
-        any_file_exists: vec!["/tmp/x".to_string()],
-        ..Default::default()
-    };
-    let err = evaluate(&rig, &spec).expect_err("multiple probes rejected");
-    assert!(err.message.contains("must specify exactly one of"));
-}
-
-#[test]
-fn test_evaluate_any_file_exists_passes_when_one_candidate_exists() {
-    let tmp_dir = tempfile::tempdir().expect("tmpdir");
-    let missing = tmp_dir.path().join("missing.php");
-    let existing = tmp_dir.path().join("existing.php");
-    std::fs::write(&existing, "<?php\n").expect("write");
-
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        any_file_exists: vec![
-            missing.to_string_lossy().into_owned(),
-            existing.to_string_lossy().into_owned(),
-        ],
-        ..Default::default()
-    };
-
-    evaluate(&rig, &spec).expect("one existing candidate passes");
-}
-
-#[test]
-fn test_evaluate_any_file_exists_fails_when_all_candidates_are_missing() {
-    let tmp_dir = tempfile::tempdir().expect("tmpdir");
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        any_file_exists: vec![
-            tmp_dir.path().join("a.php").to_string_lossy().into_owned(),
-            tmp_dir.path().join("b.php").to_string_lossy().into_owned(),
-        ],
-        ..Default::default()
-    };
-
-    let err = evaluate(&rig, &spec).expect_err("all missing candidates fail");
-    assert!(err.message.contains("None of the candidate files exist"));
-}
-
-#[test]
-fn test_evaluate_file_exists() {
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        file: Some(tmp.path().to_string_lossy().into_owned()),
-        ..Default::default()
-    };
-    evaluate(&rig, &spec).expect("existing file passes");
-}
-
-#[test]
-fn test_evaluate_file_missing() {
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        file: Some("/definitely/does/not/exist/ever-420".to_string()),
-        ..Default::default()
-    };
-    evaluate(&rig, &spec).expect_err("missing file fails");
-}
-
-#[test]
-fn test_evaluate_file_contains_substring() {
-    let tmp_dir = tempfile::tempdir().expect("tmpdir");
-    let path = tmp_dir.path().join("check.txt");
-    std::fs::write(&path, "hello world\nsecond line\n").expect("write");
-    let rig = minimal_rig();
-
-    let pass = CheckSpec {
-        file: Some(path.to_string_lossy().into_owned()),
-        contains: Some("world".to_string()),
-        ..Default::default()
-    };
-    evaluate(&rig, &pass).expect("substring present");
-
-    let fail = CheckSpec {
-        file: Some(path.to_string_lossy().into_owned()),
-        contains: Some("not-in-file".to_string()),
-        ..Default::default()
-    };
-    evaluate(&rig, &fail).expect_err("substring absent");
-}
-
-#[test]
-fn test_evaluate_command_exit_code_matches() {
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        command: Some("true".to_string()),
-        expect_exit: Some(0),
-        ..Default::default()
-    };
-    evaluate(&rig, &spec).expect("`true` exits 0");
-}
-
-#[test]
-fn test_evaluate_command_unexpected_exit() {
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        command: Some("false".to_string()),
-        expect_exit: Some(0),
-        ..Default::default()
-    };
-    evaluate(&rig, &spec).expect_err("`false` fails expect_exit=0");
-}
-
-#[test]
-fn test_evaluate_newer_than_left_newer_passes() {
+fn test_evaluate_rejects_invalid_probe_specs() {
     use crate::spec::{NewerThanSpec, TimeSource};
-    let tmp_dir = tempfile::tempdir().expect("tmpdir");
-    let older = tmp_dir.path().join("older.txt");
-    let newer = tmp_dir.path().join("newer.txt");
-    std::fs::write(&older, "x").expect("write");
-    std::fs::write(&newer, "x").expect("write");
-    set_modified(&older, 1);
-    set_modified(&newer, 2);
-
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        newer_than: Some(NewerThanSpec {
-            left: TimeSource {
-                file_mtime: Some(newer.to_string_lossy().into_owned()),
+    assert_cases(vec![
+        // The empty-spec error names every probe so users discover `newer_than`.
+        ("empty spec", CheckSpec::default(), Some("newer_than")),
+        (
+            "multiple probes",
+            CheckSpec {
+                http: Some("http://example.com".to_string()),
+                any_file_exists: vec!["/tmp/x".to_string()],
                 ..Default::default()
             },
-            right: TimeSource {
-                file_mtime: Some(older.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        }),
-        ..Default::default()
-    };
-    evaluate(&rig, &spec).expect("newer left passes");
-}
-
-#[test]
-fn test_evaluate_newer_than_left_older_fails() {
-    use crate::spec::{NewerThanSpec, TimeSource};
-    let tmp_dir = tempfile::tempdir().expect("tmpdir");
-    let older = tmp_dir.path().join("older.txt");
-    let newer = tmp_dir.path().join("newer.txt");
-    std::fs::write(&older, "x").expect("write");
-    std::fs::write(&newer, "x").expect("write");
-    set_modified(&older, 1);
-    set_modified(&newer, 2);
-
-    let rig = minimal_rig();
-    // left = older, right = newer ⇒ check fails.
-    let spec = CheckSpec {
-        newer_than: Some(NewerThanSpec {
-            left: TimeSource {
-                file_mtime: Some(older.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-            right: TimeSource {
-                file_mtime: Some(newer.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        }),
-        ..Default::default()
-    };
-    let err = evaluate(&rig, &spec).expect_err("older left fails");
-    assert!(err.message.contains("not newer"));
-}
-
-#[test]
-fn test_evaluate_newer_than_missing_left_process_passes() {
-    use crate::spec::{DiscoverSpec, NewerThanSpec, TimeSource};
-    let tmp_dir = tempfile::tempdir().expect("tmpdir");
-    let bundle = tmp_dir.path().join("bundle.js");
-    std::fs::write(&bundle, "x").expect("write");
-
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        newer_than: Some(NewerThanSpec {
-            left: TimeSource {
-                process_start: Some(DiscoverSpec {
-                    // Pattern that cannot match any process — ensures None.
-                    pattern: "homeboy-test-marker-no-process-matches-this-XQZ-9999".to_string(),
-                    argv_contains: Vec::new(),
+            Some("must specify exactly one of"),
+        ),
+        (
+            "empty newer_than time source",
+            CheckSpec {
+                newer_than: Some(NewerThanSpec {
+                    left: TimeSource::default(),
+                    right: TimeSource::default(),
                 }),
                 ..Default::default()
             },
-            right: TimeSource {
-                file_mtime: Some(bundle.to_string_lossy().into_owned()),
+            Some("must specify one of"),
+        ),
+    ]);
+}
+
+#[test]
+fn test_evaluate_file_probes() {
+    let tmp_dir = tempfile::tempdir().expect("tmpdir");
+    let existing = tmp_dir.path().join("existing.txt");
+    let missing = tmp_dir.path().join("missing.txt");
+    std::fs::write(&existing, "hello world\nsecond line\n").expect("write");
+
+    assert_cases(vec![
+        (
+            "file exists",
+            CheckSpec {
+                file: Some(path_string(&existing)),
                 ..Default::default()
             },
-        }),
-        ..Default::default()
-    };
-    // Left is None ⇒ no stale daemon to flag ⇒ pass.
-    evaluate(&rig, &spec).expect("absent left process passes");
+            None,
+        ),
+        (
+            "file missing",
+            CheckSpec {
+                file: Some(path_string(&missing)),
+                ..Default::default()
+            },
+            Some(""),
+        ),
+        (
+            "file contains substring",
+            CheckSpec {
+                file: Some(path_string(&existing)),
+                contains: Some("world".to_string()),
+                ..Default::default()
+            },
+            None,
+        ),
+        (
+            "file lacks substring",
+            CheckSpec {
+                file: Some(path_string(&existing)),
+                contains: Some("not-in-file".to_string()),
+                ..Default::default()
+            },
+            Some(""),
+        ),
+        (
+            "any candidate exists",
+            CheckSpec {
+                any_file_exists: vec![path_string(&missing), path_string(&existing)],
+                ..Default::default()
+            },
+            None,
+        ),
+        (
+            "no candidate exists",
+            CheckSpec {
+                any_file_exists: vec![
+                    path_string(&missing),
+                    path_string(&tmp_dir.path().join("b.txt")),
+                ],
+                ..Default::default()
+            },
+            Some("None of the candidate files exist"),
+        ),
+    ]);
 }
 
 #[test]
-fn test_evaluate_newer_than_rejects_empty_time_source() {
-    use crate::spec::{NewerThanSpec, TimeSource};
-    let rig = minimal_rig();
-    let spec = CheckSpec {
-        newer_than: Some(NewerThanSpec {
-            left: TimeSource::default(),
-            right: TimeSource::default(),
-        }),
+fn test_evaluate_command_exit_code() {
+    let command = |cmd: &str| CheckSpec {
+        command: Some(cmd.to_string()),
+        expect_exit: Some(0),
         ..Default::default()
     };
-    let err = evaluate(&rig, &spec).expect_err("empty source rejected");
-    assert!(err.message.contains("must specify one of"));
+    assert_cases(vec![
+        ("`true` exits 0", command("true"), None),
+        ("`false` fails expect_exit=0", command("false"), Some("")),
+    ]);
 }
 
 #[test]
-fn test_evaluate_check_with_no_probe_set_lists_newer_than() {
-    let rig = minimal_rig();
-    let err = evaluate(&rig, &CheckSpec::default()).expect_err("empty rejected");
-    // Documentation drift sentinel — make sure the error names every probe
-    // so users see `newer_than` in the suggestion.
-    assert!(err.message.contains("newer_than"));
+fn test_evaluate_newer_than() {
+    use crate::spec::{DiscoverSpec, NewerThanSpec, TimeSource};
+    let tmp_dir = tempfile::tempdir().expect("tmpdir");
+    let older = tmp_dir.path().join("older.txt");
+    let newer = tmp_dir.path().join("newer.txt");
+    std::fs::write(&older, "x").expect("write");
+    std::fs::write(&newer, "x").expect("write");
+    set_modified(&older, 1);
+    set_modified(&newer, 2);
+
+    let mtime = |path: &std::path::Path| TimeSource {
+        file_mtime: Some(path_string(path)),
+        ..Default::default()
+    };
+    let newer_than = |left: TimeSource, right: TimeSource| CheckSpec {
+        newer_than: Some(NewerThanSpec { left, right }),
+        ..Default::default()
+    };
+
+    assert_cases(vec![
+        (
+            "newer left passes",
+            newer_than(mtime(&newer), mtime(&older)),
+            None,
+        ),
+        (
+            "older left fails",
+            newer_than(mtime(&older), mtime(&newer)),
+            Some("not newer"),
+        ),
+        // No matching process means there is no stale daemon to flag.
+        (
+            "absent left process passes",
+            newer_than(
+                TimeSource {
+                    process_start: Some(DiscoverSpec {
+                        pattern: "homeboy-test-marker-no-process-matches-this-XQZ-9999".to_string(),
+                        argv_contains: Vec::new(),
+                    }),
+                    ..Default::default()
+                },
+                mtime(&newer),
+            ),
+            None,
+        ),
+    ]);
 }
 
 // ─── HTTP wait-ready (Extra-Chill/homeboy#1537) ──────────────────────────────
@@ -285,7 +233,7 @@ fn test_evaluate_check_with_no_probe_set_lists_newer_than() {
 // have called `bind()`/`listen()` yet when the next pipeline step
 // (`service.health`) fires. `http_check` retries connect-refused failures
 // for a bounded budget so single-pass `rig up` doesn't race the listener.
-// The four tests below pin both the wait-loop semantics and what we
+// The tests below pin both the wait-loop semantics and what we
 // deliberately do NOT retry on.
 
 /// Reserve a free TCP port by binding then dropping. Used only by tests

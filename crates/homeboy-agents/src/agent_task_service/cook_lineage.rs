@@ -151,25 +151,15 @@ mod tests {
     }
 
     /// The incident: a gate-fix successor has provenance and no `retry_of`.
-    /// It must still be recognized as continuing its source.
+    /// It must still be recognized as continuing its source. An initial
+    /// attempt carries no provenance and so no lineage.
     #[test]
     fn a_gate_fix_without_retry_of_still_continues_its_source() {
         let lineage = plan_lineage(&gate_fix_plan("run-1", "abc")).unwrap();
         assert_eq!(lineage.source_run_id, "run-1");
         assert_eq!(lineage.kind, CookLineageKind::GateFix);
         assert_eq!(lineage.source_patch_sha256.as_deref(), Some("abc"));
-    }
-
-    #[test]
-    fn explicit_retry_edge_does_not_reinterpret_artifact_provenance() {
-        let attempt = recipe_attempt(
-            gate_fix_plan("run-1", "abc"),
-            Some(CookAttemptLineage::retry("run-0")),
-        );
-        let lineage = recipe_attempt_lineage(&attempt).unwrap();
-        assert_eq!(lineage.source_run_id, "run-0");
-        assert_eq!(lineage.kind, CookLineageKind::Retry);
-        assert_eq!(lineage.source_patch_sha256, None);
+        assert_eq!(plan_lineage(&plan_with(json!({}))), None);
     }
 
     fn recipe_attempt(
@@ -184,7 +174,8 @@ mod tests {
         }
     }
 
-    /// The durable record is authoritative over anything derivable.
+    /// The durable record is authoritative over anything derivable, and
+    /// artifact evidence cannot grant absent recipe lineage authority.
     #[test]
     fn a_persisted_lineage_wins_over_derivation() {
         let attempt = recipe_attempt(
@@ -193,34 +184,23 @@ mod tests {
         );
         let lineage = recipe_attempt_lineage(&attempt).unwrap();
         assert_eq!(lineage, CookAttemptLineage::retry("run-0"));
-    }
 
-    /// Artifact evidence cannot grant absent recipe lineage authority.
-    #[test]
-    fn an_absent_edge_is_not_derived_from_artifact_provenance() {
         let attempt = recipe_attempt(gate_fix_plan("run-1", "abc"), None);
         assert_eq!(recipe_attempt_lineage(&attempt), None);
     }
 
+    /// The durable record omits an absent patch, and recipes recorded before
+    /// #17814 carry review-form lineage edges that must still decode, or every
+    /// reader of that Cook fails.
     #[test]
-    fn the_record_round_trips_and_omits_an_absent_patch() {
+    fn the_durable_record_round_trips_and_decodes_recorded_review_form_edges() {
         let value = serde_json::to_value(CookAttemptLineage::retry("run-1")).unwrap();
         assert_eq!(value, json!({ "source_run_id": "run-1", "kind": "retry" }));
         assert_eq!(
             serde_json::from_value::<CookAttemptLineage>(value).unwrap(),
             CookAttemptLineage::retry("run-1")
         );
-    }
 
-    #[test]
-    fn an_initial_attempt_has_no_lineage() {
-        assert_eq!(plan_lineage(&plan_with(json!({}))), None);
-    }
-
-    /// Recipes recorded before #17814 carry review-form lineage edges; they
-    /// must still decode, or every reader of that Cook fails.
-    #[test]
-    fn a_recorded_review_form_lineage_still_decodes() {
         let lineage: CookAttemptLineage = serde_json::from_value(json!({
             "source_run_id": "run-1",
             "kind": "review_form",

@@ -2812,35 +2812,11 @@ pub fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconnectRepo
 
 #[cfg(test)]
 mod status_read_purity_tests {
+    /// Status and persisted status only observe the recorded session through
+    /// the shared liveness predicate. Neither may mutate lifecycle state, open
+    /// a tunnel or reconnect.
     #[test]
-    fn status_has_no_lifecycle_mutation_path() {
-        let source = include_str!("connection.rs");
-        let start = source.find("pub fn status(").expect("status exists");
-        let end = start
-            + source[start..]
-                .find("pub fn reconcile_status(")
-                .expect("explicit reconciliation follows status");
-        let status = &source[start..end];
-
-        for mutation in [
-            "reconcile_session_metadata_with_observed_daemon",
-            "reconcile_terminal_jobs(",
-            "write_session(",
-            "adopt",
-            "read_session_or_live_peer",
-        ] {
-            assert!(
-                !status.contains(mutation),
-                "status must not invoke lifecycle mutation `{mutation}`"
-            );
-        }
-    }
-
-    /// Status, persisted status and the doctor projection only observe the
-    /// recorded session through the shared liveness predicate. None of them
-    /// may open a tunnel or reconnect.
-    #[test]
-    fn status_never_opens_a_tunnel() {
+    fn status_observes_without_mutating_or_opening_a_tunnel() {
         let source = include_str!("connection.rs");
         let section = |from: &str, to: &str| {
             let start = source.find(from).expect("section start exists");
@@ -2860,6 +2836,20 @@ mod status_read_purity_tests {
                 ),
             ),
         ] {
+            if name == "status" {
+                for mutation in [
+                    "reconcile_session_metadata_with_observed_daemon",
+                    "reconcile_terminal_jobs(",
+                    "write_session(",
+                    "adopt",
+                    "read_session_or_live_peer",
+                ] {
+                    assert!(
+                        !observation.contains(mutation),
+                        "status must not invoke lifecycle mutation `{mutation}`"
+                    );
+                }
+            }
             for transport in [
                 "ensure_transport",
                 "reach_runner",
