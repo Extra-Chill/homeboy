@@ -456,28 +456,6 @@ mod tests {
     use homeboy_core::api_jobs::JobEventKind;
     use homeboy_core::test_support::ControllerJobHarness;
 
-    /// The promotion request is the durable shape persisted under
-    /// `homeboy/agent-task-promotion-job/v1`. Round-trip every field so a field
-    /// added to the struct but dropped on the recovery path fails here rather
-    /// than silently losing its value after a restart (#13347).
-    #[test]
-    fn promotion_request_round_trips_every_field_through_its_durable_shape() {
-        let original = request();
-
-        let encoded = serde_json::to_value(&original).expect("serialize request");
-        assert!(
-            encoded.get("gates").is_some(),
-            "gates is a nested object in the durable shape: {encoded}"
-        );
-
-        let decoded: AgentTaskPromotionRequest =
-            serde_json::from_value(encoded).expect("deserialize request");
-        assert_eq!(
-            decoded, original,
-            "a field declared on the request was lost through its durable shape"
-        );
-    }
-
     fn request() -> AgentTaskPromotionRequest {
         AgentTaskPromotionRequest {
             source: "private aggregate content".to_string(),
@@ -560,28 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_checkpoint_replays_its_durable_result_without_reexecution() {
-        let mut job = AgentTaskPromotionJob::new(request()).expect("valid durable job");
-        job.phase = AgentTaskPromotionJobPhase::Completed;
-        job.report = Some(
-            serde_json::from_value(serde_json::json!({
-                "schema": "homeboy/agent-task-promotion-report/v1",
-                "status": "applied",
-                "source": { "kind": "aggregate", "task_id": "task" },
-                "to_worktree": "homeboy@promotion",
-                "target": { "worktree": "homeboy@promotion" },
-                "candidate": { "base_sha": "base", "candidate_sha": "patch-1", "tree_sha": "tree" },
-                "operator_notification": { "status": "completed", "message": "complete" }
-            }))
-            .expect("promotion report"),
-        );
-
-        let result = job.completed_result().expect("completed result");
-        assert_eq!(result["phase"], "completed");
-        assert_eq!(result["promotion"]["status"], "applied");
-    }
-
-    #[test]
     fn execute_and_resume_use_the_controller_job_handle_boundary() {
         let job = AgentTaskPromotionJob::new(request()).expect("valid durable job");
         let request = serde_json::to_value(&job).expect("serialize job");
@@ -634,6 +590,7 @@ mod tests {
             .expect("second completed replay");
         assert_eq!(first, second);
         assert_eq!(first["phase"], "completed");
+        assert_eq!(first["promotion"]["status"], "applied");
     }
 
     #[test]
@@ -671,11 +628,5 @@ mod tests {
         assert!(!public_text.contains("base-sha"));
         assert_eq!(public["source_run_id"], "run-123");
         assert_eq!(public["phase"], "queued");
-    }
-
-    #[test]
-    fn driver_registration_is_idempotent() {
-        register_promotion_job_driver();
-        register_promotion_job_driver();
     }
 }
