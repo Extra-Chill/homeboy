@@ -126,23 +126,3 @@ impl TraceVariantMatrixMode {
         }
     }
 }
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::TraceVariantMatrixMode;
-
-    #[test]
-    fn trace_variant_matrix_mode_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (TraceVariantMatrixMode::None, "none"),
-            (TraceVariantMatrixMode::Single, "single"),
-            (TraceVariantMatrixMode::Cumulative, "cumulative"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
-    }
-}

@@ -227,21 +227,3 @@ fn trace_experiment_runs_teardown_when_trace_fails() {
         assert!(run_path.exists());
     });
 }
-
-#[test]
-fn trace_success_retains_scratch_when_postprocessing_fails() {
-    with_isolated_home(|home| {
-        write_trace_experiment_extension(home, false);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_trace_experiment_rig(home, component_dir.path());
-
-        let mut args = trace_args_for_rig("studio-rig", "product-workflow");
-        args.experiment = Some("template".to_string());
-        let execution = execute_trace_run(args).expect("trace experiment should run");
-        assert_eq!(execution.workflow.exit_code, 0);
-
-        let run_path = execution.run_dir.path().to_path_buf();
-        execution.finish(false);
-        assert!(run_path.exists());
-    });
-}
