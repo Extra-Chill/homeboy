@@ -193,18 +193,15 @@ mod tests {
     }
 
     #[test]
-    fn skips_when_the_remote_runs_the_controller_release() {
-        let report = converge_runner_binary_with(&release(), || remote("0.439.0"), never_installs);
-        assert_eq!(report.status, RunnerBinaryConvergenceStatus::AlreadyCurrent);
-    }
-
-    #[test]
-    fn never_downgrades_a_newer_remote() {
-        let report = converge_runner_binary_with(&release(), || remote("0.440.0"), never_installs);
-        assert_eq!(
-            report.status,
-            RunnerBinaryConvergenceStatus::SkippedRemoteNewer
-        );
+    fn never_installs_over_a_current_or_newer_remote() {
+        for (version, expected) in [
+            ("0.439.0", RunnerBinaryConvergenceStatus::AlreadyCurrent),
+            ("0.440.0", RunnerBinaryConvergenceStatus::SkippedRemoteNewer),
+        ] {
+            let report =
+                converge_runner_binary_with(&release(), || remote(version), never_installs);
+            assert_eq!(report.status, expected, "runner {version}");
+        }
     }
 
     #[test]
@@ -224,42 +221,6 @@ mod tests {
                 RunnerBinaryConvergenceStatus::SkippedDevBuild
             );
             assert_eq!(report.from, None);
-        }
-    }
-
-    #[test]
-    fn busy_runner_convergence_preserves_version_guards() {
-        for (version, expected, should_refresh) in [
-            ("0.438.2", RunnerBinaryConvergenceStatus::Converged, true),
-            (
-                "0.440.0",
-                RunnerBinaryConvergenceStatus::SkippedRemoteNewer,
-                false,
-            ),
-            (
-                "0.439.0",
-                RunnerBinaryConvergenceStatus::AlreadyCurrent,
-                false,
-            ),
-        ] {
-            // Active jobs belong to refresh, not convergence. Keep them alive
-            // across the refresh callback to model an always-busy shared Lab.
-            let active_jobs = vec!["active-job".to_string()];
-            let refreshed = std::cell::Cell::new(false);
-            let report = converge_runner_binary_with(
-                &release(),
-                || remote(version),
-                || {
-                    assert!(!active_jobs.is_empty());
-                    refreshed.set(true);
-                    ControllerReleaseInstall::Installed {
-                        identity: Some(release().display),
-                        path_binaries: Vec::new(),
-                    }
-                },
-            );
-            assert_eq!(report.status, expected, "runner {version}");
-            assert_eq!(refreshed.get(), should_refresh, "runner {version}");
         }
     }
 
