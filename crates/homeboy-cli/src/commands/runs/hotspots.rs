@@ -1364,18 +1364,6 @@ mod tests {
         assert_eq!(exit, 0);
     }
 
-    fn sample_run(kind: &str, component_id: &str, rig_id: &str) -> NewRunRecord {
-        NewRunRecord::builder(kind)
-            .component_id(component_id)
-            .command(format!("homeboy {kind} {component_id}"))
-            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-            .homeboy_version("test-version")
-            .git_sha(Some("abc123".to_string()))
-            .rig_id(rig_id)
-            .metadata(Value::Null)
-            .build()
-    }
-
     #[test]
     fn standardized_hotspots_rank_by_total_score_across_runs() {
         let artifacts = vec![
@@ -1418,54 +1406,9 @@ mod tests {
     }
 
     #[test]
-    fn skipped_directory_fuzz_artifact_points_to_retrieval_command() {
-        with_isolated_home(|home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .start_run(sample_run("bench", "homeboy", "studio"))
-                .expect("run");
-            store
-                .finish_run(&run.id, RunStatus::Pass, None)
-                .expect("finish run");
-            let directory = home.path().join("fuzz-artifacts");
-            std::fs::create_dir_all(&directory).expect("directory");
-            std::fs::write(directory.join("result.json"), b"{}").expect("file");
-            store
-                .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
-                .expect("directory artifact");
-
-            let (output, _) = runs_hotspots(
-                &test_store(),
-                RunsHotspotsArgs {
-                    run_ids: vec![run.id.clone()],
-                    baseline_runs: Vec::new(),
-                    candidate_runs: Vec::new(),
-                    limit: 20,
-                    ..Default::default()
-                },
-            )
-            .expect("hotspots");
-
-            let RunsOutput::Hotspots(output) = output else {
-                panic!("expected hotspots output");
-            };
-            assert_eq!(output.skipped_artifact_count, 1);
-            assert!(output.skipped_artifacts[0]
-                .reason
-                .contains(&format!("homeboy runs artifacts {} --pull", run.id)));
-            assert!(output.skipped_artifacts[0]
-                .reason
-                .contains("homeboy runs artifact get"));
-        });
-    }
-
-    #[test]
-    fn hotspot_run_lookup_resolves_a_durable_run_label_through_the_facade() {
-        // #6768: routing through `runs_service::require_run` resolves a
-        // durable run label to its record id, and the
-        // batched artifact read must key on the resolved record id — keying on
-        // the caller-supplied label would silently yield zero artifacts.
+    fn hotspot_run_lookup_resolves_labels_and_points_skipped_directories_to_retrieval() {
+        // The batched artifact read must key on the record id resolved from a
+        // durable run label; keying on the label would yield zero artifacts.
         with_isolated_home(|home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
@@ -1473,10 +1416,6 @@ mod tests {
                 .start_run(
                     NewRunRecord::builder("bench")
                         .component_id("homeboy")
-                        .command("homeboy bench homeboy --run-id hotspot-label")
-                        .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-                        .homeboy_version("test-version")
-                        .git_sha(Some("abc123".to_string()))
                         .rig_id("studio")
                         .metadata(json!({ "requested_run_id": "hotspot-label" }))
                         .build(),
@@ -1492,55 +1431,32 @@ mod tests {
                 .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
                 .expect("directory artifact");
 
-            let (output, _) = runs_hotspots(
-                &test_store(),
-                RunsHotspotsArgs {
-                    run_ids: vec!["hotspot-label".to_string()],
-                    baseline_runs: Vec::new(),
-                    candidate_runs: Vec::new(),
-                    limit: 20,
-                    ..Default::default()
-                },
-            )
-            .expect("durable run label resolves through runs_service::require_run");
+            let hotspots_for = |run_id: &str| {
+                runs_hotspots(
+                    &test_store(),
+                    RunsHotspotsArgs {
+                        run_ids: vec![run_id.to_string()],
+                        limit: 20,
+                        ..Default::default()
+                    },
+                )
+            };
 
+            let (output, _) = hotspots_for("hotspot-label").expect("durable run label resolves");
             let RunsOutput::Hotspots(output) = output else {
                 panic!("expected hotspots output");
             };
-            // A non-zero skipped count proves the artifact read was keyed on
-            // the resolved record id rather than the label.
             assert_eq!(output.skipped_artifact_count, 1);
-            assert!(output.skipped_artifacts[0]
-                .reason
-                .contains(&format!("homeboy runs artifacts {} --pull", run.id)));
-        });
-    }
+            let reason = &output.skipped_artifacts[0].reason;
+            assert!(reason.contains(&format!("homeboy runs artifacts {} --pull", run.id)));
+            assert!(reason.contains("homeboy runs artifact get"));
 
-    #[test]
-    fn hotspot_run_lookup_reports_the_facade_missing_run_error() {
-        // The facade's missing-run error carries runner guidance the private
-        // helper never produced. Preserve the stable argument/message contract.
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             // `RunsOutput` is not `Debug`, so match rather than `expect_err`.
-            let error = match runs_hotspots(
-                &test_store(),
-                RunsHotspotsArgs {
-                    run_ids: vec!["definitely-missing-run".to_string()],
-                    baseline_runs: Vec::new(),
-                    candidate_runs: Vec::new(),
-                    limit: 20,
-                    ..Default::default()
-                },
-            ) {
+            let error = match hotspots_for("definitely-missing-run") {
                 Ok(_) => panic!("expected a missing-run error"),
                 Err(error) => error,
             };
-            assert!(
-                error.message.contains("run record not found"),
-                "unexpected message: {}",
-                error.message
-            );
+            assert!(error.message.contains("run record not found"));
         });
     }
 
@@ -1579,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_hotspots_take_precedence_over_loose_payloads() {
+    fn declared_hotspots_take_precedence_over_fallback_sources() {
         let points = extract_hotspot_points(&json!({
             "schema": "homeboy/fuzz-result-envelope/v1",
             "hotspots": {
@@ -1614,34 +1530,39 @@ mod tests {
         assert_eq!(points[0].label.as_deref(), Some("Search route"));
         assert_eq!(points[0].score, 0.91);
         assert_eq!(points[0].source, "typed:set-1");
-    }
 
-    #[test]
-    fn nested_typed_hotspots_use_contract_score() {
+        // Typed sets nested under metadata use the contract score too.
         let points = extract_hotspot_points(&json!({
             "schema": "homeboy/fuzz-result-envelope/v1",
             "metadata": {
                 "hotspots": {
                     "schema": "homeboy/fuzz-hotspot-set/v1",
                     "id": "metadata-set",
-                    "items": [
-                        {
-                            "id": "route:checkout",
-                            "dimension": "route",
-                            "metric": "duration",
-                            "value": 950.0,
-                            "unit": "ms",
-                            "relative_score": 0.82
-                        }
-                    ]
+                    "items": [{
+                        "id": "route:checkout",
+                        "dimension": "route",
+                        "metric": "duration",
+                        "value": 950.0,
+                        "unit": "ms",
+                        "relative_score": 0.82
+                    }]
                 }
             }
         }));
-
         assert_eq!(points.len(), 1);
-        assert_eq!(points[0].key, "route:checkout");
         assert_eq!(points[0].score, 0.82);
         assert_eq!(points[0].source, "typed:metadata-set");
+
+        // Loose standardized hotspots also win over fallback sources.
+        let points = extract_hotspot_points(&json!({
+            "schema": "https://schemas.homeboy.dev/fuzz/result-envelope.json",
+            "hotspots": [{ "id": "explicit", "score": 9 }],
+            "campaign": {
+                "findings": [{ "id": "fallback", "severity": "critical" }]
+            }
+        }));
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].key, "explicit");
     }
 
     #[test]
@@ -1898,19 +1819,5 @@ mod tests {
         assert_eq!(ranked[0].key, "gap-a");
         assert_eq!(ranked[0].label.as_deref(), Some("Gap A"));
         assert_eq!(ranked[1].key, "target_id=target-a|operation_id=delete");
-    }
-
-    #[test]
-    fn standardized_hotspots_take_precedence_over_fallback_sources() {
-        let points = extract_hotspot_points(&json!({
-            "schema": "https://schemas.homeboy.dev/fuzz/result-envelope.json",
-            "hotspots": [{ "id": "explicit", "score": 9 }],
-            "campaign": {
-                "findings": [{ "id": "fallback", "severity": "critical" }]
-            }
-        }));
-
-        assert_eq!(points.len(), 1);
-        assert_eq!(points[0].key, "explicit");
     }
 }
