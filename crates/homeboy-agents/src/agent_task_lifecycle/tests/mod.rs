@@ -295,6 +295,29 @@ pub(super) fn persisted_terminal_result_snapshot(
     snapshot
 }
 
+/// Rewrite a stored record through the ambient-rooted fixture writer, pointing
+/// the ambient roots at `store` for the duration of the rewrite.
+pub(super) fn rewrite_record_in_store<F>(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    rewrite: F,
+) -> homeboy_core::Result<AgentTaskRunRecord>
+where
+    F: FnMut(&mut AgentTaskRunRecord),
+{
+    with_isolated_home(|_| {
+        let _config = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
+            store.roots().config(),
+        );
+        let _data = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            store.roots().data(),
+        );
+        rewrite_record_for_test(run_id, rewrite)
+    })
+}
+
 pub(super) fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
     AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
