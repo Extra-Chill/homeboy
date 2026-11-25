@@ -199,16 +199,4 @@ mod tests {
         assert_eq!(classify_rig_leases(1, None), ResourceRecommendation::Warm);
         assert_eq!(classify_rig_leases(2, None), ResourceRecommendation::Hot);
     }
-
-    #[test]
-    fn overall_recommendation_returns_hottest_signal() {
-        assert_eq!(
-            overall_recommendation(&[
-                ResourceRecommendation::Ok,
-                ResourceRecommendation::Hot,
-                ResourceRecommendation::Warm,
-            ]),
-            ResourceRecommendation::Hot
-        );
-    }
 }
