@@ -144,58 +144,6 @@ fn homeboy_local_artifact_normalization_measures_empty_nonempty_and_unavailable_
     assert_eq!(unavailable_outcome.artifacts[0].size_bytes, None);
 }
 
-#[test]
-fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
-    // #7719: a successful cook whose patch artifact is empty but which produced
-    // substantive work evidence (transcript/report) must NOT be silently
-    // collapsed to NoOp, which would discard real (possibly committed) work.
-    // It is surfaced as a recoverable candidate for controller review/salvage.
-    let root = tempfile::tempdir().expect("artifact root");
-    let empty_patch_path = root.path().join("cook.patch");
-    let transcript_path = root.path().join("transcript.md");
-    fs::write(&empty_patch_path, "").expect("empty patch");
-    fs::write(
-        &transcript_path,
-        "# transcript\nreal provider work happened\n",
-    )
-    .expect("transcript");
-
-    let provenance = AgentTaskArtifactsPathProvenance {
-        owner: "homeboy".to_string(),
-        locality: "runner".to_string(),
-        plan_id: "plan".to_string(),
-        run_id: None,
-        task_id: "pi-empty-patch-with-evidence".to_string(),
-        attempt: 1,
-    };
-
-    let mut empty_patch =
-        fixture_artifact("patch", "patch", &empty_patch_path, Some("text/x-patch"));
-    empty_patch.size_bytes = None;
-    let mut transcript = fixture_artifact(
-        "transcript",
-        "transcript",
-        &transcript_path,
-        Some("text/markdown"),
-    );
-    transcript.size_bytes = None;
-
-    let mut outcome = failed_outcome_with_run_result(Value::Null);
-    outcome.status = AgentTaskOutcomeStatus::Succeeded;
-    outcome.failure_classification = None;
-    outcome.artifacts = vec![empty_patch, transcript];
-    normalize_homeboy_local_artifact_sizes(&mut outcome, root.path(), &provenance, None);
-
-    assert_eq!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Succeeded,
-        "evidence cannot assert or invalidate a candidate before harvest"
-    );
-    assert_eq!(outcome.artifacts[0].size_bytes, Some(0));
-    assert!(outcome.artifacts[1].size_bytes.unwrap_or_default() > 0);
-    assert!(outcome.outcome_candidate().is_none());
-}
-
 /// #15364: an empty patch beside a transcript is only a patch-capture risk if
 /// the attempt checkout holds unharvested state. A checkout verified at its
 /// base proves nothing was lost, so the outcome stays `Succeeded` and Cook's
@@ -203,17 +151,7 @@ fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
 #[test]
 fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_unchanged() {
     use homeboy_test_support::git::output as git;
-    let workspace = tempfile::tempdir().expect("attempt checkout");
-    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
-    git(
-        workspace.path(),
-        &["config", "user.email", "test@example.com"],
-    );
-    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
-    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
-    git(workspace.path(), &["add", "lib.rs"]);
-    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
-    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+    let (workspace, base) = base_checkout();
 
     let root = tempfile::tempdir().expect("artifact root");
     let empty_patch_path = root.path().join("cook.patch");
@@ -309,17 +247,7 @@ fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_uncha
 #[test]
 fn no_op_without_change_artifact_is_verified_only_when_the_attempt_checkout_is_unchanged() {
     use homeboy_test_support::git::output as git;
-    let workspace = tempfile::tempdir().expect("attempt checkout");
-    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
-    git(
-        workspace.path(),
-        &["config", "user.email", "test@example.com"],
-    );
-    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
-    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
-    git(workspace.path(), &["add", "lib.rs"]);
-    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
-    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+    let (workspace, base) = base_checkout();
     let provenance = AgentTaskArtifactsPathProvenance {
         owner: "homeboy".to_string(),
         locality: "runner".to_string(),
@@ -406,18 +334,7 @@ fn no_op_without_change_artifact_is_verified_only_when_the_attempt_checkout_is_u
 /// patch, is left untouched.
 #[test]
 fn succeeded_without_change_artifact_is_a_verified_no_change_attempt_when_a_patch_is_required() {
-    use homeboy_test_support::git::output as git;
-    let workspace = tempfile::tempdir().expect("attempt checkout");
-    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
-    git(
-        workspace.path(),
-        &["config", "user.email", "test@example.com"],
-    );
-    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
-    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
-    git(workspace.path(), &["add", "lib.rs"]);
-    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
-    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+    let (workspace, base) = base_checkout();
     let provenance = AgentTaskArtifactsPathProvenance {
         owner: "homeboy".to_string(),
         locality: "runner".to_string(),
@@ -490,12 +407,10 @@ fn succeeded_without_change_artifact_is_a_verified_no_change_attempt_when_a_patc
     assert_eq!(clean.status, AgentTaskOutcomeStatus::Succeeded);
     assert!(clean.failure_classification.is_none());
     assert!(clean.is_verified_unchanged_attempt());
-    let patches = clean
+    assert!(!clean
         .artifacts
         .iter()
-        .filter(|artifact| artifact.kind == "patch")
-        .collect::<Vec<_>>();
-    assert!(patches.is_empty());
+        .any(|artifact| artifact.kind == "patch"));
     assert!(clean.outcome_candidate().is_none());
 
     // A request that never asked for a patch keeps its provider result.
@@ -515,18 +430,7 @@ fn succeeded_without_change_artifact_is_a_verified_no_change_attempt_when_a_patc
 /// exist and then failing the required `patch` artifact.
 #[test]
 fn review_form_only_failure_without_edits_records_the_verified_empty_patch() {
-    use homeboy_test_support::git::output as git;
-    let workspace = tempfile::tempdir().expect("attempt checkout");
-    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
-    git(
-        workspace.path(),
-        &["config", "user.email", "test@example.com"],
-    );
-    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
-    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
-    git(workspace.path(), &["add", "lib.rs"]);
-    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
-    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+    let (workspace, base) = base_checkout();
     let provenance = AgentTaskArtifactsPathProvenance {
         owner: "homeboy".to_string(),
         locality: "runner".to_string(),
@@ -602,44 +506,8 @@ fn review_form_only_failure_without_edits_records_the_verified_empty_patch() {
 
 #[test]
 fn revision_bound_no_change_verdict_without_patch_accepts_review_only_for_clean_checkout() {
-    let workspace = tempfile::tempdir().expect("workspace");
+    let (workspace, revision) = base_checkout();
     let artifacts = tempfile::tempdir().expect("artifact root");
-    for args in [
-        ["init"].as_slice(),
-        ["config", "user.email", "homeboy@example.test"].as_slice(),
-        ["config", "user.name", "Homeboy Test"].as_slice(),
-    ] {
-        assert!(std::process::Command::new("git")
-            .args(args)
-            .current_dir(workspace.path())
-            .status()
-            .expect("run git")
-            .success());
-    }
-    fs::write(workspace.path().join("reviewed.rs"), "reviewed\n").expect("source");
-    assert!(std::process::Command::new("git")
-        .args(["add", "reviewed.rs"])
-        .current_dir(workspace.path())
-        .status()
-        .expect("stage source")
-        .success());
-    assert!(std::process::Command::new("git")
-        .args(["commit", "-m", "review base"])
-        .current_dir(workspace.path())
-        .status()
-        .expect("commit source")
-        .success());
-    let revision = String::from_utf8(
-        std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(workspace.path())
-            .output()
-            .expect("read revision")
-            .stdout,
-    )
-    .expect("UTF-8 revision")
-    .trim()
-    .to_string();
     let transcript_path = artifacts.path().join("review.md");
     fs::write(&transcript_path, "No findings.\n".repeat(1024)).expect("large transcript");
     let provenance = AgentTaskArtifactsPathProvenance {
@@ -735,6 +603,23 @@ fn generic_provider_keeps_untyped_outcome() {
     assert_eq!(outcome.failure_classification, None);
     assert!(outcome.diagnostics.is_empty());
     assert!(outcome.typed_artifacts.is_empty());
+}
+
+/// A one-commit attempt checkout and its base revision.
+fn base_checkout() -> (tempfile::TempDir, String) {
+    use homeboy_test_support::git::output as git;
+    let workspace = tempfile::tempdir().expect("attempt checkout");
+    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
+    git(
+        workspace.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
+    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
+    git(workspace.path(), &["add", "lib.rs"]);
+    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
+    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+    (workspace, base)
 }
 
 fn failed_outcome_with_run_result(run_result: Value) -> AgentTaskOutcome {
@@ -882,25 +767,19 @@ fn populated_failed_run_result_surfaces_error_identity_and_refs() {
 }
 
 #[test]
-fn succeeded_run_result_is_not_mined_for_failure_diagnostics() {
-    let mut outcome = failed_outcome_with_run_result(json!({
+fn run_result_mining_only_runs_for_failed_outcomes_with_failed_run_results() {
+    let succeeded_run_result = failed_outcome_with_run_result(json!({
         "status": "succeeded",
         "metadata": { "run_id": "run-999" }
     }));
-    // Even though the outcome status is failed, a succeeded run-result is
-    // left untouched (the failure cause is elsewhere).
-    surface_provider_run_result_diagnostics(&mut outcome);
-    assert!(outcome.diagnostics.is_empty());
-}
-
-#[test]
-fn non_failure_outcome_skips_run_result_mining() {
-    let mut outcome = failed_outcome_with_run_result(json!({
+    let mut succeeded_outcome = failed_outcome_with_run_result(json!({
         "status": "failed",
         "metadata": { "provider_error": { "message": "boom" } }
     }));
-    outcome.status = AgentTaskOutcomeStatus::Succeeded;
-    surface_provider_run_result_diagnostics(&mut outcome);
-    assert!(outcome.diagnostics.is_empty());
-    assert!(outcome.metadata.get("provider_error").is_none());
+    succeeded_outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    for mut outcome in [succeeded_run_result, succeeded_outcome] {
+        surface_provider_run_result_diagnostics(&mut outcome);
+        assert!(outcome.diagnostics.is_empty());
+        assert!(outcome.metadata.get("provider_error").is_none());
+    }
 }
