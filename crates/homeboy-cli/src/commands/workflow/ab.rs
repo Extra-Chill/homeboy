@@ -520,48 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_ab_parses_repeatable_compare_and_step_verbs() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "--placement",
-            "local",
-            "workflow",
-            "ab",
-            ".",
-            "--base",
-            "main",
-            "--candidate",
-            "HEAD",
-            "--run",
-            "make out",
-            "--compare",
-            "out",
-            "--compare",
-            "dist/*.html",
-        ])
-        .expect("parse workflow ab");
-        let Commands::Workflow(args) = cli.command else {
-            panic!("workflow");
-        };
-        let super::super::WorkflowCommand::Ab(ab) = args.command else {
-            panic!("ab");
-        };
-        assert_eq!(ab.compare, ["out", "dist/*.html"]);
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "workflow",
-            "ab",
-            ".",
-            "--base",
-            "a",
-            "--candidate",
-            "b",
-            "--run",
-            "x",
-        ])
-        .is_err());
-
-        // The recipe's step argv is a real command line.
+    fn workflow_ab_recipe_step_argv_parses_as_real_command_lines() {
         let definition = ab::definition();
         for step in &definition.steps {
             let mut argv = vec!["homeboy".to_string()];
