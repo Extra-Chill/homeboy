@@ -1823,7 +1823,7 @@ mod execution_placement_tests {
     }
 
     #[test]
-    fn durable_plan_status_and_verified_outcome_keep_one_decision_identity() {
+    fn verified_outcome_keeps_one_decision_identity_and_stale_outcomes_fail_closed() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut plan = super::super::tests::test_plan();
             let placement = decision();
@@ -1854,6 +1854,16 @@ mod execution_placement_tests {
                 status.metadata["execution_placement_outcome"]["decision_id"],
                 decision().decision_id
             );
+            let error = record_execution_placement_outcome(
+                "placement-run",
+                homeboy_lab_contract::ExecutionPlacementOutcome {
+                    decision_id: "stale".to_string(),
+                    effective: EffectiveExecutionPlacement::Local,
+                    runner_id: None,
+                },
+            )
+            .expect_err("reject a stale or contradictory outcome");
+            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
         });
     }
 
@@ -1879,9 +1889,11 @@ mod execution_placement_tests {
             let decision: homeboy_lab_contract::ExecutionPlacementDecision =
                 serde_json::from_value(record.metadata["execution_placement_decision"].clone())
                     .expect("a controller-local run records a decodable canonical decision");
+            assert!(decision.is_submission_stamp());
             assert_eq!(decision.selected, EffectiveExecutionPlacement::Local);
             assert!(decision.runner.is_none());
             assert!(decision.permits_local_execution());
+            assert_eq!(load_plan(&record.run_id).expect("durable plan"), plan);
 
             // The whole point of recording it: the local outcome now verifies.
             record_execution_placement_outcome(
@@ -1943,62 +1955,6 @@ mod execution_placement_tests {
                     .expect("local outcome"),
             )
             .expect("the routed decision now owns the record");
-        });
-    }
-
-    #[test]
-    fn stale_or_contradictory_outcomes_fail_closed() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut plan = super::super::tests::test_plan();
-            plan.metadata = json!({ "execution_placement_decision": decision() });
-            submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_environment().unwrap(),
-                &plan,
-                Some("placement-run"),
-                execution_runner_id(),
-                None,
-                None,
-                |_| Ok(json!({})),
-            )
-            .expect("submit plan");
-            let error = record_execution_placement_outcome(
-                "placement-run",
-                homeboy_lab_contract::ExecutionPlacementOutcome {
-                    decision_id: "stale".to_string(),
-                    effective: EffectiveExecutionPlacement::Local,
-                    runner_id: None,
-                },
-            )
-            .expect_err("reject contradictory outcome");
-            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        });
-    }
-
-    #[test]
-    fn controller_local_submission_records_a_canonical_placement_stamp() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let plan = super::super::tests::test_plan();
-            let record = submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_environment().unwrap(),
-                &plan,
-                Some("placement-run"),
-                execution_runner_id(),
-                None,
-                None,
-                |_| Ok(json!({})),
-            )
-            .expect("submit plan");
-
-            let submission_decision: homeboy_lab_contract::ExecutionPlacementDecision =
-                serde_json::from_value(record.metadata["execution_placement_decision"].clone())
-                    .expect("controller-local submission records a canonical decision");
-            assert!(submission_decision.is_submission_stamp());
-            assert_eq!(
-                submission_decision.selected,
-                EffectiveExecutionPlacement::Local
-            );
-            assert!(submission_decision.permits_local_execution());
-            assert_eq!(load_plan(&record.run_id).expect("durable plan"), plan);
         });
     }
 }

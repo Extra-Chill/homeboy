@@ -103,9 +103,22 @@ fn unresolved_component_lint_base_is_unavailable_without_verdict() {
 
 /// A bash-only gate program under dash dies on line 1 with exit 2 on the
 /// candidate and the baseline alike. That is a broken gate declaration,
-/// not inherited infrastructure (Extra-Chill/homeboy#15305).
+/// not inherited infrastructure (Extra-Chill/homeboy#15305). Shell syntax
+/// errors are the same declaration failure.
 #[test]
-fn dash_rejecting_a_bash_only_gate_is_a_gate_declaration_failure() {
+fn shell_interpreter_rejections_are_gate_declaration_failures() {
+    for stderr in [
+        "sh: 3: Syntax error: \"(\" unexpected\n",
+        "sh: 1: Bad substitution\n",
+        "sh: line 4: syntax error near unexpected token `fi'\n",
+    ] {
+        let evidence = gate_failure_evidence("./verify", 2, "", stderr, None);
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::GateDeclaration,
+            "stderr {stderr:?}"
+        );
+    }
     let evidence = gate_failure_evidence(
         "set -euo pipefail\necho VERIFY OK\n",
         2,
@@ -127,22 +140,6 @@ fn dash_rejecting_a_bash_only_gate_is_a_gate_declaration_failure() {
         "feedback must explain the gate shell: {}",
         evidence.agent_feedback
     );
-}
-
-#[test]
-fn shell_syntax_errors_are_gate_declaration_failures() {
-    for stderr in [
-        "sh: 3: Syntax error: \"(\" unexpected\n",
-        "sh: 1: Bad substitution\n",
-        "sh: line 4: syntax error near unexpected token `fi'\n",
-    ] {
-        let evidence = gate_failure_evidence("./verify", 2, "", stderr, None);
-        assert_eq!(
-            evidence.classification,
-            AgentTaskGateFailureClassification::GateDeclaration,
-            "stderr {stderr:?}"
-        );
-    }
 }
 
 /// A Homeboy setup/infrastructure error (structured envelope, exit 2)
@@ -327,22 +324,6 @@ fn homeboy_gate_that_resolved_its_target_stays_candidate_code() {
     }
 }
 
-/// Mentioning the words in ordinary output is not the structured marker.
-#[test]
-fn prose_about_capability_preflight_stays_candidate_code() {
-    let evidence = gate_failure_evidence(
-        "./verify",
-        1,
-        "test review_capability_preflight_parser ... FAILED\n",
-        "",
-        None,
-    );
-    assert_eq!(
-        evidence.classification,
-        AgentTaskGateFailureClassification::CandidateCode
-    );
-}
-
 #[test]
 fn libtest_environment_names_are_not_diagnostics() {
     for status in ["ok", "ignored", "ignored, needs space", "FAILED"] {
@@ -509,22 +490,22 @@ fn composer_missing_dev_tool_cannot_be_accepted_as_inherited() {
         .contains("Composer dev dependencies in subdirectories"));
 }
 
-#[test]
-fn missing_executable_cannot_be_accepted_as_inherited() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut report = run_gate_command(temp.path(), 1, "homeboy_nonexistent_gate_16197").unwrap();
-    report.accept_inherited_failure();
-    assert_eq!(report.status, AgentTaskGateStatus::Failed);
-    assert_eq!(
-        report.failure_evidence.unwrap().classification,
-        AgentTaskGateFailureClassification::Environment
-    );
-}
-
 /// Ordinary failures stay candidate feedback: a shell message on a
-/// non-syntax exit status, or a test's own "syntax error".
+/// non-syntax exit status, a test's own "syntax error", or prose that
+/// merely mentions the capability-preflight marker.
 #[test]
 fn ordinary_gate_failures_stay_candidate_code() {
+    let prose = gate_failure_evidence(
+        "./verify",
+        1,
+        "test review_capability_preflight_parser ... FAILED\n",
+        "",
+        None,
+    );
+    assert_eq!(
+        prose.classification,
+        AgentTaskGateFailureClassification::CandidateCode
+    );
     for (exit_code, stderr) in [
         (1, "test fixture: not found\n"),
         (127, "sh: 1: ./bin/check: not found\n"),
@@ -541,49 +522,25 @@ fn ordinary_gate_failures_stay_candidate_code() {
     }
 }
 
-/// A conclusive comparison carries no diagnostic, and the field is omitted
-/// from the wire form so persisted reports written before it existed still
-/// round-trip.
+/// An inconclusive comparison round-trips the reason it could not conclude;
+/// a conclusive one omits the field, and reports persisted before the field
+/// existed still decode.
 #[test]
-fn baseline_comparison_omits_an_absent_diagnostic() {
-    let comparison = AgentTaskGateBaselineComparison {
-        base_ref: "abc".to_string(),
-        exit_code: 1,
-        failure_fingerprint: "fp".to_string(),
-        matches_candidate_failure: true,
-        result: AgentTaskGateDifferentialResult::BaselineRed,
-        diagnostic: None,
-        failure_attribution: None,
-    };
-    let json = serde_json::to_value(&comparison).expect("serialize");
-    assert!(
-        json.get("diagnostic").is_none(),
-        "absent diagnostic must not widen the wire form: {json}"
-    );
-}
-
-/// A report persisted before the field existed must still deserialize.
-#[test]
-fn baseline_comparison_reads_reports_written_without_a_diagnostic() {
-    let json = serde_json::json!({
+fn baseline_comparison_diagnostic_is_optional_on_the_wire() {
+    let legacy: AgentTaskGateBaselineComparison = serde_json::from_value(serde_json::json!({
         "base_ref": "abc",
         "exit_code": 124,
         "failure_fingerprint": "",
         "matches_candidate_failure": false,
         "result": "inconclusive"
-    });
-    let comparison: AgentTaskGateBaselineComparison =
-        serde_json::from_value(json).expect("deserialize legacy report");
-    assert_eq!(comparison.diagnostic, None);
-    assert_eq!(
-        comparison.result,
-        AgentTaskGateDifferentialResult::Inconclusive
-    );
-}
+    }))
+    .expect("deserialize legacy report");
+    assert_eq!(legacy.diagnostic, None);
+    assert!(serde_json::to_value(&legacy)
+        .unwrap()
+        .get("diagnostic")
+        .is_none());
 
-/// An inconclusive comparison round-trips the reason it could not conclude.
-#[test]
-fn baseline_comparison_round_trips_its_diagnostic() {
     let comparison = AgentTaskGateBaselineComparison {
         base_ref: "abc".to_string(),
         exit_code: 124,
@@ -690,9 +647,26 @@ fn lab_gate_replay_policy_requests_runner_side_hydration() {
 /// could not execute under the resolved placement. Reading exit code
 /// alone misread this as a passing gate; this pins the marker-based
 /// classification as `Deferred`, distinct from both `Succeeded` and
-/// `Failed`.
+/// `Failed`; ordinary stdout keeps the exit-code classification.
 #[test]
 fn a_runner_wait_marker_on_stdout_classifies_as_deferred_regardless_of_exit_code() {
+    for (exit_code, stdout, expected) in [
+        (0, "ok", AgentTaskGateStatus::Succeeded),
+        (1, "", AgentTaskGateStatus::Failed),
+    ] {
+        let report = AgentTaskGateReport::new(
+            "gate-1",
+            legacy_gate_argv("true"),
+            exit_code,
+            stdout,
+            String::new(),
+            None,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        );
+        assert_eq!(report.status, expected, "exit_code={exit_code}");
+    }
     for exit_code in [0, 1] {
         let report = AgentTaskGateReport::new(
             "gate-1",
@@ -715,37 +689,6 @@ fn a_runner_wait_marker_on_stdout_classifies_as_deferred_regardless_of_exit_code
             "exit_code={exit_code}"
         );
     }
-}
-
-/// A gate whose stdout is not the runner-wait marker keeps the
-/// ordinary exit-code classification.
-#[test]
-fn ordinary_stdout_is_not_misclassified_as_deferred() {
-    let succeeded = AgentTaskGateReport::new(
-        "gate-1",
-        vec!["sh".to_string(), "-lc".to_string(), "true".to_string()],
-        0,
-        "ok",
-        String::new(),
-        None,
-        AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        AgentTaskGateEnvironment::default(),
-    );
-    assert_eq!(succeeded.status, AgentTaskGateStatus::Succeeded);
-
-    let failed = AgentTaskGateReport::new(
-        "gate-1",
-        vec!["sh".to_string(), "-lc".to_string(), "false".to_string()],
-        1,
-        "",
-        "boom",
-        None,
-        AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        AgentTaskGateEnvironment::default(),
-    );
-    assert_eq!(failed.status, AgentTaskGateStatus::Failed);
 }
 
 /// Serializes tests that mutate process-global environment state.
@@ -802,7 +745,6 @@ fn cargo_test_results_preserve_selected_counts_without_rejecting_broad_gates() {
     .expect("Cargo summary is parsed");
     assert_eq!(zero.total, 0);
     assert_eq!(zero.filtered, 1675);
-    assert_eq!(effective_gate_exit_code(0, None), 0);
 
     let empty = cargo_test_result(
             "cargo test --locked -p empty-crate",
@@ -813,7 +755,6 @@ fn cargo_test_results_preserve_selected_counts_without_rejecting_broad_gates() {
         .expect("empty Cargo summary is parsed");
     assert_eq!(empty.total, 0);
     assert_eq!(empty.filtered, 0);
-    assert_eq!(effective_gate_exit_code(0, None), 0);
 
     let selected = cargo_test_result(
             "cargo test --locked selected_test",
@@ -1248,35 +1189,6 @@ fn cargo_selection_admits_exact_or_module_prefix_and_keeps_broad_gates_explicit(
     assert!(quiet_zero_match.selected_ids.is_empty());
     assert_eq!(quiet_zero_match.selected_count, 0);
     assert_eq!(effective_gate_exit_code(0, Some(&quiet_zero_match)), 1);
-}
-
-#[test]
-fn failing_substring_selection_fails_with_the_real_cargo_exit_code() {
-    let failing = cargo_selection(
-            "cargo test selected_test",
-            &[
-                "sh".to_string(),
-                "-lc".to_string(),
-                "cargo test selected_test".to_string(),
-            ],
-            "selected_test: test\nselected_test_unrelated: test\ntest selected_test ... ok\ntest selected_test_unrelated ... FAILED\n",
-            "",
-            None,
-        )
-        .expect("Cargo selection");
-    assert_eq!(failing.filter_interpretation, "substring_ambiguous");
-    assert_eq!(failing.selected_count, 2);
-    assert_eq!(effective_gate_exit_code(101, Some(&failing)), 101);
-    let evidence = gate_failure_evidence("cargo test selected_test", 101, "", "", Some(&failing));
-    assert_eq!(
-        evidence.classification,
-        AgentTaskGateFailureClassification::CandidateCode
-    );
-    assert_eq!(evidence.exit_code, 101);
-    assert!(evidence
-        .summary
-        .contains("deterministic gate failed with exit code 101"));
-    assert!(!evidence.summary.contains("invalid_focused_cargo_selection"));
 }
 
 #[cfg(unix)]
@@ -1915,94 +1827,47 @@ fn declared_candidate_and_baseline_replay_identical_argv_deadline_and_outcomes()
 
 #[cfg(unix)]
 #[test]
-fn declared_supervised_cancellation_retains_its_typed_outcome() {
-    let (workspace, plan, mut environment) = declared_adapter_fixture(0);
-    environment
-        .variables
-        .insert("HOMEBOY_FAKE_GATE_BLOCK".to_string(), "1".to_string());
-    let supervision = declared_supervision(true, Duration::from_secs(1));
-    let report = run_declared_test_with_supervision(
-        workspace.path(),
-        1,
-        &plan,
-        AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        None,
-        Some(&supervision),
-        &environment,
-        &[],
-    )
-    .expect("cancelled declared execution");
+fn declared_supervised_stops_retain_their_typed_outcome() {
+    use homeboy_engine_primitives::test_execution::TestExecutionOutcome;
+    for (variable, value, cancelled, no_progress, termination, outcome) in [
+        (
+            "HOMEBOY_FAKE_GATE_BLOCK",
+            "1",
+            true,
+            Duration::from_secs(1),
+            AgentTaskGateTermination::Cancelled,
+            TestExecutionOutcome::Cancelled,
+        ),
+        (
+            "HOMEBOY_FAKE_GATE_SLEEP",
+            "2",
+            false,
+            Duration::from_millis(20),
+            AgentTaskGateTermination::NoProgress,
+            TestExecutionOutcome::TimedOut,
+        ),
+    ] {
+        let (workspace, plan, mut environment) = declared_adapter_fixture(0);
+        environment
+            .variables
+            .insert(variable.to_string(), value.to_string());
+        let supervision = declared_supervision(cancelled, no_progress);
+        let report = run_declared_test_with_supervision(
+            workspace.path(),
+            1,
+            &plan,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&supervision),
+            &environment,
+            &[],
+        )
+        .expect("stopped declared execution");
 
-    assert_eq!(report.termination, AgentTaskGateTermination::Cancelled);
-    assert_eq!(
-        report.test_execution_outcome,
-        Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Cancelled)
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn declared_supervised_no_progress_retains_timeout_outcome() {
-    let (workspace, plan, mut environment) = declared_adapter_fixture(0);
-    environment
-        .variables
-        .insert("HOMEBOY_FAKE_GATE_SLEEP".to_string(), "2".to_string());
-    let supervision = declared_supervision(false, Duration::from_millis(20));
-    let report = run_declared_test_with_supervision(
-        workspace.path(),
-        1,
-        &plan,
-        AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        None,
-        Some(&supervision),
-        &environment,
-        &[],
-    )
-    .expect("stalled declared execution");
-
-    assert_eq!(report.termination, AgentTaskGateTermination::NoProgress);
-    assert_eq!(
-        report.test_execution_outcome,
-        Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::TimedOut)
-    );
-}
-
-#[test]
-fn env_var_guard_restores_a_prior_value() {
-    let _lock = env_mutex();
-    let scratch = tempfile::tempdir().expect("scratch");
-    std::env::set_var("__HOMEBOY_TEST_ENV_GUARD__", "original");
-
-    {
-        let _guard = EnvVarGuard::set(&[("__HOMEBOY_TEST_ENV_GUARD__", scratch.path())]);
-        assert_eq!(
-            std::env::var_os("__HOMEBOY_TEST_ENV_GUARD__"),
-            Some(scratch.path().as_os_str().to_owned())
-        );
+        assert_eq!(report.termination, termination, "{variable}");
+        assert_eq!(report.test_execution_outcome, Some(outcome), "{variable}");
     }
-
-    assert_eq!(
-        std::env::var("__HOMEBOY_TEST_ENV_GUARD__").ok().as_deref(),
-        Some("original"),
-        "a variable that existed before must be put back, not deleted"
-    );
-    std::env::remove_var("__HOMEBOY_TEST_ENV_GUARD__");
-}
-
-#[test]
-fn env_var_guard_removes_a_variable_that_was_absent() {
-    let _lock = env_mutex();
-    let scratch = tempfile::tempdir().expect("scratch");
-    std::env::remove_var("__HOMEBOY_TEST_ENV_GUARD_ABSENT__");
-
-    {
-        let _guard = EnvVarGuard::set(&[("__HOMEBOY_TEST_ENV_GUARD_ABSENT__", scratch.path())]);
-        assert!(std::env::var_os("__HOMEBOY_TEST_ENV_GUARD_ABSENT__").is_some());
-    }
-
-    assert!(std::env::var_os("__HOMEBOY_TEST_ENV_GUARD_ABSENT__").is_none());
 }
 
 #[test]

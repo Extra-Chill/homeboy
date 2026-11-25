@@ -700,33 +700,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn command_verifier_rejects_forged_signature() {
+    fn command_verifier_accepts_only_a_validly_signed_verdict() {
         let request = request("token");
-        let mut output = signed_output(&request);
-        output = output.replacen("reviewer", "attacker", 1);
-        let file = script(&format!("printf '%s' '{}'", output.replace('\'', "'\\''")));
-        let error = verifier(vec![file.display().to_string()], 10_000)
-            .verify_acceptance(&request)
-            .unwrap_err();
+        let output = signed_output(&request);
+        let verifier_for = |output: &str| {
+            let file = script(&format!("printf '%s' '{}'", output.replace('\'', "'\\''")));
+            verifier(vec![file.display().to_string()], 10_000).verify_acceptance(&request)
+        };
+
+        let attestation =
+            verifier_for(&output).expect("complete valid signed verifier output is accepted");
+        assert_eq!(attestation.actor, "reviewer");
+
+        let error = verifier_for(&output.replacen("reviewer", "attacker", 1)).unwrap_err();
         assert!(
             error.message.contains("unsigned or unsupported"),
             "unexpected verification error: {}",
             error.message
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_verifier_accepts_valid_signed_verdict() {
-        let request = request("token");
-        let output = signed_output(&request);
-        let file = script(&format!("printf '%s' '{}'", output.replace('\'', "'\\''")));
-
-        let attestation = verifier(vec![file.display().to_string()], 10_000)
-            .verify_acceptance(&request)
-            .expect("complete valid signed verifier output is accepted");
-
-        assert_eq!(attestation.actor, "reviewer");
     }
 
     #[cfg(unix)]

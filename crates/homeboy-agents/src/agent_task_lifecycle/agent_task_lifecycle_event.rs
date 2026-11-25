@@ -421,19 +421,21 @@ mod tests {
     }
 
     #[test]
-    fn generic_runner_exec_plain_stdout_recovers_no_agent_task_event() {
+    fn generic_runner_exec_stdout_recovers_no_agent_task_event() {
         // A generic `runner exec ... --run-id X -- pwd` terminal result carries
-        // arbitrary command stdout and no agent-task workload. The recovery path
-        // must NOT parse plain command output as an agent-task run-plan envelope
-        // (Extra-Chill/homeboy#9459).
-        for stdout in [
-            "/home/runner/workspace\n",
-            "",
-            "line one\nline two\n",
-            "{ not valid json",
+        // arbitrary command stdout and no agent-task workload, and a strict fuzz
+        // workload can emit a JSON result document while exiting non-zero. The
+        // recovery path must NOT parse command output as an agent-task run-plan
+        // envelope (Extra-Chill/homeboy#9459).
+        for (exit_code, stdout) in [
+            (0, "/home/runner/workspace\n"),
+            (0, ""),
+            (0, "line one\nline two\n"),
+            (0, "{ not valid json"),
+            (1, r#"{"status":"fail","findings":3}"#),
         ] {
             let events = vec![terminal_result_event(serde_json::json!({
-                "exit_code": 0,
+                "exit_code": exit_code,
                 "stdout": stdout,
                 "stderr": "",
             }))];
@@ -442,38 +444,15 @@ mod tests {
                 &events,
                 "homeboy-lab",
                 "runner-job-1",
-                "generic-pwd",
+                "generic-run",
             )
             .expect("generic runner exec stdout must not error");
 
             assert!(
                 event.is_none(),
-                "plain stdout `{stdout:?}` must not recover an agent-task lifecycle event"
+                "stdout `{stdout:?}` must not recover an agent-task lifecycle event"
             );
         }
-    }
-
-    #[test]
-    fn generic_runner_exec_nonzero_exit_with_json_stdout_recovers_no_agent_task_event() {
-        // A strict fuzz workload can emit a valid JSON result document to stdout
-        // while intentionally exiting non-zero. That JSON is a command result,
-        // not an agent-task run-plan envelope, so recovery still yields no event
-        // and preserves the runner exit code path (Extra-Chill/homeboy#9459).
-        let events = vec![terminal_result_event(serde_json::json!({
-            "exit_code": 1,
-            "stdout": r#"{"status":"fail","findings":3}"#,
-            "stderr": "",
-        }))];
-
-        let event = agent_task_run_plan_lifecycle_event_from_persisted_job_events(
-            &events,
-            "homeboy-lab",
-            "runner-job-1",
-            "gutenberg-fuzz",
-        )
-        .expect("generic JSON stdout must not error");
-
-        assert!(event.is_none());
     }
 
     #[test]
