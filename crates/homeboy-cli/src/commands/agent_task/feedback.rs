@@ -72,6 +72,7 @@ pub(crate) fn feedback(args: CookFeedbackArgs) -> CmdResult<Value> {
             )
         )
     });
+    homeboy::agents::agent_task_service::published_feedback_admission(&args.cook_id)?;
     let (feedback, created) = store.submit(
         &args.cook_id,
         &candidate,
@@ -103,14 +104,24 @@ pub(crate) fn feedback(args: CookFeedbackArgs) -> CmdResult<Value> {
             },
         })
     };
+    let (recovery, exit_code) = if remediation_queued {
+        homeboy::agents::recovery_action::execute(
+            &args.cook_id,
+            serde_json::from_value(serde_json::json!({}))
+                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?,
+        )?
+    } else {
+        (Value::Null, i32::from(remediation_blocker.is_some()))
+    };
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-feedback-result/v1",
+            "recovery": recovery,
             "created": created,
             "remediation_queued": remediation_queued,
             "remediation_blocker": remediation_blocker,
             "feedback": feedback,
         }),
-        0,
+        exit_code,
     ))
 }
