@@ -116,9 +116,21 @@ fn materialize_lab_job_extension_overlay_snapshots(
     extension_ids: &[String],
 ) -> Result<Vec<LabJobExtensionOverlay>> {
     let mut overlays = Vec::new();
+    let workspace_root = if extension_ids.is_empty() {
+        ""
+    } else {
+        runner.workspace_root.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace_root",
+                "Lab job extension overlays require runner.workspace_root for the hydrated extension cache",
+                Some(runner.id.clone()),
+                None,
+            )
+        })?
+    };
     for id in extension_ids {
         let manifest = homeboy_core::extension::catalog::load_extension(id)?;
-        let source_path = manifest.extension_path.ok_or_else(|| {
+        let source_path = manifest.extension_path.clone().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "extensions",
                 format!("Lab extension `{id}` has no source path"),
@@ -128,13 +140,12 @@ fn materialize_lab_job_extension_overlay_snapshots(
         })?;
         let source = PathBuf::from(&source_path);
         let content_hash = extension_source_content_hash(&source)?;
-        let remote_path = format!(
-            "{}/extensions/{}/{}",
-            runtime_root.trim_end_matches('/'),
-            sanitize_ref(id),
-            &content_hash[..16]
-        );
-        sync_controller_snapshot(
+        let remote_path = lab_extension_cache_path(workspace_root, id, &content_hash);
+        let setup_command = manifest
+            .runtime()
+            .and_then(|runtime| runtime.setup_command.clone().map(|cmd| (cmd, runtime)))
+            .map(|(cmd, runtime)| (cmd, runtime.entrypoint.clone().unwrap_or_default()));
+        ensure_lab_extension_cache(
             runner,
             &RunnerExtensionMaterializationPlan {
                 id: id.clone(),
@@ -142,6 +153,9 @@ fn materialize_lab_job_extension_overlay_snapshots(
                 synced_source_path: remote_path.clone(),
                 content_hash: content_hash.clone(),
             },
+            setup_command
+                .as_ref()
+                .map(|(cmd, entrypoint)| (cmd.as_str(), entrypoint.as_str())),
         )?;
         let resolved_source = source.canonicalize().map_err(|error| {
             Error::internal_io(
@@ -199,6 +213,144 @@ fn materialize_lab_job_extension_overlay_snapshots(
         });
     }
     Ok(overlays)
+}
+
+/// Marker written inside a hydrated cache entry once the extension's own
+/// `setup_command` has succeeded there. Every job that reuses the entry touches
+/// it, so its mtime is the entry's last use for retention.
+const LAB_EXTENSION_CACHE_READY: &str = ".homeboy-lab-extension-ready";
+/// Cache entries unused for this many days are reclaimed when a new revision
+/// of the same extension is hydrated.
+const LAB_EXTENSION_CACHE_RETENTION_DAYS: u32 = 7;
+
+/// Runner-wide, content-addressed home of one extension revision.
+///
+/// Extension snapshots carry only tracked source, so installed dependencies
+/// (`vendor/`, `node_modules/`) never cross the wire. A Lab job therefore
+/// links to an entry the runner hydrated with the extension's own
+/// `setup_command`, exactly as `homeboy extension install` does for the
+/// runner's global install. The entry is keyed by the controller content hash,
+/// so concurrent jobs on different revisions still see distinct sources
+/// (Extra-Chill/homeboy#19196).
+pub(crate) fn lab_extension_cache_path(
+    workspace_root: &str,
+    id: &str,
+    content_hash: &str,
+) -> String {
+    format!(
+        "{}/_lab_workspaces/extension-cache/{}/{}",
+        workspace_root.trim_end_matches('/'),
+        sanitize_ref(id),
+        &content_hash[..16]
+    )
+}
+
+/// Make `plan.synced_source_path` a ready, hydrated extension entry.
+///
+/// A ready entry is reused without uploading. Otherwise the snapshot is
+/// unpacked into a unique build directory, `setup_command` runs there (setup
+/// may bake absolute paths, so the build directory is the entry's permanent
+/// location), and the entry is published with `ln -sn`, which fails instead of
+/// replacing when another job won the race. The loser discards its build.
+fn ensure_lab_extension_cache(
+    runner: &Runner,
+    plan: &RunnerExtensionMaterializationPlan,
+    setup: Option<(&str, &str)>,
+) -> Result<()> {
+    let entry = plan.synced_source_path.trim_end_matches('/');
+    let (_, ready) = exec(
+        &runner.id,
+        runner_raw_shell(lab_extension_cache_probe_command(entry)),
+    )?;
+    if ready == 0 {
+        return Ok(());
+    }
+    let build = format!("{entry}.build-{}", uuid::Uuid::new_v4().simple());
+    sync_controller_snapshot(
+        runner,
+        &RunnerExtensionMaterializationPlan {
+            synced_source_path: build.clone(),
+            ..plan.clone()
+        },
+    )?;
+    let setup = setup.map(|(command, entrypoint)| {
+        homeboy_engine_primitives::template::render(
+            command,
+            &[
+                ("extension_path", build.as_str()),
+                ("entrypoint", entrypoint),
+            ],
+        )
+    });
+    let (output, exit_code) = exec(
+        &runner.id,
+        runner_raw_shell(lab_extension_cache_publish_command(
+            entry,
+            &build,
+            setup.as_deref(),
+        ))
+        .with_env(runner.env.clone()),
+    )?;
+    if exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "extensions",
+            format!(
+                "failed to hydrate Lab extension `{}` on the runner: {}",
+                plan.id,
+                tail_lines(&runner_exec_detail(&output), 40)
+            ),
+            Some(entry.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn tail_lines(text: &str, count: usize) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    lines[lines.len().saturating_sub(count)..].join("\n")
+}
+
+fn lab_extension_cache_probe_command(entry: &str) -> String {
+    let ready = shell::quote_path(&format!("{entry}/{LAB_EXTENSION_CACHE_READY}"));
+    format!("test -f {ready} && touch {ready}")
+}
+
+fn lab_extension_cache_publish_command(entry: &str, build: &str, setup: Option<&str>) -> String {
+    let parent = Path::new(entry)
+        .parent()
+        .and_then(Path::to_str)
+        .expect("extension cache entry has a UTF-8 parent");
+    let setup = setup
+        .map(|command| format!("(cd \"$build\" && {command}) >&2\n"))
+        .unwrap_or_default();
+    format!(
+        "set -eu\nentry={entry}\nbuild={build}\nparent={parent}\n\
+{setup}\
+touch \"$build\"/{ready}\n\
+if ! ln -sn \"$build\" \"$entry\" 2>/dev/null; then\n\
+  test -f \"$entry\"/{ready} || {{ echo \"extension cache entry $entry exists but is not ready\" >&2; exit 1; }}\n\
+  rm -rf \"$build\"\n\
+fi\n\
+# Reclaim builds unused for {days} days, crashed builds older than a day, then dangling entries.\n\
+for dir in \"$parent\"/*.build-*; do\n\
+  [ -d \"$dir\" ] || continue\n\
+  [ \"$dir\" = \"$build\" ] && continue\n\
+  if [ -f \"$dir\"/{ready} ]; then\n\
+    [ -n \"$(find \"$dir\"/{ready} -mtime +{days} 2>/dev/null)\" ] && rm -rf \"$dir\"\n\
+  else\n\
+    [ -n \"$(find \"$dir\" -maxdepth 0 -mtime +1 2>/dev/null)\" ] && rm -rf \"$dir\"\n\
+  fi\n\
+done\n\
+for link in \"$parent\"/*; do\n\
+  if [ -L \"$link\" ] && [ ! -e \"$link\" ]; then rm -f \"$link\"; fi\n\
+done\n",
+        entry = shell::quote_path(entry),
+        build = shell::quote_path(build),
+        parent = shell::quote_path(parent),
+        ready = LAB_EXTENSION_CACHE_READY,
+        days = LAB_EXTENSION_CACHE_RETENTION_DAYS,
+    )
 }
 
 fn lab_job_extension_overlay_command(
@@ -366,6 +518,108 @@ mod lab_job_overlay_tests {
             .file_type()
             .is_symlink());
         assert!(!runtime.join("home/.missing").exists());
+    }
+
+    fn run_sh(script: &str) -> bool {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .status()
+            .expect("run script")
+            .success()
+    }
+
+    fn make_build(entry: &Path, nonce: &str) -> PathBuf {
+        let build = PathBuf::from(format!("{}.build-{nonce}", entry.display()));
+        std::fs::create_dir_all(&build).expect("build dir");
+        std::fs::write(build.join("composer.json"), "{}").expect("source file");
+        build
+    }
+
+    #[test]
+    fn extension_cache_publish_hydrates_once_and_race_losers_discard_their_build() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry = root
+            .path()
+            .join("extension-cache/wordpress/aaaaaaaaaaaaaaaa");
+        let entry_str = entry.to_str().unwrap();
+        assert!(!run_sh(&lab_extension_cache_probe_command(entry_str)));
+
+        let winner = make_build(&entry, "one");
+        let setup = "mkdir -p vendor && touch vendor/autoload.php";
+        assert!(run_sh(&lab_extension_cache_publish_command(
+            entry_str,
+            winner.to_str().unwrap(),
+            Some(setup),
+        )));
+        assert!(std::fs::symlink_metadata(&entry)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(entry.join("vendor/autoload.php").is_file());
+        assert!(run_sh(&lab_extension_cache_probe_command(entry_str)));
+
+        let loser = make_build(&entry, "two");
+        assert!(run_sh(&lab_extension_cache_publish_command(
+            entry_str,
+            loser.to_str().unwrap(),
+            Some(setup),
+        )));
+        assert!(!loser.exists(), "race loser discards its build");
+        assert_eq!(
+            std::fs::canonicalize(&entry).unwrap(),
+            std::fs::canonicalize(&winner).unwrap()
+        );
+    }
+
+    #[test]
+    fn extension_cache_failed_setup_publishes_nothing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry = root
+            .path()
+            .join("extension-cache/wordpress/bbbbbbbbbbbbbbbb");
+        let build = make_build(&entry, "one");
+        assert!(!run_sh(&lab_extension_cache_publish_command(
+            entry.to_str().unwrap(),
+            build.to_str().unwrap(),
+            Some("exit 7"),
+        )));
+        assert!(std::fs::symlink_metadata(&entry).is_err());
+        assert!(!run_sh(&lab_extension_cache_probe_command(
+            entry.to_str().unwrap()
+        )));
+    }
+
+    #[test]
+    fn extension_cache_publish_reclaims_stale_builds_and_dangling_entries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("extension-cache/wordpress");
+        let old_entry = parent.join("cccccccccccccccc");
+        let stale = make_build(&old_entry, "old");
+        std::fs::write(stale.join(LAB_EXTENSION_CACHE_READY), "").unwrap();
+        std::os::unix::fs::symlink(&stale, &old_entry).unwrap();
+        let crashed = make_build(&parent.join("dddddddddddddddd"), "crashed");
+        let recent_entry = parent.join("eeeeeeeeeeeeeeee");
+        let recent = make_build(&recent_entry, "recent");
+        std::fs::write(recent.join(LAB_EXTENSION_CACHE_READY), "").unwrap();
+        std::os::unix::fs::symlink(&recent, &recent_entry).unwrap();
+        assert!(run_sh(&format!(
+            "touch -t 202001010000 {} {}",
+            shell::quote_path(&stale.join(LAB_EXTENSION_CACHE_READY).display().to_string()),
+            shell::quote_path(&crashed.display().to_string()),
+        )));
+
+        let entry = parent.join("ffffffffffffffff");
+        let build = make_build(&entry, "new");
+        assert!(run_sh(&lab_extension_cache_publish_command(
+            entry.to_str().unwrap(),
+            build.to_str().unwrap(),
+            None,
+        )));
+        assert!(entry.join(LAB_EXTENSION_CACHE_READY).is_file());
+        assert!(!stale.exists() && std::fs::symlink_metadata(&old_entry).is_err());
+        assert!(!crashed.exists());
+        assert!(recent_entry.join(LAB_EXTENSION_CACHE_READY).is_file());
     }
 }
 
@@ -1676,6 +1930,66 @@ mod tests {
             for handle in handles {
                 handle.join().expect("extension job");
             }
+        });
+    }
+
+    #[test]
+    fn lab_job_overlays_link_one_hydrated_cache_entry_with_setup_dependencies() {
+        crate::test_support::with_isolated_home(|home| {
+            let runner_root = tempfile::tempdir().expect("runner root");
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-extension-hydrate","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let counter = runner_root.path().join("setup-count");
+            let source = home.path().join(".config/homeboy/extensions/fixture");
+            fs::create_dir_all(&source).expect("extension source");
+            fs::write(
+                source.join("fixture.json"),
+                format!(
+                    r#"{{"id":"fixture","name":"Fixture","version":"1.0.0","executable":{{"runtime":{{"setup_command":"mkdir -p {{{{extension_path}}}}/vendor && touch {{{{extension_path}}}}/vendor/autoload.php && printf x >> {}"}}}}}}"#,
+                    counter.display()
+                ),
+            )
+            .expect("extension manifest");
+            let runner = crate::load("lab-extension-hydrate").expect("runner");
+
+            let mut remote_paths = Vec::new();
+            for job in ["job-a", "job-b"] {
+                let runtime_root = runner_root
+                    .path()
+                    .join(format!("_lab_workspaces/{job}-homeboy-artifacts/runtime"));
+                let overlays = materialize_lab_job_extension_overlay_snapshots(
+                    &runner,
+                    &runtime_root.display().to_string(),
+                    &["fixture".to_string()],
+                )
+                .expect("stage overlay");
+                assert!(Command::new("sh")
+                    .arg("-c")
+                    .arg(lab_job_extension_overlay_command(
+                        &runtime_root.display().to_string(),
+                        &overlays,
+                    ))
+                    .status()
+                    .expect("link overlay")
+                    .success());
+                assert!(runtime_root
+                    .join("home/.config/homeboy/extensions/fixture/vendor/autoload.php")
+                    .is_file());
+                remote_paths.push(overlays[0].remote_path.clone());
+            }
+            assert_eq!(remote_paths[0], remote_paths[1]);
+            assert!(remote_paths[0].contains("/_lab_workspaces/extension-cache/fixture/"));
+            assert_eq!(
+                fs::read_to_string(&counter).unwrap(),
+                "x",
+                "setup runs once per revision"
+            );
         });
     }
 }
