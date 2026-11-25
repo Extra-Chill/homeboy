@@ -149,75 +149,6 @@ mod stall_rotation_tests {
         plan
     }
 
-    /// Acceptance: "a fake provider that emits nothing: the run is classified
-    /// `provider_stalled` and rotates". A stall with no partial work is the
-    /// common case (#14914's "20 min with zero output"): nothing to carry
-    /// forward, so a plain clean-checkout rotation already fully recovers it.
-    #[test]
-    fn a_provider_that_emits_nothing_is_classified_stalled_and_rotates_to_the_next_provider() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let mut plan = git_workspace_plan(&workspace);
-        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
-            entries: vec![non_adopting_entry("fallback-backend")],
-            max_attempts: None,
-            liveness_timeout_ms: None,
-        });
-        enable_rotation(&mut plan);
-        // This scenario has no partial work: the fake provider never writes
-        // to the workspace, matching the #14914 "20 min with zero output"
-        // shape.
-        let scheduler = AgentTaskScheduler::new(Arc::new(AlwaysStallsExecutorThenSucceeds {
-            calls: Arc::new(AtomicUsize::new(0)),
-        }));
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
-        let attempts = aggregate.outcomes[0]
-            .metadata
-            .pointer("/provider_rotation/attempts")
-            .and_then(Value::as_array)
-            .expect("rotation attempts evidence");
-        assert_eq!(
-            attempts.len(),
-            2,
-            "records both the stalled and the rotated attempt"
-        );
-        assert_eq!(attempts[0]["status"], "provider_error");
-        assert_eq!(attempts[0]["failure_classification"], "stalled");
-        assert_eq!(attempts[0]["backend"], "test");
-        assert_eq!(attempts[1]["status"], "succeeded");
-        assert_eq!(attempts[1]["backend"], "fallback-backend");
-        assert!(aggregate.events.iter().any(|event| {
-            event
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("provider rotation queued"))
-        }));
-    }
-
-    struct AlwaysStallsExecutorThenSucceeds {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl AgentTaskExecutorAdapter for AlwaysStallsExecutorThenSucceeds {
-        fn execute(
-            &self,
-            request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                let mut result = outcome(request.task_id, AgentTaskOutcomeStatus::ProviderError);
-                result.failure_classification = Some(AgentTaskFailureClassification::Stalled);
-                result.summary =
-                    Some("provider produced no output before its liveness deadline".to_string());
-                return result;
-            }
-            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
-        }
-    }
-
     /// Acceptance: "keeping the worktree's current state so partial work
     /// carries over" — when the operator's rotation entry explicitly opts a
     /// route into adopting the previous candidate (`adoption:
@@ -311,6 +242,21 @@ mod stall_rotation_tests {
             vec![false, false],
             "without an explicit adoption opt-in the rotated-to attempt starts clean, not implicitly inheriting the stalled attempt's edit"
         );
+        let attempts = aggregate.outcomes[0]
+            .metadata
+            .pointer("/provider_rotation/attempts")
+            .and_then(Value::as_array)
+            .expect("rotation attempts evidence");
+        assert_eq!(
+            attempts.len(),
+            2,
+            "records both the stalled and the rotated attempt"
+        );
+        assert_eq!(attempts[0]["status"], "provider_error");
+        assert_eq!(attempts[0]["failure_classification"], "stalled");
+        assert_eq!(attempts[0]["backend"], "test");
+        assert_eq!(attempts[1]["status"], "succeeded");
+        assert_eq!(attempts[1]["backend"], "fallback-backend");
         assert!(aggregate.events.iter().any(|event| {
             event
                 .message
