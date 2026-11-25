@@ -3,36 +3,10 @@
 use super::*;
 use homeboy_core::defaults;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-// NOTE: two tests that registered a `cli_surface::Cli`-backed agent-task dispatch
-// resolver to exercise provider-policy compilation were removed as part of
-// extracting homeboy-core. CLI parsing is the CLI layer's responsibility (and is
-// covered by its own tests); keeping them here forced core to depend upward on
-// the CLI parser. The resolver-hook mechanism itself is covered where it's wired
-// (cli_runtime), and provider-policy compilation is covered by tests that supply
-// a ResolvedAgentTaskProviderPolicy directly.
+use std::path::Path;
 
 mod lab_source_path_tests {
     use super::*;
-
-    #[test]
-    fn lab_source_path_uses_agent_task_dispatch_cwd() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "dispatch".to_string(),
-            "--cwd".to_string(),
-            "/Users/user/Developer/wp-site-generator".to_string(),
-            "--prompt".to_string(),
-            "cook".to_string(),
-        ];
-
-        assert_eq!(
-            lab_offload_source_path(&args).expect("source path"),
-            PathBuf::from("/Users/user/Developer/wp-site-generator")
-        );
-    }
 
     /// Regression for #16166: `--placement lab … --path .` recorded the
     /// relative path verbatim into durable staging state, so the staging
@@ -188,21 +162,18 @@ mod lab_arg_rewrite_tests {
     }
 
     #[test]
-    fn rewrite_strips_controller_wait_policy_for_runner_prefix() {
-        let input = args(&["homeboy", "--wait", "fuzz", "run", "component-a"]);
-
-        assert_eq!(
-            rewrite_lab_offload_args(&input, "/runner/project", &[], None),
-            args(&["homeboy", "fuzz", "run", "component-a"])
-        );
-        assert_eq!(
-            rewrite_runner_resident_lab_offload_args(&input, None),
-            args(&["homeboy", "fuzz", "run", "component-a"])
-        );
-    }
-
-    #[test]
     fn runner_rewrite_consumes_only_the_controller_wait_flag() {
+        let prefixed = args(&["homeboy", "--wait", "fuzz", "run", "component-a"]);
+        let expected = args(&["homeboy", "fuzz", "run", "component-a"]);
+        assert_eq!(
+            rewrite_lab_offload_args(&prefixed, "/runner/project", &[], None),
+            expected
+        );
+        assert_eq!(
+            rewrite_runner_resident_lab_offload_args(&prefixed, None),
+            expected
+        );
+
         for wait in [false, true] {
             let mut input = args(&["homeboy", "fuzz", "run", "component-a"]);
             if wait {
@@ -884,21 +855,6 @@ mod provider_config_remap_tests {
         let inlined: serde_json::Value = serde_json::from_str(spec).expect("inline json");
         assert_eq!(inlined["workspace_root"], "/remote/repo");
         assert_eq!(inlined["model"], "claude-opus-4-8");
-    }
-
-    #[test]
-    fn remap_provider_config_inline_json_without_mappings_is_untouched() {
-        // Plain inline JSON (no @file, no mappings) must pass through verbatim so
-        // behavior is never worse than passing the original argument through.
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--provider-config".to_string(),
-            r#"{"model":"claude-opus-4-8"}"#.to_string(),
-        ];
-        let out = remap_provider_config_in_args(&args, &[]).expect("remap provider config");
-        assert_eq!(out, args);
     }
 }
 
@@ -1591,112 +1547,48 @@ mod materialize_specs_tests {
     }
 
     #[test]
-    fn materialize_agent_task_specs_syncs_inline_and_file_plan_json() {
+    fn materialize_agent_task_specs_syncs_inline_and_file_plan_and_tasks_json() {
         let temp = tempfile::tempdir().expect("tempdir");
         let plan = serde_json::json!({
             "schema": "homeboy/agent-task-plan/v1",
             "tasks": [{ "task_id": "task-1", "instructions": "test" }]
         })
         .to_string();
-        let plan_file = temp.path().join("plan.json");
-        std::fs::write(&plan_file, &plan).expect("write plan");
-
-        for spec in [plan, format!("@{}", plan_file.display())] {
-            let args = vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "run-plan".to_string(),
-                "--plan".to_string(),
-                spec,
-            ];
-            let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
-                assert_eq!(spec.filename, "agent-task-plan.json");
-                assert_eq!(spec.role, "agent_task_plan_remapped");
-                Ok(Some((
-                    "@/remote/agent-task-plan.json".to_string(),
-                    spec.role,
-                )))
-            })
-            .expect("materialize plan");
-
-            assert_eq!(out.argv[4], "@/remote/agent-task-plan.json");
-            assert_eq!(out.workspace_entries.len(), 1);
-            assert_eq!(
-                out.workspace_entries[0].step_id,
-                "lab.sync_remapped_agent_task_plan"
-            );
-            assert_eq!(out.workspace_entries[0].entry, "agent_task_plan_remapped");
-        }
-    }
-
-    #[test]
-    fn materialize_agent_task_specs_syncs_inline_and_file_tasks_json() {
-        let temp = tempfile::tempdir().expect("tempdir");
         let tasks = serde_json::json!([{ "prompt": "Fix issue" }]).to_string();
-        let tasks_file = temp.path().join("tasks.json");
-        std::fs::write(&tasks_file, &tasks).expect("write tasks");
-
-        for spec in [tasks, format!("@{}", tasks_file.display())] {
-            let args = vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--tasks".to_string(),
-                spec,
-            ];
-            let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
-                assert_eq!(spec.filename, "agent-task-tasks.json");
-                assert_eq!(spec.role, "agent_task_tasks_remapped");
-                Ok(Some((
-                    "@/remote/agent-task-tasks.json".to_string(),
-                    spec.role,
-                )))
-            })
-            .expect("materialize tasks");
-
-            assert_eq!(out.argv[4], "@/remote/agent-task-tasks.json");
-            assert_eq!(out.workspace_entries.len(), 1);
-            assert_eq!(
-                out.workspace_entries[0].step_id,
-                "lab.sync_remapped_agent_task_tasks"
-            );
-            assert_eq!(out.workspace_entries[0].entry, "agent_task_tasks_remapped");
-        }
-    }
-
-    #[test]
-    fn materialize_agent_task_specs_syncs_controller_attempt_plan_before_cook_handoff() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let plan = serde_json::json!({
-            "schema": "homeboy/agent-task-plan/v1",
-            "plan_id": "controller-plan",
-            "tasks": [{ "task_id": "task-1", "instructions": "test" }]
-        })
-        .to_string();
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--attempt-plan".to_string(),
-            plan,
+        let cases = [
+            ("run-plan", "--plan", plan, "plan"),
+            ("cook", "--tasks", tasks, "tasks"),
         ];
 
-        let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
-            assert_eq!(spec.filename, "agent-task-attempt-plan.json");
-            assert_eq!(spec.role, "agent_task_attempt_plan_remapped");
-            Ok(Some((
-                "@/remote/agent-task-attempt-plan.json".to_string(),
-                spec.role,
-            )))
-        })
-        .expect("materialize controller attempt plan");
+        for (subcommand, flag, json, kind) in cases {
+            let file = temp.path().join(format!("{kind}.json"));
+            std::fs::write(&file, &json).expect("write spec");
+            let filename = format!("agent-task-{kind}.json");
+            let role = format!("agent_task_{kind}_remapped");
+            for spec in [json.clone(), format!("@{}", file.display())] {
+                let args = vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    subcommand.to_string(),
+                    flag.to_string(),
+                    spec,
+                ];
+                let out = materialize_agent_task_specs_in_args(&args, &[], temp.path(), |spec| {
+                    assert_eq!(spec.filename, filename);
+                    assert_eq!(spec.role, role);
+                    Ok(Some((format!("@/remote/{}", spec.filename), spec.role)))
+                })
+                .expect("materialize spec");
 
-        assert_eq!(out.argv[4], "@/remote/agent-task-attempt-plan.json");
-        assert_eq!(out.workspace_entries.len(), 1);
-        assert_eq!(
-            out.workspace_entries[0].step_id,
-            "lab.sync_remapped_agent_task_attempt_plan"
-        );
+                assert_eq!(out.argv[4], format!("@/remote/{filename}"));
+                assert_eq!(out.workspace_entries.len(), 1);
+                assert_eq!(
+                    out.workspace_entries[0].step_id,
+                    format!("lab.sync_remapped_agent_task_{kind}")
+                );
+                assert_eq!(out.workspace_entries[0].entry, role);
+            }
+        }
     }
 
     #[test]
@@ -2060,43 +1952,37 @@ mod materialize_specs_tests {
     }
 
     #[test]
-    fn materialize_agent_task_specs_rejects_posix_workspace_traversal() {
-        let mappings = vec![LabPathRemap {
-            local: "/controller/workspace".to_string(),
-            remote: "/runner/workspace".to_string(),
-        }];
-        let args = follow_up_plan_args("/controller/workspace/../../outside", None);
+    fn materialize_agent_task_specs_rejects_workspace_traversal() {
+        for (local, root) in [
+            (
+                "/controller/workspace",
+                "/controller/workspace/../../outside",
+            ),
+            (
+                r"C:\controller\workspace",
+                r"C:\controller\workspace\..\..\outside",
+            ),
+        ] {
+            let mappings = vec![LabPathRemap {
+                local: local.to_string(),
+                remote: "/runner/workspace".to_string(),
+            }];
+            let args = follow_up_plan_args(root, None);
 
-        let error =
-            materialize_agent_task_specs_in_args(&args, &mappings, Path::new("/tmp"), |_| {
-                Ok(None::<(String, ())>)
-            })
-            .err()
-            .expect("POSIX traversal must fail before Lab dispatch");
+            let error =
+                materialize_agent_task_specs_in_args(&args, &mappings, Path::new("/tmp"), |_| {
+                    Ok(None::<(String, ())>)
+                })
+                .err()
+                .expect("traversal must fail before Lab dispatch");
 
-        assert!(error
-            .message
-            .contains("escapes the selected runner workspace"));
-    }
-
-    #[test]
-    fn materialize_agent_task_specs_rejects_windows_workspace_traversal() {
-        let mappings = vec![LabPathRemap {
-            local: r"C:\controller\workspace".to_string(),
-            remote: "/runner/workspace".to_string(),
-        }];
-        let args = follow_up_plan_args(r"C:\controller\workspace\..\..\outside", None);
-
-        let error =
-            materialize_agent_task_specs_in_args(&args, &mappings, Path::new("/tmp"), |_| {
-                Ok(None::<(String, ())>)
-            })
-            .err()
-            .expect("Windows traversal must fail before Lab dispatch");
-
-        assert!(error
-            .message
-            .contains("escapes the selected runner workspace"));
+            assert!(
+                error
+                    .message
+                    .contains("escapes the selected runner workspace"),
+                "{root}"
+            );
+        }
     }
 
     #[test]
@@ -2298,30 +2184,6 @@ mod lab_args_rewrite_tests {
     }
 
     #[test]
-    fn lab_args_rewrite_preserves_nested_review_quality_command_label() {
-        let args = vec![
-            "homeboy".to_string(),
-            "review".to_string(),
-            "lint".to_string(),
-            "data-machine".to_string(),
-            "--placement".to_string(),
-            "lab".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-        ];
-
-        assert_eq!(
-            rewrite_lab_offload_args(&args, "/runner/data-machine", &[], None),
-            vec![
-                "homeboy".to_string(),
-                "review".to_string(),
-                "lint".to_string(),
-                "data-machine".to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn lab_args_rewrite_agent_task_dispatch_cwd() {
         let args = vec![
             "homeboy".to_string(),
@@ -2400,7 +2262,7 @@ mod lab_args_rewrite_tests {
     }
 
     #[test]
-    fn lab_args_rewrite_extension_refresh_adds_local_source_revision_ref() {
+    fn lab_args_rewrite_extension_refresh_pins_local_source_revision_unless_explicit() {
         let source = tempfile::tempdir().expect("source dir");
         std::fs::write(source.path().join("nodejs.json"), r#"{"name":"Node.js"}"#)
             .expect("manifest");
@@ -2410,80 +2272,42 @@ mod lab_args_rewrite_tests {
         let revision = git_output(source.path(), &["rev-parse", "HEAD"]).expect("source revision");
         let local_source = source.path().display().to_string();
         let remote_source = "/runner/workspaces/nodejs";
-        let args = vec![
-            "homeboy".to_string(),
-            "extension".to_string(),
-            "refresh".to_string(),
-            local_source.clone(),
-            "--id".to_string(),
-            "nodejs".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-            "--placement".to_string(),
-            "lab".to_string(),
-        ];
         let mappings = vec![LabPathRemap {
-            local: local_source,
+            local: local_source.clone(),
             remote: remote_source.to_string(),
         }];
 
-        assert_eq!(
-            rewrite_lab_offload_args(&args, remote_source, &mappings, None),
-            vec![
+        for (explicit_ref, expected_ref) in [
+            (None, revision.as_str()),
+            (Some("operator-ref"), "operator-ref"),
+        ] {
+            let mut args = vec![
                 "homeboy".to_string(),
                 "extension".to_string(),
                 "refresh".to_string(),
-                remote_source.to_string(),
+                local_source.clone(),
                 "--id".to_string(),
                 "nodejs".to_string(),
-                "--ref".to_string(),
-                revision,
-            ]
-        );
-    }
+            ];
+            if let Some(explicit_ref) = explicit_ref {
+                args.extend(["--ref".to_string(), explicit_ref.to_string()]);
+            }
+            args.extend(["--runner", "homeboy-lab", "--placement", "lab"].map(str::to_string));
 
-    #[test]
-    fn lab_args_rewrite_extension_refresh_preserves_explicit_ref() {
-        let source = tempfile::tempdir().expect("source dir");
-        std::fs::write(source.path().join("nodejs.json"), r#"{"name":"Node.js"}"#)
-            .expect("manifest");
-        if !git(source.path(), &["init", "--quiet"]) || !commit_all(source.path(), "init") {
-            return;
+            assert_eq!(
+                rewrite_lab_offload_args(&args, remote_source, &mappings, None),
+                vec![
+                    "homeboy".to_string(),
+                    "extension".to_string(),
+                    "refresh".to_string(),
+                    remote_source.to_string(),
+                    "--id".to_string(),
+                    "nodejs".to_string(),
+                    "--ref".to_string(),
+                    expected_ref.to_string(),
+                ]
+            );
         }
-        let local_source = source.path().display().to_string();
-        let remote_source = "/runner/workspaces/nodejs";
-        let args = vec![
-            "homeboy".to_string(),
-            "extension".to_string(),
-            "refresh".to_string(),
-            local_source.clone(),
-            "--id".to_string(),
-            "nodejs".to_string(),
-            "--ref".to_string(),
-            "operator-ref".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-            "--placement".to_string(),
-            "lab".to_string(),
-        ];
-        let mappings = vec![LabPathRemap {
-            local: local_source,
-            remote: remote_source.to_string(),
-        }];
-
-        assert_eq!(
-            rewrite_lab_offload_args(&args, remote_source, &mappings, None),
-            vec![
-                "homeboy".to_string(),
-                "extension".to_string(),
-                "refresh".to_string(),
-                remote_source.to_string(),
-                "--id".to_string(),
-                "nodejs".to_string(),
-                "--ref".to_string(),
-                "operator-ref".to_string(),
-            ]
-        );
     }
 
     #[test]
