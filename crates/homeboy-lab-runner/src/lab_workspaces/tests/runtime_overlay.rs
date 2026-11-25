@@ -73,9 +73,9 @@ fn parses_overlay_with_opaque_install_step_and_env_surfacing() {
 }
 
 #[test]
-fn rejects_install_step_with_empty_command_argv() {
+fn rejects_empty_install_argv_and_missing_artifact_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let spec = RuntimeOverlaySpec {
+    let empty_command = RuntimeOverlaySpec {
         path: dir.path().display().to_string(),
         role: None,
         snapshot_includes: Vec::new(),
@@ -85,46 +85,33 @@ fn rejects_install_step_with_empty_command_argv() {
         }),
         expose_remote_path_env: None,
     };
-
-    let err = parse_runtime_overlays(vec![spec]).expect_err("empty command rejected");
+    let err = parse_runtime_overlays(vec![empty_command]).expect_err("empty command rejected");
     assert!(err.message.contains("non-empty command argv"));
-}
 
-#[test]
-fn rejects_overlay_with_missing_artifact_directory() {
-    let spec = RuntimeOverlaySpec {
+    let missing_artifact = RuntimeOverlaySpec {
         path: "/definitely/not/a/real/overlay/dir".to_string(),
         role: None,
         snapshot_includes: Vec::new(),
         install: None,
         expose_remote_path_env: None,
     };
-
-    assert!(parse_runtime_overlays(vec![spec]).is_err());
+    assert!(parse_runtime_overlays(vec![missing_artifact]).is_err());
 }
 
 #[test]
-fn install_workdir_defaults_to_overlay_remote_path() {
-    assert_eq!(
-        runtime_overlay_install_workdir("/srv/_lab/overlay", None),
-        "/srv/_lab/overlay"
-    );
-    assert_eq!(
-        runtime_overlay_install_workdir("/srv/_lab/overlay", Some("  ")),
-        "/srv/_lab/overlay"
-    );
-}
-
-#[test]
-fn install_workdir_resolves_relative_against_remote_and_honors_absolute() {
-    assert_eq!(
-        runtime_overlay_install_workdir("/srv/_lab/overlay", Some("cli")),
-        "/srv/_lab/overlay/cli"
-    );
-    assert_eq!(
-        runtime_overlay_install_workdir("/srv/_lab/overlay", Some("/srv/_lab/sibling")),
-        "/srv/_lab/sibling"
-    );
+fn install_workdir_defaults_to_remote_resolves_relative_and_honors_absolute() {
+    for (workdir, expected) in [
+        (None, "/srv/_lab/overlay"),
+        (Some("  "), "/srv/_lab/overlay"),
+        (Some("cli"), "/srv/_lab/overlay/cli"),
+        (Some("/srv/_lab/sibling"), "/srv/_lab/sibling"),
+    ] {
+        assert_eq!(
+            runtime_overlay_install_workdir("/srv/_lab/overlay", workdir),
+            expected,
+            "workdir {workdir:?}"
+        );
+    }
 }
 
 #[test]
@@ -140,10 +127,6 @@ fn env_overrides_only_surface_overlays_that_declared_an_env_var() {
         overrides,
         vec![("RUNTIME_CLI_DIR".to_string(), "/srv/_lab/cli".to_string())]
     );
-}
-
-#[test]
-fn env_overrides_empty_when_no_overlays() {
     assert!(runtime_overlay_env_overrides(&[]).is_empty());
 }
 
