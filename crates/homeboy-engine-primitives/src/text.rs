@@ -271,12 +271,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_identifier_trims_and_lowercases() {
+    fn identifiers_compare_trimmed_and_case_insensitively() {
         assert_eq!(normalize_identifier("  HeLLo  "), "hello");
-    }
-
-    #[test]
-    fn identifier_eq_is_case_insensitive_and_trims() {
         assert!(identifier_eq("  My-Site ", "my-site"));
     }
 
@@ -293,20 +289,16 @@ mod tests {
     }
 
     #[test]
-    fn levenshtein_returns_zero_for_identical_strings() {
-        assert_eq!(levenshtein("hello", "hello"), 0);
-    }
-
-    #[test]
-    fn levenshtein_returns_length_for_empty_other() {
-        assert_eq!(levenshtein("hello", ""), 5);
-        assert_eq!(levenshtein("", "world"), 5);
-    }
-
-    #[test]
-    fn levenshtein_counts_substitutions() {
-        assert_eq!(levenshtein("cat", "bat"), 1);
-        assert_eq!(levenshtein("kitten", "sitting"), 3);
+    fn levenshtein_counts_edit_distance() {
+        for (a, b, distance) in [
+            ("hello", "hello", 0),
+            ("hello", "", 5),
+            ("", "world", 5),
+            ("cat", "bat", 1),
+            ("kitten", "sitting", 3),
+        ] {
+            assert_eq!(levenshtein(a, b), distance, "{a:?} vs {b:?}");
+        }
     }
 
     #[test]

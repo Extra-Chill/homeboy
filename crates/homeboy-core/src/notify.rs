@@ -403,8 +403,8 @@ pub struct NotifyOutcome {
     /// The transport's own structured result envelope, when it emitted one.
     ///
     /// Transports classify their failures, count their retries, and report
-    /// truncation on stdout. That work used to be discarded because homeboy
-    /// only read the exit code.
+    /// truncation on stdout; homeboy keeps that envelope instead of reading
+    /// only the exit code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
 }

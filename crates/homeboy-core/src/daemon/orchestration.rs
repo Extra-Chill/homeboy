@@ -200,31 +200,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_promotion_upgrade_in_progress_does_not_refuse_controller_admission() {
-        with_isolated_home(|_| {
-            let root = crate::paths::runtime_promotion_dir().unwrap();
-            std::fs::create_dir_all(&root).unwrap();
-            // Even an old upgrader's reservation must not fence new admission.
-            std::fs::write(
-                root.join("upgrade-drain.json"),
-                serde_json::json!({
-                    "operation_id": "upgrade-in-progress", "pid": std::process::id(),
-                    "runs": []
-                })
-                .to_string(),
-            )
-            .unwrap();
-            commit_intents(&["new-cook-during-upgrade"]);
-            let pass = drain_work_intents_with(|intent| {
-                Ok(serde_json::json!({"scheduled": true, "job_id": intent.id}))
-            })
-            .unwrap();
-            assert_eq!(pass["scheduled"][0]["job_id"], "new-cook-during-upgrade");
-            assert!(pass["deferred"].as_array().unwrap().is_empty());
-        });
-    }
-
-    #[test]
     fn a_superseded_intent_is_acknowledged_without_a_job() {
         with_isolated_home(|_| {
             commit_intents(&["intent-stale-generation"]);

@@ -146,9 +146,8 @@ pub fn validate_component_versions(components: &[Component]) -> Result<()> {
 
 /// The single version target a component's version is read from.
 ///
-/// `local_version_source` / `artifact_version_source` used to live here and
-/// returned `homeboy-deploy` types, which is one of the edges that made release
-/// and deploy circular. They now live in `homeboy-deploy` and call this.
+/// `homeboy-deploy`'s `local_version_source` / `artifact_version_source`
+/// resolve through this.
 pub fn canonical_version_target(component: &Component) -> Option<&VersionTarget> {
     component
         .version_targets
@@ -422,7 +421,7 @@ pub fn validate_and_finalize_changelog(
             new_version,
         )?
     } else {
-        // Legacy path: finalize an existing ## Unreleased section.
+        // Manual path: finalize an existing ## Unreleased section.
         changelog::finalize_next_section(
             &changelog_content,
             &settings.next_section_aliases,
@@ -683,10 +682,8 @@ mod tests {
 
         validate_component_versions(&[component.clone()]).expect("matching targets");
         assert_eq!(get_component_version(&component).as_deref(), Some("1.2.3"));
-        // The VersionSource-shaped assertions this test used to make now live
-        // in homeboy-deploy, next to `local_version_source` /
-        // `artifact_version_source`. What this crate owns is the canonical
-        // target those two resolve through.
+        // VersionSource assertions live in homeboy-deploy; this crate owns
+        // the canonical target they resolve through.
         let canonical = canonical_version_target(&component).expect("canonical target");
         assert_eq!(canonical.file, "package.json");
         assert_eq!(canonical.artifact_path.as_deref(), Some("package.json"));
@@ -859,9 +856,8 @@ mod tests {
     // Prerelease / build metadata handling (see #10321)
     // ========================================================================
 
-    /// `--bump patch` on a prerelease used to return `None` because the
-    /// hand-rolled parser split on `.` and demanded exactly three numeric
-    /// parts, so `1.2.3-beta.1` yielded `["1", "2", "3-beta", "1"]`.
+    /// `--bump patch` on a prerelease must return a version, not `None`:
+    /// `1.2.3-beta.1` does not split into three numeric parts on `.`.
     #[test]
     fn increment_version_bumps_prerelease_by_dropping_it() {
         assert_eq!(

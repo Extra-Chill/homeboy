@@ -217,7 +217,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_flags_translate_to_typed_trace_probes() {
+    fn convenience_flags_translate_to_typed_trace_probes() {
         let args = PassiveTraceArgs {
             comp: crate::commands::utils::args::PositionalComponentArgs {
                 component: Some("homeboy".to_string()),

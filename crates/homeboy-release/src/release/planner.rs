@@ -487,9 +487,9 @@ mod tests {
     /// Regression for the homeboy-action release blocker:
     /// `validate_working_tree_fail_fast` builds an Error with a hint vec
     /// listing the dirty files. That error flows through ValidationCollector,
-    /// which used to drop the hints on the single-error re-emit path —
-    /// leaving CI consumers with a bare `Uncommitted changes detected`
-    /// message and no way to see *which* files were dirty.
+    /// which must keep the hints on the single-error re-emit path so CI
+    /// consumers see *which* files were dirty, not a bare
+    /// `Uncommitted changes detected` message.
     ///
     /// This test pins down the round-trip: build the same shape of error
     /// that `validate_working_tree_fail_fast` would produce, push it through

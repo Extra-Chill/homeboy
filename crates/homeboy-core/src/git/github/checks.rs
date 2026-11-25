@@ -4,12 +4,10 @@
 //! readiness surfaces interpret those entries: the readiness summary
 //! ([`super::readiness::classify_pr_ci`]), the fleet rollup
 //! ([`super::fleet`]), and the PR-land merge gate
-//! ([`crate::git::pr_land`]). They previously each re-matched
-//! `(status, conclusion)` with subtly different groupings — most visibly, the
-//! fleet rollup folded `SKIPPED` into its passed count while the readiness
-//! summary tracked it separately. This module is the single place that maps one
+//! ([`crate::git::pr_land`]). This module is the single place that maps one
 //! check entry to a [`CheckClass`], so every surface agrees on what each
-//! outcome means.
+//! outcome means (for example, `SKIPPED` is its own bucket everywhere rather
+//! than a pass).
 
 use serde_json::Value;
 

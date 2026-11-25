@@ -1259,7 +1259,7 @@ fn run_project_dashboard(
             );
             break;
         }
-        // Bundled/retired components are no longer standalone deploy targets.
+        // Bundled/retired components are not standalone deploy targets.
         // Surface their lifecycle status for visibility, but do not run the
         // version/release-state machinery that would flag false `outdated`
         // drift (issue #3489).
@@ -2104,43 +2104,6 @@ mod tests {
         assert!(matches!(status, ProjectComponentDashboardStatus::Unknown));
     }
 
-    #[test]
-    fn parser_accepts_status_path_only() {
-        let cli = Cli::try_parse_from(["homeboy", "status", "--path", "/tmp/example", "--full"])
-            .expect("status --path parses");
-
-        match cli.command {
-            Commands::Status(args) => {
-                assert_eq!(args.target, None);
-                assert_eq!(args.scope.path.as_deref(), Some("/tmp/example"));
-                assert!(args.full);
-            }
-            _ => panic!("expected status command"),
-        }
-    }
-
-    #[test]
-    fn parser_accepts_status_id_with_path() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "status",
-            "wordpress-playground",
-            "--path",
-            "/tmp/wp-playground",
-            "--full",
-        ])
-        .expect("status <id> --path parses");
-
-        match cli.command {
-            Commands::Status(args) => {
-                assert_eq!(args.target.as_deref(), Some("wordpress-playground"));
-                assert_eq!(args.scope.path.as_deref(), Some("/tmp/wp-playground"));
-                assert!(args.full);
-            }
-            _ => panic!("expected status command"),
-        }
-    }
-
     fn parse_status(argv: &[&str]) -> StatusArgs {
         match Cli::try_parse_from(argv)
             .expect("status invocation should parse")
@@ -2352,17 +2315,6 @@ mod tests {
             .status()
             .expect("git command");
         assert!(status.success(), "git {:?} failed", args);
-    }
-
-    #[test]
-    fn parser_accepts_unreleased_filter() {
-        let cli = Cli::try_parse_from(["homeboy", "status", "--unreleased"])
-            .expect("status --unreleased parses");
-
-        match cli.command {
-            Commands::Status(args) => assert!(args.unreleased),
-            _ => panic!("expected status command"),
-        }
     }
 
     #[test]

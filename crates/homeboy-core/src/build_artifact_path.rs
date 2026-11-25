@@ -108,33 +108,32 @@ mod tests {
         File::create(&file_path).unwrap();
 
         let result = resolve_artifact_path(file_path.to_str().unwrap());
-        assert!(result.is_ok());
         assert_eq!(result.unwrap(), file_path);
     }
 
     #[test]
-    fn test_literal_path_not_exists() {
-        let result = resolve_artifact_path("/nonexistent/path/artifact.zip");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let details = err.details.to_string();
-        assert!(
-            details.contains("Artifact not found"),
-            "Expected error details to contain 'Artifact not found', got: {}",
-            details
-        );
-    }
-
-    #[test]
-    fn test_glob_pattern_single_match() {
+    fn test_unresolvable_paths_report_why() {
         let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("build-1.0.0.zip");
-        File::create(&file_path).unwrap();
-
-        let pattern = dir.path().join("build-*.zip");
-        let result = resolve_artifact_path(pattern.to_str().unwrap());
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), file_path);
+        fs::create_dir(dir.path().join("build-1.0.0.zip")).unwrap();
+        for (pattern, expected) in [
+            (
+                "/nonexistent/path/artifact.zip".to_string(),
+                "Artifact not found",
+            ),
+            (
+                dir.path().join("nonexistent-*.zip").display().to_string(),
+                "No files match pattern",
+            ),
+            // Directories matching the glob are not artifacts.
+            (
+                dir.path().join("build-*.zip").display().to_string(),
+                "No files match pattern",
+            ),
+        ] {
+            let err = resolve_artifact_path(&pattern).expect_err(&pattern);
+            let details = err.details.to_string();
+            assert!(details.contains(expected), "{pattern}: {details}");
+        }
     }
 
     #[test]
@@ -155,70 +154,23 @@ mod tests {
 
         let pattern = dir.path().join("build-*.zip");
         let result = resolve_artifact_path(pattern.to_str().unwrap());
-        assert!(result.is_ok());
         assert_eq!(result.unwrap(), new_file);
     }
 
     #[test]
-    fn test_glob_pattern_no_matches() {
-        let dir = TempDir::new().unwrap();
-        let pattern = dir.path().join("nonexistent-*.zip");
-        let result = resolve_artifact_path(pattern.to_str().unwrap());
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let details = err.details.to_string();
-        assert!(
-            details.contains("No files match pattern"),
-            "Expected error details to contain 'No files match pattern', got: {}",
-            details
-        );
-    }
-
-    #[test]
-    fn test_glob_pattern_ignores_directories() {
-        let dir = TempDir::new().unwrap();
-        let subdir = dir.path().join("build-1.0.0.zip");
-        fs::create_dir(&subdir).unwrap();
-
-        let pattern = dir.path().join("build-*.zip");
-        let result = resolve_artifact_path(pattern.to_str().unwrap());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_contains_glob_chars() {
-        assert!(contains_glob_chars("dist/*.zip"));
-        assert!(contains_glob_chars("build-?.tar.gz"));
-        assert!(contains_glob_chars("file[0-9].txt"));
-        assert!(!contains_glob_chars("dist/artifact.zip"));
-        assert!(!contains_glob_chars("/path/to/file.tar.gz"));
-    }
-
-    #[test]
-    fn test_relative_literal_resolves_from_root() {
-        let dir = TempDir::new().unwrap();
-        let artifact_dir = dir.path().join("target").join("distrib");
-        fs::create_dir_all(&artifact_dir).unwrap();
-        let file_path = artifact_dir.join("artifact.zip");
-        File::create(&file_path).unwrap();
-
-        let result =
-            resolve_artifact_path_from_root("target/distrib/artifact.zip", Some(dir.path()));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), file_path);
-    }
-
-    #[test]
-    fn test_relative_glob_resolves_from_root() {
+    fn test_relative_literal_and_glob_resolve_from_root() {
         let dir = TempDir::new().unwrap();
         let artifact_dir = dir.path().join("target").join("distrib");
         fs::create_dir_all(&artifact_dir).unwrap();
         let file_path = artifact_dir.join("build-1.0.1.zip");
         File::create(&file_path).unwrap();
 
-        let result =
-            resolve_artifact_path_from_root("target/distrib/build-*.zip", Some(dir.path()));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), file_path);
+        for pattern in [
+            "target/distrib/build-1.0.1.zip",
+            "target/distrib/build-*.zip",
+        ] {
+            let result = resolve_artifact_path_from_root(pattern, Some(dir.path()));
+            assert_eq!(result.unwrap(), file_path, "{pattern}");
+        }
     }
 }

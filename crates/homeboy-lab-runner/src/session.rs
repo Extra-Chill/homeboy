@@ -1331,13 +1331,9 @@ mod status_serialization_tests {
         let summary = report.admission_summary();
         assert!(!summary.connected);
         assert!(!summary.accepting_jobs);
-        assert!(
-            summary
-                .next_action
-                .as_deref()
-                .is_some_and(|a| a.contains("connect")),
-            "disconnected points at connect: {:?}",
-            summary.next_action
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner connect homeboy-lab")
         );
     }
 
@@ -1586,20 +1582,6 @@ mod status_serialization_tests {
         let summary = report.admission_summary();
 
         assert_eq!(summary.next_action, None);
-    }
-
-    #[test]
-    fn disconnected_runner_points_to_connect() {
-        let mut report = base_report();
-        report.connected = false;
-        report.state = RunnerSessionState::Disconnected;
-
-        let summary = report.admission_summary();
-
-        assert_eq!(
-            summary.next_action.as_deref(),
-            Some("homeboy runner connect homeboy-lab")
-        );
     }
 }
 

@@ -1080,7 +1080,7 @@ fn scoped_provider_backend(backend: Option<&str>, catalog: bool) -> Option<&str>
 
 /// Filter the catalog to the scoped backend's providers, or return the full set
 /// when unscoped. All derived catalog sections are built from the result, so a
-/// single-backend query no longer emits every other backend's data (#9654).
+/// single-backend query emits only that backend's data (#9654).
 fn scope_providers(
     all_providers: &[AgentTaskExecutorProvider],
     scoped_backend: Option<&str>,
@@ -1907,11 +1907,10 @@ fn validate_effective_provider_route(
 
 /// Readiness for every backend the catalog declares, one entry per backend.
 ///
-/// `--validate-readiness` used to inherit Cook's default-backend precondition,
-/// so the command Cook's own error tells an operator to run in order to *find* a
-/// usable backend failed with that same missing-default error. The only way
-/// forward was guessing declared backends one at a time (#12569). An absent
-/// `--backend` now validates each declared backend exactly the way
+/// `--validate-readiness` is the command Cook's missing-default error tells an
+/// operator to run to *find* a usable backend, so it does not inherit Cook's
+/// default-backend precondition (#12569). An absent `--backend` validates each
+/// declared backend exactly the way
 /// `--backend <backend> --validate-readiness` would, and reports every verdict:
 /// a backend that fails readiness is captured here, never propagated, because
 /// the failing backends are half of the picture this sweep exists to produce.

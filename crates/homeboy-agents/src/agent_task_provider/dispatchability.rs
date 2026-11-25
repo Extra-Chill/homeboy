@@ -853,6 +853,36 @@ pub fn provider_readiness_is_runner_owned() -> bool {
     })
 }
 
+/// Reject controller-local agent-task admission when `/agent_task/local_execution`
+/// is `denied`.
+///
+/// Local admission is either no placement directive (`None`) or a directive whose
+/// selected placement is local — explicit `--placement local`, or `auto` /
+/// `lab-or-local` falling back. A Lab runner executing the attempt on the
+/// controller's behalf (`runner_resident`) is not controller execution.
+pub fn enforce_agent_task_local_execution_policy(
+    policy: homeboy_core::defaults::AgentTaskLocalExecutionPolicy,
+    runner_resident: bool,
+    placement: Option<&homeboy_core::parsed_command_preflight::PlacementDirective>,
+) -> homeboy_core::Result<()> {
+    if !policy.is_denied() || runner_resident {
+        return Ok(());
+    }
+    match placement {
+        Some(placement)
+            if placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab =>
+        {
+            Ok(())
+        }
+        Some(placement) => Err(
+            homeboy_core::defaults::agent_task_local_execution_denied_error(
+                placement.fallback.reason.as_deref(),
+            ),
+        ),
+        None => Err(homeboy_core::defaults::agent_task_local_execution_denied_error(None)),
+    }
+}
+
 /// Admit a compiled plan for an explicit placement (or local admission with `None`).
 ///
 /// Required-but-unavailable Lab placement fails before provider admission.
@@ -872,6 +902,11 @@ pub fn admit_plan_provider_dispatchability(
 ) -> homeboy_core::Result<AgentTaskPlan> {
     use homeboy_lab_contract::{EffectiveExecutionPlacement, ExecutionPlacementRequirement};
 
+    enforce_agent_task_local_execution_policy(
+        homeboy_core::defaults::resolve_agent_task_local_execution_policy(),
+        homeboy_core::resource_policy_context::lab_execution_runner_id().is_some(),
+        placement,
+    )?;
     if let Some(placement) = placement {
         if placement.required == ExecutionPlacementRequirement::Lab
             && placement.selected == EffectiveExecutionPlacement::Local
@@ -1300,6 +1335,97 @@ mod tests {
                 authority: None,
             },
         }
+    }
+
+    #[test]
+    fn denied_local_execution_rejects_explicit_local_placement() {
+        use homeboy_core::defaults::AgentTaskLocalExecutionPolicy;
+        use homeboy_lab_contract::{EffectiveExecutionPlacement, ExecutionPlacementRequirement};
+        let mut local = placement_directive(
+            ExecutionPlacementRequirement::Local,
+            EffectiveExecutionPlacement::Local,
+        );
+        local.override_authorization.authorized = true;
+
+        let error = enforce_agent_task_local_execution_policy(
+            AgentTaskLocalExecutionPolicy::Denied,
+            false,
+            Some(&local),
+        )
+        .expect_err("denied policy rejects explicit local placement");
+        assert!(error.message.contains("/agent_task/local_execution"));
+        // Local admission without a directive is the same controller execution.
+        assert!(enforce_agent_task_local_execution_policy(
+            AgentTaskLocalExecutionPolicy::Denied,
+            false,
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn denied_local_execution_never_admits_an_auto_local_fallback() {
+        use homeboy_core::defaults::AgentTaskLocalExecutionPolicy;
+        use homeboy_lab_contract::{
+            EffectiveExecutionPlacement, ExecutionPlacementRequirement, Placement,
+        };
+        let mut fallback = placement_directive(
+            ExecutionPlacementRequirement::Either,
+            EffectiveExecutionPlacement::Local,
+        );
+        fallback.requested = Placement::Auto;
+        fallback.fallback.reason = Some("runner `homeboy-lab` is disconnected".to_string());
+
+        let error = enforce_agent_task_local_execution_policy(
+            AgentTaskLocalExecutionPolicy::Denied,
+            false,
+            Some(&fallback),
+        )
+        .expect_err("auto must not fall back to local");
+        assert!(error
+            .message
+            .contains("runner `homeboy-lab` is disconnected"));
+
+        let lab = placement_directive(
+            ExecutionPlacementRequirement::Either,
+            EffectiveExecutionPlacement::Lab,
+        );
+        assert!(enforce_agent_task_local_execution_policy(
+            AgentTaskLocalExecutionPolicy::Denied,
+            false,
+            Some(&lab),
+        )
+        .is_ok());
+        // The runner executing the attempt on the controller's behalf is not
+        // controller execution.
+        assert!(enforce_agent_task_local_execution_policy(
+            AgentTaskLocalExecutionPolicy::Denied,
+            true,
+            Some(&fallback),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn allowed_local_execution_is_unchanged() {
+        use homeboy_core::defaults::AgentTaskLocalExecutionPolicy;
+        use homeboy_lab_contract::{EffectiveExecutionPlacement, ExecutionPlacementRequirement};
+        let local = placement_directive(
+            ExecutionPlacementRequirement::Local,
+            EffectiveExecutionPlacement::Local,
+        );
+        assert!(enforce_agent_task_local_execution_policy(
+            AgentTaskLocalExecutionPolicy::Allowed,
+            false,
+            Some(&local),
+        )
+        .is_ok());
+        assert!(enforce_agent_task_local_execution_policy(
+            AgentTaskLocalExecutionPolicy::Allowed,
+            false,
+            None,
+        )
+        .is_ok());
     }
 
     #[test]

@@ -82,7 +82,7 @@ pub struct RuntimePromotionLeaseRecord {
     #[serde(default)]
     pub linux_starttime_ticks: Option<u64>,
     /// Cross-platform process-start identity for capability handoff. The
-    /// legacy Linux ticks remain populated for v2 readers during rollout.
+    /// Linux ticks above stay populated for v2 readers.
     #[serde(default)]
     pub process_start_identity: Option<crate::process::ProcessStartIdentity>,
     /// Written at transaction boundaries. Expiry is diagnostic only: it never
@@ -2835,8 +2835,8 @@ mod tests {
             "candidate-b",
             CompatibleOwnerPolicy::SameGeneration,
         ));
-        let mut legacy_owner = owner.clone();
-        legacy_owner.compatibility_key.clear();
+        let mut unkeyed_owner = owner.clone();
+        unkeyed_owner.compatibility_key.clear();
         assert!(is_compatible_owner(
             &owner,
             "lab",
@@ -2852,7 +2852,7 @@ mod tests {
             CompatibleOwnerPolicy::SameTarget,
         ));
         assert!(!is_compatible_owner(
-            &legacy_owner,
+            &unkeyed_owner,
             "lab",
             "generation-a",
             "candidate-a",
@@ -3468,7 +3468,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_lease_without_start_identity_cannot_grant_nested_ownership() {
+    fn lease_without_start_identity_cannot_grant_nested_ownership() {
         let mut held = lease_record();
         held.linux_starttime_ticks = None;
         held.process_start_identity = None;
@@ -3534,7 +3534,7 @@ mod tests {
     }
 
     #[test]
-    fn keyed_owner_allows_legacy_reentrancy_without_releasing_its_transaction() {
+    fn keyed_owner_allows_unkeyed_reentrancy_without_releasing_its_transaction() {
         crate::test_support::with_isolated_home(|_| {
             let outer = acquire_waiting_for_compatible_key(
                 "keyed owner",
@@ -3544,8 +3544,8 @@ mod tests {
                 |_| unreachable!("uncontended owner does not queue"),
             )
             .expect("keyed owner acquires lease");
-            let inner = acquire("legacy nested operation", "lab")
-                .expect("the owner's exact local capability permits legacy reentrancy");
+            let inner = acquire("unkeyed nested operation", "lab")
+                .expect("the owner's exact local capability permits unkeyed reentrancy");
 
             assert!(!inner.primary, "nested lease must not own cleanup");
             assert_eq!(inner.compatibility_key, "candidate-a");

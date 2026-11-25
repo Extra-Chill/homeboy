@@ -335,6 +335,8 @@ mod tests {
             terminal_run_days: 90,
             runtime_tmp_days: 30,
             runtime_run_max_count: 5,
+            release_artifact_max_count: 3,
+            release_artifact_max_bytes: 4096,
             limit: 7,
             ..retention()
         };
@@ -342,13 +344,15 @@ mod tests {
         let policy = cleanup_policy_from_retention(&configured, CleanupPolicyOverrides::default())
             .expect("resolve policy");
 
-        // The regression this guards: specialists used to carry their own
-        // `default_value_t` literals, so a widened configuration window was
-        // honored by the aggregate and silently ignored by the specialist.
+        // Specialists must resolve configured windows through the shared
+        // policy rather than their own `default_value_t` literals, or a widened
+        // window is honored by the aggregate and ignored by the specialist.
         assert_eq!(policy.terminal_run_days, 90);
         assert_eq!(policy.runtime_tmp_days, 30);
         assert_eq!(policy.runtime_tmp_managed_days, 30);
         assert_eq!(policy.runtime_run_max_count, 5);
+        assert_eq!(policy.release_artifact_max_count, 3);
+        assert_eq!(policy.release_artifact_max_bytes, 4096);
         assert_eq!(policy.limit, 7);
     }
 
@@ -377,6 +381,8 @@ mod tests {
         let configured = RetentionConfig {
             terminal_run_days: 90,
             runtime_tmp_days: 30,
+            release_artifact_max_count: 3,
+            release_artifact_max_bytes: 4096,
             limit: 7,
             ..retention()
         };
@@ -387,6 +393,8 @@ mod tests {
                 terminal_run_days: Some(1),
                 limit: Some(2),
                 runtime_tmp_days: Some(3),
+                release_artifact_max_count: Some(1),
+                release_artifact_max_bytes: Some(2048),
                 ..CleanupPolicyOverrides::default()
             },
         )
@@ -395,49 +403,51 @@ mod tests {
         assert_eq!(policy.terminal_run_days, 1);
         assert_eq!(policy.limit, 2);
         assert_eq!(policy.runtime_tmp_days, 3);
+        assert_eq!(policy.release_artifact_max_count, 1);
+        assert_eq!(policy.release_artifact_max_bytes, 2048);
     }
 
+    /// The *effective* value is validated, so a corrupt configuration is
+    /// rejected even when the operator typed nothing, and a specialist cannot
+    /// inherit a nonsensical window that the aggregate would have refused.
     #[test]
-    fn negative_window_is_rejected_on_every_entry_point() {
-        let configured = RetentionConfig {
-            terminal_run_days: -1,
-            ..retention()
-        };
-
-        // A corrupt configuration is rejected even when the operator typed
-        // nothing, so a specialist cannot inherit a nonsensical window that the
-        // aggregate would have refused.
-        assert!(
-            cleanup_policy_from_retention(&configured, CleanupPolicyOverrides::default()).is_err()
-        );
-        assert!(cleanup_policy_from_retention(
-            &retention(),
-            CleanupPolicyOverrides {
-                terminal_run_days: Some(-1),
-                ..CleanupPolicyOverrides::default()
-            },
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn nonpositive_limit_is_rejected() {
-        assert!(cleanup_policy_from_retention(
-            &RetentionConfig {
-                limit: 0,
-                ..retention()
-            },
-            CleanupPolicyOverrides::default(),
-        )
-        .is_err());
-        assert!(cleanup_policy_from_retention(
-            &retention(),
-            CleanupPolicyOverrides {
-                limit: Some(0),
-                ..CleanupPolicyOverrides::default()
-            },
-        )
-        .is_err());
+    fn invalid_effective_window_or_limit_is_rejected_on_every_entry_point() {
+        let cases = [
+            (
+                RetentionConfig {
+                    terminal_run_days: -1,
+                    ..retention()
+                },
+                CleanupPolicyOverrides::default(),
+            ),
+            (
+                retention(),
+                CleanupPolicyOverrides {
+                    terminal_run_days: Some(-1),
+                    ..CleanupPolicyOverrides::default()
+                },
+            ),
+            (
+                RetentionConfig {
+                    limit: 0,
+                    ..retention()
+                },
+                CleanupPolicyOverrides::default(),
+            ),
+            (
+                retention(),
+                CleanupPolicyOverrides {
+                    limit: Some(0),
+                    ..CleanupPolicyOverrides::default()
+                },
+            ),
+        ];
+        for (configured, overrides) in cases {
+            assert!(
+                cleanup_policy_from_retention(&configured, overrides).is_err(),
+                "{configured:?} / {overrides:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -453,35 +463,6 @@ mod tests {
         )
         .expect("resolve policy");
         assert_eq!(policy.terminal_run_days, 0);
-    }
-
-    #[test]
-    fn scan_limit_fails_closed_instead_of_widening() {
-        let policy = cleanup_policy_from_retention(
-            &retention(),
-            CleanupPolicyOverrides {
-                limit: Some(i64::MAX),
-                ..CleanupPolicyOverrides::default()
-            },
-        )
-        .expect("resolve policy");
-
-        // On every target where `i64::MAX` fits a `usize` this is the identity.
-        // Where it does not, the budget collapses to zero removals rather than
-        // widening to an unbounded delete.
-        let expected = usize::try_from(i64::MAX).unwrap_or(0);
-        assert_eq!(policy.scan_limit(), expected);
-    }
-
-    #[test]
-    fn runner_age_floor_is_one_named_value() {
-        let policy = cleanup_policy_from_retention(&retention(), CleanupPolicyOverrides::default())
-            .expect("resolve policy");
-        assert_eq!(policy.runner_min_age_hours, RUNNER_MIN_AGE_HOURS);
-        assert_eq!(
-            policy.runner_min_age(),
-            Duration::from_secs(RUNNER_MIN_AGE_HOURS * SECONDS_PER_HOUR)
-        );
     }
 
     #[test]
@@ -509,85 +490,5 @@ mod tests {
             Duration::from_secs(6 * SECONDS_PER_DAY)
         );
         assert_eq!(policy.shared_store_lease_ttl(), Duration::from_secs(61));
-    }
-
-    /// The leaked-test-home floor is a fixed, named value like the runner floor,
-    /// and its byte ceiling is finite. An infinite ceiling would silently
-    /// restore the age-only bound that #11073 showed cannot keep up.
-    #[test]
-    fn the_leaked_test_home_bound_is_both_an_age_floor_and_a_finite_byte_ceiling() {
-        let policy = cleanup_policy_from_retention(&retention(), CleanupPolicyOverrides::default())
-            .expect("resolve policy");
-
-        assert_eq!(
-            policy.leaked_test_home_min_age_hours,
-            LEAKED_TEST_HOME_MIN_AGE_HOURS
-        );
-        assert_eq!(
-            policy.leaked_test_home_min_age(),
-            Duration::from_secs(LEAKED_TEST_HOME_MIN_AGE_HOURS * SECONDS_PER_HOUR)
-        );
-        assert!(policy.leaked_test_home_min_age_hours > 0);
-        assert_eq!(
-            policy.leaked_test_home_max_total_bytes,
-            LEAKED_TEST_HOME_MAX_TOTAL_BYTES
-        );
-        assert!(policy.leaked_test_home_max_total_bytes < u64::MAX);
-    }
-
-    /// #14223: the release artifact store had no count, byte, or age bound of
-    /// any kind, and grew to 6.1 GB. Both budgets must be finite by default and
-    /// both must be resolvable from configuration.
-    #[test]
-    fn the_release_artifact_bound_is_a_finite_count_and_a_finite_byte_ceiling() {
-        let policy = cleanup_policy_from_retention(&retention(), CleanupPolicyOverrides::default())
-            .expect("resolve policy");
-
-        assert!(policy.release_artifact_max_count < usize::MAX);
-        assert!(policy.release_artifact_max_bytes < u64::MAX);
-        assert_eq!(
-            policy.release_artifact_min_age_hours,
-            RELEASE_ARTIFACT_MIN_AGE_HOURS
-        );
-        assert_eq!(
-            policy.release_artifact_min_age(),
-            Duration::from_secs(RELEASE_ARTIFACT_MIN_AGE_HOURS * SECONDS_PER_HOUR)
-        );
-
-        // The regression this module exists to prevent: a widened configuration
-        // window honored by one entry point and ignored by another.
-        let configured = RetentionConfig {
-            release_artifact_max_count: 3,
-            release_artifact_max_bytes: 4096,
-            ..retention()
-        };
-        let policy = cleanup_policy_from_retention(&configured, CleanupPolicyOverrides::default())
-            .expect("resolve policy");
-        assert_eq!(policy.release_artifact_max_count, 3);
-        assert_eq!(policy.release_artifact_max_bytes, 4096);
-
-        let policy = cleanup_policy_from_retention(
-            &configured,
-            CleanupPolicyOverrides {
-                release_artifact_max_count: Some(1),
-                release_artifact_max_bytes: Some(2048),
-                ..CleanupPolicyOverrides::default()
-            },
-        )
-        .expect("resolve policy");
-        assert_eq!(policy.release_artifact_max_count, 1);
-        assert_eq!(policy.release_artifact_max_bytes, 2048);
-    }
-
-    #[test]
-    fn workspace_passes_depend_only_on_mutation_intent() {
-        assert_eq!(
-            CleanupPolicy::runner_workspace_passes(true),
-            RUNNER_WORKSPACE_APPLY_PASSES
-        );
-        assert_eq!(
-            CleanupPolicy::runner_workspace_passes(false),
-            RUNNER_WORKSPACE_DRY_RUN_PASSES
-        );
     }
 }

@@ -2277,8 +2277,8 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             0
         );
         let (probe, probe_exit_code) = recover_preflight_probe(source_run_id);
-        // A retryable pre-execution failure used to need `cook-continue
-        // --rearm`; recover names the retry step and validates no continuation.
+        // A retryable pre-execution failure: recover names the retry step and
+        // validates no continuation.
         assert_eq!(probe_exit_code, 0, "{probe:#}");
         assert_eq!(probe["status"], "pre_execution_failure");
         assert_eq!(probe["step"], json!({ "kind": "retry" }));
@@ -2681,7 +2681,7 @@ fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result()
     with_temp_home(|| {
         let cook_id = "cook-background-recover";
         let run_id = "cook-background-recover-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let root = tempfile::tempdir().unwrap();
         let release = root.path().join("release");
         let started = root.path().join("started");
@@ -2810,7 +2810,7 @@ fn recover_regate_verify_replaces_gates_for_an_incomplete_unjudged_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-regate-verify";
         let run_id = "cook-regate-verify-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let store = test_lifecycle_store();
         let mut aggregate = store.read_aggregate(run_id).unwrap();
         aggregate.outcomes[0].outputs = json!({"review_form": {
@@ -2916,7 +2916,7 @@ fn recover_regate_carries_explicit_gate_budgets_for_a_no_progress_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-regate-budgets";
         let run_id = "cook-regate-budgets-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let gate = json!({"id": "gate-1", "status": "unavailable", "termination": "no_progress", "command": ["sh", "-c", "cargo test"], "exit_code": 1});
         test_lifecycle_store()
             .record_promotion(
@@ -3241,7 +3241,7 @@ fn admission_failure_driver_exit_leaves_no_running_row() {
 /// A terminal candidate-recoverable Cook attempt whose outcome holds no
 /// immutable candidate, with a local continuation placement decision.
 /// `runtime_generation` overrides the Homeboy build the recipe records.
-fn persist_legacy_candidate_cook(cook_id: &str, run_id: &str, runtime_generation: Option<&str>) {
+fn persist_candidateless_cook(cook_id: &str, run_id: &str, runtime_generation: Option<&str>) {
     let plan = AgentTaskPlan::new(
         "cook-legacy-null-model-plan",
         vec![serde_json::from_value(json!({
@@ -3359,7 +3359,7 @@ fn recover_preflight_admits_a_candidate_recorded_by_an_older_homeboy_build() {
         let cook_id = "cook-older-runtime";
         let run_id = "cook-older-runtime-attempt-1";
         let older = "homeboy 0.433.16+880cf5ac";
-        persist_legacy_candidate_cook(cook_id, run_id, Some(older));
+        persist_candidateless_cook(cook_id, run_id, Some(older));
         let recipe =
             homeboy::agents::agent_task_service::load_recipe(cook_id).expect("load older recipe");
         assert_eq!(recipe.runtime_generation, older);
@@ -3414,7 +3414,7 @@ fn recover_without_admissible_candidate_plans_no_step_and_names_the_refusal() {
     with_temp_home(|| {
         let cook_id = "cook-blocked-recover-summary";
         let run_id = "cook-blocked-recover-summary-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let performer = FixtureCookRecoveryPerformer {
             executor: Arc::new(CountingCookExecutor::default()),
             ..Default::default()
@@ -3464,7 +3464,7 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-legacy-null-model";
         let run_id = "cook-legacy-null-model-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let before = filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root"));
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),

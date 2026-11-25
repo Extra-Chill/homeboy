@@ -512,8 +512,7 @@ impl<T: Serialize, E: Serialize + Default> Default for EntityCrudOutput<T, E> {
 ///
 /// Every row-shaped list command returns its rows under `data.entities` so one
 /// reader works across all of them (#14876). Every list emits `entities` only
-/// (#15742, #16390); the retired per-command mirrors (`extensions`,
-/// `projects`) are gone.
+/// (#15742, #16390); there are no per-command row mirrors.
 ///
 /// Embed with `#[serde(flatten)]`. `entities` is always emitted, including as
 /// `[]` when the list is empty, so absence is never a valid "no rows" answer.
@@ -537,8 +536,7 @@ impl<T> EntityRows<T> {
     }
 }
 
-/// Read access to the rows as a slice, so callers that used to hold a
-/// `Vec<T>` keep `.iter()`, `.len()`, and indexing unchanged.
+/// Read access to the rows as a slice, so callers keep `.iter()`, `.len()`, and indexing unchanged.
 impl<T> std::ops::Deref for EntityRows<T> {
     type Target = [T];
 
@@ -651,57 +649,44 @@ mod tests {
     }
 
     #[test]
-    fn test_exit_code() {
-        let clean = BatchResult::new();
-        assert_eq!(clean.exit_code(), 0);
-
-        let mut failed = BatchResult::new();
-        failed.record_error("item".to_string(), "failed".to_string());
-        assert_eq!(failed.exit_code(), 1);
-    }
-
-    #[test]
-    fn test_record_created() {
+    fn batch_records_each_item_with_its_status_and_error() {
         let mut result = BatchResult::new();
-        result.record_created("alpha".to_string());
+        assert_eq!(result.exit_code(), 0);
+        result.record_created("created".to_string());
+        result.record_updated("updated".to_string());
+        result.record_skipped("skipped".to_string());
+        result.record_error("failed".to_string(), "boom".to_string());
 
-        assert_eq!(result.created, 1);
-        assert_eq!(result.items[0].id, "alpha");
-        assert_eq!(result.items[0].status, "created");
-        assert_eq!(result.items[0].error, None);
-    }
-
-    #[test]
-    fn test_record_updated() {
-        let mut result = BatchResult::new();
-        result.record_updated("alpha".to_string());
-
-        assert_eq!(result.updated, 1);
-        assert_eq!(result.items[0].id, "alpha");
-        assert_eq!(result.items[0].status, "updated");
-        assert_eq!(result.items[0].error, None);
-    }
-
-    #[test]
-    fn test_record_skipped() {
-        let mut result = BatchResult::new();
-        result.record_skipped("alpha".to_string());
-
-        assert_eq!(result.skipped, 1);
-        assert_eq!(result.items[0].id, "alpha");
-        assert_eq!(result.items[0].status, "skipped");
-        assert_eq!(result.items[0].error, None);
-    }
-
-    #[test]
-    fn test_record_error() {
-        let mut result = BatchResult::new();
-        result.record_error("alpha".to_string(), "boom".to_string());
-
-        assert_eq!(result.errors, 1);
-        assert_eq!(result.items[0].id, "alpha");
-        assert_eq!(result.items[0].status, "error");
-        assert_eq!(result.items[0].error.as_deref(), Some("boom"));
+        let items: Vec<_> = result
+            .items
+            .iter()
+            .map(|item| {
+                (
+                    item.id.as_str(),
+                    item.status.as_str(),
+                    item.error.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("created", "created", None),
+                ("updated", "updated", None),
+                ("skipped", "skipped", None),
+                ("failed", "error", Some("boom")),
+            ]
+        );
+        assert_eq!(
+            (
+                result.created,
+                result.updated,
+                result.skipped,
+                result.errors
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(result.exit_code(), 1);
     }
 
     #[test]
@@ -764,16 +749,6 @@ mod tests {
         assert!(serialized["results"][1].get("error").is_none());
     }
 
-    #[test]
-    fn bulk_result_handles_empty_results() {
-        let output = BulkResult::<serde_json::Value>::new("fixture", Vec::new());
-
-        assert_eq!(output.summary.total, 0);
-        assert_eq!(output.summary.succeeded, 0);
-        assert_eq!(output.summary.failed, 0);
-        assert!(output.results.is_empty());
-    }
-
     #[derive(Serialize)]
     struct FlattenedRows {
         command: &'static str,
@@ -792,7 +767,6 @@ mod tests {
 
         assert_eq!(value["command"], "example.list");
         assert_eq!(value["entities"], json!([{ "id": "a" }, { "id": "b" }]));
-        assert!(value.get("examples").is_none(), "no mirror: {value}");
     }
 
     #[test]

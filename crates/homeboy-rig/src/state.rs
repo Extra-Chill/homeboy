@@ -125,11 +125,9 @@ pub(crate) struct SharedPathState {
 
 /// Storage for rig runtime state, bound to one Homeboy home.
 ///
-/// `RigState::load`/`save` previously resolved the config root on every call,
-/// which made the resolution invisible at the call site and let a single rig run
-/// read state from one home and persist it into another. Every one of those
-/// call sites is a read-modify-write against the same file, so the root belongs
-/// on the store rather than on seventeen free functions (#7505).
+/// The config root lives on the store so a single rig run reads and persists
+/// state in the same home: every call site is a read-modify-write against the
+/// same file (#7505).
 ///
 /// Service logs live beneath the same per-rig state directory, so the store owns
 /// those paths too.

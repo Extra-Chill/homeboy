@@ -113,10 +113,9 @@ mod tests {
 
     #[test]
     fn findings_resolve_a_durable_run_label_and_report_the_record_id() {
-        // #6768: this command used to carry a private `require_run` that only
-        // matched record ids, and then filtered findings on the *caller's*
-        // string. Routing through `runs_service::require_run` resolves the
-        // alias, and filtering on the resolved id is what makes the lookup
+        // #6768: routing through `runs_service::require_run` resolves a
+        // durable run label, and filtering on the resolved id (not the
+        // caller's string) is what makes the lookup
         // return the run's findings instead of an empty list.
         with_isolated_home(|_home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");

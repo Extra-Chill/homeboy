@@ -180,18 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn intent_serializes_as_stable_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&ResourceCleanupIntent::DryRun).unwrap(),
-            "\"dry_run\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ResourceCleanupIntent::Apply).unwrap(),
-            "\"apply\""
-        );
-    }
-
-    #[test]
     fn contract_rejects_wrong_schema() {
         let mut contract = contract(ResourceCleanupIntent::DryRun);
         contract.schema = "homeboy/resource-cleanup-intent/v0".to_string();

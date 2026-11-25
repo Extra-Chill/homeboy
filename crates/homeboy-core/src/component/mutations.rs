@@ -175,25 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rename() {
-        crate::test_support::with_isolated_home(|home| {
-            let repo = write_component_repo(home, "demo-plugin");
-
-            let renamed = rename("demo-plugin", "renamed-plugin").expect("rename component");
-
-            assert_eq!(renamed.id, "renamed-plugin");
-            let config: serde_json::Value = serde_json::from_str(
-                &fs::read_to_string(repo.join("homeboy.json")).expect("read homeboy.json"),
-            )
-            .expect("parse homeboy.json");
-            assert_eq!(
-                config.get("id").and_then(|value| value.as_str()),
-                Some("renamed-plugin")
-            );
-        });
-    }
-
-    #[test]
     fn component_rename_dotted_noop_errors_without_changing_files() {
         crate::test_support::with_isolated_home(|home| {
             let repo = write_component_repo(home, "liberatesh");
@@ -221,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_local_path_updates_standalone_registration() {
+    fn merge_local_path_updates_standalone_registration_and_project_attachments() {
         crate::test_support::with_isolated_home(|home| {
             let old_repo = home.path().join("sample-plugin");
             let new_repo = home.path().join("sample-plugin-current");
@@ -246,6 +227,17 @@ mod tests {
             );
             inventory::write_standalone_registration(&component)
                 .expect("write initial standalone registration");
+            crate::project::save(&crate::project::Project {
+                id: "runtime".to_string(),
+                components: vec![crate::project::ProjectComponentAttachment {
+                    id: "sample-plugin".to_string(),
+                    local_path: old_repo.to_string_lossy().to_string(),
+                    remote_path: Some("wp-content/plugins/sample-plugin".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .expect("save project");
 
             let patch = serde_json::json!({
                 "local_path": new_repo.to_string_lossy()
@@ -273,6 +265,9 @@ mod tests {
                     .and_then(|value| value.as_str()),
                 Some(new_repo.to_string_lossy().as_ref())
             );
+
+            let project = crate::project::load("runtime").expect("load project");
+            assert_eq!(project.components[0].local_path, new_repo.to_string_lossy());
         });
     }
 
@@ -333,59 +328,6 @@ mod tests {
                     .and_then(|command| command.as_str()),
                 Some("npm run package")
             );
-        });
-    }
-
-    #[test]
-    fn merge_local_path_updates_project_attachments() {
-        crate::test_support::with_isolated_home(|home| {
-            let old_repo = home.path().join("studio-web-old");
-            let new_repo = home.path().join("studio-web-new");
-            fs::create_dir_all(&old_repo).expect("old repo dir");
-            fs::create_dir_all(&new_repo).expect("new repo dir");
-            fs::write(
-                old_repo.join("homeboy.json"),
-                r#"{"id":"studio-web","remote_path":"wp-content/plugins/studio-web"}"#,
-            )
-            .expect("old homeboy.json");
-            fs::write(
-                new_repo.join("homeboy.json"),
-                r#"{"id":"studio-web","remote_path":"wp-content/plugins/studio-web"}"#,
-            )
-            .expect("new homeboy.json");
-
-            let component = Component::new(
-                "studio-web".to_string(),
-                old_repo.to_string_lossy().to_string(),
-                "wp-content/plugins/studio-web".to_string(),
-                None,
-            );
-            inventory::write_standalone_registration(&component)
-                .expect("write initial standalone registration");
-
-            let project = crate::project::Project {
-                id: "runtime".to_string(),
-                components: vec![crate::project::ProjectComponentAttachment {
-                    id: "studio-web".to_string(),
-                    local_path: old_repo.to_string_lossy().to_string(),
-                    remote_path: Some("wp-content/plugins/studio-web".to_string()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            };
-            crate::project::save(&project).expect("save project");
-
-            let patch = serde_json::json!({
-                "local_path": new_repo.to_string_lossy()
-            })
-            .to_string();
-            merge(Some("studio-web"), &patch, &[]).expect("component merge");
-
-            let loaded = crate::component::load("studio-web").expect("load component");
-            assert_eq!(loaded.local_path, new_repo.to_string_lossy());
-
-            let project = crate::project::load("runtime").expect("load project");
-            assert_eq!(project.components[0].local_path, new_repo.to_string_lossy());
         });
     }
 

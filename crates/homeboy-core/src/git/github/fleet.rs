@@ -173,7 +173,7 @@ fn summarize_check_rollup(checks: &[serde_json::Value]) -> GithubPrCheckRollup {
         match classify_check(check) {
             CheckClass::Passed => rollup.passed += 1,
             // SKIPPED is its own non-blocking terminal bucket here, matching the
-            // readiness summary — it is no longer folded into `passed`.
+            // readiness summary; it never counts toward `passed`.
             CheckClass::Skipped => rollup.skipped += 1,
             CheckClass::Failed | CheckClass::Rerunnable => rollup.failed += 1,
             CheckClass::Unknown => rollup.unknown += 1,

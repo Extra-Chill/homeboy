@@ -240,7 +240,7 @@ fn lab_route_free_slots_follow_the_effective_admission_budget() {
         reasons: Vec::new(),
         pressure: Value::Null,
     };
-    // High self-load must not turn a legacy reduced observation into a cap.
+    // High self-load must not turn a reduced observation into a cap.
     let route = lab_route_value("homeboy-lab", Some(24), Some(1), Some(&idle));
     assert_eq!(route["effective_budget"], 24);
     assert_eq!(route["free_slots"], 14);

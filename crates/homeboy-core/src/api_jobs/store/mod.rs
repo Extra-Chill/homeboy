@@ -56,12 +56,6 @@ pub(crate) struct AdmissionReservation {
     pub(crate) token: String,
     pub(crate) expires_at_ms: u64,
     pub(crate) created: bool,
-    /// Exact direct-daemon authority registered before this reservation commit.
-    #[allow(
-        dead_code,
-        reason = "Reservation provenance asserted by cfg(test) admission paths; production branches on the reservation itself."
-    )]
-    pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -430,10 +424,6 @@ pub(crate) struct LocalRunnerJob {
     pub(crate) lifecycle: Option<super::remote_runner::RunnerJobLifecycleMetadata>,
     /// Exact direct-daemon authority required to execute this queued job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[allow(
-        dead_code,
-        reason = "Reservation provenance asserted by cfg(test) admission paths; production branches on the reservation itself."
-    )]
     pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
@@ -1452,10 +1442,6 @@ impl JobStore {
                     token: lease.token.clone(),
                     expires_at_ms: lease.expires_at_ms,
                     created: false,
-                    workspace_owner_lease: stored
-                        .local_runner
-                        .as_ref()
-                        .and_then(|runner| runner.workspace_owner_lease.clone()),
                 };
                 return Ok(reservation);
             }
@@ -1526,7 +1512,6 @@ impl JobStore {
                 token,
                 expires_at_ms,
                 created: false,
-                workspace_owner_lease,
             };
             return Ok(reservation);
         }
@@ -1541,7 +1526,6 @@ impl JobStore {
             token: lease.token,
             expires_at_ms: lease.expires_at_ms,
             created,
-            workspace_owner_lease,
         })
     }
 
@@ -1588,13 +1572,12 @@ impl JobStore {
                 .local_runner
                 .as_mut()
                 .expect("admission local runner was checked")
-                .workspace_owner_lease = renewed_owner_lease.clone();
+                .workspace_owner_lease = renewed_owner_lease;
             Ok(AdmissionReservation {
                 job: stored.job.clone(),
                 token: reservation_token,
                 expires_at_ms,
                 created: false,
-                workspace_owner_lease: renewed_owner_lease,
             })
         })
     }
@@ -3870,36 +3853,6 @@ impl JobStore {
             stored.job.updated_at_ms = timestamp_ms();
             Ok(())
         })
-    }
-
-    /// Reached only from the `#[cfg(test)]` reconciliation paths in
-    /// `store::reconciliation`; production appends terminal evidence through
-    /// `append_status_event_with_data_at`. Kept because those tests assert real
-    /// reconciliation behavior, suppressed per item so the next unused method in
-    /// this impl still fails the build.
-    #[allow(
-        dead_code,
-        reason = "Reached only from cfg(test) reconciliation paths that assert real behavior."
-    )]
-    pub(super) fn append_status_event_with_data(
-        &self,
-        job_id: Uuid,
-        status: JobStatus,
-        message: impl Into<String>,
-        mut data: Value,
-    ) -> Result<JobEvent> {
-        if !data.is_object() {
-            data = serde_json::json!({ "metadata": data });
-        }
-        if let Some(object) = data.as_object_mut() {
-            object.insert("status".to_string(), serde_json::json!(status));
-        }
-        self.append_event(
-            job_id,
-            JobEventKind::Status,
-            Some(message.into()),
-            Some(data),
-        )
     }
 
     /// Whether a different daemon generation now holds this job's lease. A

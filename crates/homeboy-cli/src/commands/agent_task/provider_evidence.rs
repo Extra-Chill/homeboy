@@ -1,4 +1,3 @@
-use sha2::Digest;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 

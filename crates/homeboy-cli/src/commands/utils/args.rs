@@ -432,18 +432,6 @@ mod normalize_tests {
     }
 
     #[test]
-    fn removed_allow_local_fallback_flag_is_rejected() {
-        // `--placement lab-or-local` is the only spelling (#15742).
-        let args = normalize(argv(&[
-            "homeboy",
-            "bench",
-            "example",
-            "--allow-local-fallback",
-        ]));
-        assert!(Cli::try_parse_from(args).is_err());
-    }
-
-    #[test]
     fn release_version_show_requires_canonical_subcommand() {
         let shorthand = normalize(argv(&["homeboy", "release", "version", "my-comp"]));
         assert!(Cli::try_parse_from(shorthand).is_err());
@@ -1132,8 +1120,7 @@ impl ChangedScopeArgs {
 
 /// Parse a Lab changed-file handoff payload.
 ///
-/// Previously copied verbatim into `lint.rs`, `test.rs`, and
-/// `review/mod.rs`.
+/// Shared by `lint.rs`, `test.rs`, and `review/mod.rs`.
 pub(crate) fn parse_lab_changed_files_json(raw: &str) -> homeboy::core::Result<Vec<String>> {
     serde_json::from_str(raw).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(
@@ -1259,11 +1246,11 @@ mod changed_scope_tests {
 
 /// Sniff-selection flags flattened into the lint command.
 ///
-/// The `[errors_only, sniffs, exclude_sniffs]` triplet used to be re-declared
-/// field-by-field on `LintArgs` (CLI), `LintRunWorkflowArgs` (workflow), and
-/// `LintSourceOptions` (refactor). Owning the group here — and mapping it to
-/// the core [`homeboy_core::extension::lint::LintSniffFilters`] contract —
-/// keeps the shape defined once instead of being repeated across layers (#5576).
+/// The `[errors_only, sniffs, exclude_sniffs]` triplet shared by `LintArgs`
+/// (CLI), `LintRunWorkflowArgs` (workflow), and `LintSourceOptions`
+/// (refactor). Owning the group here — and mapping it to the core
+/// [`homeboy_core::extension::lint::LintSniffFilters`] contract — keeps the
+/// shape defined once across layers (#5576).
 #[derive(Args, Debug, Clone, Default)]
 pub struct LintSniffArgs {
     /// Show only errors, suppress warnings
@@ -1373,18 +1360,14 @@ pub enum DetailLevel {
 /// * `--json-summary` / `--summary` (`audit`, `lint`, `test`, `trace`,
 ///   `bench`'s run group) are the *detail* axis, not the format axis.
 ///
-///   `test` was recorded here as unable to take a `--format` flag at all, on
-///   the grounds that `filter_passthrough_args` strips homeboy-owned flags from
-///   `homeboy review test -- <runner args>` and the test path had no
-///   explicit-passthrough sentinel, so declaring `--format` would swallow
-///   libtest's own `--format <fmt>`. That is no longer true, and #11755 is
-///   where it was checked: `mark_explicit_passthrough` marks
+///   `test` can take a `--format` flag without swallowing libtest's own
+///   `--format <fmt>` (#11755): `mark_explicit_passthrough` marks
 ///   `("review", "test")` exactly as it marks `bench`, and
 ///   `filter_passthrough_args` returns everything after that sentinel verbatim.
 ///   `review_test_forwards_a_runner_owned_format_flag_verbatim` pins the whole
-///   path end to end. Adopting the group on `test` is now a presentation
-///   decision (which of `--json-summary`'s two senses `--detail` folds onto),
-///   not a passthrough hazard.
+///   path end to end. Adopting the group on `test` is a presentation decision
+///   (which of `--json-summary`'s two senses `--detail` folds onto), not a
+///   passthrough hazard.
 /// * `lint` declares `--summary` *and* `--json-summary` as separate fields
 ///   that `review` couples with `|=`; collapsing them is a behavior decision.
 /// * `--full` (`status`, `agent-task`), `--compact` (`runner`), `--format`

@@ -260,9 +260,9 @@ pub struct CompactContextStatus {
 }
 
 /// Answers "can work be dispatched right now, and to which placement" — the
-/// question compact `status` previously left to a second `runner status`
-/// call. `effective_placement` is what a `--placement auto` command would
-/// resolve to at this instant given `runner`'s live readiness.
+/// question compact `status` answers without a second `runner status` call.
+/// `effective_placement` is what a `--placement auto` command would resolve
+/// to at this instant given `runner`'s live readiness.
 #[derive(Debug, Serialize)]
 pub struct DispatchReadinessStatus {
     /// Where a `--placement auto` command would run right now: `"lab"` when a
@@ -414,7 +414,7 @@ pub enum ProjectComponentDashboardStatus {
     /// Absorbed into another component; not independently deployable. Tracked
     /// for visibility but excluded from deploy/outdated obligations.
     Bundled,
-    /// Sunset; no longer a deploy target. Excluded from outdated obligations.
+    /// Sunset; not a deploy target. Excluded from outdated obligations.
     Retired,
     /// Cannot determine status
     Unknown,

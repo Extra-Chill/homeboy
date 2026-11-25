@@ -481,23 +481,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_uptime_p() {
-        assert_eq!(
-            parse_uptime("up 10 days, 3 hours, 22 minutes"),
-            "10 days, 3 hours, 22 minutes"
-        );
-    }
-
-    #[test]
-    fn test_parse_uptime_p_short() {
-        assert_eq!(parse_uptime("up 45 minutes"), "45 minutes");
-    }
-
-    #[test]
-    fn test_parse_uptime_fallback() {
-        let line = " 14:32:01 up 10 days,  3:22,  1 user,  load average: 0.02, 0.08, 0.08";
-        let result = parse_uptime(line);
-        assert_eq!(result, "10 days,  3:22");
+    fn parse_uptime_reads_pretty_and_raw_uptime_lines() {
+        for (line, expected) in [
+            (
+                "up 10 days, 3 hours, 22 minutes",
+                "10 days, 3 hours, 22 minutes",
+            ),
+            ("up 45 minutes", "45 minutes"),
+            (
+                " 14:32:01 up 10 days,  3:22,  1 user,  load average: 0.02, 0.08, 0.08",
+                "10 days,  3:22",
+            ),
+        ] {
+            assert_eq!(parse_uptime(line), expected, "{line}");
+        }
     }
 
     #[test]
@@ -526,12 +523,8 @@ mod tests {
         assert_eq!(disk.total, "150G");
         assert_eq!(disk.used, "36G");
         assert_eq!(disk.percent, 25);
-    }
-
-    #[test]
-    fn test_parse_disk_usage_high() {
-        let disk = parse_disk_usage("/dev/vda1        75G   69G  2.4G  97% /").unwrap();
-        assert_eq!(disk.percent, 97);
+        let high = parse_disk_usage("/dev/vda1        75G   69G  2.4G  97% /").unwrap();
+        assert_eq!(high.percent, 97);
     }
 
     #[test]
@@ -556,27 +549,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_service_status_active() {
-        let svc = parse_service_status("kimaki:active").unwrap();
-        assert_eq!(svc.name, "kimaki");
-        assert!(svc.active);
-        assert_eq!(svc.status, "active");
-    }
-
-    #[test]
-    fn test_parse_service_status_inactive() {
-        let svc = parse_service_status("php8.4-fpm:inactive").unwrap();
-        assert_eq!(svc.name, "php8.4-fpm");
-        assert!(!svc.active);
-        assert_eq!(svc.status, "inactive");
-    }
-
-    #[test]
-    fn test_parse_service_status_failed() {
-        let svc = parse_service_status("mysql:failed").unwrap();
-        assert_eq!(svc.name, "mysql");
-        assert!(!svc.active);
-        assert_eq!(svc.status, "failed");
+    fn parse_service_status_reads_name_state_and_activity() {
+        for (line, name, status, active) in [
+            ("kimaki:active", "kimaki", "active", true),
+            ("php8.4-fpm:inactive", "php8.4-fpm", "inactive", false),
+            ("mysql:failed", "mysql", "failed", false),
+        ] {
+            let svc = parse_service_status(line).unwrap();
+            assert_eq!(svc.name, name);
+            assert_eq!(svc.status, status);
+            assert_eq!(svc.active, active, "{line}");
+        }
     }
 
     #[test]

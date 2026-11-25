@@ -168,7 +168,7 @@ fn publish_step_result(
 /// registry then refuses for lack of credentials, the release promised a
 /// publication it did not make, so the step fails rather than skipping.
 ///
-/// Skipping here used to let a release report `succeeded` with nothing
+/// Skipping here would let a release report `succeeded` with nothing
 /// published and no warning in the operator summary (#14983). A component
 /// that does not want to publish from a given environment says so with
 /// `release.publish: false` or `--skip-publish`, never by lacking a token.

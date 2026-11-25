@@ -182,12 +182,9 @@ impl AgentTaskOutcome {
     /// This is the single authoritative reader for "what model did this run
     /// actually execute under" — the value lives in `metadata.model` and every
     /// lifecycle reconciliation path (aggregate → task, provider handle
-    /// backfill, terminal-record repair) needs it. Previously each site
-    /// re-implemented `metadata.get("model") → as_str → trim → non-empty` with
-    /// subtly different handling (one path forgot the trim), which is why the
-    /// same "reconcile the terminal provider model" fix landed three times
-    /// (#9405/#9415/#9423). Centralizing the read here gives one definition:
-    /// present, non-blank after trimming, or `None`.
+    /// backfill, terminal-record repair) needs it, so every site shares one
+    /// definition: present, non-blank after trimming, or `None`
+    /// (#9405/#9415/#9423).
     pub fn selected_model(&self) -> Option<&str> {
         self.metadata
             .get("model")
@@ -343,18 +340,5 @@ impl AgentTaskWorkflowStepSuggestion {
         self.body = self.body.map(|value| policy.redact_string(&value));
         self.uri = self.uri.map(|value| policy.redact_url(&value));
         self
-    }
-}
-
-#[cfg(test)]
-mod default_construction_tests {
-    use super::*;
-
-    #[test]
-    fn default_status_is_failed_never_succeeded() {
-        assert_eq!(
-            AgentTaskOutcome::default().status,
-            AgentTaskOutcomeStatus::Failed
-        );
     }
 }

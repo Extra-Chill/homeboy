@@ -1960,7 +1960,7 @@ fn a_missing_declared_artifact_is_classified_as_an_evidence_contract_violation()
 }
 
 #[test]
-fn a_traversal_escaping_artifact_ref_is_no_longer_discarded_silently() {
+fn a_traversal_escaping_artifact_ref_is_reported_unresolvable() {
     with_isolated_home(|home| {
         let artifacts_dir = home.path().join("fuzz-artifacts");
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
@@ -2162,7 +2162,7 @@ fn persisted_fuzz_evidence_records_the_classified_contract_and_result_totals() {
             homeboy::core::observation::runs_service::require_run(&store, "evidence-contract-run")
                 .expect("run");
 
-        // The exact component revision — previously hardcoded to None.
+        // The exact component revision is recorded on the run.
         assert_eq!(
             run.git_sha.as_deref(),
             Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0")

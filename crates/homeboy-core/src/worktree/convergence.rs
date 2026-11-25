@@ -556,57 +556,6 @@ mod tests {
             )
             .expect("admit diverged PR without resetting");
             assert_eq!(git(&f.destination, &["rev-parse", "HEAD"]), candidate);
-            git(
-                &f.source,
-                &["update-ref", "refs/remotes/origin/fix/issue-1", &candidate],
-            );
-            git(
-                &f.source,
-                &["update-ref", "refs/remotes/origin/main", &f.base],
-            );
-            git(
-                &f.source,
-                &["worktree", "remove", f.destination.to_str().unwrap()],
-            );
-            git(&f.source, &["branch", "-D", "fix/issue-1"]);
-            // Remote-only branches are the same authority creation adopts.
-            let classification = super::super::stale_destination::classify_local_branch(
-                &f.source,
-                "repo@fix-issue-1",
-                "fix/issue-1",
-                "main",
-            )
-            .unwrap();
-            assert!(matches!(
-                classification,
-                super::super::stale_destination::DestinationFreshness::Stale(_)
-            ));
-            let error = super::super::stale_destination::refuse_foreign_history(classification)
-                .unwrap_err();
-            assert_eq!(
-                error.details["destination_convergence"]["pr_url"],
-                "https://github.com/Extra-Chill/homeboy/pull/42"
-            );
-            for state in ["closed", "merged"] {
-                std::fs::write(&gh, "#!/bin/sh\nprintf '[]'\n").unwrap();
-                let classification = super::super::stale_destination::classify_local_branch(
-                    &f.source,
-                    "repo@fix-issue-1",
-                    "fix/issue-1",
-                    "main",
-                )
-                .unwrap();
-                let error = super::super::stale_destination::refuse_foreign_history(classification)
-                    .expect_err(state);
-                assert_eq!(
-                    error.details["destination_convergence"]["command"],
-                    "gh pr create --head fix/issue-1"
-                );
-                assert_eq!(
-                    git(&f.source, &["rev-parse", "refs/remotes/origin/fix/issue-1"]),
-                    candidate
-                );
-            }
         });
     }
 

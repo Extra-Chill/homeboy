@@ -77,24 +77,6 @@ pub fn parse_capability_extensions(pairs: &[String]) -> Result<BTreeMap<String, 
     Ok(parsed)
 }
 
-/// Check if adding a new version target would conflict with existing targets.
-pub fn validate_version_target_conflict(
-    existing: &[VersionTarget],
-    new_file: &str,
-    new_pattern: &str,
-    _component_id: &str,
-) -> Result<()> {
-    for target in existing {
-        if target.file == new_file {
-            let existing_pattern = target.pattern.as_deref().unwrap_or("");
-            if existing_pattern == new_pattern {
-                return Ok(());
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Validate that a version target pattern is a valid regex with at least one capture group.
 pub fn validate_version_pattern(pattern: &str) -> Result<()> {
     if pattern.contains("{version}") {
@@ -183,14 +165,16 @@ mod capability_extension_tests {
     use super::parse_capability_extensions;
 
     #[test]
-    fn parses_capability_and_non_capability_surfaces() {
+    fn parses_trimmed_surfaces_and_collapses_agreeing_repeats() {
         let parsed = parse_capability_extensions(&[
+            " build = wordpress ".to_string(),
             "build=wordpress".to_string(),
             "remote_path=wordpress".to_string(),
             "provides.file_extensions=nodejs".to_string(),
         ])
         .expect("valid pairs");
 
+        assert_eq!(parsed.len(), 3);
         assert_eq!(parsed.get("build").map(String::as_str), Some("wordpress"));
         assert_eq!(
             parsed.get("remote_path").map(String::as_str),
@@ -203,42 +187,22 @@ mod capability_extension_tests {
     }
 
     #[test]
-    fn trims_surrounding_whitespace() {
-        let parsed =
-            parse_capability_extensions(&[" build = wordpress ".to_string()]).expect("valid pair");
-        assert_eq!(parsed.get("build").map(String::as_str), Some("wordpress"));
-    }
-
-    #[test]
-    fn rejects_pair_without_equals() {
-        let err = parse_capability_extensions(&["build".to_string()])
-            .expect_err("missing '=' must be rejected");
-        assert!(err.to_string().contains("<capability>=<extension>"));
-    }
-
-    #[test]
-    fn rejects_empty_halves() {
-        assert!(parse_capability_extensions(&["=wordpress".to_string()]).is_err());
-        assert!(parse_capability_extensions(&["build=".to_string()]).is_err());
-    }
-
-    #[test]
-    fn repeating_the_same_owner_is_accepted() {
-        let parsed = parse_capability_extensions(&[
-            "build=wordpress".to_string(),
-            "build=wordpress".to_string(),
-        ])
-        .expect("identical repeats agree");
-        assert_eq!(parsed.len(), 1);
-    }
-
-    #[test]
-    fn rejects_conflicting_owners_for_one_capability() {
-        let err = parse_capability_extensions(&[
-            "build=wordpress".to_string(),
-            "build=nodejs".to_string(),
-        ])
-        .expect_err("conflicting owners must be rejected");
-        assert!(err.to_string().contains("Conflicting owners"));
+    fn rejects_malformed_and_conflicting_pairs() {
+        for (pairs, expected) in [
+            (vec!["build"], "<capability>=<extension>"),
+            (
+                vec!["=wordpress"],
+                "both capability and extension are required",
+            ),
+            (vec!["build="], "both capability and extension are required"),
+            (
+                vec!["build=wordpress", "build=nodejs"],
+                "Conflicting owners",
+            ),
+        ] {
+            let pairs: Vec<String> = pairs.into_iter().map(String::from).collect();
+            let err = parse_capability_extensions(&pairs).expect_err("pairs must be rejected");
+            assert!(err.to_string().contains(expected), "{pairs:?}: {err}");
+        }
     }
 }

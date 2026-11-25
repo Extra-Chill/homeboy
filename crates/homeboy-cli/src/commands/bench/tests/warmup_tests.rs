@@ -1,41 +1,6 @@
 use super::*;
 
 #[test]
-fn parses_warmup_flag() {
-    let cli = TestCli::try_parse_from(["bench", "homeboy", "--warmup", "3"])
-        .expect("bench --warmup should parse");
-
-    assert_eq!(cli.bench.run.warmup, Some(3));
-}
-
-#[test]
-fn rejects_negative_warmup_flag() {
-    let err = match TestCli::try_parse_from(["bench", "homeboy", "--warmup", "-1"]) {
-        Ok(_) => panic!("negative warmup must fail at parse time"),
-        Err(err) => err,
-    };
-
-    assert!(
-        err.to_string().contains("invalid value"),
-        "expected invalid value error, got: {}",
-        err
-    );
-}
-
-#[test]
-fn filter_strips_warmup_forms() {
-    let args = vec![
-        "--warmup".to_string(),
-        "3".to_string(),
-        "--filter=Scenario".to_string(),
-    ];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--filter=Scenario"]);
-
-    let args = vec!["--warmup=3".to_string(), "--keep".to_string()];
-    assert_eq!(filter_homeboy_flags(&args), vec!["--keep"]);
-}
-
-#[test]
 fn unrigged_bench_forwards_cli_warmup() {
     with_isolated_home(|home| {
         write_bench_extension(home);

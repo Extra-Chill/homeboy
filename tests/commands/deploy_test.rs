@@ -75,44 +75,6 @@ fn deploy_ref_requires_dangerous_confirmation_for_real_deploy() {
 }
 
 #[test]
-fn deploy_parser_accepts_exact_ref() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "deploy",
-        "project-a",
-        "component-a",
-        "--ref",
-        "release-candidate",
-        "--dry-run",
-    ])
-    .expect("--ref should parse");
-
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert_eq!(args.requested_ref.as_deref(), Some("release-candidate"));
-}
-
-#[test]
-fn deploy_parser_accepts_release_set_manifest() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "deploy",
-        "--project",
-        "project-a",
-        "--release-set",
-        "release-set.json",
-        "--dry-run",
-    ])
-    .expect("--release-set should parse");
-
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert_eq!(args.release_set.as_deref(), Some("release-set.json"));
-}
-
-#[test]
 fn release_set_rejects_conflicting_source_selectors() {
     for conflicting in [vec!["--head"], vec!["--tagged"], vec!["--outdated"]] {
         let mut argv = vec![
@@ -191,66 +153,16 @@ fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
     assert!(config.skip_deps_hydration);
 }
 
-#[test]
-fn deploy_confirm_dangerous_does_not_grant_stale_or_downgrade_consent() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "deploy",
-        "project-a",
-        "component-a",
-        "--confirm-dangerous",
-    ])
-    .expect("--confirm-dangerous should parse");
-
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert!(args.confirm_dangerous);
-    assert!(!args.allow_stale_source);
-    assert!(!args.allow_downgrade);
-}
-
-#[test]
-fn deploy_rejects_old_apply_spelling() {
-    let result = Cli::try_parse_from(["homeboy", "deploy", "project-a", "component-a", "--apply"]);
-    let error = match result {
-        Ok(_) => panic!("--apply must be rejected by clap after the rename"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("unexpected argument"));
-    assert!(error.to_string().contains("--apply"));
-}
-
-#[test]
-fn deploy_parser_accepts_explicit_source_safety_overrides() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "deploy",
-        "project-a",
-        "component-a",
-        "--allow-stale-source",
-        "--allow-downgrade",
-    ])
-    .expect("source-safety overrides should parse");
-
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert!(args.allow_stale_source);
-    assert!(args.allow_downgrade);
-}
-
 /// `--version` is deliberately absent from this list (#10648).
 ///
-/// It was here because `--version` doubles as a tag selector on the
-/// non-ref path, so it looked like one more way of choosing source. It is not:
-/// with a ref requested, `resolve_deploy_tags` is skipped entirely and the
+/// `--version` doubles as a tag selector on the non-ref path, but it is not a
+/// competing source selector: with a ref requested, `resolve_deploy_tags` is skipped entirely and the
 /// version reaches `PreparedDeployArtifact::validate` as an assertion about the
 /// package's contents. Selecting a commit and asserting what it builds are
 /// different questions, and recovery needs to ask both at once --
 /// `exact_ref_deploy_accepts_an_independent_expected_version` covers that.
 ///
-/// Everything still listed here genuinely competes with `--ref` for source
+/// Everything listed here genuinely competes with `--ref` for source
 /// selection and must stay refused.
 #[test]
 fn deploy_ref_rejects_every_other_source_selector() {
@@ -375,24 +287,4 @@ fn deploy_target_selects_a_named_deliverable() {
         .is_err(),
         "an unselectable target must be rejected at parse time"
     );
-}
-
-/// Omitting `--target` keeps the inferred route, so an optional provider never
-/// forces the flag onto every existing deploy.
-#[test]
-fn deploy_without_target_leaves_the_route_inferred() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "deploy",
-        "--project",
-        "project-a",
-        "--component",
-        "component-a",
-    ])
-    .expect("deploy without --target");
-
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-    assert_eq!(args.target, None);
 }

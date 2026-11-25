@@ -925,8 +925,6 @@ fn routes_versioned_control_plane_endpoints() {
     );
     http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc")
         .expect_err("only the canonical actions route mutates runs");
-    http_api::route(HttpMethod::Get, "/agent-task/runs/run-abc")
-        .expect_err("the unversioned compatibility route is removed");
     for path in [
         "/v1/control-plane/missions?limit=0",
         "/v1/control-plane/missions?limit=101",

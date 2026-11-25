@@ -12,8 +12,7 @@ use std::time::Duration;
 /// Exit code returned when a watch did not settle before its timeout.
 ///
 /// Matches the GNU `timeout(1)` convention so wrappers can recognize the case.
-/// Every watch surface shares this constant; it used to be declared once per
-/// watch command, which is exactly how two commands drift.
+/// Every watch surface shares this constant so watch commands cannot drift.
 pub const TIMEOUT_EXIT_CODE: i32 = 124;
 
 /// "Fetch the current state of the thing being watched", abstracted so the loop

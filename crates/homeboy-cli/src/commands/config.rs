@@ -650,11 +650,9 @@ mod tests {
         });
     }
 
-    /// Reproduces #13635: an unscoped `config show` used to dump the entire
-    /// multi-line binary-upgrade and source-build scripts inline, burying
-    /// settings like `agent_task`/`notifications`/`release_gate` in ~15KB of
-    /// install-method shell programs. The actual settings must be readable
-    /// without the embedded scripts drowning them out.
+    /// #13635: an unscoped `config show` keeps the multi-line binary-upgrade
+    /// and source-build scripts out of the output, so settings like
+    /// `agent_task`/`notifications`/`release_gate` stay readable.
     #[test]
     fn unscoped_show_elides_large_install_scripts_but_keeps_real_settings_readable() {
         homeboy::core::test_support::with_isolated_home(|_| {
@@ -675,7 +673,7 @@ mod tests {
                 "release_gate settings must still be present: {config}"
             );
 
-            // The large embedded source-build script no longer dominates the
+            // The large embedded source-build script does not dominate the
             // output.
             let source_script = config
                 .pointer("/defaults/install_methods/source/upgrade_command")

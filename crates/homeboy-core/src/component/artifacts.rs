@@ -281,27 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_declared_cleanup_artifacts_from_component_config() {
-        let raw = serde_json::json!({
-            "id": "fixture",
-            "local_path": "/tmp/fixture",
-            "cleanup_artifacts": [
-                { "label": "WordPress runtime", "path": "wordpress/" },
-                { "label": "generated packages", "glob": "packages/*/dist" }
-            ]
-        });
-
-        let parsed: Component = serde_json::from_value(raw).expect("component parses");
-
-        assert_eq!(parsed.cleanup_artifacts.len(), 2);
-        assert_eq!(parsed.cleanup_artifacts[0].label, "WordPress runtime");
-        assert_eq!(
-            parsed.cleanup_artifacts[0].path.as_deref(),
-            Some("wordpress/")
-        );
-    }
-
-    #[test]
     fn dry_run_reports_declared_artifacts_without_runtime_inference() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(
@@ -378,6 +357,8 @@ mod tests {
         });
     }
 
+    /// Declarations come from the component's `homeboy.json`, so the fixture
+    /// goes through the config wire shape rather than the struct.
     #[test]
     fn apply_removes_only_declared_artifact_paths() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -385,14 +366,12 @@ mod tests {
         fs::write(dir.path().join("dist/app.js"), "generated").unwrap();
         fs::write(dir.path().join("src.js"), "source").unwrap();
 
-        let mut component = component(dir.path());
-        component
-            .cleanup_artifacts
-            .push(CleanupArtifactDeclaration {
-                label: "dist".to_string(),
-                path: Some("dist".to_string()),
-                glob: None,
-            });
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "local_path": dir.path().display().to_string(),
+            "cleanup_artifacts": [{ "label": "dist", "path": "dist" }]
+        }))
+        .expect("component parses");
 
         let report = cleanup_artifact_report(&component, true).expect("apply");
 

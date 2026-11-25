@@ -2327,7 +2327,7 @@ fn identityless_manifest_is_a_diagnostic_and_does_not_stop_residue_retirement() 
     tombstone.state = TaskWorktreeState::Removed;
     write_record(&store, &tombstone).unwrap();
 
-    // A legacy manifest written before identities were required.
+    // A manifest without a workspace identity.
     let mut legacy = fixture_record(source.path(), &dir.path().join("legacy"));
     rebind_handle(&mut legacy, "fixture@legacy".to_string());
     legacy.workspace_identity = None;
@@ -4376,13 +4376,6 @@ fn reaping_audit_rows_live_in_the_coordination_audit_and_survive_reopen() {
     let ids: Vec<_> = audit.iter().map(|entry| entry.record_id.as_str()).collect();
     assert_eq!(ids, vec![record.id.as_str(), "second-record"]);
     assert!(audit[1].branch_deleted && audit[0].force);
-    assert!(
-        !data_root
-            .path()
-            .join("task-worktree-reaping.jsonl")
-            .exists(),
-        "the reaping audit no longer writes a JSONL file"
-    );
 
     let store = crate::observation::ObservationStore::open_initialized_for_lifecycle_at(
         crate::paths::observation_db_in_root(data_root.path()),

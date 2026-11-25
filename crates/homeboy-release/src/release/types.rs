@@ -47,7 +47,7 @@ impl ReleasePlan {
 
     /// Wrap a generic Homeboy plan in the release compatibility contract.
     ///
-    /// Release execution consumes `plan.steps` directly. The legacy top-level
+    /// Release execution consumes `plan.steps` directly. The top-level
     /// JSON fields (`component_id`, `enabled`, and `semver_recommendation`) are
     /// projected from the generic plan subject/policy during serialization so
     /// existing release JSON consumers keep the same shape without creating a
@@ -243,7 +243,7 @@ impl ReleaseWorkspaceOutput {
 }
 
 /// Additive result envelope for callers that requested provider workspace
-/// lifecycle evidence. The legacy release result remains unchanged.
+/// lifecycle evidence. The wrapped release result keeps its own shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseWorkspaceCommandResult {
     pub result: ReleaseCommandResult,
@@ -367,9 +367,8 @@ fn default_artifact_producer() -> String {
 ///
 /// Every step that produces a downstream value (the new version, the tag name,
 /// the release notes, the built artifacts) stores it here and the next step
-/// reads it back. This was previously a `Mutex<ReleaseContext>` accessed
-/// through a generic pipeline DAG — a pattern the execution never actually
-/// needed because every step runs sequentially.
+/// reads it back. Steps run sequentially, so the state is a plain struct
+/// threaded through them by `&mut`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ReleaseState {
     pub(crate) version: Option<String>,
@@ -948,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn release_plan_serializes_legacy_component_fields_from_generic_plan() {
+    fn release_plan_serializes_top_level_component_fields_from_generic_plan() {
         let plan = ReleasePlan::new("demo", true, Vec::new(), None, Vec::new(), Vec::new());
 
         let serialized = serde_json::to_value(&plan).expect("serialize release plan");
@@ -960,13 +959,6 @@ mod tests {
         assert_eq!(serialized["enabled"], true);
         assert_eq!(serialized["policy"]["enabled"], true);
         assert!(serialized.get("semver_recommendation").is_none());
-    }
-
-    #[test]
-    fn release_command_input_defaults_do_not_force_lower_bumps() {
-        let input = ReleaseCommandInput::default();
-
-        assert!(!input.force_lower_bump);
     }
 
     #[test]
@@ -1002,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_release_run_result_literal_and_json_shape_remain_compatible() {
+    fn release_run_result_omits_empty_optional_fields() {
         let result = ReleaseRunResult {
             steps: Vec::new(),
             status: ReleaseStepStatus::Success,
@@ -1012,7 +1004,7 @@ mod tests {
         };
 
         assert_eq!(
-            serde_json::to_value(result).expect("serialize legacy release result"),
+            serde_json::to_value(result).expect("serialize release result"),
             serde_json::json!({ "steps": [], "status": "success" })
         );
     }

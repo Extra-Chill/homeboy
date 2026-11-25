@@ -290,7 +290,7 @@ pub fn validate_payload(key: &str, payload: &Value) -> Result<()> {
     }
 }
 
-/// Project the legacy test parser's successful summary onto the declared
+/// Project the test parser's successful aggregate summary onto the declared
 /// `test.failures` array contract. The parser writes aggregate counts beside
 /// an empty failure list, while the sidecar itself represents only failures.
 fn payload_for_validation<'a>(key: &str, payload: &'a Value) -> &'a Value {
@@ -483,12 +483,9 @@ mod tests {
         }
     }
 
-    /// The five keys that used to exist only in `homeboy-extension`'s shadow
-    /// path/producer table. They resolved to a path but never to a schema
-    /// version and were never reachable by `validate_payload`, so a declaration
-    /// of any of them bought nothing. They are registry entries now. (#11121)
+    /// Extension-produced keys resolve to their registry path and producer.
     #[test]
-    fn registry_absorbed_the_extension_shadow_table_keys() {
+    fn registry_resolves_extension_produced_keys() {
         for (key, path, producer) in [
             ("lint.producers", "lint-producers.json", Some("lint")),
             ("test.coverage", "coverage.json", Some("test")),
@@ -501,7 +498,7 @@ mod tests {
             assert_eq!(
                 default_schema_version(key),
                 Some("v1"),
-                "shadow-table keys carried no schema version before {key}"
+                "schema version for {key}"
             );
             validate_payload(key, &empty_payload(key).expect("registry key"))
                 .unwrap_or_else(|err| panic!("empty payload for {key} must validate: {err}"));
@@ -695,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_file_validation_normalizes_successful_legacy_test_failure_summaries() {
+    fn sidecar_file_validation_normalizes_successful_test_failure_summaries() {
         let dir = tempfile::tempdir().expect("temp dir");
         let failures = dir.path().join("test-failures.json");
         std::fs::write(
@@ -706,7 +703,7 @@ mod tests {
 
         assert_eq!(
             validate_sidecar_file("test.failures", &failures)
-                .expect("successful legacy summary is an empty failure sidecar"),
+                .expect("successful summary is an empty failure sidecar"),
             SidecarFileCheck::Valid
         );
     }
@@ -722,7 +719,7 @@ mod tests {
             let path = dir.path().join(format!("{name}.json"));
             std::fs::write(&path, payload).expect("invalid test failure summary");
             let error = validate_sidecar_file("test.failures", &path)
-                .expect_err("only successful empty legacy summaries are normalized");
+                .expect_err("only successful empty summaries are normalized");
             assert!(error.to_string().contains("JSON array"), "{error}");
         }
     }

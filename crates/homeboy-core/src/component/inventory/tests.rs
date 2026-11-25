@@ -140,73 +140,8 @@ fn write_standalone_registration_rejects_blank_id() {
     assert!(result.is_err(), "Should reject blank ID");
 }
 
-#[test]
-fn standalone_prefers_portable_config_when_available() {
-    let dir = temp_home_dir();
-    let config_components = dir
-        .path()
-        .join(".config")
-        .join("homeboy")
-        .join("components");
-    fs::create_dir_all(&config_components).unwrap();
-
-    // Also create empty projects dir so inventory doesn't fail
-    let projects_dir = dir.path().join(".config").join("homeboy").join("projects");
-    fs::create_dir_all(&projects_dir).unwrap();
-
-    // Create a repo directory with homeboy.json
-    let repo_dir = dir.path().join("my-plugin");
-    fs::create_dir_all(&repo_dir).unwrap();
-
-    let portable = serde_json::json!({
-        "id": "my-plugin",
-        "version_targets": [{"file": "plugin.php", "pattern": "Version:\\s*([0-9.]+)"}],
-        "changelog_target": "CHANGELOG.md",
-        "extensions": {"wordpress": {}}
-    });
-    fs::write(
-        repo_dir.join("homeboy.json"),
-        serde_json::to_string_pretty(&portable).unwrap(),
-    )
-    .unwrap();
-
-    // Create standalone registration pointing to repo
-    let standalone = serde_json::json!({
-        "local_path": repo_dir.to_string_lossy(),
-        "remote_path": "wp-content/plugins/my-plugin"
-    });
-    fs::write(
-        config_components.join("my-plugin.json"),
-        serde_json::to_string_pretty(&standalone).unwrap(),
-    )
-    .unwrap();
-
-    let result = registered_components_in_home(dir.path());
-
-    let components = result.unwrap();
-    let plugin = components
-        .iter()
-        .find(|c| c.id == "my-plugin")
-        .expect("Should find my-plugin");
-
-    // Should have data from portable config
-    assert!(
-        plugin.version_targets.is_some(),
-        "Should have version_targets from portable config"
-    );
-    assert_eq!(
-        plugin.changelog_target.as_deref(),
-        Some("CHANGELOG.md"),
-        "Should have changelog_target from portable config"
-    );
-
-    // Should have remote_path from standalone (not in portable)
-    assert_eq!(
-        plugin.remote_path, "wp-content/plugins/my-plugin",
-        "Should inherit remote_path from standalone registration"
-    );
-}
-
+/// The repo-owned `homeboy.json` wins every field it declares; the standalone
+/// registration only fills fields the portable config leaves out.
 #[test]
 fn portable_config_fields_override_standalone_registration() {
     let dir = temp_home_dir();
@@ -224,8 +159,8 @@ fn portable_config_fields_override_standalone_registration() {
         repo_dir.join("homeboy.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "id": "repo-owned-plugin",
-            "remote_path": "portable/remote-path",
             "build_artifact": "portable.zip",
+            "changelog_target": "CHANGELOG.md",
             "extensions": { "portable-extension": {} }
         }))
         .unwrap(),
@@ -251,8 +186,12 @@ fn portable_config_fields_override_standalone_registration() {
         .expect("component should load");
 
     assert_eq!(plugin.local_path, repo_dir.to_string_lossy());
-    assert_eq!(plugin.remote_path, "portable/remote-path");
     assert_eq!(plugin.build_artifact.as_deref(), Some("portable.zip"));
+    assert_eq!(plugin.changelog_target.as_deref(), Some("CHANGELOG.md"));
+    assert_eq!(
+        plugin.remote_path, "standalone/remote-path",
+        "fields absent from the portable config come from the registration"
+    );
     assert!(plugin
         .extensions
         .as_ref()
@@ -355,34 +294,6 @@ fn targeted_lookup_preserves_project_attachment_precedence() {
 }
 
 #[test]
-fn targeted_lookup_skips_stale_registration_and_finds_matching_sibling() {
-    let dir = temp_home_dir();
-    let workspace = dir.path().join("workspace");
-    let stale_path = workspace.join("old-plugin");
-    let replacement = workspace.join("replacement");
-    fs::create_dir_all(&replacement).unwrap();
-    fs::write(
-        replacement.join("homeboy.json"),
-        serde_json::json!({ "id": "old-plugin" }).to_string(),
-    )
-    .unwrap();
-    let _home = with_home_override(dir.path());
-    let components = crate::paths::components().unwrap();
-    fs::create_dir_all(&components).unwrap();
-    fs::write(
-        components.join("old-plugin.json"),
-        serde_json::json!({ "local_path": stale_path }).to_string(),
-    )
-    .unwrap();
-
-    let component = registered_by_id("old-plugin")
-        .unwrap()
-        .expect("sibling portable replacement");
-
-    assert_eq!(component.local_path, replacement.to_string_lossy());
-}
-
-#[test]
 fn targeted_stale_lookup_hydrates_only_the_matching_sibling() {
     let dir = temp_home_dir();
     let workspace = dir.path().join("workspace");
@@ -437,60 +348,23 @@ fn targeted_lookup_ignores_stale_registration_without_a_matching_sibling() {
     assert!(registered_by_id("old-plugin").unwrap().is_none());
 }
 
+/// A project attachment whose checkout is missing, or whose portable config
+/// names a different component, is skipped in favor of a later valid one.
 #[test]
-fn targeted_lookup_skips_invalid_project_attachment_for_later_attachment() {
-    let dir = temp_home_dir();
-    let valid_repo = dir.path().join("valid-repo");
-    fs::create_dir_all(&valid_repo).unwrap();
-    fs::write(
-        valid_repo.join("homeboy.json"),
-        serde_json::json!({ "id": "fixture" }).to_string(),
-    )
-    .unwrap();
-    let _home = with_home_override(dir.path());
-    crate::project::save(&Project {
-        id: "invalid".to_string(),
-        components: vec![ProjectComponentAttachment {
-            id: "fixture".to_string(),
-            local_path: dir.path().join("missing").to_string_lossy().to_string(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    })
-    .unwrap();
-    crate::project::save(&Project {
-        id: "valid".to_string(),
-        components: vec![ProjectComponentAttachment {
-            id: "fixture".to_string(),
-            local_path: valid_repo.to_string_lossy().to_string(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    })
-    .unwrap();
-
-    let component = registered_by_id("fixture")
-        .unwrap()
-        .expect("later project attachment");
-    assert_eq!(component.local_path, valid_repo.to_string_lossy());
-}
-
-#[test]
-fn targeted_lookup_skips_project_attachment_with_a_mismatched_portable_id() {
+fn targeted_lookup_skips_unusable_project_attachments_for_a_later_valid_one() {
     let dir = temp_home_dir();
     let mismatched_repo = dir.path().join("mismatched-repo");
     let valid_repo = dir.path().join("valid-repo");
     fs::create_dir_all(&mismatched_repo).unwrap();
     fs::create_dir_all(&valid_repo).unwrap();
-    for (repo, id) in [(&mismatched_repo, "other"), (&valid_repo, "fixture")] {
-        fs::write(
-            repo.join("homeboy.json"),
-            serde_json::json!({ "id": id }).to_string(),
-        )
-        .unwrap();
-    }
+    write_portable_id(&mismatched_repo, "other");
+    write_portable_id(&valid_repo, "fixture");
     let _home = with_home_override(dir.path());
-    for (project_id, local_path) in [("mismatched", &mismatched_repo), ("valid", &valid_repo)] {
+    for (project_id, local_path) in [
+        ("invalid", dir.path().join("missing")),
+        ("mismatched", mismatched_repo),
+        ("valid", valid_repo.clone()),
+    ] {
         crate::project::save(&Project {
             id: project_id.to_string(),
             components: vec![ProjectComponentAttachment {
@@ -700,39 +574,10 @@ fn targeted_path_lookup_does_not_substitute_a_same_id_project_checkout() {
     assert_eq!(component.local_path, standalone_repo.to_string_lossy());
 }
 
+/// Registrations with an empty `local_path`, non-JSON files and unparsable
+/// JSON are skipped without failing the inventory or hiding valid entries.
 #[test]
-fn load_standalone_skips_missing_local_path() {
-    let dir = temp_home_dir();
-
-    let config_components = dir
-        .path()
-        .join(".config")
-        .join("homeboy")
-        .join("components");
-    fs::create_dir_all(&config_components).unwrap();
-
-    // Write a component with empty local_path
-    let json = serde_json::json!({
-        "local_path": "",
-        "remote_path": "wp-content/plugins/broken"
-    });
-    fs::write(
-        config_components.join("broken.json"),
-        serde_json::to_string_pretty(&json).unwrap(),
-    )
-    .unwrap();
-
-    let result = registered_components_in_home(dir.path());
-
-    let components = result.unwrap();
-    assert!(
-        components.is_empty(),
-        "Should skip components with empty local_path"
-    );
-}
-
-#[test]
-fn load_standalone_skips_non_json_files() {
+fn load_standalone_reads_valid_registrations_and_skips_broken_ones() {
     let dir = temp_home_dir();
     let config_components = dir
         .path()
@@ -741,45 +586,18 @@ fn load_standalone_skips_non_json_files() {
         .join("components");
     fs::create_dir_all(&config_components).unwrap();
 
-    // Create a non-JSON file
-    fs::write(config_components.join("readme.txt"), "not a component").unwrap();
-    // Create an invalid JSON file
-    fs::write(config_components.join("broken.json"), "not valid json").unwrap();
-
-    let result = registered_components_in_home(dir.path());
-
-    let components = result.unwrap();
-    assert!(
-        components.is_empty(),
-        "Should skip non-JSON and invalid JSON files"
-    );
-}
-
-#[test]
-fn load_standalone_reads_json_files() {
-    let dir = temp_home_dir();
-
-    // Create the ~/.config/homeboy/components/ directory structure
-    let config_components = dir
-        .path()
-        .join(".config")
-        .join("homeboy")
-        .join("components");
-    fs::create_dir_all(&config_components).unwrap();
-
-    // Create a fake component directory
     let repo_dir = dir.path().join("my-plugin");
     fs::create_dir_all(&repo_dir).unwrap();
-
     write_standalone_json(&config_components, "my-plugin", &repo_dir.to_string_lossy());
+    write_standalone_json(&config_components, "empty-path", "");
+    fs::write(config_components.join("readme.txt"), "not a component").unwrap();
+    fs::write(config_components.join("broken.json"), "not valid json").unwrap();
 
-    let result = registered_components_in_home(dir.path());
+    let components = registered_components_in_home(dir.path()).unwrap();
 
-    let components = result.unwrap();
-    assert!(
-        components.iter().any(|c| c.id == "my-plugin"),
-        "Should find my-plugin from standalone files. Found: {:?}",
-        components.iter().map(|c| &c.id).collect::<Vec<_>>()
+    assert_eq!(
+        components.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        vec!["my-plugin"]
     );
 }
 
@@ -836,7 +654,7 @@ fn stale_standalone_path_discovers_renamed_sibling_portable_component() {
 }
 
 #[test]
-fn reconcile_reports_safe_sibling_repair_without_applying() {
+fn reconcile_reports_sibling_repair_on_dry_run_and_applies_it_on_request() {
     let dir = temp_home_dir();
     let config_components = dir
         .path()
@@ -850,11 +668,7 @@ fn reconcile_reports_safe_sibling_repair_without_applying() {
     let stale_path = workspace.join("old-homeboy");
     let checkout = workspace.join("homeboy");
     fs::create_dir_all(checkout.join(".git")).unwrap();
-    fs::write(
-        checkout.join("homeboy.json"),
-        serde_json::to_string_pretty(&serde_json::json!({ "id": "homeboy" })).unwrap(),
-    )
-    .unwrap();
+    write_portable_id(&checkout, "homeboy");
     write_standalone_json(&config_components, "homeboy", &stale_path.to_string_lossy());
 
     let _home = with_home_override(dir.path());
@@ -866,37 +680,12 @@ fn reconcile_reports_safe_sibling_repair_without_applying() {
         Some(checkout.to_string_lossy().as_ref())
     );
     assert!(!report.applied);
-
     let raw = fs::read_to_string(config_components.join("homeboy.json")).unwrap();
     assert!(raw.contains(stale_path.to_string_lossy().as_ref()));
-}
 
-#[test]
-fn reconcile_apply_updates_stale_local_path_when_candidate_is_unique() {
-    let dir = temp_home_dir();
-    let config_components = dir
-        .path()
-        .join(".config")
-        .join("homeboy")
-        .join("components");
-    fs::create_dir_all(&config_components).unwrap();
+    let applied = reconcile_standalone_registration("homeboy", true).unwrap();
 
-    let workspace = dir.path().join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-    let stale_path = workspace.join("old-homeboy");
-    let checkout = workspace.join("homeboy");
-    fs::create_dir_all(checkout.join(".git")).unwrap();
-    fs::write(
-        checkout.join("homeboy.json"),
-        serde_json::to_string_pretty(&serde_json::json!({ "id": "homeboy" })).unwrap(),
-    )
-    .unwrap();
-    write_standalone_json(&config_components, "homeboy", &stale_path.to_string_lossy());
-
-    let _home = with_home_override(dir.path());
-    let report = reconcile_standalone_registration("homeboy", true).unwrap();
-
-    assert!(report.applied);
+    assert!(applied.applied);
     let raw = fs::read_to_string(config_components.join("homeboy.json")).unwrap();
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(

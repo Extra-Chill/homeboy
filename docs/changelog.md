@@ -4,6 +4,43 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.1] - 2026-11-25
+
+### Changed
+- prune dead code, low-value tests and history comments
+- prune agent_task_service retired compat, dead code and low-value tests
+- prune restating and duplicate cleanup and component tests
+- prune restating and duplicate tests in homeboy-core src/daemon
+- fold redundant staging, runner and resource tests; drop test-only cache wrapper
+- prune restating and duplicate tests in component, config, context, control-plane and daemon
+- prune restating and duplicate tests in homeboy-core cleanup modules
+- prune restating and duplicate tests in artifact, broker auth, build, capacity and CI profile modules
+- prune low-value top-level integration tests and orphan fixtures
+- prune history comments, dead code and restating tests from agent_task_lifecycle
+
+## [0.497.0] - 2026-11-24
+
+### Added
+- add /agent_task/local_execution policy to deny controller-local execution
+
+### Changed
+- prune runs/runner/status tests that restate implementation or guard retired surfaces
+- prune restating and duplicate tests in deploy, rig, fuzz, error, paths, review and small crates
+- prune retired cook flag migration shim, init guidance, and absence tests
+- prune clap-restating tests and history comments in bench/fuzz/trace/infra
+- prune tests that don't earn their place and the retired --ai-used-for flag
+- prune serde-restating tests, dead review-form claims and test-only notify entry
+- prune restating tests and retired compatibility from shared core modules
+- prune observation/daemon tests that restate implementation and drop v1 daemon lease acceptance
+- prune low-value git/worktree tests, dead destination guard, and history comments
+- prune dead admission code, redundant tests and history comments in api_jobs/component/project
+- prune redundant extension tests and history comments
+
+## [0.496.7] - 2026-11-24
+
+### Changed
+- one guarded transition for the detached Cook handoff
+
 ## [0.496.6] - 2026-11-24
 
 ### Fixed

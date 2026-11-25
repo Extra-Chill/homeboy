@@ -1,9 +1,8 @@
 //! Compare-and-swap terminal transitions (#15718, step 2a).
 //!
-//! The lifecycle store used to rewrite the whole snapshot on every write. The
-//! only guard was SQL refusing a `running` status over a terminal row, so a
-//! stale writer that was *itself* terminal replaced a concurrent terminal
-//! decision wholesale.
+//! A stale writer that is *itself* terminal must not replace a concurrent
+//! terminal decision wholesale; these tests pin the compare-and-swap that
+//! refuses it.
 
 use super::{succeeded_aggregate, test_plan};
 use crate::agent_task_lifecycle::terminal_transition::TerminalRecordCommit;

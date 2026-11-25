@@ -25,8 +25,8 @@ pub struct ResourcePolicyContext {
     pub command: String,
     /// Overall severity: `ok`, `warm`, or `hot`.
     pub severity: String,
-    /// Requested controller placement. This records an intentional local
-    /// override without preserving deprecated CLI terminology.
+    /// Requested controller placement: whether the operator intentionally
+    /// overrode placement to local.
     pub local_override: bool,
     /// Whether a warning was emitted (or would have been) for this run.
     pub warned: bool,
@@ -106,7 +106,7 @@ pub struct ResourcePolicyHostSnapshot {
     /// Severity classification of the active rig lease set.
     pub rig_lease_severity: String,
     /// Configured local runner concurrency used to classify rig leases, when
-    /// available. Absent values use the legacy count-based fallback.
+    /// available. Absent values classify by lease count alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rig_lease_concurrency_limit: Option<usize>,
 }

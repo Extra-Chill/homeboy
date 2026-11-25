@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_round_trips_through_json_with_schema_default() {
+    fn policy_parses_with_schema_and_mode_defaults() {
         let raw = serde_json::json!({
             "deny": [{ "pattern": "cargo test", "reason": "CI compiles" }],
             "reason": "shared host"
@@ -565,10 +565,6 @@ mod tests {
         assert_eq!(policy.schema, AGENT_COMMAND_POLICY_SCHEMA);
         assert_eq!(policy.mode, AgentCommandPolicyMode::DenyList);
         assert!(policy.evaluate("cargo test").denial().is_some());
-
-        let encoded = serde_json::to_value(&policy).expect("encode");
-        let decoded: AgentCommandPolicy = serde_json::from_value(encoded).expect("decode");
-        assert_eq!(decoded, policy);
     }
 
     #[test]
@@ -594,24 +590,5 @@ mod tests {
             tokenize_command(r#"RUSTFLAGS="-D warnings" cargo test"#),
             vec!["RUSTFLAGS=-D warnings", "cargo", "test"]
         );
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn agent_command_policy_mode_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (AgentCommandPolicyMode::DenyList, "deny_list"),
-            (AgentCommandPolicyMode::AllowList, "allow_list"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
     }
 }

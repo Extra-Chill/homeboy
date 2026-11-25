@@ -6,11 +6,8 @@
 //! ([`super::pipeline::run`], via the release plan dispatcher) runs them in
 //! order and handles skip-on-failure logic for subsequent steps.
 //!
-//! This used to be a trait-object-dispatched `PipelineStepExecutor` driving a
-//! generic DAG (`engine::pipeline`). In practice every release runs the same
-//! linear sequence with a sequential `Mutex<ReleaseContext>` shared between
-//! steps, so the DAG scaffolding bought nothing but indirection. The logic
-//! inside each `run_*` function is unchanged; only the plumbing is different.
+//! Every release runs the same linear sequence, so steps share state through
+//! a plain `&mut ReleaseState` rather than a generic DAG.
 
 use crate::release::{changelog as release_changelog, version};
 use homeboy_core::component::Component;
@@ -636,7 +633,7 @@ fn should_amend_release_commit(local_path: &str, prefix: Option<&str>) -> Result
 #[cfg(test)]
 mod tests {
     #[test]
-    fn amend_detection_accepts_legacy_and_owned_scopes_only() {
+    fn amend_detection_accepts_unscoped_and_owned_scopes_only() {
         use homeboy_test_support::git::{commit_file, repo, run};
         let repo = repo();
         let path = repo.path().to_str().unwrap();
@@ -2326,10 +2323,9 @@ mod tests {
         assert_eq!(state.tag.as_deref(), Some("v1.3.4"));
     }
 
-    /// Issue #9695: without a planned identity (legacy path), the version step
-    /// falls back to the raw bump type and computes the next version from the
-    /// on-disk source — preserving prior behavior for callers that do not thread
-    /// the plan-resolved target.
+    /// Issue #9695: without a planned identity, the version step uses the raw
+    /// bump type and computes the next version from the on-disk source for
+    /// callers that do not thread the plan-resolved target.
     #[test]
     fn version_step_without_planned_identity_uses_the_raw_bump() {
         let (_temp, component) = plugin_repo_with_changelog_at("1.3.2");

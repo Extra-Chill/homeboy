@@ -1273,9 +1273,8 @@ fn an_interactive_session_carrying_a_command_requests_a_terminal() {
 
 /// A remote command is embedded once in the owned-execution wrapper.
 ///
-/// The wrapper previously inlined the payload separately in its `setsid` and
-/// Perl branches, so every remote command was doubled inside one `exec` argv.
-/// Large payloads (capability probes composed from runner env plus required
+/// Inlining the payload separately in the wrapper's `setsid` and Perl branches
+/// would double every remote command inside one `exec` argv. Large payloads (capability probes composed from runner env plus required
 /// tool, command, and capability entries) then failed with `Argument list too
 /// long` before either branch ran, which stalled Lab handoff for every Cook.
 /// See #14304, and #8855, #8951, #9009, #10492 for the same limit elsewhere.

@@ -758,13 +758,15 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
 
 /// Scopes the captured controller preflight to this test thread so a
 /// concurrently running preview test cannot observe or overwrite it.
-struct ResetCapturedPreflight(
-    #[allow(dead_code)] homeboy::core::parsed_command_preflight::CapturedResultTestScope,
-);
+struct ResetCapturedPreflight {
+    _scope: homeboy::core::parsed_command_preflight::CapturedResultTestScope,
+}
 
 impl ResetCapturedPreflight {
     fn new() -> Self {
-        Self(homeboy::core::parsed_command_preflight::isolate_captured_result_for_test())
+        Self {
+            _scope: homeboy::core::parsed_command_preflight::isolate_captured_result_for_test(),
+        }
     }
 }
 
