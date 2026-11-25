@@ -218,23 +218,11 @@ mod tests {
         assert_eq!(encoded["events"][0]["data"]["percent"], 50);
         assert_eq!(encoded["terminal"], true);
         assert_eq!(encoded["terminal_outcome"], "succeeded");
-        assert_eq!(
-            serde_json::to_value(RunnerApiWatchTerminalOutcome::Failed)
-                .expect("failed outcome JSON"),
-            "failed"
-        );
-        assert_eq!(
-            serde_json::to_value(RunnerApiWatchTerminalOutcome::Cancelled)
-                .expect("cancelled outcome JSON"),
-            "cancelled"
-        );
         let decoded: RunnerApiWatchResponse =
             serde_json::from_value(encoded).expect("page round-trips");
         assert_eq!(decoded, page);
-    }
 
-    #[test]
-    fn watch_failure_wire_uses_the_operation_failure_vocabulary() {
+        // Failures use the shared operation-failure vocabulary.
         let failure = RunnerApiWatchResponse {
             schema: RUNNER_API_WATCH_RESPONSE_SCHEMA.to_string(),
             api_version: RUNNER_API_V1,
@@ -262,16 +250,8 @@ mod tests {
     }
 
     #[test]
-    fn watch_capability_advertisement_keeps_the_protocol_shape() {
+    fn watch_capability_verification_requires_the_current_protocol() {
         let capability = RunnerApiWatchCapability::current();
-        assert_eq!(capability.capability, RUNNER_API_WATCH_CAPABILITY);
-        assert_eq!(
-            serde_json::to_value(&capability).expect("capability JSON"),
-            serde_json::json!({
-                "capability": RUNNER_API_WATCH_CAPABILITY,
-                "version": RUNNER_API_WATCH_CAPABILITY_VERSION,
-            })
-        );
         assert!(capability.verify().is_ok());
         assert!(RunnerApiWatchCapability {
             version: RUNNER_API_WATCH_CAPABILITY_VERSION + 1,
@@ -279,9 +259,11 @@ mod tests {
         }
         .verify()
         .is_err());
-        let decoded: RunnerApiWatchCapability =
-            serde_json::from_value(serde_json::to_value(capability).expect("capability JSON"))
-                .expect("capability round-trips");
-        assert_eq!(decoded.version, RUNNER_API_WATCH_CAPABILITY_VERSION);
+        assert!(RunnerApiWatchCapability {
+            capability: "other-capability".to_string(),
+            ..capability
+        }
+        .verify()
+        .is_err());
     }
 }

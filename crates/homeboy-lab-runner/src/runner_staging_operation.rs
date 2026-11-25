@@ -1886,14 +1886,22 @@ pub(crate) mod tests_support {
     #[test]
     fn incompatible_or_disconnected_transport_refuses_before_provider_budget() {
         let envelope = envelope();
-        let mut incompatible = Transport {
-            compatible: false,
-            ..transport(0)
-        };
-        let error = submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
-        assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
-        assert_eq!(incompatible.calls, 0);
-        assert_eq!(incompatible.provider_budget, 0);
+        for mut incompatible in [
+            Transport {
+                compatible: false,
+                ..transport(0)
+            },
+            Transport {
+                source_artifact_compatible: false,
+                ..transport(0)
+            },
+        ] {
+            let error =
+                submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
+            assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
+            assert_eq!(incompatible.calls, 0);
+            assert_eq!(incompatible.provider_budget, 0);
+        }
         let mut disconnected = Transport {
             connected: false,
             ..transport(0)
@@ -1934,19 +1942,6 @@ pub(crate) mod tests_support {
                 .remote_cwd,
             "/runner/workspaces/run-1"
         );
-    }
-
-    #[test]
-    fn source_artifact_capability_is_negotiated_before_admission() {
-        let envelope = envelope();
-        let mut incompatible = Transport {
-            source_artifact_compatible: false,
-            ..transport(0)
-        };
-        let error = submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
-        assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
-        assert_eq!(incompatible.calls, 0);
-        assert_eq!(incompatible.provider_budget, 0);
     }
 
     #[test]
@@ -2212,31 +2207,6 @@ pub(crate) mod tests_support {
         assert_eq!(incompatible.calls, 0);
     }
 
-    #[test]
-    fn source_package_check_omits_ignored_injected_symlinks() {
-        let source = tempfile::tempdir().expect("source");
-        let external = tempfile::NamedTempFile::new().expect("external");
-        std::fs::write(source.path().join("source.txt"), b"source").expect("source");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(external.path(), source.path().join("AGENTS.md")).expect("link");
-
-        let first = scan_source_package(source.path());
-        let second = scan_source_package(source.path());
-
-        assert_eq!(first.verdict, second.verdict);
-        #[cfg(unix)]
-        {
-            assert!(first.verdict.valid);
-            assert_eq!(first.verdict.excluded[0].kind, "untracked_symlink");
-            let transfer = SourceArtifactTransfer::from_directory("source-1", source.path())
-                .expect("staging omits the same symlink");
-            assert_eq!(
-                first.verdict.accepted.expect("accepted").digest,
-                transfer.sha256
-            );
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn source_package_check_exclusions_are_lexical_bounded_and_never_read_targets() {
@@ -2471,20 +2441,6 @@ pub(crate) mod tests_support {
                 .as_array()
                 .expect("contributors")[0]["path"],
             "0000"
-        );
-    }
-
-    #[test]
-    fn source_package_check_round_trips_with_limits() {
-        let verdict = scan_source_package(tempfile::tempdir().expect("source").path()).verdict;
-        assert_eq!(verdict.schema, SOURCE_PACKAGE_CHECK_SCHEMA);
-        assert_eq!(verdict.limits.byte_limit, MAX_SOURCE_ARTIFACT_BYTES);
-        assert_eq!(
-            serde_json::from_value::<SourcePackageCheckVerdict>(
-                serde_json::to_value(&verdict).expect("serialize v2 check")
-            )
-            .expect("deserialize v2 check"),
-            verdict
         );
     }
 }

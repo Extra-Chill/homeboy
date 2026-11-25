@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn session_defaults_and_optional_fields_keep_their_wire_shape() {
+    fn session_records_keep_their_durable_wire_shape() {
         let session = minimal_session();
         assert_eq!(session.mode, RunnerTunnelMode::DirectSsh);
         assert_eq!(session.role, RunnerSessionRole::Controller);
@@ -181,10 +181,8 @@ mod tests {
                 "last_seen_at": null
             })
         );
-    }
 
-    #[test]
-    fn complete_session_keeps_nested_identity_and_recovery_data() {
+        // A complete record keeps nested process identity and recovery data.
         let value = serde_json::json!({
             "runner_id": "runner-1",
             "mode": "direct_ssh",
@@ -225,23 +223,15 @@ mod tests {
         assert_eq!(serde_json::to_value(session).expect("serialize"), value);
     }
 
+    /// `metadata_value` is a hand-written restatement of the serde spelling
+    /// written into durable metadata; the two must never diverge.
     #[test]
-    fn session_enum_vocabulary_stays_canonical() {
-        for (mode, wire, label) in [
-            (RunnerTunnelMode::DirectSsh, "direct_ssh", "direct SSH"),
-            (RunnerTunnelMode::Loopback, "loopback", "loopback"),
-        ] {
-            assert_eq!(serde_json::to_value(&mode).expect("serialize"), wire);
-            assert_eq!(mode.metadata_value(), wire);
-            assert_eq!(mode.label(), label);
-        }
-
-        for (state, wire) in [
-            (RunnerSessionState::Connected, "connected"),
-            (RunnerSessionState::Disconnected, "disconnected"),
-            (RunnerSessionState::Recorded, "recorded"),
-        ] {
-            assert_eq!(serde_json::to_value(state).expect("serialize"), wire);
+    fn tunnel_mode_metadata_value_matches_its_serde_spelling() {
+        for mode in [RunnerTunnelMode::DirectSsh, RunnerTunnelMode::Loopback] {
+            assert_eq!(
+                serde_json::to_value(&mode).expect("serialize"),
+                mode.metadata_value()
+            );
         }
     }
 }

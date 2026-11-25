@@ -767,6 +767,14 @@ mod schema_error_tests {
                 .any(|h| h.message.contains("homeboy upgrade")),
             "should hint to upgrade"
         );
+
+        let recognized = serde_json::json!({
+            "components": {
+                "with_path": { "path": "~/dev/foo" },
+                "with_id": { "component_id": "foo" }
+            }
+        });
+        assert_eq!(component_with_unrecognized_schema(&recognized), None);
     }
 
     #[test]
@@ -780,24 +788,6 @@ mod schema_error_tests {
         let path = Path::new("/tmp/broken/rig.json");
         let error = rig_spec_parse_error(err, path, None, Some("{ not json".to_string()));
         assert_eq!(error.code, ErrorCode::ValidationInvalidJson);
-    }
-
-    #[test]
-    fn component_detection_names_only_the_unrecognized_schema() {
-        let recognized: serde_json::Value = serde_json::from_str(
-            r#"{
-                "components": {
-                    "with_path": { "path": "~/dev/foo" },
-                    "with_id": { "component_id": "foo" }
-                }
-            }"#,
-        )
-        .expect("value");
-        assert_eq!(component_with_unrecognized_schema(&recognized), None);
-        assert_eq!(
-            component_with_unrecognized_schema(&rig_value_with_unrecognized_component()),
-            Some("legacy".to_string())
-        );
     }
 
     #[test]

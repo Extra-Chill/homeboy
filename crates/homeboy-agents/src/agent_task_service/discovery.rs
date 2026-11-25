@@ -1396,43 +1396,36 @@ mod tests {
     }
 
     #[test]
-    fn queued_retry_is_owned_by_its_durable_step_without_a_caller_lease() {
+    fn queued_record_liveness_follows_durable_ownership_not_caller_lease() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:01:00Z")
             .expect("timestamp")
             .with_timezone(&chrono::Utc);
-        let valid = queued_record(json!({
+        let stepped = queued_record(json!({
             "epoch": 1,
             "current_intent_id": "agent-task-exec:retry-attempt:1:0",
             "recovery_failures": 0,
         }));
-        assert_eq!(
-            classify_liveness(&valid, now, &BTreeSet::new()),
-            AgentTaskLiveness::Active
-        );
-
-        assert_eq!(
-            classify_liveness(&valid, now + chrono::Duration::days(1), &BTreeSet::new()),
-            AgentTaskLiveness::Active
-        );
-
-        let invalid = queued_record(json!({}));
-        assert_eq!(
-            classify_liveness(&invalid, now, &BTreeSet::new()),
-            AgentTaskLiveness::Stale
-        );
-    }
-
-    #[test]
-    fn durable_queued_retry_survives_launcher_death_until_the_queue_consumer_claims_it() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:01:00Z")
-            .expect("timestamp")
-            .with_timezone(&chrono::Utc);
         let mut retry = queued_record(json!({}));
         retry.metadata["retry_of"] = json!("source-attempt");
-        assert_eq!(
-            classify_liveness(&retry, now, &BTreeSet::new()),
-            AgentTaskLiveness::Active
-        );
+        let unowned = queued_record(json!({}));
+
+        for (label, record, at, expected) in [
+            ("durable step", &stepped, now, AgentTaskLiveness::Active),
+            (
+                "durable step a day later",
+                &stepped,
+                now + chrono::Duration::days(1),
+                AgentTaskLiveness::Active,
+            ),
+            ("queued retry", &retry, now, AgentTaskLiveness::Active),
+            ("no owner", &unowned, now, AgentTaskLiveness::Stale),
+        ] {
+            assert_eq!(
+                classify_liveness(record, at, &BTreeSet::new()),
+                expected,
+                "{label}"
+            );
+        }
     }
 
     #[test]

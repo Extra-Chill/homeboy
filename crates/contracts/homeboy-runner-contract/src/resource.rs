@@ -326,8 +326,10 @@ fn stop_on_object(
 mod tests {
     use super::*;
 
+    /// Runner resource metrics round-trip in both their minimal shape (absent
+    /// measurements omitted) and their complete shape.
     #[test]
-    fn resource_metrics_keep_their_minimal_wire_shape() {
+    fn resource_metrics_keep_their_wire_shape() {
         let value = serde_json::json!({
             "duration_ms": 25,
             "sample_count": 2,
@@ -365,11 +367,8 @@ mod tests {
             serde_json::from_value::<RunnerResourceMetrics>(value).expect("deserialize"),
             metrics
         );
-    }
 
-    #[test]
-    fn resource_metrics_keep_their_complete_wire_shape() {
-        let value = serde_json::json!({
+        let complete = serde_json::json!({
             "duration_ms": 25,
             "cpu_user_ms": 11,
             "cpu_system_ms": 7,
@@ -415,8 +414,8 @@ mod tests {
         });
 
         let metrics =
-            serde_json::from_value::<RunnerResourceMetrics>(value.clone()).expect("deserialize");
-        assert_eq!(serde_json::to_value(metrics).expect("serialize"), value);
+            serde_json::from_value::<RunnerResourceMetrics>(complete.clone()).expect("deserialize");
+        assert_eq!(serde_json::to_value(metrics).expect("serialize"), complete);
     }
 
     #[test]
@@ -475,68 +474,55 @@ mod tests {
 
     const SERVICE_INSTALL: &str = "then `homeboy runner service install <runner>`";
 
+    /// Each process-limit origin gets a runner-owned remedy naming the exact
+    /// runner env change, and no remedy suggests a flag detached Cooks refuse.
     #[test]
-    fn default_limit_remedy_names_the_runner_default_and_the_runner_config_action() {
-        let remedy = process_violation(512, Some("default"), Some(1024)).remedy();
-        assert_eq!(
-            remedy,
-            format!(
-                "process limit 512 is the runner default (16/core); run `homeboy runner set <runner> --json '{{\"env\":{{\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}}}'` {SERVICE_INSTALL}"
-            )
-        );
-    }
-
-    #[test]
-    fn runner_override_remedy_names_the_runner_env_key() {
-        let remedy = process_violation(256, Some("runner_override"), Some(1024)).remedy();
-        assert!(remedy.starts_with("process limit 256 is the runner's PROCESS_COUNT; "));
-        assert!(
-            remedy.contains("{\"env\":{\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}")
-        );
-        assert!(remedy.ends_with(SERVICE_INSTALL));
-    }
-
-    #[test]
-    fn ceiling_remedy_raises_the_ceiling_with_the_limit() {
-        let remedy = process_violation(256, Some("runner_ceiling"), Some(256)).remedy();
-        assert_eq!(
-            remedy,
-            format!(
-                "process limit 256 is the runner ceiling; run `homeboy runner set <runner> --json '{{\"env\":{{\"HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT\":\"384\",\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}}}'` {SERVICE_INSTALL}"
-            )
-        );
-        assert!(remedy.len() <= 256, "fits the blocker projection bound");
-    }
-
-    #[test]
-    fn unrecorded_or_retired_sources_get_the_same_runner_owned_action() {
-        for (source, origin) in [
-            (None, "from an unrecorded source"),
-            (Some("job_override"), "from `job_override`"),
-        ] {
-            let remedy = process_violation(128, source, None).remedy();
-            assert!(remedy.starts_with(&format!("process limit 128 is {origin}; ")));
-            assert!(remedy.contains("homeboy runner set <runner> --json"));
-            assert!(remedy.ends_with(SERVICE_INSTALL));
-        }
-    }
-
-    #[test]
-    fn remedies_never_suggest_flags_detached_cooks_refuse() {
+    fn remedies_name_the_runner_owned_action_for_each_limit_origin() {
+        let process_env = "{\"env\":{\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}";
         let rss = RunnerResourceGuardViolation {
             reason: "rss_limit_exceeded".to_string(),
             rss_bytes: 3 * GIB + 1,
             rss_limit_bytes: 3 * GIB,
             ..process_violation(128, Some("default"), Some(256))
         };
-        assert!(rss
-            .remedy()
-            .contains("{\"env\":{\"HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES\":\"5368709120\"}}"));
-        for remedy in [
-            rss.remedy(),
-            process_violation(128, Some("default"), Some(256)).remedy(),
-            process_violation(256, Some("runner_ceiling"), Some(256)).remedy(),
-        ] {
+        let cases = [
+            (
+                process_violation(512, Some("default"), Some(1024)),
+                "process limit 512 is the runner default (16/core); run `homeboy runner set <runner> --json '",
+                process_env,
+            ),
+            (
+                process_violation(256, Some("runner_override"), Some(1024)),
+                "process limit 256 is the runner's PROCESS_COUNT; ",
+                process_env,
+            ),
+            (
+                process_violation(256, Some("runner_ceiling"), Some(256)),
+                "process limit 256 is the runner ceiling; ",
+                "{\"env\":{\"HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT\":\"384\",\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}",
+            ),
+            (
+                process_violation(128, None, None),
+                "process limit 128 is from an unrecorded source; ",
+                "homeboy runner set <runner> --json",
+            ),
+            (
+                process_violation(128, Some("job_override"), None),
+                "process limit 128 is from `job_override`; ",
+                "homeboy runner set <runner> --json",
+            ),
+            (
+                rss,
+                "",
+                "{\"env\":{\"HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES\":\"5368709120\"}}",
+            ),
+        ];
+        for (violation, prefix, action) in cases {
+            let remedy = violation.remedy();
+            assert!(remedy.starts_with(prefix), "{remedy}");
+            assert!(remedy.contains(action), "{remedy}");
+            assert!(remedy.ends_with(SERVICE_INSTALL), "{remedy}");
+            assert!(remedy.len() <= 256, "fits the blocker projection bound");
             for refused in ["--runner-env", "--lab-env-json", "--gate-env", "resume"] {
                 assert!(!remedy.contains(refused), "{remedy}");
             }
@@ -568,6 +554,8 @@ mod tests {
         );
     }
 
+    /// Violations recorded before the ceiling and breakdown fields existed
+    /// still decode, summarize, and re-encode without the new fields.
     #[test]
     fn legacy_violation_without_ceiling_or_breakdown_round_trips() {
         let legacy: RunnerResourceGuardViolation = serde_json::from_value(serde_json::json!({

@@ -431,6 +431,12 @@ mod tests {
         assert_eq!(dep.resolved_ref.as_deref(), Some(head.as_str()));
         assert_eq!(dep.branch.as_deref(), Some("main"));
         assert!(dep.git_provenance);
+
+        // The resolved graph is recorded as run evidence.
+        let value = graph.to_evidence_value();
+        assert_eq!(value["schema"], RUNTIME_DEPENDENCY_GRAPH_SCHEMA);
+        assert_eq!(value["dependencies"][0]["slug"], "sample-component");
+        assert_eq!(value["dependencies"][0]["git_provenance"], true);
     }
 
     #[test]
@@ -476,42 +482,29 @@ mod tests {
     }
 
     #[test]
-    fn pinned_ref_mismatch_is_rejected_as_stale() {
+    fn pinned_ref_must_match_the_checkout_head() {
         let repo = tempfile::tempdir().expect("repo");
         init_repo(repo.path());
         let first = commit_file(repo.path(), "a.txt", "a");
-        let _second = commit_file(repo.path(), "b.txt", "b");
+        let second = commit_file(repo.path(), "b.txt", "b");
+        let pinned = |reference: &str| {
+            vec![contract(
+                "wpsg",
+                &repo.path().display().to_string(),
+                serde_json::json!({ "ref": reference }),
+            )]
+        };
 
         // Declare the older commit as the pinned ref while HEAD is newer.
-        let contracts = vec![contract(
-            "wpsg",
-            &repo.path().display().to_string(),
-            serde_json::json!({ "ref": first }),
-        )];
-
-        let error = resolve_runtime_dependency_graph(&contracts)
+        let error = resolve_runtime_dependency_graph(&pinned(&first))
             .expect_err("pinned ref mismatch fails preflight");
-
         assert!(error.message.contains("stale"));
         assert!(error.message.contains("does not match the declared ref"));
-    }
 
-    #[test]
-    fn pinned_ref_match_resolves() {
-        let repo = tempfile::tempdir().expect("repo");
-        init_repo(repo.path());
-        let head = commit_file(repo.path(), "a.txt", "a");
-
-        let contracts = vec![contract(
-            "wpsg",
-            &repo.path().display().to_string(),
-            serde_json::json!({ "ref": head }),
-        )];
-
-        let graph = resolve_runtime_dependency_graph(&contracts).expect("resolved graph");
+        let graph = resolve_runtime_dependency_graph(&pinned(&second)).expect("resolved graph");
         let dep = &graph.dependencies[0];
-        assert_eq!(dep.resolved_ref.as_deref(), Some(head.as_str()));
-        assert_eq!(dep.declared_ref.as_deref(), Some(head.as_str()));
+        assert_eq!(dep.resolved_ref.as_deref(), Some(second.as_str()));
+        assert_eq!(dep.declared_ref.as_deref(), Some(second.as_str()));
     }
 
     #[test]
@@ -544,26 +537,5 @@ mod tests {
 
         let graph = resolve_runtime_dependency_graph(&contracts).expect("resolved graph");
         assert!(graph.is_empty());
-    }
-
-    #[test]
-    fn resolved_graph_serializes_for_evidence() {
-        let repo = tempfile::tempdir().expect("repo");
-        init_repo(repo.path());
-        commit_file(repo.path(), "a.txt", "a");
-
-        let contracts = vec![contract(
-            "workspace-registry",
-            &repo.path().display().to_string(),
-            Value::Null,
-        )];
-
-        let graph = resolve_runtime_dependency_graph(&contracts).expect("resolved graph");
-        let value = graph.to_evidence_value();
-        assert_eq!(value["schema"], RUNTIME_DEPENDENCY_GRAPH_SCHEMA);
-        assert_eq!(value["dependencies"][0]["slug"], "workspace-registry");
-        assert!(value["dependencies"][0]["git_provenance"]
-            .as_bool()
-            .unwrap());
     }
 }

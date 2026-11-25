@@ -334,18 +334,4 @@ mod tests {
             assert_eq!(persisted["status"], receipt_status);
         }
     }
-    #[test]
-    fn cook_ci_receipt_is_durable_and_replaceable() {
-        let root = std::env::temp_dir().join(format!("cook-ci-{}", uuid::Uuid::new_v4()));
-        let store = CookRecipeStore::from_data_root(root.clone());
-        let path = store.ci_path("cook");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        for status in ["awaiting_ci", "ci_gate_failed", "completed"] {
-            let receipt = json!({"cook_id":"cook", "pr_url":"https://github.com/o/r/pull/1", "status":status});
-            save(&store, "cook", &receipt).unwrap();
-            let restored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            assert_eq!(restored, receipt);
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
 }

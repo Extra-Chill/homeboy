@@ -353,85 +353,106 @@ mod tests {
     }
 
     #[test]
-    fn known_capacity_is_reported_with_its_remaining_and_limit() {
-        let readiness = capacity_readiness_from_probe_result(&verdict(
-            true,
-            "ready",
-            "",
-            Some(ProviderReadinessInvocationCapacity {
-                remaining: Some(Value::from(42)),
-                limit: Some(Value::from(100)),
-                unit: Some("requests".to_string()),
-                reset_at: None,
-                scope: None,
-                accounts: Vec::new(),
-            }),
-        ));
-        assert_eq!(
-            readiness,
-            AgentTaskProviderCapacityReadiness::Known {
-                remaining: Some(Value::from(42)),
-                limit: Some(Value::from(100)),
-                unit: Some("requests".to_string()),
-                reset_at: None,
-                scope: None,
-                accounts: Vec::new(),
-            }
-        );
-        assert!(!readiness.is_exhausted());
-    }
-
-    #[test]
-    fn exhausted_capacity_carries_its_parsed_reset_instant() {
-        let readiness = capacity_readiness_from_probe_result(&verdict(
-            false,
-            "capacity",
-            "5-hour usage limit reached",
-            Some(ProviderReadinessInvocationCapacity {
-                remaining: Some(Value::from(0)),
-                limit: None,
-                unit: None,
-                reset_at: Some("2026-08-27T12:37:03Z".to_string()),
-                scope: None,
-                accounts: Vec::new(),
-            }),
-        ));
-        let expected_reset_at = chrono::Utc
+    fn probe_results_classify_into_known_exhausted_or_unknown_capacity() {
+        let reset_at = chrono::Utc
             .with_ymd_and_hms(2026, 8, 27, 12, 37, 3)
             .single()
             .unwrap();
-        assert_eq!(
-            readiness,
-            AgentTaskProviderCapacityReadiness::Exhausted {
-                reset_at: Some(expected_reset_at.to_rfc3339()),
-                reason: "5-hour usage limit reached".to_string(),
-                scope: None,
-                accounts: Vec::new(),
-            }
-        );
-        assert!(readiness.is_exhausted());
-        assert_eq!(readiness.reset_at(), Some(expected_reset_at));
-    }
-
-    #[test]
-    fn exhausted_capacity_without_a_known_reset_still_types_as_exhausted() {
-        let readiness = capacity_readiness_from_probe_result(&verdict(
-            false,
-            "capacity",
-            "no quota left",
-            None,
-        ));
-        assert_eq!(
-            readiness,
-            AgentTaskProviderCapacityReadiness::Exhausted {
-                reset_at: None,
-                reason: "no quota left".to_string(),
-                scope: None,
-                accounts: Vec::new(),
-            }
-        );
-        assert!(readiness.is_exhausted());
-        assert_eq!(readiness.reset_at(), None);
+        let cases = [
+            (
+                "published remaining and limit are known capacity",
+                verdict(
+                    true,
+                    "ready",
+                    "",
+                    Some(ProviderReadinessInvocationCapacity {
+                        remaining: Some(Value::from(42)),
+                        limit: Some(Value::from(100)),
+                        unit: Some("requests".to_string()),
+                        ..Default::default()
+                    }),
+                ),
+                AgentTaskProviderCapacityReadiness::Known {
+                    remaining: Some(Value::from(42)),
+                    limit: Some(Value::from(100)),
+                    unit: Some("requests".to_string()),
+                    reset_at: None,
+                    scope: None,
+                    accounts: Vec::new(),
+                },
+                None,
+            ),
+            (
+                "exhaustion carries its parsed reset instant",
+                verdict(
+                    false,
+                    "capacity",
+                    "5-hour usage limit reached",
+                    Some(ProviderReadinessInvocationCapacity {
+                        remaining: Some(Value::from(0)),
+                        reset_at: Some("2026-08-27T12:37:03Z".to_string()),
+                        ..Default::default()
+                    }),
+                ),
+                AgentTaskProviderCapacityReadiness::Exhausted {
+                    reset_at: Some(reset_at.to_rfc3339()),
+                    reason: "5-hour usage limit reached".to_string(),
+                    scope: None,
+                    accounts: Vec::new(),
+                },
+                Some(reset_at),
+            ),
+            (
+                "exhaustion without a reset is still exhausted",
+                verdict(false, "capacity", "no quota left", None),
+                AgentTaskProviderCapacityReadiness::Exhausted {
+                    reset_at: None,
+                    reason: "no quota left".to_string(),
+                    scope: None,
+                    accounts: Vec::new(),
+                },
+                None,
+            ),
+            (
+                "a provider that publishes nothing is unknown, not unavailable",
+                verdict(true, "ready", "", None),
+                AgentTaskProviderCapacityReadiness::Unknown {
+                    reason: "the provider's readiness invocation does not report capacity"
+                        .to_string(),
+                },
+                None,
+            ),
+            (
+                "an empty capacity object is still unknown",
+                verdict(
+                    true,
+                    "ready",
+                    "",
+                    Some(ProviderReadinessInvocationCapacity {
+                        unit: Some("requests".to_string()),
+                        ..Default::default()
+                    }),
+                ),
+                AgentTaskProviderCapacityReadiness::Unknown {
+                    reason: "the provider's readiness invocation does not report capacity"
+                        .to_string(),
+                },
+                None,
+            ),
+        ];
+        for (case, probe, expected, expected_reset) in cases {
+            let readiness = capacity_readiness_from_probe_result(&probe);
+            assert_eq!(readiness, expected, "{case}");
+            assert_eq!(
+                readiness.is_exhausted(),
+                matches!(
+                    expected,
+                    AgentTaskProviderCapacityReadiness::Exhausted { .. }
+                ),
+                "{case}"
+            );
+            assert_eq!(readiness.reset_at(), expected_reset, "{case}");
+        }
     }
 
     fn account(
@@ -615,76 +636,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_route_without_accounts_omits_the_field() {
-        let readiness = capacity_readiness_from_probe_result(&verdict(
-            true,
-            "ready",
-            "",
-            Some(ProviderReadinessInvocationCapacity {
-                remaining: Some(Value::from(1)),
-                ..Default::default()
-            }),
-        ));
-        let serialized = serde_json::to_value(&readiness).expect("serializes");
-        assert!(serialized.get("accounts").is_none(), "{serialized}");
-    }
-
-    #[test]
-    fn a_provider_that_publishes_nothing_is_unknown_not_unavailable() {
-        let readiness = capacity_readiness_from_probe_result(&verdict(true, "ready", "", None));
-        assert_eq!(
-            readiness,
-            AgentTaskProviderCapacityReadiness::Unknown {
-                reason: "the provider's readiness invocation does not report capacity".to_string(),
-            }
-        );
-        assert!(!readiness.is_exhausted());
-    }
-
-    #[test]
-    fn an_empty_capacity_object_is_still_unknown() {
-        // A provider that declares a `capacity` object but fills in neither
-        // `remaining` nor `limit` has not actually published anything
-        // observable; treat it the same as omitting `capacity` entirely.
-        let readiness = capacity_readiness_from_probe_result(&verdict(
-            true,
-            "ready",
-            "",
-            Some(ProviderReadinessInvocationCapacity {
-                remaining: None,
-                limit: None,
-                unit: Some("requests".to_string()),
-                reset_at: None,
-                scope: None,
-                accounts: Vec::new(),
-            }),
-        ));
-        assert!(matches!(
-            readiness,
-            AgentTaskProviderCapacityReadiness::Unknown { .. }
-        ));
-    }
-
-    #[test]
-    fn a_route_with_no_live_probe_reports_the_specific_reason_it_was_not_evaluated() {
-        let readiness = capacity_readiness_unknown("live capacity validation was not requested");
-        assert_eq!(
-            readiness,
-            AgentTaskProviderCapacityReadiness::Unknown {
-                reason: "live capacity validation was not requested".to_string(),
-            }
-        );
-    }
-
-    /// Mid-run exhaustion classification (#14858 acceptance): a provider
-    /// runtime stream carrying an actionable quota/usage-limit rejection
-    /// must produce a typed capacity failure with its reset instant, not an
-    /// opaque generic error. This drives the outcome through the real
-    /// production adapters — `structured_error::normalize_runtime_stream_error`
-    /// (#13703) for classification and the same diagnostic shape
-    /// `usage_cap`'s detector attaches (#13644) for the reset instant —
-    /// rather than hand-building the outcome's typed fields directly.
+    /// Mid-run exhaustion (#14858): a real Pi quota rejection, normalized by
+    /// the production adapters, yields typed capacity with its reset instant.
     #[test]
     fn mid_run_quota_exhaustion_is_a_typed_capacity_failure_with_its_reset_instant() {
         use crate::agent_task::{AgentTaskDiagnostic, AgentTaskOutcome, AgentTaskOutcomeStatus};
@@ -740,49 +693,34 @@ mod tests {
     }
 
     #[test]
-    fn mid_run_quota_exhaustion_without_a_known_reset_is_still_typed_capacity() {
+    fn only_quota_exhaustion_outcomes_are_typed_capacity() {
         use crate::agent_task::{
             AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus,
         };
 
-        // The provider classified as quota-exhausted, but nothing on the
-        // outcome carries a parseable reset time (the common case when a
-        // provider's rejection text never names one). Capacity evidence is
-        // still typed as exhausted rather than falling back to unknown.
-        let outcome = AgentTaskOutcome {
-            task_id: "mid-run-exhaustion-no-reset".to_string(),
+        let outcome = |classification| AgentTaskOutcome {
+            task_id: "mid-run-failure".to_string(),
             status: AgentTaskOutcomeStatus::Failed,
-            failure_classification: Some(AgentTaskFailureClassification::ProviderQuotaExhausted),
+            failure_classification: Some(classification),
             ..Default::default()
         };
 
-        let readiness =
-            capacity_readiness_from_outcome(&outcome).expect("quota exhaustion is typed capacity");
+        // No parseable reset time anywhere on the outcome: still exhausted,
+        // never downgraded to unknown.
         assert_eq!(
-            readiness,
-            AgentTaskProviderCapacityReadiness::Exhausted {
+            capacity_readiness_from_outcome(&outcome(
+                AgentTaskFailureClassification::ProviderQuotaExhausted
+            )),
+            Some(AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: None,
                 reason: "the provider reported its account capacity as exhausted".to_string(),
                 scope: None,
                 accounts: Vec::new(),
-            }
+            })
         );
-        assert_eq!(readiness.reset_at(), None);
-    }
-
-    #[test]
-    fn a_generic_provider_failure_is_not_reported_as_capacity() {
-        use crate::agent_task::{
-            AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus,
-        };
-
-        let outcome = AgentTaskOutcome {
-            task_id: "generic-failure".to_string(),
-            status: AgentTaskOutcomeStatus::Failed,
-            failure_classification: Some(AgentTaskFailureClassification::Provider),
-            ..Default::default()
-        };
-
-        assert!(capacity_readiness_from_outcome(&outcome).is_none());
+        assert!(capacity_readiness_from_outcome(&outcome(
+            AgentTaskFailureClassification::Provider
+        ))
+        .is_none());
     }
 }

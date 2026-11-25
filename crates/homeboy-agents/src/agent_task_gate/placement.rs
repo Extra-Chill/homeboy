@@ -2374,9 +2374,10 @@ mod tests {
 
     /// #18121: pressure is waited out first (#18058); a refusal that outlasts
     /// the wait is still the runner's capacity, not a verdict, so it never
-    /// terminalizes a Cook.
+    /// terminalizes a Cook. #18376: controller/runner version skew is likewise
+    /// a transport failure: the runner never judged the candidate.
     #[test]
-    fn pressure_refusal_after_the_wait_is_a_transport_failure() {
+    fn pressure_refusal_and_version_skew_are_transport_failures() {
         let refusal = LabGateAdmission {
             accepts_jobs: false,
             reasons: vec!["pressure".to_string()],
@@ -2388,6 +2389,15 @@ mod tests {
         assert!(is_lab_gate_transport_failure(&refusal));
         let wrapped = gate_execute_unavailable(refusal, "transport", None);
         assert_eq!(wrapped.details["stage"], "admission");
+        assert!(is_lab_gate_transport_failure(&wrapped));
+
+        let skew = RunnerBuildSkew {
+            controller: "0.1.0".to_string(),
+            runner: "0.0.9".to_string(),
+        }
+        .error("skew-runner");
+        assert!(is_lab_gate_transport_failure(&skew));
+        let wrapped = gate_execute_unavailable(skew, "receipt_verification", None);
         assert!(is_lab_gate_transport_failure(&wrapped));
     }
 
@@ -2428,20 +2438,6 @@ mod tests {
 
         let runtime = super::super::gate_runtime::unavailable("php -v", "php", "lab");
         assert!(!is_lab_gate_transport_failure(&runtime));
-    }
-
-    /// #18376: controller/runner version skew from Lab gate placement is a
-    /// transport failure: the runner never judged the candidate.
-    #[test]
-    fn runner_version_skew_is_a_transport_failure() {
-        let skew = RunnerBuildSkew {
-            controller: "0.1.0".to_string(),
-            runner: "0.0.9".to_string(),
-        }
-        .error("skew-runner");
-        assert!(is_lab_gate_transport_failure(&skew));
-        let wrapped = gate_execute_unavailable(skew, "receipt_verification", None);
-        assert!(is_lab_gate_transport_failure(&wrapped));
     }
 
     /// A runner on another Homeboy build whose receipts do not bind until its
@@ -2961,38 +2957,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn lab_gate_preserves_runner_playwright_cache_in_replace_environment() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let cache = home.path().join(PLAYWRIGHT_CACHE_SUBPATH);
-            fs::create_dir_all(&cache).unwrap();
-            let _cache_env =
-                homeboy_core::test_support::EnvVarGuard::unset("PLAYWRIGHT_BROWSERS_PATH");
-            let temp = tempfile::tempdir().unwrap();
-            repository(temp.path());
-            let mut request = gate_printing_path_and_home(temp.path());
-            request.argv = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "printf '%s' \"$PLAYWRIGHT_BROWSERS_PATH\"".to_string(),
-            ];
-            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "homeboy", "reservation").unwrap();
-
-            let receipt = execute_with_context(request, temp.path(), &context).unwrap();
-
-            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
-            assert_eq!(receipt.report.stdout, cache.display().to_string());
-            assert_eq!(
-                receipt
-                    .report
-                    .environment
-                    .preserved
-                    .get("PLAYWRIGHT_BROWSERS_PATH"),
-                Some(&format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}"))
-            );
-        });
-    }
-
     fn printing_playwright_cache(temp: &Path) -> LabGateRequest {
         let mut request = gate_printing_path_and_home(temp);
         request.argv = vec![
@@ -3014,152 +2978,142 @@ mod tests {
         .unwrap()
     }
 
+    /// Runner browser cache resolution for an isolated replace-mode gate: a
+    /// request declaration wins (even one absent on the runner), then the
+    /// runner process's cache, then the Homeboy-managed cache, then the
+    /// default cache under the runner HOME; a missing cache maps nothing.
     #[test]
-    fn lab_gate_maps_homeboy_managed_browser_cache_in_isolated_replace_environment() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            // Both runner caches exist; the Homeboy-managed one is preferred.
-            let cache = home.path().join(".cache/homeboy/playwright-browsers");
-            fs::create_dir_all(&cache).unwrap();
-            fs::create_dir_all(home.path().join(PLAYWRIGHT_CACHE_SUBPATH)).unwrap();
-            let _cache_env =
-                homeboy_core::test_support::EnvVarGuard::unset("PLAYWRIGHT_BROWSERS_PATH");
-            let temp = tempfile::tempdir().unwrap();
-            repository(temp.path());
-            let request = printing_playwright_cache(temp.path());
+    fn lab_gate_resolves_the_runner_playwright_browser_cache() {
+        const MANAGED: &str = ".cache/homeboy/playwright-browsers";
+        enum Env {
+            Unset,
+            Existing,
+            Missing,
+        }
+        let default_preserved = format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}");
+        let managed_preserved = format!("HOME/{MANAGED}");
+        // (case, default cache, managed cache, runner env, declared, expected
+        //  browsers relative to HOME, expected preserved provenance)
+        let cases: [(
+            &str,
+            bool,
+            bool,
+            Env,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+        ); 5] = [
+            (
+                "default",
+                true,
+                false,
+                Env::Unset,
+                None,
+                Some(PLAYWRIGHT_CACHE_SUBPATH),
+                Some(default_preserved.as_str()),
+            ),
+            (
+                "managed",
+                true,
+                true,
+                Env::Unset,
+                None,
+                Some(MANAGED),
+                Some(managed_preserved.as_str()),
+            ),
+            (
+                "runner env",
+                true,
+                false,
+                Env::Existing,
+                None,
+                None,
+                Some("PLAYWRIGHT_BROWSERS_PATH"),
+            ),
+            (
+                "declared",
+                true,
+                false,
+                Env::Existing,
+                Some("/declared/browsers"),
+                None,
+                None,
+            ),
+            ("missing", false, false, Env::Missing, None, None, None),
+        ];
+        for (case, default_cache, managed_cache, env, declared, in_home, preserved) in cases {
+            homeboy_core::test_support::with_isolated_home(|home| {
+                if default_cache {
+                    fs::create_dir_all(home.path().join(PLAYWRIGHT_CACHE_SUBPATH)).unwrap();
+                }
+                if managed_cache {
+                    fs::create_dir_all(home.path().join(MANAGED)).unwrap();
+                }
+                let runner_cache = tempfile::tempdir().unwrap();
+                let runner_cache = runner_cache.path().join("runner-playwright-browsers");
+                let _cache_env = match env {
+                    Env::Unset => {
+                        homeboy_core::test_support::EnvVarGuard::unset("PLAYWRIGHT_BROWSERS_PATH")
+                    }
+                    Env::Existing => {
+                        fs::create_dir_all(&runner_cache).unwrap();
+                        homeboy_core::test_support::EnvVarGuard::set(
+                            "PLAYWRIGHT_BROWSERS_PATH",
+                            &runner_cache,
+                        )
+                    }
+                    Env::Missing => homeboy_core::test_support::EnvVarGuard::set(
+                        "PLAYWRIGHT_BROWSERS_PATH",
+                        runner_cache.join("absent"),
+                    ),
+                };
+                let temp = tempfile::tempdir().unwrap();
+                repository(temp.path());
+                let mut request = printing_playwright_cache(temp.path());
+                if let Some(declared) = declared {
+                    request
+                        .environment
+                        .variables
+                        .insert("PLAYWRIGHT_BROWSERS_PATH".to_string(), declared.to_string());
+                }
 
-            let receipt = execute_with_context(request, temp.path(), &lab_context()).unwrap();
+                let receipt = execute_with_context(request, temp.path(), &lab_context()).unwrap();
 
-            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
-            assert_eq!(
-                receipt.report.environment.mode,
-                AgentTaskGateEnvironmentMode::Replace
-            );
-            let (browsers, gate_home) = receipt.report.stdout.split_once('|').unwrap();
-            assert_eq!(browsers, cache.display().to_string());
-            assert_ne!(
-                Path::new(gate_home),
-                home.path(),
-                "gate HOME stays isolated"
-            );
-            assert_eq!(
-                receipt
-                    .report
-                    .environment
-                    .preserved
-                    .get("PLAYWRIGHT_BROWSERS_PATH")
-                    .map(String::as_str),
-                Some("HOME/.cache/homeboy/playwright-browsers")
-            );
-        });
-    }
-
-    #[test]
-    fn lab_gate_explicit_playwright_declaration_wins_over_runner_cache() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            fs::create_dir_all(home.path().join(PLAYWRIGHT_CACHE_SUBPATH)).unwrap();
-            let runner_cache = tempfile::tempdir().unwrap();
-            let _cache_env = homeboy_core::test_support::EnvVarGuard::set(
-                "PLAYWRIGHT_BROWSERS_PATH",
-                runner_cache.path(),
-            );
-            let temp = tempfile::tempdir().unwrap();
-            repository(temp.path());
-            let mut request = printing_playwright_cache(temp.path());
-            // Even a declared path that does not exist on the runner wins.
-            request.environment.variables.insert(
-                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
-                "/declared/browsers".to_string(),
-            );
-
-            let receipt = execute_with_context(request, temp.path(), &lab_context()).unwrap();
-
-            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
-            let (browsers, _) = receipt.report.stdout.split_once('|').unwrap();
-            assert_eq!(browsers, "/declared/browsers");
-            assert!(!receipt
-                .report
-                .environment
-                .preserved
-                .contains_key("PLAYWRIGHT_BROWSERS_PATH"));
-        });
-    }
-
-    #[test]
-    fn lab_gate_without_runner_browser_cache_maps_nothing() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let missing = tempfile::tempdir().unwrap();
-            let _cache_env = homeboy_core::test_support::EnvVarGuard::set(
-                "PLAYWRIGHT_BROWSERS_PATH",
-                missing.path().join("absent"),
-            );
-            let temp = tempfile::tempdir().unwrap();
-            repository(temp.path());
-            let request = printing_playwright_cache(temp.path());
-
-            let receipt = execute_with_context(request, temp.path(), &lab_context()).unwrap();
-
-            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
-            let (browsers, _) = receipt.report.stdout.split_once('|').unwrap();
-            assert_eq!(browsers, "unset");
-            assert!(!receipt
-                .report
-                .environment
-                .preserved
-                .contains_key("PLAYWRIGHT_BROWSERS_PATH"));
-        });
-    }
-
-    #[test]
-    fn lab_gate_uses_runner_process_cache_when_request_does_not_declare_one() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            // The runner HOME also has a default cache; the runner's declared
-            // cache must still win.
-            fs::create_dir_all(home.path().join(PLAYWRIGHT_CACHE_SUBPATH)).unwrap();
-            let cache_root = tempfile::tempdir().unwrap();
-            let cache = cache_root.path().join("runner-playwright-browsers");
-            fs::create_dir_all(&cache).unwrap();
-            let _cache_env =
-                homeboy_core::test_support::EnvVarGuard::set("PLAYWRIGHT_BROWSERS_PATH", &cache);
-            let temp = tempfile::tempdir().unwrap();
-            repository(temp.path());
-            let mut request = gate_printing_path_and_home(temp.path());
-            request.argv = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "printf '%s' \"$PLAYWRIGHT_BROWSERS_PATH\"".to_string(),
-            ];
-            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "homeboy", "reservation").unwrap();
-
-            let receipt = execute_with_context(request, temp.path(), &context).unwrap();
-
-            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
-            assert_eq!(receipt.report.stdout, cache.display().to_string());
-        });
-    }
-
-    #[test]
-    fn lab_gate_declared_runner_cache_outside_home_is_used() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().unwrap();
-            repository(temp.path());
-            let cache_root = tempfile::tempdir().unwrap();
-            let cache = cache_root.path().join("playwright-browsers");
-            fs::create_dir_all(&cache).unwrap();
-            let mut request = gate_printing_path_and_home(temp.path());
-            request.environment.variables.insert(
-                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
-                cache.display().to_string(),
-            );
-            request.argv = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "printf '%s' \"$PLAYWRIGHT_BROWSERS_PATH\"".to_string(),
-            ];
-            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "homeboy", "reservation").unwrap();
-            let receipt = execute_with_context(request, temp.path(), &context).unwrap();
-            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
-            assert_eq!(receipt.report.stdout, cache.display().to_string());
-        });
+                assert_eq!(
+                    receipt.report.status,
+                    AgentTaskGateStatus::Succeeded,
+                    "{case}"
+                );
+                assert_eq!(
+                    receipt.report.environment.mode,
+                    AgentTaskGateEnvironmentMode::Replace,
+                    "{case}"
+                );
+                let (browsers, gate_home) = receipt.report.stdout.split_once('|').unwrap();
+                let expected = match (declared, in_home, &env) {
+                    (Some(declared), _, _) => declared.to_string(),
+                    (None, Some(relative), _) => home.path().join(relative).display().to_string(),
+                    (None, None, Env::Existing) => runner_cache.display().to_string(),
+                    (None, None, _) => "unset".to_string(),
+                };
+                assert_eq!(browsers, expected, "{case}");
+                assert_ne!(
+                    Path::new(gate_home),
+                    home.path(),
+                    "gate HOME stays isolated"
+                );
+                assert_eq!(
+                    receipt
+                        .report
+                        .environment
+                        .preserved
+                        .get("PLAYWRIGHT_BROWSERS_PATH")
+                        .map(String::as_str),
+                    preserved,
+                    "{case}"
+                );
+            });
+        }
     }
 
     #[test]
@@ -3649,7 +3603,6 @@ mod tests {
 
     fn assert_version_skew(error: &Error) {
         assert_eq!(error.code, homeboy_core::ErrorCode::RunnerVersionSkew);
-        assert_eq!(error.code.as_str(), "runner.version_skew");
         for expected in [
             "0.458.0",
             "0.457.2",

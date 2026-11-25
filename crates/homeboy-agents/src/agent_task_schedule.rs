@@ -826,14 +826,14 @@ mod managed_service_plan_tests {
     use super::*;
 
     #[test]
-    fn task_only_plans_remain_byte_compatible_and_services_round_trip_through_homeboy_plan() {
+    fn task_only_plans_stay_byte_compatible_and_services_round_trip_with_postprocess() {
         let task_only = AgentTaskPlan::new("task-only", Vec::new());
         assert!(serde_json::to_value(&task_only)
             .unwrap()
             .get("services")
             .is_none());
 
-        let mut plan = AgentTaskPlan::new("services", Vec::new());
+        let mut plan = AgentTaskPlan::new("composed", Vec::new());
         plan.services.push(AgentTaskManagedService {
             version: AgentTaskManagedService::VERSION,
             id: "preview".to_string(),
@@ -850,34 +850,6 @@ mod managed_service_plan_tests {
             readiness: None,
             cleanup_deadline_ms: AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS,
             public_url: Some("https://preview.example.test".to_string()),
-            browser_origin_probe: None,
-            lifecycle: AgentTaskManagedServiceLifecycle::Plan,
-            target: None,
-        });
-        plan.rebuild_homeboy_plan();
-        let round_trip = AgentTaskPlan::from_homeboy_plan(plan.homeboy_plan.clone());
-        assert_eq!(round_trip.services, plan.services);
-    }
-
-    #[test]
-    fn managed_services_and_postprocess_steps_round_trip_together() {
-        let mut plan = AgentTaskPlan::new("composed", Vec::new());
-        plan.services.push(AgentTaskManagedService {
-            version: AgentTaskManagedService::VERSION,
-            id: "preview".to_string(),
-            command: vec!["server".to_string()],
-            cwd: None,
-            env: HashMap::new(),
-            env_allowlist: Vec::new(),
-            secret_env: Vec::new(),
-            secret_env_plan: None,
-            host: "127.0.0.1".to_string(),
-            port: Some(3000),
-            port_env: None,
-            socket_handoff: false,
-            readiness: None,
-            cleanup_deadline_ms: AgentTaskManagedService::DEFAULT_CLEANUP_DEADLINE_MS,
-            public_url: None,
             browser_origin_probe: None,
             lifecycle: AgentTaskManagedServiceLifecycle::Plan,
             target: None,

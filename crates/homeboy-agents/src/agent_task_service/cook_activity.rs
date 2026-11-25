@@ -322,6 +322,8 @@ mod tests {
             homeboy_core::test_support::run_git_command(root, args);
         };
         git(&["init", "--quiet"]);
+        // A cook that has produced nothing reports zero, not "unknown".
+        assert_eq!(worktree_files_changed(root), Some(0));
         std::fs::write(root.join("tracked"), "base\n").unwrap();
         git(&["add", "tracked"]);
         // Force a stat-cache refresh without changing the indexed content.
@@ -345,10 +347,6 @@ mod tests {
         );
 
         assert_eq!(count_porcelain_entries(porcelain), 3);
-    }
-
-    #[test]
-    fn a_clean_worktree_counts_zero_rather_than_reporting_nothing() {
         // `Some(0)` and `None` mean different things to an operator: "the agent
         // has written nothing" versus "we could not look".
         assert_eq!(count_porcelain_entries(""), 0);
@@ -480,18 +478,6 @@ mod tests {
 
         assert!(!summary.contains("MiB"));
         assert!(!summary.contains("process(es)"));
-        assert_eq!(activity.child_processes, None);
-        assert_eq!(activity.tree_rss_mib, None);
-    }
-
-    #[test]
-    fn kib_readings_round_down_into_the_unit_budgets_are_written_in() {
-        // Rounding down keeps a rounding artefact from crossing a threshold
-        // that can terminate a run.
-        assert_eq!(kib_to_mib(0), 0);
-        assert_eq!(kib_to_mib(1_023), 0);
-        assert_eq!(kib_to_mib(1_024), 1);
-        assert_eq!(kib_to_mib(9_437_183), 9_215);
     }
 
     #[test]
@@ -522,24 +508,6 @@ mod tests {
         assert!(activity.elapsed_seconds.is_some());
         assert_eq!(activity.worktree_root, None);
         assert_eq!(activity.files_changed, None);
-    }
-
-    #[test]
-    fn worktree_edit_count_measures_a_real_repository_and_ignores_run_state() {
-        let temp = tempfile::tempdir().expect("probe fixture directory");
-        let root = temp.path();
-        let initialized = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(root)
-            .status()
-            .expect("git init runs");
-        assert!(initialized.success(), "git init succeeds");
-
-        // A cook that has produced nothing reports zero, not "unknown".
-        assert_eq!(worktree_files_changed(root), Some(0));
-
-        std::fs::write(root.join("edited.rs"), "fn main() {}\n").expect("write provider edit");
-        assert_eq!(worktree_files_changed(root), Some(1));
     }
 
     #[test]

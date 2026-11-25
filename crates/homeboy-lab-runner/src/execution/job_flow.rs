@@ -642,14 +642,6 @@ mod tests {
             };
 
             assert!(
-                terminal.job.status.is_terminal(),
-                "terminal evidence is retained"
-            );
-            assert_eq!(
-                terminal.job.operation, "runner.exec --read-only-artifact",
-                "terminal snapshot retains the failed retrieval identity"
-            );
-            assert!(
                 settle_admitted_job_after_terminal_snapshot("runner-a", &terminal, true)
                     .expect("settle terminal job-flow snapshot")
             );

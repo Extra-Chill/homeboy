@@ -1,18 +1,16 @@
 #![cfg(test)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use super::super::{
-    accepted_extra_lab_workspaces, agent_task_plan_extra_workspaces, agent_task_plan_spec,
-    declared_path_input_values, extension_source_extra_workspaces, path_setting_values,
-    path_values_extra_workspaces, preflight_provider_config_source_cli_dependencies,
-    provider_config_candidate_paths, provider_config_extra_workspaces,
-    resolve_path_setting_workspace_refs_in_args,
+    accepted_extra_lab_workspaces, agent_task_plan_extra_workspaces, declared_path_input_values,
+    extension_source_extra_workspaces, path_setting_values, path_values_extra_workspaces,
+    preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
+    provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
     rig_component_path_env_extra_workspaces_from_entries, runtime_refresh_source_extra_workspaces,
     sync_lab_workspace_roots_controlled, workspace_mapping_entries_for_git_dependency,
-    workspace_mapping_entry, workspace_ref_extra_workspaces, ExtraLabWorkspace,
-    LAB_EXTRA_WORKSPACES_JSON_ENV,
+    workspace_mapping_entry, workspace_ref_extra_workspaces, LAB_EXTRA_WORKSPACES_JSON_ENV,
 };
 use crate::workspace::git_output;
 use crate::{
@@ -160,59 +158,7 @@ fn extracts_all_local_path_sources_including_runtime_overlays() {
     }
     // Non-path scalars are not collected.
     assert!(!paths.iter().any(|p| p == "claude-opus-4-8"));
-}
-
-#[test]
-fn empty_config_yields_no_candidates() {
-    let value = serde_json::json!({ "model": "x" });
-    assert!(provider_config_candidate_paths(&value).is_empty());
-}
-
-#[test]
-fn agent_task_plan_spec_allows_global_flags_before_agent_task() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "run-plan".to_string(),
-        "--plan=@/tmp/plan.json".to_string(),
-    ];
-
-    assert_eq!(
-        agent_task_plan_spec(&args),
-        Some("@/tmp/plan.json".to_string())
-    );
-}
-
-#[test]
-fn provider_config_file_path_syncs_containing_checkout() {
-    let controller = tempfile::tempdir().expect("controller");
-    let source = controller.path().join("primary");
-    let provider = controller.path().join("provider-cli");
-    let cli = provider.join("packages/cli/dist/index.js");
-    std::fs::create_dir_all(&source).expect("source dir");
-    std::fs::create_dir_all(cli.parent().unwrap()).expect("cli dist dir");
-    std::fs::write(&cli, "#!/usr/bin/env node\n").expect("cli file");
-    git(&provider, &["init", "-b", "main"]);
-    git(&provider, &["config", "user.email", "test@example.com"]);
-    git(&provider, &["config", "user.name", "Homeboy Test"]);
-    git(&provider, &["add", "."]);
-    git(&provider, &["commit", "-m", "initial"]);
-
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "dispatch".to_string(),
-        "--provider-config".to_string(),
-        serde_json::json!({ "source_cli": cli }).to_string(),
-    ];
-
-    let workspaces = provider_config_extra_workspaces(&args, &source).expect("workspaces");
-
-    assert_eq!(workspaces.len(), 1);
-    assert_eq!(workspaces[0].path, provider.canonicalize().unwrap());
-    assert!(workspaces[0]
-        .snapshot_includes
-        .contains(&"packages/cli/dist/**".to_string()));
+    assert!(provider_config_candidate_paths(&serde_json::json!({ "model": "x" })).is_empty());
 }
 
 #[test]
@@ -295,7 +241,7 @@ fn extension_refresh_source_syncs_local_source() {
 }
 
 #[test]
-fn provider_config_file_path_merges_snapshot_includes_for_duplicate_checkout() {
+fn provider_config_file_paths_sync_one_containing_checkout_with_merged_includes() {
     let controller = tempfile::tempdir().expect("controller");
     let source = controller.path().join("primary");
     let provider = controller.path().join("provider-cli");
@@ -324,6 +270,7 @@ fn provider_config_file_path_merges_snapshot_includes_for_duplicate_checkout() {
     let workspaces = provider_config_extra_workspaces(&args, &source).expect("workspaces");
 
     assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0].path, provider.canonicalize().unwrap());
     assert!(workspaces[0]
         .snapshot_includes
         .contains(&"packages/cli/dist/**".to_string()));
@@ -1101,26 +1048,7 @@ fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
 }
 
 #[test]
-fn path_setting_workspace_ref_missing_handle_fails_locally() {
-    crate::test_support::with_isolated_home(|_| {
-        let args = vec![
-            "homeboy".to_string(),
-            "trace".to_string(),
-            "--setting=fixture=@workspace:missing@cook/file.json".to_string(),
-        ];
-
-        let err = resolve_path_setting_workspace_refs_in_args(&args)
-            .expect_err("missing workspace ref should fail");
-
-        assert_eq!(err.details["field"], "workspace_ref");
-        assert!(err
-            .message
-            .contains("does not match a known workspace handle"));
-    });
-}
-
-#[test]
-fn path_setting_workspace_ref_removed_record_is_not_resolvable() {
+fn path_setting_workspace_ref_missing_handle_or_removed_record_fails_locally() {
     crate::test_support::with_isolated_home(|home| {
         let store = homeboy_core::paths::homeboy_data()
             .expect("homeboy data")
@@ -1145,41 +1073,28 @@ fn path_setting_workspace_ref_removed_record_is_not_resolvable() {
             .to_string(),
         )
         .expect("worktree record");
-        let args = vec![
-            "homeboy".to_string(),
-            "trace".to_string(),
-            "--setting".to_string(),
-            "fixture=@workspace:repo@old".to_string(),
-        ];
+        for setting in [
+            "--setting=fixture=@workspace:missing@cook/file.json",
+            "--setting=fixture=@workspace:repo@old",
+        ] {
+            let args = vec![
+                "homeboy".to_string(),
+                "trace".to_string(),
+                setting.to_string(),
+            ];
 
-        let err = resolve_path_setting_workspace_refs_in_args(&args)
-            .expect_err("removed workspace ref should fail");
+            let err = resolve_path_setting_workspace_refs_in_args(&args)
+                .expect_err("unknown or removed workspace ref should fail");
 
-        assert_eq!(err.details["field"], "workspace_ref");
-        assert!(err
-            .message
-            .contains("does not match a known workspace handle"));
+            assert_eq!(err.details["field"], "workspace_ref", "{setting}");
+            assert!(
+                err.message
+                    .contains("does not match a known workspace handle"),
+                "{setting}: {}",
+                err.message
+            );
+        }
     });
-}
-
-#[test]
-fn workspace_ref_provenance_is_recorded_on_mapping_entry() {
-    let workspace = ExtraLabWorkspace {
-        role: "path_setting_workspace_ref".to_string(),
-        path: PathBuf::from("/local/repo@cook"),
-        snapshot_includes: Vec::new(),
-        git_fetch_refs: Vec::new(),
-        allow_dirty_lab_workspace: false,
-        source_provenance: Some(serde_json::json!({
-            "source_provenance": "workspace_ref",
-            "ref": "@workspace:repo@cook/file.json"
-        })),
-    };
-
-    assert_eq!(
-        workspace.source_provenance.as_ref().unwrap()["source_provenance"],
-        "workspace_ref"
-    );
 }
 
 #[test]

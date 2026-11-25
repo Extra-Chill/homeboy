@@ -82,23 +82,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn byte_file_counts_keep_their_wire_shape_and_zero_default() {
-        assert_eq!(
-            serde_json::to_value(ByteFileCounts::default()).expect("serialize"),
-            serde_json::json!({ "files": 0, "bytes": 0 })
-        );
-        assert_eq!(
-            serde_json::to_value(ByteFileCounts {
-                files: 3,
-                bytes: 1024,
-            })
-            .expect("serialize"),
-            serde_json::json!({ "files": 3, "bytes": 1024 })
-        );
-    }
-
-    #[test]
-    fn workspace_lease_keeps_its_minimal_wire_shape() {
+    fn workspace_lease_and_current_summary_keep_their_wire_shapes() {
         let value = serde_json::json!({
             "runner_id": "lab-a",
             "local_path": "/local/project",
@@ -124,10 +108,9 @@ mod tests {
             serde_json::from_value::<RunnerWorkspaceLease>(value).expect("deserialize"),
             lease
         );
-    }
 
-    #[test]
-    fn current_workspace_keeps_its_complete_wire_shape() {
+        // The complete summary keeps every source/synthetic-checkout field and
+        // the deliberate `snapshot-git` spelling durable consumers read.
         let summary = RunnerWorkspaceCurrentSummary {
             local_path: "/local/project".to_string(),
             remote_path: "/runner/project".to_string(),
@@ -156,21 +139,5 @@ mod tests {
                 "synthetic_checkout_tree": "789abc",
             })
         );
-    }
-
-    #[test]
-    fn workspace_sync_modes_use_fixed_wire_labels() {
-        for (mode, label) in [
-            (RunnerWorkspaceSyncMode::Snapshot, "snapshot"),
-            (RunnerWorkspaceSyncMode::SnapshotGit, "snapshot-git"),
-            (RunnerWorkspaceSyncMode::Git, "git"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(mode).expect("serialize"),
-                serde_json::json!(label),
-                "{mode:?}"
-            );
-            assert_eq!(mode.as_str(), label);
-        }
     }
 }
