@@ -379,10 +379,10 @@ fn run_command_with_workspace_inner(
             ));
         }
 
-        // Keep planner failures visible in a preview. Silently converting an
-        // error to `None` used to produce an unclassified `skipped` result
-        // (without a version or a reason), notably when a primary checkout
-        // was behind its already-fetched upstream.
+        // Keep planner failures visible in a preview. Converting an error to
+        // `None` would produce an unclassified `skipped` result (without a
+        // version or a reason), notably when a primary checkout is behind its
+        // already-fetched upstream.
         let early_plan_result = super::plan(&input.component_id, &options);
         let early_plan = early_plan_result.as_ref().ok().cloned();
         let skipped_reason = early_plan.as_ref().and_then(skipped_reason_from_plan);
@@ -3179,42 +3179,4 @@ mod tests {
             assert!(result.ci_release.is_none());
         });
     }
-}
-#[test]
-fn legacy_release_command_input_struct_literal_remains_source_compatible() {
-    let _ = ReleaseCommandInput {
-        component_id: "component".to_string(),
-        path_override: None,
-        dry_run: false,
-        recover: false,
-        repair_changelog_history: Vec::new(),
-        retag: false,
-        skip_checks: false,
-        skip_checks_granular: Vec::new(),
-        skip_build_validation: false,
-        skip_deps_hydration: false,
-        bump_override: None,
-        force_lower_bump: false,
-        pipeline: super::types::ReleasePipelineOptions::default(),
-        skip_github_release: false,
-        git_identity: None,
-        execution: None,
-        readiness: None,
-    };
-    let _ = ReleaseOptions {
-        bump_type: "patch".to_string(),
-        dry_run: false,
-        path_override: None,
-        skip_checks: false,
-        skip_checks_granular: Vec::new(),
-        skip_build_validation: false,
-        skip_deps_hydration: false,
-        pipeline: super::types::ReleasePipelineOptions::default(),
-        skip_github_release: false,
-        git_identity: None,
-        bump_policy: Default::default(),
-        preflight_placement: Default::default(),
-        readiness: None,
-        control_plane: None,
-    };
 }

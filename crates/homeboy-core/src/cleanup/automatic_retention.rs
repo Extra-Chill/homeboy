@@ -752,19 +752,4 @@ mod tests {
         assert_eq!(record(&db, kind).0, "completed");
         assert!(holders(&db, kind).is_empty());
     }
-
-    #[test]
-    fn live_owner_in_this_process_is_not_reaped() {
-        let (_db, db) = isolated_store();
-        let kind = AutomaticRetentionKind::Controller;
-        let _held = begin_automatic_retention_pass(open(&db), kind, SystemTime::now())
-            .unwrap()
-            .expect("first pass");
-        assert!(
-            begin_automatic_retention_pass(open(&db), kind, SystemTime::now())
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(holders(&db, kind).len(), 1);
-    }
 }

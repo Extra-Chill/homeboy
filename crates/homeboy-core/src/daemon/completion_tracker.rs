@@ -96,18 +96,11 @@ mod tests {
     #[test]
     fn first_observation_seeds_without_reporting_completions() {
         let mut tracker = CompletionTracker::default();
-        let completed = tracker.observe(ids(&["a", "b"]), terminal);
+        let completed = tracker.observe(ids(&["a", "a", "b"]), terminal);
         assert!(completed.is_empty());
-        // The seeded ids are now tracked: completing them reports them.
+        // The seeded ids are now tracked: completing them reports each once,
+        // despite the duplicate.
         assert_eq!(tracker.observe(Vec::new(), terminal), ids(&["a", "b"]));
-    }
-
-    #[test]
-    fn reports_runs_that_left_the_running_set() {
-        let mut tracker = CompletionTracker::default();
-        tracker.observe(ids(&["a", "b", "c"]), terminal);
-        let completed = tracker.observe(ids(&["a"]), terminal);
-        assert_eq!(completed, ids(&["b", "c"]));
     }
 
     #[test]
@@ -120,35 +113,8 @@ mod tests {
         assert_eq!(tracker.observe(ids(&["d"]), terminal), ids(&["a"]));
         // `d` finishes.
         assert_eq!(tracker.observe(Vec::new(), terminal), ids(&["d"]));
-    }
-
-    #[test]
-    fn a_run_is_reported_only_once() {
-        let mut tracker = CompletionTracker::default();
-        tracker.observe(ids(&["a"]), terminal);
-        assert_eq!(tracker.observe(Vec::new(), terminal), ids(&["a"]));
-        // Subsequent polls without `a` running must not re-report it.
+        // Later polls never re-report a departed run.
         assert!(tracker.observe(Vec::new(), terminal).is_empty());
-    }
-
-    #[test]
-    fn duplicate_running_ids_collapse() {
-        let mut tracker = CompletionTracker::default();
-        let completed = tracker.observe(ids(&["a", "a", "b"]), terminal);
-        assert!(completed.is_empty());
-        // Despite the duplicate, each id is reported at most once on departure.
-        assert_eq!(tracker.observe(Vec::new(), terminal), ids(&["a", "b"]));
-    }
-
-    #[test]
-    fn a_run_truncated_out_of_the_page_is_not_reported_completed() {
-        let mut tracker = CompletionTracker::default();
-        tracker.observe(ids(&["a", "b"]), terminal);
-        // The page drops `b` — bound hit, ordering churn — but `b` is still
-        // running. Reporting it here would burn its exactly-once delivery
-        // marker and permanently suppress the real completion.
-        let completed = tracker.observe(ids(&["a"]), |_| RunTerminality::Unresolved);
-        assert!(completed.is_empty());
     }
 
     #[test]
@@ -156,6 +122,8 @@ mod tests {
         let mut tracker = CompletionTracker::default();
         tracker.observe(ids(&["a", "b"]), terminal);
         // `b` is evicted from the page for two polls while still running.
+        // Reporting it here would burn its exactly-once delivery marker and
+        // permanently suppress the real completion.
         assert!(tracker
             .observe(ids(&["a"]), |_| RunTerminality::Unresolved)
             .is_empty());

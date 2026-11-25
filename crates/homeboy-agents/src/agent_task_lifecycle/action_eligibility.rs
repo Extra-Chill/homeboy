@@ -454,14 +454,14 @@ mod tests {
         let old = (now - chrono::Duration::hours(6)).to_rfc3339();
 
         // A runner-backed run with a fresh heartbeat: the reconciler leaves it
-        // alone, so Reconcile must not be advertised (it used to be).
+        // alone, so Reconcile must not be advertised.
         let mut runner_fresh = record(RunExecutionState::Running);
         runner_fresh.metadata["runner_id"] = serde_json::json!("homeboy-lab");
         runner_fresh.metadata["runner_job_id"] = serde_json::json!("accepted-job");
         runner_fresh.updated_at = Some(fresh);
 
         // A queued run with no owner and an old timestamp: the reconciler
-        // cancels it, so Reconcile must be advertised (it used to be withheld).
+        // cancels it, so Reconcile must be advertised.
         let mut queued_orphan = record(RunExecutionState::Queued);
         queued_orphan.updated_at = Some(old.clone());
 

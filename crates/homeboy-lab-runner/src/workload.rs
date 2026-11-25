@@ -1150,62 +1150,36 @@ mod tests {
     }
 
     #[test]
-    fn lab_runner_workload_validation_rejects_blank_result_refs_plan_id() {
-        let mut workload = workload();
-        workload.result_refs.plan_id = " ".to_string();
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect_err("blank result refs plan id must fail");
-        assert_eq!(err.details["field"], "runner_workload.result_refs.plan_id");
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_result_refs_plan_id_mismatched_to_workload_id() {
-        let mut workload = workload();
-        workload.result_refs.plan_id = "lab_offload.other".to_string();
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect_err("mismatched result refs plan id must fail");
-        assert_eq!(err.details["field"], "runner_workload.result_refs.plan_id");
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_blank_result_refs_artifact_ids() {
-        let mut workload = workload();
-        workload.result_refs.artifacts = vec![homeboy_core::lab_contract::JobArtifactMetadata {
-            id: " ".to_string(),
-            name: Some("trace.zip".to_string()),
-            path: Some("/tmp/trace.zip".to_string()),
-            ..Default::default()
-        }];
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &["homeboy".to_string(), "trace".to_string()],
-            &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
-            true,
-        )
-        .expect_err("blank result refs artifact id must fail");
-        assert_eq!(
-            err.details["field"],
-            "runner_workload.result_refs.artifacts"
-        );
+    fn lab_runner_workload_validation_rejects_invalid_result_refs() {
+        let blank_plan_id: fn(&mut LabRunnerWorkload) = |w| w.result_refs.plan_id = " ".into();
+        let mismatched_plan_id: fn(&mut LabRunnerWorkload) =
+            |w| w.result_refs.plan_id = "lab_offload.other".into();
+        let blank_artifact_id: fn(&mut LabRunnerWorkload) = |w| {
+            w.result_refs.artifacts = vec![homeboy_core::lab_contract::JobArtifactMetadata {
+                id: " ".to_string(),
+                name: Some("trace.zip".to_string()),
+                path: Some("/tmp/trace.zip".to_string()),
+                ..Default::default()
+            }]
+        };
+        for (edit, field) in [
+            (blank_plan_id, "runner_workload.result_refs.plan_id"),
+            (mismatched_plan_id, "runner_workload.result_refs.plan_id"),
+            (blank_artifact_id, "runner_workload.result_refs.artifacts"),
+        ] {
+            let mut workload = workload();
+            edit(&mut workload);
+            let err = validate_lab_runner_workload_dispatch(
+                Some(&workload),
+                "lab-a",
+                Some("/srv/homeboy/work"),
+                &["homeboy".to_string(), "trace".to_string()],
+                &secret_plan(&["HOMEBODY_TRACE_SECRET"]),
+                true,
+            )
+            .expect_err("invalid result refs must fail");
+            assert_eq!(err.details["field"], field);
+        }
     }
 
     #[test]

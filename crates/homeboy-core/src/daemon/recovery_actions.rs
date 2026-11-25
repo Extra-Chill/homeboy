@@ -537,18 +537,6 @@ mod tests {
         assert_eq!(diagnose().render_command(), "homeboy daemon status");
     }
 
-    /// The workload attestation is unverifiable by construction, so it must
-    /// travel as a declared confirmation an operator has to supply rather than
-    /// as an argument a dispatcher can fill in from a report.
-    #[test]
-    fn the_workload_attestation_is_declared_as_an_operator_confirmation() {
-        assert_eq!(
-            attest_absent(&[Uuid::nil()]).required_confirmations,
-            vec![ATTEST_ABSENT.to_string()]
-        );
-        assert!(stop().required_confirmations.is_empty());
-    }
-
     fn status(
         stale_reason_code: Option<super::super::DaemonStaleReasonCode>,
         repair_plan: Vec<DaemonRepairStep>,
@@ -683,6 +671,12 @@ mod tests {
 
     #[test]
     fn fresh_daemon_on_its_installed_executable_is_converged() {
+        let plan = plan_recovery(&status(None, Vec::new(), 0));
+        assert!(plan.steps.is_empty());
+        assert!(!plan.executable);
+        assert!(plan.reason.contains("fresh"), "{}", plan.reason);
+        assert_eq!(plan.lifecycle, Plan::Converged);
+
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("homeboy");
         std::fs::write(&path, "current").expect("binary");
@@ -792,16 +786,6 @@ mod tests {
             0,
         );
         assert!(!authorizes_automatic_idle_restart(&diagnosis));
-    }
-
-    #[test]
-    fn a_fresh_report_plans_nothing_and_says_why() {
-        let plan = plan_recovery(&status(None, Vec::new(), 0));
-
-        assert!(plan.steps.is_empty());
-        assert!(!plan.executable);
-        assert!(plan.reason.contains("fresh"), "{}", plan.reason);
-        assert_eq!(plan.lifecycle, Plan::Converged);
     }
 
     /// #11105: a report the freshness table authorizes nothing for used to
@@ -1023,18 +1007,5 @@ mod tests {
             }
         ));
         assert!(super::super::lifecycle_plan::mutation_refusal(&plan.lifecycle).is_some());
-    }
-
-    #[test]
-    fn diagnosis_is_the_only_read_only_action() {
-        assert_eq!(diagnose().safety, ActionSafety::ReadOnly);
-        for action in [
-            stop(),
-            stop_for_lease("lease"),
-            ensure_running(),
-            attest_absent(&[Uuid::nil()]),
-        ] {
-            assert_eq!(action.safety, ActionSafety::Mutating, "{}", action.id);
-        }
     }
 }

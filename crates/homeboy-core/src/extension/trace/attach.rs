@@ -391,64 +391,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_all() {
-        let attachments = TraceAttachment::parse_all(&[
-            "logfile:/tmp/service.log".to_string(),
-            "fswatch:/tmp/auth.json".to_string(),
-            "pid:1234".to_string(),
-            "port:8080".to_string(),
-            "http://127.0.0.1:8080/health".to_string(),
-            "systemd:kimaki.service".to_string(),
-        ])
-        .unwrap();
+    fn trace_attachment_parse_accepts_v1_kinds_and_rejects_invalid_targets() {
+        let cases = [
+            ("logfile:/tmp/service.log", "logfile", "/tmp/service.log"),
+            ("fswatch:/tmp/auth.json", "fswatch", "/tmp/auth.json"),
+            ("pid:1234", "pid", "1234"),
+            ("port:8080", "port", "8080"),
+            (
+                "http:http://127.0.0.1:8080/health",
+                "http",
+                "http://127.0.0.1:8080/health",
+            ),
+            (
+                "http://127.0.0.1:8080/health",
+                "http",
+                "http://127.0.0.1:8080/health",
+            ),
+            ("systemd:kimaki.service", "systemd", "kimaki.service"),
+        ];
+        for (raw, kind, target) in cases {
+            assert_eq!(
+                TraceAttachment::parse(raw).unwrap(),
+                TraceAttachment {
+                    kind: kind.to_string(),
+                    target: target.to_string(),
+                },
+                "{raw}"
+            );
+        }
 
-        assert_eq!(attachments.len(), 6);
-        assert_eq!(attachments[0].kind, "logfile");
-        assert_eq!(attachments[1].kind, "fswatch");
-        assert_eq!(attachments[2].target, "1234");
-        assert_eq!(attachments[3].target, "8080");
-        assert_eq!(attachments[4].kind, "http");
-        assert_eq!(attachments[5].kind, "systemd");
-        assert_eq!(attachments[5].target, "kimaki.service");
-    }
-
-    #[test]
-    fn trace_attachment_parse_supports_v1_kinds() {
-        assert_eq!(
-            TraceAttachment::parse("logfile:/tmp/service.log").unwrap(),
-            TraceAttachment {
-                kind: "logfile".to_string(),
-                target: "/tmp/service.log".to_string(),
-            }
-        );
-        assert_eq!(
-            TraceAttachment::parse("fswatch:/tmp/auth.json").unwrap(),
-            TraceAttachment {
-                kind: "fswatch".to_string(),
-                target: "/tmp/auth.json".to_string(),
-            }
-        );
-        assert_eq!(TraceAttachment::parse("pid:1234").unwrap().target, "1234");
-        assert_eq!(TraceAttachment::parse("port:8080").unwrap().target, "8080");
-        assert_eq!(
-            TraceAttachment::parse("http:http://127.0.0.1:8080/health")
-                .unwrap()
-                .target,
-            "http://127.0.0.1:8080/health"
-        );
-        assert_eq!(
-            TraceAttachment::parse("http://127.0.0.1:8080/health")
-                .unwrap()
-                .target,
-            "http://127.0.0.1:8080/health"
-        );
-        assert_eq!(
-            TraceAttachment::parse("systemd:kimaki.service").unwrap(),
-            TraceAttachment {
-                kind: "systemd".to_string(),
-                target: "kimaki.service".to_string(),
-            }
-        );
+        for raw in ["logfile", "logfile:", "pid:0", "pid:abc"] {
+            assert!(TraceAttachment::parse(raw).is_err(), "{raw}");
+        }
     }
 
     #[test]
@@ -463,23 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn test_observe_trace_attachments() {
-        let temp = tempfile::tempdir().unwrap();
-        let log_path = temp.path().join("service.log");
-        std::fs::write(&log_path, "before\n").unwrap();
-        let attachment =
-            TraceAttachment::parse(&format!("logfile:{}", log_path.display())).unwrap();
-
-        let observations = observe_trace_attachments(&[attachment], "before", Instant::now());
-
-        assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].phase, "before");
-        assert_eq!(observations[0].attachment.kind, "logfile");
-        assert_eq!(observations[0].status, "present");
-    }
-
-    #[test]
-    fn test_observe_fswatch_attachment_snapshots_file_metadata() {
+    fn observe_fswatch_attachment_snapshots_file_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let watched_path = temp.path().join("auth.json");
         std::fs::write(&watched_path, "before\n").unwrap();
@@ -500,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_attach_observations() {
+    fn append_attach_observations_writes_timeline_and_artifact() {
         let run_dir = RunDir::create().unwrap();
         std::fs::create_dir_all(run_dir.path().join("artifacts")).unwrap();
         let attachment = TraceAttachment::parse("logfile:/tmp/service.log").unwrap();

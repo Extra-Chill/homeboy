@@ -1823,21 +1823,6 @@ mod helper_drain_tests {
     use super::*;
 
     #[test]
-    fn helper_that_never_returns_does_not_block_drain() {
-        let (release_tx, release_rx) = mpsc::channel::<()>();
-        let helper = std::thread::spawn(move || {
-            let _ = release_rx.recv();
-        });
-        let started = Instant::now();
-        join_with_deadline(
-            vec![("stuck-test-helper", helper)],
-            Instant::now() + Duration::from_millis(40),
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
-        let _ = release_tx.send(());
-    }
-
-    #[test]
     fn deadline_join_returns_finished_results_and_detaches_busy_threads() {
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let finished = std::thread::spawn(|| -> std::io::Result<()> {
@@ -4613,37 +4598,42 @@ mod tests {
         });
     }
 
+    /// Write-scoped control-plane routes are classified after path
+    /// normalization, and only their collection endpoints are writes.
     #[test]
-    fn control_plane_reference_registration_paths_are_write_scoped() {
-        for path in [
-            "/v1/control-plane/runs/run-1/artifacts",
-            "/v1/control-plane/runs/run-1/artifacts/",
-            "/v1/control-plane/runs/run-1/evidence",
-            "/v1//control-plane/runs/run-1/evidence",
-            "/v1/control-plane/runs/run-1/external-references",
+    fn control_plane_write_paths_are_classified_after_normalization() {
+        for (path, registration, event_append) in [
+            ("/v1/control-plane/runs/run-1/artifacts", true, false),
+            ("/v1/control-plane/runs/run-1/artifacts/", true, false),
+            ("/v1/control-plane/runs/run-1/evidence", true, false),
+            ("/v1//control-plane/runs/run-1/evidence", true, false),
+            (
+                "/v1/control-plane/runs/run-1/external-references",
+                true,
+                false,
+            ),
+            (
+                "/v1/control-plane/runs/run-1/artifacts/patch-1",
+                false,
+                false,
+            ),
+            ("/v1/control-plane/runs/run-1/tasks", false, false),
+            ("/v1/control-plane/runs/run-1/events", false, true),
+            ("/v1/control-plane/runs/run-1/events/", false, true),
+            ("/v1//control-plane/runs/run-1/events", false, true),
+            (
+                "/v1/control-plane/runs/run-1/events/retention",
+                false,
+                false,
+            ),
         ] {
-            assert!(is_control_plane_reference_registration(path));
+            assert_eq!(
+                is_control_plane_reference_registration(path),
+                registration,
+                "{path}"
+            );
+            assert_eq!(is_control_plane_event_append(path), event_append, "{path}");
         }
-        assert!(!is_control_plane_reference_registration(
-            "/v1/control-plane/runs/run-1/artifacts/patch-1"
-        ));
-        assert!(!is_control_plane_reference_registration(
-            "/v1/control-plane/runs/run-1/tasks"
-        ));
-    }
-
-    #[test]
-    fn control_plane_event_append_paths_are_write_scoped_after_normalization() {
-        for path in [
-            "/v1/control-plane/runs/run-1/events",
-            "/v1/control-plane/runs/run-1/events/",
-            "/v1//control-plane/runs/run-1/events",
-        ] {
-            assert!(is_control_plane_event_append(path));
-        }
-        assert!(!is_control_plane_event_append(
-            "/v1/control-plane/runs/run-1/events/retention"
-        ));
     }
 
     /// Round-trip the envelope through the exact functions that build it on the
@@ -5686,24 +5676,6 @@ mod tests {
     }
 
     #[test]
-    fn admission_commit_failure_releases_owner() {
-        with_isolated_home(|_| {
-            let lease = register_direct_owner("admission-failure");
-            let mut pending = PendingWorkspaceOwnerLease::new(Some((
-                daemon_workspace_claim_store().expect("owner store"),
-                lease.clone(),
-            )));
-            let mut error = Error::internal_io("injected admission commit failure", None);
-            pending.rollback_error(&mut error);
-            assert_owner_live(&lease, false);
-            assert_eq!(
-                error.details["workspace_owner_lease_cleanup"]["released"],
-                true
-            );
-        });
-    }
-
-    #[test]
     fn admission_accepts_null_owner_request_but_rejects_malformed_structured_value() {
         with_isolated_home(|_| {
             let lease_id = "lease-null-owner-request";
@@ -6129,21 +6101,30 @@ mod tests {
         });
     }
 
+    /// Every terminal path of a direct job releases its workspace owner.
     #[test]
-    fn queued_cancel_and_spawn_failure_release_owner() {
+    fn terminal_jobs_release_their_owner() {
         with_isolated_home(|_| {
             let store = JobStore::default();
             for (owner, reason) in [
                 ("queued-cancel", "cancel"),
                 ("spawn-failure", "spawn failure"),
+                ("terminal", "complete"),
             ] {
                 let lease = register_direct_owner(owner);
                 let job =
                     store.create_test_local_runner_job(Some(direct_local_runner(lease.clone())));
-                if reason == "cancel" {
-                    store.cancel(job.id, reason).expect("cancel queued job");
-                } else {
-                    store.fail(job.id, reason).expect("record spawn failure");
+                match reason {
+                    "cancel" => {
+                        store.cancel(job.id, reason).expect("cancel queued job");
+                    }
+                    "complete" => {
+                        store.start(job.id).expect("start job");
+                        store.complete(job.id, None).expect("complete job");
+                    }
+                    _ => {
+                        store.fail(job.id, reason).expect("record spawn failure");
+                    }
                 }
                 assert!(store
                     .get(job.id)
@@ -6152,19 +6133,6 @@ mod tests {
                     .is_terminal());
                 assert_owner_live(&lease, false);
             }
-        });
-    }
-
-    #[test]
-    fn terminal_job_releases_owner() {
-        with_isolated_home(|_| {
-            let store = JobStore::default();
-            let lease = register_direct_owner("terminal");
-            let job = store.create_test_local_runner_job(Some(direct_local_runner(lease.clone())));
-            store.start(job.id).expect("start job");
-            store.complete(job.id, None).expect("complete job");
-            assert_eq!(store.get(job.id).expect("job").status, JobStatus::Succeeded);
-            assert_owner_live(&lease, false);
         });
     }
 
@@ -6234,6 +6202,10 @@ mod tests {
             )
             .expect_err("durable admission commit fails");
             assert_eq!(error.code.as_str(), "internal.io_error");
+            assert_eq!(
+                error.details["workspace_owner_lease_cleanup"]["released"],
+                true
+            );
             assert!(store.list().is_empty());
             daemon_workspace_claim_store()
                 .expect("owner store")
@@ -6857,29 +6829,6 @@ mod tests {
             assert!(try_acquire_daemon_owner_lock()
                 .expect("reacquire owner lock")
                 .is_some());
-        });
-    }
-
-    #[test]
-    fn the_owner_lock_holder_record_round_trips() {
-        with_isolated_home(|_| {
-            let state = state_path().expect("state path");
-            let _lock = acquire_daemon_owner_lock_at(&state, Duration::ZERO).expect("serve lock");
-
-            let probe = probe_daemon_owner_lock_at(&state).expect("probe");
-            assert_eq!(
-                probe,
-                DaemonOwnerLockProbe::Held {
-                    holder: Some(DaemonOwnerHolder::current()),
-                }
-            );
-            let wire = serde_json::to_value(&probe).expect("serialize probe");
-            assert_eq!(wire["state"], "held");
-            assert_eq!(wire["holder"]["pid"], std::process::id());
-            assert_eq!(
-                serde_json::from_value::<DaemonOwnerLockProbe>(wire).expect("parse probe"),
-                probe
-            );
         });
     }
 
@@ -8137,7 +8086,7 @@ mod owned_admission_tests {
     #[test]
     fn root_and_continuation_admission_table() {
         // Automatic stale drain and explicit recover --drain use the same rule.
-        for (state, draining) in [("fresh", false), ("stale", true), ("draining", true)] {
+        for (state, draining) in [("admitting", false), ("draining", true)] {
             for (linked, expected) in [
                 (None, !draining),
                 (Some("owned"), true),

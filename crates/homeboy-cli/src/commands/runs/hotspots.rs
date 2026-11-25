@@ -1462,9 +1462,8 @@ mod tests {
 
     #[test]
     fn hotspot_run_lookup_resolves_a_durable_run_label_through_the_facade() {
-        // #6768: this command used to carry a private `require_run` that only
-        // matched record ids, so a durable run label errored out. Routing
-        // through `runs_service::require_run` resolves the alias, and the
+        // #6768: routing through `runs_service::require_run` resolves a
+        // durable run label to its record id, and the
         // batched artifact read must key on the resolved record id — keying on
         // the caller-supplied label would silently yield zero artifacts.
         with_isolated_home(|home| {

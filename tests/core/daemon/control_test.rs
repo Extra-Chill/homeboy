@@ -408,8 +408,8 @@ fn startup_observation_waits_for_delayed_token_without_provider_work() {
 
 #[test]
 fn startup_observation_stops_as_soon_as_the_child_exits() {
-    // #17445: a `serve` that died on bind used to be polled for the whole
-    // observation budget, re-reading status on every poll.
+    // #17445: a `serve` that dies on bind ends observation immediately
+    // instead of polling status for the whole observation budget.
     let missing = fake_status(None, false);
     let mut reads = 0;
     let mut sleeps = 0;

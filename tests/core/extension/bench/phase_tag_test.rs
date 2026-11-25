@@ -309,7 +309,7 @@ mod cases {
         );
     }
 
-    // 5b. No-phase invariant: with no policies at all (the legacy p95-only
+    // 5b. No-phase invariant: with no policies at all (the p95-only
     // path), phase_groups is also None.
     #[test]
     fn phase_groups_is_none_when_metric_policies_is_empty() {

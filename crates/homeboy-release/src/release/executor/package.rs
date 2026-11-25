@@ -1272,10 +1272,10 @@ fn relevant_package_error_lines(stdout: &str, stderr: &str) -> Vec<String> {
     // diagnose — so the fallback has to be the most informative slice
     // available.
     //
-    // It previously returned the FIRST 12 lines, which for build output is the
-    // banner and dependency checks: identical for every component, and true of
-    // successful runs too. The end of the output is where a run diverges from
-    // a healthy one, so the tail is what gets kept (#14859).
+    // The first lines of build output are the banner and dependency checks:
+    // identical for every component, and true of successful runs too. The end
+    // of the output is where a run diverges from a healthy one, so the tail is
+    // what gets kept (#14859).
     let all: Vec<&str> = stderr
         .lines()
         .chain(stdout.lines())

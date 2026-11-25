@@ -371,12 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn different_build_lease_is_compatible_unless_exact_is_required() {
-        use homeboy_lab_contract::{
-            admit_lab_runner, required_lab_handoff_capabilities, LabCapabilityHandshake,
-            LabRuntimeAncestry, LabRuntimeIdentity, LAB_CONTRACT_VERSION,
-        };
-
+    fn a_different_build_lease_stays_fresh_until_its_lab_contract_differs() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("lease.json");
         let mut state = restartable_validation(Some("compatible".into()))
@@ -387,30 +382,6 @@ mod tests {
         state.build_identity.version = "0.0.0".into();
         fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
         assert!(validate_lease_file(&path).unwrap().fresh);
-
-        let controller = LabRuntimeIdentity {
-            build_identity: crate::build_identity::current().display,
-            lab_contract_version: Some(LAB_CONTRACT_VERSION),
-            source_revision: "controller".into(),
-            clean: true,
-        };
-        let daemon = LabRuntimeIdentity {
-            build_identity: state.build_identity.display.clone(),
-            source_revision: "daemon".into(),
-            ..controller.clone()
-        };
-        let capabilities = required_lab_handoff_capabilities();
-        let handshake = LabCapabilityHandshake {
-            controller,
-            runner_command: daemon.clone(),
-            daemon,
-            required_capabilities: capabilities.clone(),
-            runner_command_capabilities: capabilities.clone(),
-            daemon_capabilities: capabilities,
-            ancestry: LabRuntimeAncestry::Unknown,
-        };
-        assert!(admit_lab_runner(&handshake, false).compatible);
-        assert!(!admit_lab_runner(&handshake, true).compatible);
 
         state.lab_contract_version += 1;
         fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
@@ -447,39 +418,26 @@ mod tests {
     }
 
     /// A stale but idle report routes replacement through `ensure-running`
-    /// on the one store rather than composing a separate stop and start.
+    /// on the one store rather than composing a separate stop and start. With
+    /// or without a lease it must not synthesize a lease selector.
     #[test]
     fn a_restartable_report_uses_ensure_running() {
-        let report = freshness_report_from_validation(
-            &restartable_validation(Some("lease-restartable".to_string())),
-            0,
-        );
+        for lease_id in [Some("lease-restartable"), None] {
+            let report = freshness_report_from_validation(
+                &restartable_validation(lease_id.map(str::to_string)),
+                0,
+            );
 
-        assert!(report.restartable);
-        assert_eq!(report.lease_id.as_deref(), Some("lease-restartable"));
-        assert_eq!(
-            repair_plan_commands(&report),
-            vec![(
-                recovery_actions::DAEMON_ENSURE_RUNNING.to_string(),
-                "homeboy daemon ensure-running".to_string(),
-            ),]
-        );
-    }
-
-    /// A restartable report with no lease still uses the same canonical
-    /// lifecycle resolver; it must not synthesize a lease selector.
-    #[test]
-    fn a_restartable_report_without_a_lease_uses_ensure_running() {
-        let report = freshness_report_from_validation(&restartable_validation(None), 0);
-
-        assert!(report.restartable);
-        assert_eq!(report.lease_id, None);
-        assert_eq!(
-            repair_plan_commands(&report),
-            vec![(
-                recovery_actions::DAEMON_ENSURE_RUNNING.to_string(),
-                "homeboy daemon ensure-running".to_string(),
-            ),]
-        );
+            assert!(report.restartable);
+            assert_eq!(report.lease_id.as_deref(), lease_id);
+            assert_eq!(
+                repair_plan_commands(&report),
+                vec![(
+                    recovery_actions::DAEMON_ENSURE_RUNNING.to_string(),
+                    "homeboy daemon ensure-running".to_string(),
+                )],
+                "{lease_id:?}"
+            );
+        }
     }
 }

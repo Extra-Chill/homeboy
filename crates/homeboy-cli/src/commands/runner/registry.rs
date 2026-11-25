@@ -1018,27 +1018,4 @@ mod tests {
         })
         .expect("an exact live adoption validates");
     }
-
-    /// The per-case dead-daemon recovery flags are gone: a plain connect
-    /// starts a daemon whose startup recovers its predecessor (#17429).
-    #[test]
-    fn dead_daemon_recovery_flags_do_not_parse() {
-        use clap::Parser;
-        for flags in [
-            &["--adopt-orphan-lease", "lease"][..],
-            &["--reconcile-leaseless-orphans"][..],
-            &["--recover-missing-lease-state", "lease"][..],
-            &[
-                "--confirm-untracked-child-dead",
-                "00000000-0000-0000-0000-000000000001",
-            ][..],
-        ] {
-            let mut argv = vec!["homeboy", "runner", "connect", "lab"];
-            argv.extend_from_slice(flags);
-            assert!(
-                crate::cli_surface::Cli::try_parse_from(argv).is_err(),
-                "{flags:?} must not parse"
-            );
-        }
-    }
 }

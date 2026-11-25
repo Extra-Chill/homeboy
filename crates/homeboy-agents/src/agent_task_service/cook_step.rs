@@ -553,22 +553,6 @@ pub(crate) fn finalize_detached_cook_attempt(cook_id: &str, _attempt_run_id: &st
     super::finish_cook_terminal(&store, cook_id)
 }
 
-pub(super) fn attempt_status_label(
-    state: homeboy_lifecycle_contract::RunExecutionState,
-) -> &'static str {
-    use homeboy_lifecycle_contract::RunExecutionState;
-    match state {
-        RunExecutionState::Queued => "queued",
-        RunExecutionState::Running => "running",
-        RunExecutionState::Succeeded => "succeeded",
-        RunExecutionState::CandidateRecoverable => "candidate_recoverable",
-        RunExecutionState::PartialFailure => "partial_failure",
-        RunExecutionState::Failed => "failed",
-        RunExecutionState::Unknown => "unknown",
-        RunExecutionState::Cancelled => "cancelled",
-    }
-}
-
 pub(super) fn last_failed_command_result(log_path: &Path) -> Option<Value> {
     let mut file = std::fs::File::open(log_path).ok()?;
     let length = file.metadata().ok()?.len();

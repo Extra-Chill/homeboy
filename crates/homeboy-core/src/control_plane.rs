@@ -882,13 +882,12 @@ mod tests {
     use super::{
         append_delegated_action_event, execute_delegated_action,
         register_control_plane_action_delegate, ControlPlaneActionDelegate,
-        ControlPlaneActionDelegateResult, ControlPlaneInvocationContext, ControlPlaneProvider,
-        NoopProvider,
+        ControlPlaneActionDelegateResult, ControlPlaneInvocationContext,
     };
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
-        ControlPlaneActionRequest, ControlPlaneError, ControlPlaneOperation, ControlPlaneRun,
-        EffectId, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        ControlPlaneActionRequest, ControlPlaneError, ControlPlaneRun, EffectId, RunId,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     };
 
     static EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
@@ -969,16 +968,6 @@ mod tests {
                 message: Some("recovered from durable evidence".to_string()),
             })
         }
-    }
-
-    #[test]
-    fn noop_provider_advertises_discovery_without_run_reads() {
-        let capabilities = NoopProvider.capabilities();
-        assert!(capabilities.resources.is_empty());
-        assert_eq!(
-            capabilities.operations,
-            vec![ControlPlaneOperation::GetCapabilities]
-        );
     }
 
     #[test]

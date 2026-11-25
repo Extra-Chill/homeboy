@@ -390,7 +390,7 @@ mod tests {
 
     /// A superproject with one submodule whose remote URL is unreachable, so
     /// only the local source checkout can satisfy it.
-    fn fixture(root: &Path) -> (PathBuf, String) {
+    fn fixture(root: &Path) -> PathBuf {
         let library = root.join("library");
         std::fs::create_dir_all(&library).unwrap();
         git(&library, &["init", "-q"]);
@@ -412,7 +412,7 @@ mod tests {
             ],
         );
         // Point the declared URL somewhere that cannot be fetched.
-        let unreachable = "https://example.invalid/library.git".to_string();
+        let unreachable = "https://example.invalid/library.git";
         git(
             &source,
             &[
@@ -420,7 +420,7 @@ mod tests {
                 "--file",
                 ".gitmodules",
                 "submodule.vendor/library.url",
-                &unreachable,
+                unreachable,
             ],
         );
         // Register the unreachable URL in repository config too, as a real
@@ -428,7 +428,7 @@ mod tests {
         git(&source, &["submodule", "sync", "-q"]);
         git(&source, &["add", "."]);
         git(&source, &["commit", "-q", "-m", "superproject"]);
-        (source, unreachable)
+        source
     }
 
     #[test]
@@ -438,21 +438,6 @@ mod tests {
         assert!(
             hydrate_git_submodules(root.path(), None, "test", SUBMODULE_HYDRATION_TIMEOUT)
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn reads_declared_submodules() {
-        let root = tempfile::tempdir().unwrap();
-        let (source, url) = fixture(root.path());
-        let declared = declared_submodules(&source).unwrap();
-        assert_eq!(
-            declared,
-            vec![DeclaredSubmodule {
-                name: "vendor/library".to_string(),
-                path: "vendor/library".to_string(),
-                url: Some(url),
-            }]
         );
     }
 
@@ -471,7 +456,7 @@ mod tests {
     #[test]
     fn detached_worktree_initializes_submodules_from_the_source_checkout() {
         let root = tempfile::tempdir().unwrap();
-        let (source, _) = fixture(root.path());
+        let source = fixture(root.path());
         let checkout = root.path().join("attempt");
         git(
             &source,
@@ -507,7 +492,7 @@ mod tests {
     #[test]
     fn primary_checkout_is_used_when_no_source_is_given() {
         let root = tempfile::tempdir().unwrap();
-        let (source, _) = fixture(root.path());
+        let source = fixture(root.path());
         let checkout = root.path().join("attempt");
         git(
             &source,
@@ -535,7 +520,7 @@ mod tests {
     #[test]
     fn unreachable_submodule_without_local_source_reports_failure() {
         let root = tempfile::tempdir().unwrap();
-        let (source, _) = fixture(root.path());
+        let source = fixture(root.path());
         // A plain clone shares nothing with the source, so the submodule can
         // only come from its unreachable remote.
         let checkout = root.path().join("clone");

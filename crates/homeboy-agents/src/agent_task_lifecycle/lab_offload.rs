@@ -334,10 +334,6 @@ pub fn record_local_lab_identity_fallback(
     Ok(record)
 }
 
-// The ambient `record_lab_offload_phase_executions()` shim that used to sit here
-// is gone; the lab workspace-exec hydration was its only caller and now records into the store it
-// resolved for the whole operation (#7505).
-
 /// The store-rooted counterpart of [`record_lab_offload_phase_executions`].
 ///
 /// The terminal guard is read from the same record the execution ids are
@@ -376,10 +372,6 @@ pub fn record_lab_offload_phase_executions_in_store(
     })
 }
 
-// The ambient `record_lab_staging_controller_job()` shim that used to sit here
-// is gone; the detached staging submitter was its only caller and now records into the store it
-// resolved for the whole operation (#7505).
-
 /// The store-rooted counterpart of [`record_lab_staging_controller_job`].
 ///
 /// The staging job id is the controller's only handle on a materialization it
@@ -413,10 +405,6 @@ pub fn record_lab_staging_controller_job_in_store(
         metadata.insert("materialization_owner".to_string(), json!("controller_job"));
     })
 }
-
-// The ambient `record_lab_admission_reservation()` shim that used to sit here
-// is gone; the lab offload inner loop was its only caller and now reserves
-// admission in the store it resolved for the whole offload (#7505).
 
 /// The store-rooted counterpart of [`record_lab_admission_reservation`].
 ///
@@ -452,10 +440,6 @@ pub fn record_lab_admission_reservation_in_store(
         );
     })
 }
-
-// The ambient `record_lab_staging_controller_failure()` shim that used to sit here
-// is gone; the staging checkpoint executor was its only caller and now records into the store it
-// resolved for the whole operation (#7505).
 
 /// The store-rooted counterpart of [`record_lab_staging_controller_failure`].
 ///

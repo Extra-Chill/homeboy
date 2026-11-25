@@ -4215,7 +4215,8 @@ fn dispatched_prompt_is_the_operator_prompt_without_a_template() {
         let original_instructions = options.identity.initial_plan.tasks[0].instructions.clone();
 
         project_controller_owned_gate_contract(&mut options);
-        project_initial_finalizing_review_form_contract(&mut options);
+        project_initial_finalizing_review_form_contract(&mut options)
+            .expect("project review-form contract");
         project_attempt_prompt_template(&mut options);
 
         let request = &options.identity.initial_plan.tasks[0];
@@ -6712,7 +6713,8 @@ fn normal_cook_repairs_the_immutable_attempt_when_replay_uses_a_fresh_run_id() {
         );
         durable_options.identity.initial_run_id = durable_run_id.to_string();
         project_controller_owned_gate_contract(&mut durable_options);
-        project_initial_finalizing_review_form_contract(&mut durable_options);
+        project_initial_finalizing_review_form_contract(&mut durable_options)
+            .expect("project review-form contract");
         persist_initial_recipe(&durable_options).expect("persist immutable recipe");
 
         let mut replay_options = batch_cook_options(

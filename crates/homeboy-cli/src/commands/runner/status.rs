@@ -1613,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_drift_never_leaks_the_legacy_daemon_refresh_command() {
+    fn identity_drift_never_emits_a_daemon_refresh_command() {
         let mut report = stale_daemon_report();
         report
             .session

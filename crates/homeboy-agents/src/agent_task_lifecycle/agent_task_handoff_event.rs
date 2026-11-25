@@ -239,9 +239,6 @@ pub fn agent_task_dispatch_handoff_event_from_job_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::lab_contract::{
-        LabRunnerWorkloadAgentTaskDispatchKind, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
-    };
     use serde_json::json;
 
     fn workload(agent_task: Option<serde_json::Value>) -> LabRunnerWorkload {
@@ -331,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_dispatch_envelope_is_still_recognized() {
+    fn dispatch_envelope_is_recognized() {
         let envelope = json!({
             "schema": AGENT_TASK_DISPATCH_ENVELOPE_SCHEMA,
             "run_id": "cook-7530"
@@ -344,7 +341,7 @@ mod tests {
             "runner-job-1",
             &result,
         )
-        .expect("legacy dispatch envelope");
+        .expect("dispatch envelope");
 
         assert_eq!(event.handoff["schema"], AGENT_TASK_DISPATCH_ENVELOPE_SCHEMA);
     }
@@ -439,33 +436,5 @@ mod tests {
             .expect("typed event recovered from job events");
         assert_eq!(recovered.run_id, "cook-7530");
         assert_eq!(recovered.handoff["schema"], AGENT_TASK_LAB_HANDOFF_SCHEMA);
-    }
-
-    #[test]
-    fn typed_helper_agrees_with_the_contract_spellings() {
-        let agent_task = LabRunnerWorkloadAgentTask {
-            run_id: "cook-7530".to_string(),
-            plan_ref: None,
-            resolved_provider_policy: None,
-            dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::Cook,
-            lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
-            handoff_mirror_policy: Some(
-                LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
-            ),
-            wait_budget_ms: None,
-        };
-        assert!(agent_task_mirrors_dispatch_handoff(&agent_task));
-
-        let no_handoff = LabRunnerWorkloadAgentTask {
-            handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
-            ..agent_task.clone()
-        };
-        assert!(!agent_task_mirrors_dispatch_handoff(&no_handoff));
-
-        let pre_typed = LabRunnerWorkloadAgentTask {
-            handoff_mirror_policy: None,
-            ..agent_task
-        };
-        assert!(!agent_task_mirrors_dispatch_handoff(&pre_typed));
     }
 }

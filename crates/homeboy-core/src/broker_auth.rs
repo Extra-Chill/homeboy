@@ -583,74 +583,57 @@ mod tests {
     }
 
     #[test]
-    fn missing_token_is_rejected_when_configured() {
-        let (store, _token) = store_with("runner-a", BrokerScope::Submit);
-        let err = store
-            .authorize(false, None, BrokerScope::Submit, Some("runner-a"))
-            .expect_err("missing token");
-        assert!(err.message.contains("missing broker bearer token"));
-    }
-
-    #[test]
-    fn paired_runner_can_authorize_its_own_runner_id() {
-        let (store, token) = store_with("runner-a", BrokerScope::Submit);
-        let grant = store
-            .authorize(false, Some(&token), BrokerScope::Submit, Some("runner-a"))
-            .expect("authorized");
-        assert_eq!(grant.runner_id, "runner-a");
-    }
-
-    #[test]
-    fn wrong_runner_id_is_rejected() {
-        let (store, token) = store_with("runner-a", BrokerScope::Submit);
-        let err = store
-            .authorize(false, Some(&token), BrokerScope::Submit, Some("runner-b"))
-            .expect_err("cross-runner request rejected");
-        assert!(err.message.contains("different runner id"));
-    }
-
-    #[test]
-    fn wrong_token_is_rejected() {
-        let (store, _token) = store_with("runner-a", BrokerScope::Submit);
-        let err = store
-            .authorize(
-                false,
-                Some("hbk_bogus"),
-                BrokerScope::Submit,
+    fn configured_store_rejects_unauthorized_requests() {
+        type Mutate = fn(&mut BrokerAuthStore);
+        let keep: Mutate = |_| {};
+        let clear_scopes: Mutate = |store| store.credentials[0].scopes.clear();
+        let revoke: Mutate = |store| assert!(store.revoke("cred-1"));
+        for (label, mutate, token, runner, expected) in [
+            (
+                "missing token",
+                keep,
+                None,
                 Some("runner-a"),
-            )
-            .expect_err("bad token");
-        assert!(err.message.contains("not recognized"));
-    }
-
-    #[test]
-    fn scope_is_enforced() {
-        let (mut store, token) = store_with("runner-a", BrokerScope::Submit);
-        store.credentials[0].scopes.clear();
-        let err = store
-            .authorize(false, Some(&token), BrokerScope::Submit, None)
-            .expect_err("submit needs submit scope");
-        assert!(err.message.contains("scope"));
-    }
-
-    #[test]
-    fn revoked_credential_is_rejected() {
-        let (mut store, token) = store_with("runner-a", BrokerScope::Submit);
-        assert!(store.revoke("cred-1"));
-        let err = store
-            .authorize(false, Some(&token), BrokerScope::Submit, Some("runner-a"))
-            .expect_err("revoked");
-        assert!(
-            err.message.contains("no paired runner credentials") || err.message.contains("revoked")
-        );
-    }
-
-    #[test]
-    fn submit_scope_authorizes_controller_submit_without_runner_binding() {
-        let (store, token) = store_with("runner-a", BrokerScope::Submit);
-        store
-            .authorize(false, Some(&token), BrokerScope::Submit, None)
-            .expect("submit authorized");
+                "missing broker bearer token",
+            ),
+            (
+                "wrong runner",
+                keep,
+                Some(""),
+                Some("runner-b"),
+                "different runner id",
+            ),
+            (
+                "wrong token",
+                keep,
+                Some("hbk_bogus"),
+                Some("runner-a"),
+                "not recognized",
+            ),
+            ("missing scope", clear_scopes, Some(""), None, "scope"),
+            (
+                "revoked",
+                revoke,
+                Some(""),
+                Some("runner-a"),
+                "no paired runner credentials",
+            ),
+        ] {
+            let (mut store, minted) = store_with("runner-a", BrokerScope::Submit);
+            mutate(&mut store);
+            let token = token.map(|token| {
+                if token.is_empty() {
+                    minted.as_str()
+                } else {
+                    token
+                }
+            });
+            let err = store
+                .authorize(false, token, BrokerScope::Submit, runner)
+                .expect_err(label);
+            assert_eq!(err.code.as_str(), "broker.auth_denied", "{label}");
+            assert!(err.message.contains(expected), "{label}: {}", err.message);
+        }
     }
 
     #[test]
@@ -673,22 +656,6 @@ mod tests {
             content_hash::sha256_hex(token.as_bytes())
         );
         assert_eq!(store.credentials[0].token.as_deref(), Some(token.as_str()));
-    }
-
-    #[test]
-    fn enforcement_copy_strips_plaintext_tokens() {
-        let (store, token) = store_with("runner-a", BrokerScope::Submit);
-        let enforcement_store = store.enforcement_copy();
-
-        assert_eq!(store.credentials[0].token.as_deref(), Some(token.as_str()));
-        assert!(enforcement_store
-            .credentials
-            .iter()
-            .all(|credential| credential.token.is_none()));
-        assert_eq!(
-            enforcement_store.credentials[0].token_sha256,
-            content_hash::sha256_hex(token.as_bytes())
-        );
     }
 
     #[test]

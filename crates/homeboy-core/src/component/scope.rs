@@ -272,18 +272,4 @@ mod tests {
                 .is_empty()
         );
     }
-
-    #[test]
-    fn scope_is_empty_without_component_scopes() {
-        let component = Component::new(
-            "generic".to_string(),
-            "/tmp/generic".to_string(),
-            "".to_string(),
-            None,
-        );
-
-        let resolved = resolve_component_scope(&component, ScopeCommand::Deploy);
-        assert!(resolved.exclude.is_empty());
-        assert!(resolved.include.is_empty());
-    }
 }

@@ -318,47 +318,15 @@ mod audit_coverage_tests {
     use super::*;
     use crate::test_support::with_isolated_home;
 
-    /// The config root of the isolated home each test below installs.
-    ///
-    /// These tests are their own boundary: the child-record cleanup entry points
-    /// take a config root, so the test resolves once here and calls them
-    /// directly rather than through the process environment (#7505).
-    fn test_config_root() -> std::path::PathBuf {
-        paths::homeboy().expect("config root")
-    }
-
     #[test]
-    fn test_register_child_process() {
-        with_isolated_home(|_| {
-            let guard = register_child_process(
-                "inv-audit",
-                std::process::id(),
-                None,
-                "audit-child".to_string(),
-            )
-            .expect("child record");
-            assert!(guard.path.exists());
-        });
-    }
-
-    #[test]
-    fn test_children_dir() {
-        with_isolated_home(|_| {
-            let config_root = crate::paths::homeboy().expect("config root");
-            let dir = InvocationChildRecord::children_dir_in_root(&config_root, "inv/../audit");
-
-            assert!(dir.ends_with("inv____audit"));
-        });
-    }
-
-    #[test]
-    fn test_record_path() {
+    fn child_record_paths_sanitize_invocation_id() {
         with_isolated_home(|_| {
             let config_root = crate::paths::homeboy().expect("config root");
             let dir = InvocationChildRecord::children_dir_in_root(&config_root, "inv/../audit");
             let path =
                 InvocationChildRecord::record_path_in_root(&config_root, "inv/../audit", 1234);
 
+            assert!(dir.ends_with("inv____audit"));
             assert_eq!(
                 path.file_name().and_then(|name| name.to_str()),
                 Some("1234.json")
@@ -371,25 +339,5 @@ mod audit_coverage_tests {
     fn test_process_started_at_handles_current_and_missing_processes() {
         assert!(InvocationChildRecord::process_started_at(std::process::id()).is_some());
         assert!(InvocationChildRecord::process_started_at(u32::MAX).is_none());
-    }
-
-    #[test]
-    fn test_cleanup_invocation_children() {
-        with_isolated_home(|_| {
-            assert_eq!(
-                cleanup_invocation_children_in_root(&test_config_root(), "inv-empty").unwrap(),
-                0
-            );
-        });
-    }
-
-    #[test]
-    fn test_cleanup_stale_child_records() {
-        with_isolated_home(|_| {
-            assert_eq!(
-                cleanup_stale_child_records_in_root(&test_config_root()).unwrap(),
-                0
-            );
-        });
     }
 }

@@ -15,8 +15,7 @@ pub(crate) const EXPIRED_LAB_HANDOFF_REASON: &str =
 
 pub(crate) struct LabHandoffLock {
     // Retains the advisory lock until acceptance or expiry has been persisted.
-    #[allow(dead_code)]
-    file: File,
+    _file: File,
 }
 
 impl LabHandoffLock {
@@ -59,7 +58,7 @@ impl LabHandoffLock {
                 Some("lock Lab handoff".to_string()),
             ));
         }
-        Ok(Self { file })
+        Ok(Self { _file: file })
     }
 }
 /// Restore the terminal aggregate only when one persisted executor outcome maps
@@ -1358,9 +1357,6 @@ pub fn requeue_orphaned_unmaterialized_cook_admission_in_store(
     Ok(requeued.is_some())
 }
 
-// The ambient `expire_detached_cook_admission()` shim that used to sit here is
-// gone; the reconciler was its only caller and now expires inside the store it classified the run from (#7505).
-
 /// Expire a detached Cook's admission lease inside an explicitly rooted store.
 ///
 /// The liveness read and the terminal handoff write share one store, so an
@@ -2593,10 +2589,6 @@ pub(crate) fn project_runner_execution_context(
     Ok(())
 }
 
-// The ambient `persist_controller_plan()` shim that used to sit above this is
-// gone. Its last caller was the Cook retry boundary, which now persists the
-// controller plan into the same store it reserved the successor in (#7505).
-
 pub(crate) fn persist_controller_plan_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -2692,12 +2684,6 @@ pub fn claim_cook_terminal_notification_in_store(
     )
 }
 
-// The ambient `confirm_cook_terminal_notification()` shim that used to sit
-// above this is gone. Its only callers were the three terminal-notification
-// entry points in `agent_task_notify`, which now resolve one lifecycle store
-// for the whole claim/confirm/release protocol and pass it to each rooted
-// sibling, rather than resolving a fresh root per step (#7505).
-
 /// Persist a confirmed terminal delivery beside the injected store's own Cook
 /// index. Like the claim it commits, this is a bare filesystem write with no
 /// record read in front of it, so an ambient reach here would consume the wrong
@@ -2727,23 +2713,16 @@ pub fn confirm_cook_terminal_notification_in_store(
 ///
 /// This is the third step of the same exactly-once protocol as
 /// [`claim_cook_terminal_notification_in_store`] and
-/// [`confirm_cook_terminal_notification_in_store`], and it is the step that
-/// previously had no rooted form at all. The ambient shim that used to sit
-/// above it reached `store::`, which resolved a root of its own: a claim taken in an injected
-/// store and released against the ambient one leaves the real claim standing
-/// until its lease expires, which is the duplicate-notification outcome the
-/// claim exists to prevent.
+/// [`confirm_cook_terminal_notification_in_store`]. It must release in the
+/// store the claim was taken in: a claim released against another root leaves
+/// the real claim standing until its lease expires, which is the
+/// duplicate-notification outcome the claim exists to prevent.
 pub fn release_cook_terminal_notification_claim_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<()> {
     lifecycle_store.release_cook_notification_claim(cook_id)
 }
-
-// The ambient `record_cook_terminal_notification_outcome()` shim that used to
-// sit above this is gone, for the same reason as the confirm shim: its only
-// callers were the `agent_task_notify` entry points, which now record the
-// outcome in the store they claimed against (#7505).
 
 /// Store the latest compact notification delivery outcome in the injected
 /// store's own Cook directory. The marker is a file, not an observation row, so it follows this store's data root rather than the
@@ -3121,12 +3100,6 @@ pub fn record_provider_execution_process_in_store(
     })
 }
 
-// The ambient `running_owner_pid()` shim that used to sit above this is gone.
-// Its last caller was the Cook heartbeat, which samples activity on a thread
-// that already held a borrow of the injected lifecycle store for its
-// supervision writes — so it now reads the owner PID from the same installation
-// it records the sample into (#7505).
-
 /// Return the unambiguous running provider PID for activity sampling, from an
 /// explicitly injected durable lifecycle root.
 pub fn running_owner_pid_in_store(
@@ -3194,10 +3167,6 @@ pub fn restore_cook_controller_failure_if_absent_in_store(
     })?;
     Ok(())
 }
-
-// The ambient `clear_cook_controller_failure()` shim that used to sit above
-// this resolved a root and delegated straight here. It had no callers, so it
-// was a resolution point that existed for nobody (#7505).
 
 /// Clear a durable controller failure inside an explicitly rooted store.
 ///
@@ -3737,9 +3706,6 @@ pub(crate) fn record_provider_execution_progress(
     })
 }
 
-// The ambient `has_active_provider_execution()` shim that used to sit here is gone;
-// its one scheduler test now asks the store it resolves (#7505).
-
 /// [`has_active_provider_execution`] against explicitly injected durable
 /// lifecycle roots.
 pub fn has_active_provider_execution_in_store(
@@ -3793,7 +3759,7 @@ pub fn record_provider_execution_cleanup_elapsed_in_store(
 }
 
 /// Attach the spawned child's identity inside an explicitly rooted store.
-/// Test fixture for the legacy `child_attached` step: production launches
+/// Test fixture for a standalone `child_attached` step: production launches
 /// publish child and supervisor together through
 /// [`record_claimed_detached_cook_handoff_supervision_in_store`].
 ///
@@ -5106,10 +5072,6 @@ pub fn list_records_in_store(
     Ok(list_records_with_health_in_store(lifecycle_store)?.0)
 }
 
-// The ambient `list_records_with_health()` shim that used to sit here is gone.
-// The controller-pin reference provider was its only caller and now lists from
-// a store it resolves once (#7505).
-
 /// [`list_records_with_health`] against explicitly injected durable lifecycle
 /// roots.
 ///
@@ -5213,10 +5175,6 @@ pub fn run_record_exists_resolved_in_store(
 ) -> Result<bool> {
     lifecycle_store.record_exists_readonly(&resolve_run_id_in_store(lifecycle_store, run_id)?)
 }
-
-// The ambient `mark_resuming()` shim that used to sit here is gone. The resume
-// path was its only caller and now marks inside the store it resolved for the
-// resume itself (#7505).
 
 /// Stamp the resume request and re-enter Running inside an explicitly rooted
 /// store.
@@ -5522,10 +5480,6 @@ pub fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|identity| !identity.trim().is_empty())
 }
-
-// The ambient `retry_with_force()` shim that used to sit above this is gone.
-// Its last caller was the Cook retry boundary, which now reserves the successor
-// in the store it holds for the whole lineage (#7505).
 
 /// Reserve one successor for the complete retry lineage inside an explicitly
 /// rooted store. The advisory lock is taken beside that store's own run
@@ -5893,21 +5847,8 @@ pub(crate) fn restore_retry_plan_workspace_in_store(
 
 const RETRY_LINEAGE_LIMIT: usize = 16;
 
-/// Run a successor-creating recovery while its retry lineage is reserved.
-pub(crate) fn with_retry_lineage_reservation_in_store<T>(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    action: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    let source = lifecycle_store.read_record(&resolve_run_id_in_store(lifecycle_store, run_id)?)?;
-    let root_run_id = retry_root_run_id_in_store(lifecycle_store, &source)?;
-    let _reservation = RetryLineageLock::lock_in_store(lifecycle_store, &root_run_id)?;
-    action()
-}
-
 struct RetryLineageLock {
-    #[allow(dead_code)]
-    file: File,
+    _file: File,
 }
 
 impl RetryLineageLock {
@@ -5947,7 +5888,7 @@ impl RetryLineageLock {
                 Some(format!("lock retry lineage {root_run_id}")),
             ));
         }
-        Ok(Self { file })
+        Ok(Self { _file: file })
     }
 }
 
@@ -6078,10 +6019,6 @@ fn persist_retry_lineage_in_store(
     Ok(())
 }
 
-// The ambient `find_unbound_cook_retry_successor()` shim that used to sit
-// above this is gone. Its last caller was the Cook retry boundary, which now
-// looks the successor up in the store it reserved it in (#7505).
-
 /// Find the one lifecycle-first Cook retry reservation that can be bound to an
 /// unbound recipe attempt, inside an explicitly rooted store.
 ///
@@ -6202,10 +6139,6 @@ pub fn durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
 /// Read one concrete durable record without resolving a Cook ID through its
 /// latest attempt, from an explicitly injected durable lifecycle root. This is
 /// the inspection counterpart to [`exact_record`].
-///
-/// The ambient `exact_durable_local_read()` shim that used to sit above this is
-/// gone: `status_once` was its only caller and now reads through the store it
-/// resolved for the whole status read (#7505).
 pub fn exact_durable_local_read_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -6379,9 +6312,6 @@ fn inherit_cook_notification_route_locked_in_store(
     Ok(())
 }
 
-// The ambient `record_cook_attempt_locked()` shim that used to sit here is gone;
-// its one strict-lock test now registers inside the store it resolves (#7505).
-
 pub(crate) fn record_cook_attempt_locked_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -6495,9 +6425,6 @@ impl CookAttemptRegistration {
         Ok(self.index)
     }
 }
-
-// The ambient `record_cook_recovery_checkpoint()` shim that used to sit here is gone;
-// the fanout resume path was its only caller and now checkpoints inside the store it resolves (#7505).
 
 pub fn record_cook_recovery_checkpoint_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -6613,9 +6540,6 @@ pub struct DetachedCookMaterializingAttempt {
     pub cook_id: String,
     pub run_id: String,
 }
-
-// The ambient `resolve_detached_cook_materializing_attempt()` shim that used to sit
-// here is gone; the status reader was its only caller and now resolves the attempt in the store it checked the index against (#7505).
 
 /// [`resolve_detached_cook_materializing_attempt`] against explicitly injected
 /// durable lifecycle roots.
@@ -6888,10 +6812,6 @@ pub fn exact_record_bounded_in_store(
 ) -> Result<AgentTaskRunRecord> {
     lifecycle_store.read_record_bounded(&sanitize_run_id(run_id))
 }
-
-// The ambient `reconcile_scope_run_ids()` shim that used to sit here is gone;
-// the reconciler moved to the rooted form in a prior slice and the one
-// remaining test caller now resolves its own store (#7505).
 
 /// [`reconcile_scope_run_ids`] against explicitly injected durable lifecycle
 /// roots.
@@ -7323,9 +7243,6 @@ pub fn record_acceptance_verdict_in_store(
     )
 }
 
-// The ambient `record_acceptance_verdict_with_feedback()` shim that used to sit
-// here is gone; the acceptance CLI command was its only caller (#7505).
-
 /// Record an authority verdict inside an explicitly rooted store.
 ///
 /// The pre-verification binding read, the drift comparison made again under the
@@ -7530,9 +7447,6 @@ pub fn record_cook_finalization_in_store(
         Some(CookDeliveryCommit::FollowDelivery)
     })
 }
-
-// The ambient `record_cook_force_with_lease_receipt()` shim that used to sit
-// here is gone; the fanout force-with-lease path was its only caller and now writes both receipts into one store (#7505).
 
 pub fn record_cook_force_with_lease_receipt_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,

@@ -27,7 +27,7 @@ fn test_env_vars() {
 }
 
 #[test]
-fn structured_context_matches_legacy_isolated_dirs() {
+fn structured_context_matches_isolated_dir_env_vars() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");
         let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
@@ -365,7 +365,7 @@ fn invocation_dirs_are_unique_across_concurrent_invocations() {
 #[test]
 fn invocation_id_path_component_is_short() {
     // The short id used in path components should be ~10 chars, far below
-    // the 36-char UUID we used to embed.
+    // a 36-char UUID.
     let id = short_invocation_id();
     assert!(id.len() <= 12, "short id should be <= 12 chars: {id}");
     assert!(id.len() >= 8, "short id should be >= 8 chars: {id}");
@@ -667,8 +667,8 @@ fn studio_site_build_socket_path_fits_macos_sockaddr_un() {
     // Specific regression for the failure observed in #2311 follow-up:
     // Studio's daemon binds to
     //   $HOMEBOY_INVOCATION_STATE_DIR/studio-agent-site-build/daemon/daemon.sock
-    // and previously got EINVAL on macOS because the prefix was already
-    // ~64 bytes by the time the workload appended its 41-byte suffix.
+    // and must not hit EINVAL on macOS once the workload appends its
+    // 41-byte suffix to the prefix.
     let _guard = home_env_guard();
     let prior = std::env::var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
     std::env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV);

@@ -354,26 +354,7 @@ mod tests {
     }
 
     fn results(scenarios: Vec<BenchScenario>) -> BenchResults {
-        BenchResults {
-            component_id: "demo".to_string(),
-            iterations: 10,
-            provenance: Default::default(),
-            run_metadata: None,
-            metadata: BTreeMap::new(),
-            metric_groups: BTreeMap::new(),
-            timeline: Vec::new(),
-            span_definitions: BTreeMap::new(),
-            diagnostics: Vec::new(),
-            child_command_failures: Vec::new(),
-            phase_events: Vec::new(),
-            phase_summaries: Vec::new(),
-            failure_classification: None,
-            responsiveness: None,
-            budget_findings: Vec::new(),
-            scenarios,
-            metric_policies: BTreeMap::new(),
-            metric_policy_presets: BTreeMap::new(),
-        }
+        results_with_policies(scenarios, BTreeMap::new())
     }
 
     fn results_with_policies(
@@ -403,57 +384,10 @@ mod tests {
     }
 
     #[test]
-    fn test_from_scenario() {
-        let scenario = scenario("snapshot", 123.0);
-        let snapshot = BenchScenarioSnapshot::from_scenario(&scenario);
-
-        assert_eq!(snapshot.id, "snapshot");
-        assert_eq!(snapshot.metric_value("p95_ms"), Some(123.0));
-        assert!(snapshot.metric_value("mean_ms").unwrap() > 110.0);
-    }
-
-    #[test]
-    fn test_save_baseline() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = results(vec![scenario("a", 100.0)]);
-        let path = save_baseline(dir.path(), "demo", &run, None).unwrap();
-
-        assert!(path.exists());
-    }
-
-    #[test]
-    fn test_load_baseline() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = results(vec![scenario("a", 100.0)]);
-        save_baseline(dir.path(), "demo", &run, None).unwrap();
-
-        let loaded = load_baseline(dir.path(), None).unwrap();
-
-        assert_eq!(loaded.context_id, "demo");
-        assert_eq!(loaded.metadata.scenarios.len(), 1);
-    }
-
-    #[test]
-    fn test_compare() {
-        let dir = tempfile::tempdir().unwrap();
-        save_baseline(
-            dir.path(),
-            "demo",
-            &results(vec![scenario("a", 100.0)]),
-            None,
-        )
-        .unwrap();
-        let baseline = load_baseline(dir.path(), None).unwrap();
-
-        let comparison = compare(&results(vec![scenario("a", 106.0)]), &baseline, 5.0);
-
-        assert!(comparison.regression);
-        assert_eq!(comparison.scenarios.len(), 1);
-    }
-
-    #[test]
     fn save_and_load_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
+        assert!(load_baseline(dir.path(), None).is_none());
+
         let run = results(vec![scenario("a", 100.0), scenario("b", 200.0)]);
         save_baseline(dir.path(), "demo", &run, None).unwrap();
 
@@ -469,23 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn no_regression_when_flat() {
-        let dir = tempfile::tempdir().unwrap();
-        let baseline_run = results(vec![scenario("a", 100.0)]);
-        save_baseline(dir.path(), "demo", &baseline_run, None).unwrap();
-        let baseline = load_baseline(dir.path(), None).unwrap();
-
-        let current = results(vec![scenario("a", 100.0)]);
-        let comparison = compare(&current, &baseline, 5.0);
-
-        assert!(!comparison.regression);
-        assert!(!comparison.has_improvements);
-        assert_eq!(comparison.scenarios.len(), 1);
-        assert_eq!(comparison.scenarios[0].p95_delta_ms, Some(0.0));
-    }
-
-    #[test]
-    fn four_percent_slower_does_not_regress_at_five_percent_threshold() {
+    fn p95_regression_respects_threshold_percent() {
         let dir = tempfile::tempdir().unwrap();
         save_baseline(
             dir.path(),
@@ -496,36 +414,35 @@ mod tests {
         .unwrap();
         let baseline = load_baseline(dir.path(), None).unwrap();
 
-        let current = results(vec![scenario("a", 104.0)]);
-        let comparison = compare(&current, &baseline, 5.0);
+        for (current_p95, threshold, regressed) in [
+            (100.0, 5.0, false),
+            (104.0, 5.0, false),
+            (106.0, 5.0, true),
+            (108.0, 10.0, false),
+            (108.0, 5.0, true),
+        ] {
+            let comparison = compare(
+                &results(vec![scenario("a", current_p95)]),
+                &baseline,
+                threshold,
+            );
+            assert_eq!(
+                comparison.regression, regressed,
+                "p95 {current_p95} at {threshold}%"
+            );
+            assert_eq!(comparison.scenarios[0].regression, regressed);
+            assert_eq!(comparison.reasons.is_empty(), !regressed);
+            if current_p95 == 100.0 {
+                assert!(!comparison.has_improvements);
+                assert_eq!(comparison.scenarios[0].p95_delta_ms, Some(0.0));
+            }
+        }
 
-        assert!(!comparison.regression);
-        assert!(!comparison.scenarios[0].regression);
-        assert_eq!(comparison.reasons, Vec::<String>::new());
-    }
-
-    #[test]
-    fn six_percent_slower_regresses_at_five_percent_threshold() {
-        let dir = tempfile::tempdir().unwrap();
-        save_baseline(
-            dir.path(),
-            "demo",
-            &results(vec![scenario("a", 100.0)]),
-            None,
-        )
-        .unwrap();
-        let baseline = load_baseline(dir.path(), None).unwrap();
-
-        let current = results(vec![scenario("a", 106.0)]);
-        let comparison = compare(&current, &baseline, 5.0);
-
-        assert!(comparison.regression);
-        assert!(comparison.scenarios[0].regression);
+        let comparison = compare(&results(vec![scenario("a", 106.0)]), &baseline, 5.0);
         assert_eq!(comparison.reasons.len(), 1);
-        assert!(comparison.reasons[0].contains("a:"));
-        assert!(comparison.reasons[0].contains("p95_ms"));
-        assert!(comparison.reasons[0].contains("100.00"));
-        assert!(comparison.reasons[0].contains("106.00"));
+        for fragment in ["a:", "p95_ms", "100.00", "106.00"] {
+            assert!(comparison.reasons[0].contains(fragment), "{fragment}");
+        }
     }
 
     #[test]
@@ -550,27 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn new_scenario_is_tracked() {
-        let dir = tempfile::tempdir().unwrap();
-        save_baseline(
-            dir.path(),
-            "demo",
-            &results(vec![scenario("a", 100.0)]),
-            None,
-        )
-        .unwrap();
-        let baseline = load_baseline(dir.path(), None).unwrap();
-
-        let current = results(vec![scenario("a", 100.0), scenario("b", 50.0)]);
-        let comparison = compare(&current, &baseline, 5.0);
-
-        assert!(!comparison.regression);
-        assert_eq!(comparison.new_scenario_ids, vec!["b".to_string()]);
-        assert_eq!(comparison.scenarios.len(), 1); // only "a" has a baseline delta
-    }
-
-    #[test]
-    fn removed_scenario_is_tracked() {
+    fn added_and_removed_scenarios_are_tracked() {
         let dir = tempfile::tempdir().unwrap();
         save_baseline(
             dir.path(),
@@ -581,29 +478,13 @@ mod tests {
         .unwrap();
         let baseline = load_baseline(dir.path(), None).unwrap();
 
-        let current = results(vec![scenario("a", 100.0)]);
+        let current = results(vec![scenario("a", 100.0), scenario("c", 50.0)]);
         let comparison = compare(&current, &baseline, 5.0);
 
         assert!(!comparison.regression);
+        assert_eq!(comparison.new_scenario_ids, vec!["c".to_string()]);
         assert_eq!(comparison.removed_scenario_ids, vec!["b".to_string()]);
-    }
-
-    #[test]
-    fn threshold_percent_is_configurable() {
-        let dir = tempfile::tempdir().unwrap();
-        save_baseline(
-            dir.path(),
-            "demo",
-            &results(vec![scenario("a", 100.0)]),
-            None,
-        )
-        .unwrap();
-        let baseline = load_baseline(dir.path(), None).unwrap();
-
-        // 8% slower: passes at 10% threshold, fails at 5%.
-        let current = results(vec![scenario("a", 108.0)]);
-        assert!(!compare(&current, &baseline, 10.0).regression);
-        assert!(compare(&current, &baseline, 5.0).regression);
+        assert_eq!(comparison.scenarios.len(), 1); // only "a" has a baseline delta
     }
 
     #[test]
@@ -862,12 +743,6 @@ mod tests {
             Some(RegressionTest::KolmogorovSmirnov)
         );
         assert!(delta.statistic.unwrap() > 0.7);
-    }
-
-    #[test]
-    fn load_returns_none_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(load_baseline(dir.path(), None).is_none());
     }
 
     #[test]

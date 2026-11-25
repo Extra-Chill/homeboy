@@ -89,35 +89,28 @@ mod tests {
     use homeboy_engine_primitives::baseline::BaselineFlags;
 
     #[test]
-    fn test_bench_failure_stderr_tail() {
+    fn empty_artifact_path_failure_tail_carries_bench_context() {
         let args = bench_args();
+
         let tail = bench_failure_stderr_tail(
             "WORKLOAD_ERROR: studio-agent-site-build - warmup iteration 1/1 returned artifact \"visual_comparison_dir\" with empty path\n",
             &args,
         );
 
-        assert!(tail.contains("Bench artifact path validation context"));
-        assert!(tail.contains("component id `studio`"));
-    }
-
-    #[test]
-    fn enriches_empty_artifact_path_failure_with_bench_context() {
-        let args = bench_args();
-
-        let enriched = enrich_empty_artifact_path_error(
-            "WORKLOAD_ERROR: studio-agent-site-build - warmup iteration 1/1 returned artifact \"visual_comparison_dir\" with empty path".to_string(),
-            &args,
-        );
-
-        assert!(enriched.contains("rig id `studio-bfb`"));
-        assert!(enriched.contains("component id `studio`"));
-        assert!(enriched.contains("workload id `studio-agent-site-build`"));
-        assert!(enriched.contains("scenario id `studio-agent-site-build`"));
-        assert!(enriched.contains("phase `warmup`"));
-        assert!(enriched.contains("iteration 1/1"));
-        assert!(enriched.contains("artifact key `visual_comparison_dir`"));
-        assert!(enriched.contains("Omit optional artifacts"));
-        assert!(enriched.contains("real diagnostics file/directory"));
+        for fragment in [
+            "Bench artifact path validation context",
+            "rig id `studio-bfb`",
+            "component id `studio`",
+            "workload id `studio-agent-site-build`",
+            "scenario id `studio-agent-site-build`",
+            "phase `warmup`",
+            "iteration 1/1",
+            "artifact key `visual_comparison_dir`",
+            "Omit optional artifacts",
+            "real diagnostics file/directory",
+        ] {
+            assert!(tail.contains(fragment), "{fragment}: {tail}");
+        }
     }
 
     fn bench_args() -> BenchRunWorkflowArgs {
