@@ -1342,6 +1342,154 @@ fn attempt_keeps_its_own_notification_route_over_the_cook_route() {
     });
 }
 
+fn published_interrupted_delivery(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+) -> homeboy_core::daemon::step_job::StepTerminalDelivery {
+    let parent = "lost-materialized";
+    let child = "lost-materialized-attempt-1";
+    prepare_empty_admission(parent);
+    agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+        store, parent, child,
+    )
+    .unwrap();
+    agent_task_lifecycle::submit_plan_in_store(store, &test_plan(), Some(child)).unwrap();
+    agent_task_lifecycle::record_cook_attempt_in_store(store, parent, 1, child).unwrap();
+    let mut delivery = terminal_delivery(&current_intent(store, parent));
+    delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
+    delivery.error = Some(serde_json::json!({
+        "message": "step child exit status is unknown",
+        "details": {"step_outcome": "exit_status_unknown"}
+    }));
+    delivery
+}
+
+#[test]
+fn execution_step_materialized_zero_execution_requeues_and_can_be_claimed_again() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let delivery = published_interrupted_delivery(&store);
+        let child = "lost-materialized-attempt-1";
+        assert_eq!(
+            consume_execution_terminal_in_store(&store, &delivery).unwrap()["disposition"],
+            "recovered"
+        );
+        let queued = store.read_record(child).unwrap();
+        assert_eq!(queued.state(), RunExecutionState::Queued);
+        assert!(queued.metadata.get("interrupted_owner").is_none());
+        assert_eq!(queued.provider_executions_consumed(), 0);
+        assert_eq!(
+            queued.metadata["cook_runtime_admission"]["reason"],
+            "execution_step_interrupted"
+        );
+        assert_eq!(
+            queued.metadata["cook_runtime_admission"]["job_id"],
+            delivery.job_id
+        );
+        assert_eq!(
+            queued.metadata["execution_scheduling"]["recovery_failures"],
+            1
+        );
+        let intent = current_intent(&store, child);
+        assert!(intent.authorizes(&queued));
+        assert!(matches!(intent.mode, ExecutionStepMode::QueuedRun { .. }));
+        // Re-delivering the parent loss cannot replace the child's new owner.
+        consume_execution_terminal_in_store(&store, &delivery).unwrap();
+        assert_eq!(store.read_record(child).unwrap().revision, queued.revision);
+        agent_task_lifecycle::record_interrupted_local_owner_in_store(&store, child).unwrap();
+        assert_eq!(
+            store.read_record(child).unwrap().state(),
+            RunExecutionState::Queued
+        );
+        let claimed =
+            agent_task_lifecycle::claim_exact_execution_intent_in_store(&store, &intent, |_, _| {
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.run_id, child);
+        assert_eq!(claimed.state(), RunExecutionState::Running);
+        let calls = Arc::new(AtomicUsize::new(0));
+        super::execution::run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
+            &store,
+            store.read_controller_plan(child).unwrap(),
+            child,
+            Arc::new(CountingExecutor {
+                calls: calls.clone(),
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn execution_step_materialized_remote_zero_execution_is_not_replayed() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let delivery = published_interrupted_delivery(&store);
+        let child = "lost-materialized-attempt-1";
+        store
+            .mutate_record(child, |record| {
+                record.metadata["lab_staging_controller_job_id"] = serde_json::json!("staging-job");
+                true
+            })
+            .unwrap();
+        let before = store.read_record(child).unwrap();
+        assert_eq!(
+            consume_execution_terminal_in_store(&store, &delivery).unwrap()["disposition"],
+            "execution_owned"
+        );
+        assert_eq!(store.read_record(child).unwrap().revision, before.revision);
+    });
+}
+
+#[test]
+fn execution_step_materialized_provider_progress_still_interrupts_owner() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let delivery = published_interrupted_delivery(&store);
+        let child = "lost-materialized-attempt-1";
+        store
+            .mutate_record(child, |record| {
+                record.metadata["provider_executions"] =
+                    serde_json::json!([{"state": "succeeded"}]);
+                true
+            })
+            .unwrap();
+        assert_eq!(
+            consume_execution_terminal_in_store(&store, &delivery).unwrap()["disposition"],
+            "execution_owned"
+        );
+        let record = store.read_record(child).unwrap();
+        assert!(record.state().is_terminal());
+        assert!(record.metadata["interrupted_owner"].is_object());
+        assert!(record.metadata.get("cook_runtime_admission").is_none());
+    });
+}
+
+#[test]
+fn execution_step_materialized_recovery_exhaustion_retains_interrupted_diagnostic() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let delivery = published_interrupted_delivery(&store);
+        let child = "lost-materialized-attempt-1";
+        store
+            .mutate_record(child, |record| {
+                record.metadata["execution_scheduling"] =
+                    serde_json::json!({"recovery_failures": 19});
+                true
+            })
+            .unwrap();
+        consume_execution_terminal_in_store(&store, &delivery).unwrap();
+        let record = store.read_record(child).unwrap();
+        assert_eq!(record.state(), RunExecutionState::Failed);
+        assert!(record.metadata["interrupted_owner"].is_object());
+        assert!(record.metadata.get("cook_runtime_admission").is_none());
+    });
+}
+
 #[test]
 fn execution_step_published_admission_delivery_preserves_child_deferral_custody() {
     with_isolated_home(|_| {
