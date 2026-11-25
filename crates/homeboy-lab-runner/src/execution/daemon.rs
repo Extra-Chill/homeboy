@@ -1954,6 +1954,125 @@ fn daemon_terminal_wait_deadline_error(job_id: &str, waited: Duration, budget: D
     ))
 }
 
+/// The daemon held the job queued for runner capacity past the caller's queue
+/// bound. Nothing has started, so this is a retryable capacity deferral
+/// rather than an execution timeout: the caller withdraws the queued job and
+/// defers through the scheduler's capacity contract (#19108).
+fn daemon_queue_wait_deadline_error(job_id: &str, waited: Duration, bound: Duration) -> Error {
+    let retry_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+    let mut error = Error::new(
+        ErrorCode::RunnerCapacityBusy,
+        format!(
+            "runner job `{job_id}` stayed queued for runner capacity for {:.1}s (queue bound {:.1}s) and never started",
+            waited.as_secs_f64(),
+            bound.as_secs_f64()
+        ),
+        json!({
+            "daemon_queue_wait_timeout": {
+                "runner_job_id": job_id,
+                "waited_ms": waited.as_millis() as u64,
+                "queue_bound_ms": bound.as_millis() as u64,
+            },
+            "reason": "runner_capacity_queue",
+            "retry_at": retry_at,
+            "retry_after_seconds": 30,
+            "execution_step_disposition": "runner_ineligible",
+        }),
+    );
+    error.retryable = Some(true);
+    error.with_hint(format!(
+        "The Lab never admitted job `{job_id}` out of its capacity queue. Inspect capacity with `homeboy runner status <runner-id>`."
+    ))
+}
+
+/// How long a terminal wait may last, split by what the daemon reports.
+///
+/// The execution budget runs only while the job is admitted (or the daemon
+/// is unreachable after admission), so time a job spends queued for runner
+/// capacity never consumes it (#19108). The queue bound, when set, caps the
+/// queued wait separately; without one a queued job keeps its durable place
+/// until capacity clears or its owner cancels it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DaemonWaitBudget {
+    pub(crate) execution: Duration,
+    pub(crate) queue: Option<Duration>,
+}
+
+impl DaemonWaitBudget {
+    /// An execution budget with an unbounded capacity queue.
+    pub(crate) fn execution(execution: Duration) -> Self {
+        Self {
+            execution,
+            queue: None,
+        }
+    }
+
+    /// Bound the capacity-queue wait separately from execution.
+    pub(crate) fn with_queue_bound(mut self, queue: Duration) -> Self {
+        self.queue = Some(queue);
+        self
+    }
+}
+
+impl From<Duration> for DaemonWaitBudget {
+    fn from(execution: Duration) -> Self {
+        Self::execution(execution)
+    }
+}
+
+/// What the observer last learned about the job, which decides the budget
+/// the following interval is charged to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservedPhase {
+    Queued,
+    Admitted,
+    Unreachable,
+}
+
+/// Time charged to each half of a [`DaemonWaitBudget`].
+#[derive(Debug, Default)]
+struct DaemonWaitClock {
+    execution: Duration,
+    queue: Duration,
+    ever_admitted: bool,
+}
+
+impl DaemonWaitClock {
+    /// Whether an interval in `phase` is charged to the queue bound. An
+    /// unreachable daemon is queue time only for a job never seen admitted
+    /// under a queue bound; otherwise it runs the execution budget, so a
+    /// runner whose daemon is gone still ends the wait (#18197).
+    fn charges_queue(&self, phase: ObservedPhase, budget: &DaemonWaitBudget) -> bool {
+        match phase {
+            ObservedPhase::Queued => true,
+            ObservedPhase::Admitted => false,
+            ObservedPhase::Unreachable => !self.ever_admitted && budget.queue.is_some(),
+        }
+    }
+
+    fn charge(&mut self, phase: ObservedPhase, budget: &DaemonWaitBudget, elapsed: Duration) {
+        if self.charges_queue(phase, budget) {
+            self.queue = self.queue.saturating_add(elapsed);
+        } else {
+            self.execution = self.execution.saturating_add(elapsed);
+        }
+    }
+
+    /// Time left on the bound `phase` is charged to, if that bound exists.
+    fn remaining(&self, phase: ObservedPhase, budget: &DaemonWaitBudget) -> Option<Duration> {
+        if self.charges_queue(phase, budget) {
+            match (phase, budget.queue) {
+                (_, Some(bound)) => Some(bound.saturating_sub(self.queue)),
+                // An unbounded capacity queue pauses the execution budget.
+                (ObservedPhase::Queued, None) => None,
+                (_, None) => Some(budget.execution.saturating_sub(self.execution)),
+            }
+        } else {
+            Some(budget.execution.saturating_sub(self.execution))
+        }
+    }
+}
+
 /// Authoritative terminal state for a known daemon job. This observer never
 /// submits work, making it safe for foreground waiting and controller resume.
 pub(crate) struct DaemonTerminalObservation {
@@ -1973,7 +2092,13 @@ pub(crate) fn observe_daemon_job_until_terminal(
     budget: Duration,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<DaemonTerminalObservation> {
-    observe_daemon_job_until_terminal_with(runner_id, runner_job_id, budget, cancelled, &|_| Ok(()))
+    observe_daemon_job_until_terminal_with(
+        runner_id,
+        runner_job_id,
+        DaemonWaitBudget::execution(budget),
+        cancelled,
+        &|_| Ok(()),
+    )
 }
 
 /// Read one daemon job, once, through the runner's current transport. The
@@ -2002,7 +2127,7 @@ pub(crate) fn read_daemon_job(runner_id: &str, runner_job_id: &str) -> Result<Jo
 pub(crate) fn observe_daemon_job_until_terminal_with(
     runner_id: &str,
     runner_job_id: &str,
-    budget: Duration,
+    budget: DaemonWaitBudget,
     cancelled: &dyn Fn() -> bool,
     on_status: &dyn Fn(&Job) -> Result<()>,
 ) -> Result<DaemonTerminalObservation> {
@@ -2076,14 +2201,18 @@ pub(crate) fn observe_daemon_job_until_terminal_with(
 /// job, so the observer reattaches through `reload_endpoint` and keeps polling
 /// the same job id until the caller's budget runs out (#17376). The caller's
 /// budget bounds the wait, not a fixed reconnect window, because a gate job
-/// can run far longer than any reconnect gap. The budget pauses only while the
-/// daemon reports the job queued, never while the daemon is unreachable.
-/// Authoritative answers, such as
-/// an unknown job or a refused reattach, still end it at once.
+/// can run far longer than any reconnect gap.
+///
+/// The execution budget runs only while the daemon reports the job admitted,
+/// or while the daemon is unreachable; time the job spends queued for runner
+/// capacity is charged to the separate queue bound instead (#19108). An
+/// unbounded queue pauses the execution budget while queued. Authoritative
+/// answers, such as an unknown job or a refused reattach, still end the wait
+/// at once.
 pub(crate) fn follow_daemon_job_to_terminal<Read, Reload>(
     mut endpoint: String,
     runner_job_id: &str,
-    budget: Duration,
+    budget: impl Into<DaemonWaitBudget>,
     cancelled: &dyn Fn() -> bool,
     mut read: Read,
     reload_endpoint: Reload,
@@ -2092,27 +2221,35 @@ where
     Read: FnMut(&str) -> Result<Job>,
     Reload: Fn() -> Result<Option<String>>,
 {
+    let budget = budget.into();
     let started = Instant::now();
-    let mut deadline = started + budget;
+    let mut clock = DaemonWaitClock::default();
     let mut last_observed = started;
-    let mut queued = false;
+    // Nothing is known before the first read; it is charged like an
+    // unreachable daemon, which the first read settles almost at once.
+    let mut phase = ObservedPhase::Unreachable;
     let mut backoff = DAEMON_TERMINAL_WAIT_INITIAL_BACKOFF;
+    let mut charge = |clock: &mut DaemonWaitClock, phase: ObservedPhase| {
+        let now = Instant::now();
+        clock.charge(phase, &budget, now.duration_since(last_observed));
+        last_observed = now;
+    };
     loop {
         if cancelled() {
             return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
         }
-        let observed = Instant::now();
-        if queued {
-            deadline += observed.duration_since(last_observed);
-        }
-        last_observed = observed;
-        let interval = match read(&endpoint) {
+        let read_result = read(&endpoint);
+        // The read itself belongs to what was known before it.
+        charge(&mut clock, phase);
+        let interval = match read_result {
             Ok(job) if job.status.is_terminal() => return Ok((job, endpoint)),
             Ok(job) => {
-                // Admission has no execution deadline: the budget pauses while
-                // the job is queued, so a queued Cook keeps its durable place
-                // until capacity clears or its owner cancels it.
-                queued = job.status == homeboy_core::api_jobs::JobStatus::Queued;
+                phase = if job.status == homeboy_core::api_jobs::JobStatus::Queued {
+                    ObservedPhase::Queued
+                } else {
+                    clock.ever_admitted = true;
+                    ObservedPhase::Admitted
+                };
                 let interval = backoff;
                 backoff = backoff
                     .saturating_mul(2)
@@ -2120,16 +2257,16 @@ where
                 interval
             }
             Err(error) if daemon_poll_transport_was_lost(&error) => {
-                // An unreachable daemon is not a queued job. The budget runs
-                // again, so a runner whose daemon is gone ends the wait
+                // An unreachable daemon is not a queued job: its time runs a
+                // budget, so a runner whose daemon is gone ends the wait
                 // instead of holding a queued job's place forever (#18197).
-                queued = false;
-                if Instant::now() >= deadline {
+                phase = ObservedPhase::Unreachable;
+                if clock.remaining(phase, &budget) == Some(Duration::ZERO) {
                     let mut surfaced = error;
                     surfaced.retryable = Some(true);
                     return Err(surfaced.with_hint(format!(
                         "Lost contact with the runner daemon while polling job `{runner_job_id}` until the {:.0}s budget ran out; the remote job may still be in flight. Reconnect with `homeboy runner connect <runner-id>` and inspect `homeboy runner job logs <runner-id> {runner_job_id}`.",
-                        budget.as_secs_f64()
+                        budget.execution.as_secs_f64()
                     )));
                 }
                 match reload_endpoint() {
@@ -2142,29 +2279,38 @@ where
             }
             Err(error) => return Err(error),
         };
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(daemon_terminal_wait_deadline_error(
-                runner_job_id,
-                started.elapsed(),
-                budget,
-            ));
+        let remaining = clock.remaining(phase, &budget);
+        if remaining == Some(Duration::ZERO) {
+            return Err(match (phase, budget.queue) {
+                (ObservedPhase::Queued, Some(bound)) => {
+                    daemon_queue_wait_deadline_error(runner_job_id, clock.queue, bound)
+                }
+                _ => daemon_terminal_wait_deadline_error(
+                    runner_job_id,
+                    started.elapsed(),
+                    budget.execution,
+                ),
+            });
         }
-        // Never sleep past the deadline, and never sleep longer than the
-        // cancellation slice in one go, so growing backoff cannot delay a
-        // cancellation response.
-        if sleep_daemon_wait_unless_cancelled(interval.min(deadline - now), cancelled) {
+        // Never sleep past the bound this interval is charged to, and never
+        // sleep longer than the cancellation slice in one go, so growing
+        // backoff cannot delay a cancellation response.
+        let sleep = remaining.map_or(interval, |remaining| interval.min(remaining));
+        if sleep_daemon_wait_unless_cancelled(sleep, cancelled) {
             return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
         }
+        charge(&mut clock, phase);
     }
 }
 
 /// Whether a failed observation only lost sight of the job, so the job may
 /// still be running on the runner. Running out of the wait budget is not a
-/// lost observation: the job overran.
+/// lost observation: the job overran. Nor is outlasting the queue bound: the
+/// daemon answered that the job never left its capacity queue.
 pub(crate) fn daemon_observation_was_lost(error: &Error) -> bool {
     reattach_failure_is_transient(error)
         && error.details.get("daemon_terminal_wait_timeout").is_none()
+        && error.details.get("daemon_queue_wait_timeout").is_none()
 }
 
 /// Resolve the daemon endpoint an observation starts from.

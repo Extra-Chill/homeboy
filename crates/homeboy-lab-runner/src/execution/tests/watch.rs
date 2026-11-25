@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-fn loopback_broker_daemon() -> String {
+pub(super) fn loopback_broker_daemon() -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("daemon listener");
     let daemon_url = format!("http://{}", listener.local_addr().expect("daemon address"));
     std::thread::spawn(move || {
@@ -23,7 +23,7 @@ fn loopback_broker_daemon() -> String {
     daemon_url
 }
 
-fn allow_unauthenticated_loopback_broker() {
+pub(super) fn allow_unauthenticated_loopback_broker() {
     // The in-process daemon's /exec endpoint drives runner processes through
     // the RunnerExecDriver hook; register the runner-side driver so the
     // end-to-end tests here can run the child (production wires this at CLI
@@ -37,7 +37,7 @@ fn allow_unauthenticated_loopback_broker() {
     .expect("save loopback broker auth opt-in");
 }
 
-fn daemon_client() -> Client {
+pub(super) fn daemon_client() -> Client {
     Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))

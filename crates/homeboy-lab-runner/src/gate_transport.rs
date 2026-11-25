@@ -200,6 +200,24 @@ const LAB_GATE_PUBLIC_MESSAGE: &str =
 /// before the controller would cancel the job.
 const LAB_GATE_RECEIPT_MARGIN: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// How long a submitted gate job may wait in the Lab's capacity queue before
+/// the controller withdraws it as a retryable capacity deferral. Queued time
+/// never spends the gate's execution budget, which starts when the daemon
+/// admits the job (#19108); this bound matches the wait queued work already
+/// gets through transient substrate refusals.
+const LAB_GATE_QUEUE_BOUND: std::time::Duration =
+    homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE;
+
+/// The controller's wait for one gate job: the gate's own `timeout_seconds`
+/// plus the receipt margin from admission, and the capacity queue bounded on
+/// its own.
+fn lab_gate_wait_budget(timeout_seconds: u64) -> crate::execution::DaemonWaitBudget {
+    crate::execution::DaemonWaitBudget::execution(
+        std::time::Duration::from_secs(timeout_seconds).saturating_add(LAB_GATE_RECEIPT_MARGIN),
+    )
+    .with_queue_bound(LAB_GATE_QUEUE_BOUND)
+}
+
 /// Whether a transport failure is a controller-side configuration error that
 /// was rejected before any runner job existed (for example a missing runner
 /// `secret_env` ref). It carries no gate output, so its message is safe to
@@ -1001,20 +1019,31 @@ fn execute_owned(
     let last_heartbeat = std::cell::Cell::new(started);
     let heartbeat_error = std::cell::RefCell::new(None);
     let stop_requested = std::cell::Cell::new(false);
+    let job_start = GateJobStart::new(&request.runner_id, job_id);
     let cancelled = || {
         if let Some(policy) = supervision {
             if last_heartbeat.get().elapsed() >= policy.heartbeat_interval {
                 last_heartbeat.set(std::time::Instant::now());
+                // Queued and admitted read differently, so a gate held for
+                // capacity is not mistaken for one running silently.
+                let output_tail = if job_start.admitted() {
+                    format!(
+                        "waiting for admitted runner gate on {} (job {job_id})",
+                        request.runner_id
+                    )
+                } else {
+                    format!(
+                        "queued for runner capacity on {} (job {job_id})",
+                        request.runner_id
+                    )
+                };
                 let status = homeboy_agents::agent_task_gate::AgentTaskGateLiveStatus {
                     visibility: request.visibility,
                     reveal_policy: request.reveal_policy,
                     elapsed_ms: started.elapsed().as_millis(),
                     last_progress_ms_ago: None,
                     progress: None,
-                    output_tail: format!(
-                        "waiting for admitted runner gate on {} (job {job_id})",
-                        request.runner_id
-                    ),
+                    output_tail,
                 };
                 if let Err(error) = (policy.on_heartbeat)(&status) {
                     *heartbeat_error.borrow_mut() = Some(error);
@@ -1029,7 +1058,6 @@ fn execute_owned(
         }
         cancelled
     };
-    let job_start = GateJobStart::new(&request.runner_id, job_id);
     let on_status = |job: &homeboy_core::api_jobs::Job| -> Result<()> {
         job_start.observe(job.status, || {
             if request.preflight_only {
@@ -1044,8 +1072,7 @@ fn execute_owned(
     let terminal = crate::execution::observe_daemon_job_until_terminal_with(
         &request.runner_id,
         job_id,
-        std::time::Duration::from_secs(request.timeout_seconds)
-            .saturating_add(LAB_GATE_RECEIPT_MARGIN),
+        lab_gate_wait_budget(request.timeout_seconds),
         &cancelled,
         &on_status,
     );
@@ -1464,7 +1491,10 @@ fn settle_gate_observation_failure<T>(
     cancel: impl FnOnce() -> Result<()>,
     observe_terminal: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let deadline = error.details.get("daemon_terminal_wait_timeout").is_some();
+    // An overrun budget cancels the job; an outlasted capacity queue
+    // withdraws it before it ever starts.
+    let deadline = error.details.get("daemon_terminal_wait_timeout").is_some()
+        || error.details.get("daemon_queue_wait_timeout").is_some();
     if !stop_requested && !deadline {
         return Err(gate_observation_error(error, job_id));
     }
@@ -1648,8 +1678,36 @@ mod observation_failure_tests {
         overran.details =
             serde_json::json!({"daemon_terminal_wait_timeout": {"runner_job_id": "x"}});
         overran.retryable = Some(true);
+        let mut outlasted_queue = Error::new(
+            homeboy_core::ErrorCode::RunnerCapacityBusy,
+            "runner job `x` stayed queued for runner capacity",
+            serde_json::json!({"daemon_queue_wait_timeout": {"runner_job_id": "x"}}),
+        );
+        outlasted_queue.retryable = Some(true);
+        // #19108: a gate that outlasted the capacity queue is withdrawn, so
+        // the deferred retry does not race a stale queued job.
+        let withdrawn = std::cell::Cell::new(false);
+        settle_gate_observation_failure(
+            outlasted_queue.clone(),
+            "x",
+            false,
+            || {
+                withdrawn.set(true);
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .expect("withdrawn queued job settles");
+        assert!(withdrawn.get());
         let cases = [
             ("lost transport", lost(), false, false, false),
+            (
+                "capacity queue outlasted",
+                outlasted_queue,
+                false,
+                false,
+                true,
+            ),
             (
                 "no current session",
                 crate::connection::no_current_daemon_session_error("lab"),

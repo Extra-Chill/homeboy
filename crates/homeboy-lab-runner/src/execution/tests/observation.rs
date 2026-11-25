@@ -44,6 +44,33 @@ fn queued_admission_outlives_execution_budget_and_remains_cancellable() {
     assert!(error.message.contains("cancelled"));
 }
 
+/// #19108: the capacity queue has its own bound. Outlasting it is a
+/// retryable capacity deferral the daemon answered, not a lost observation or
+/// an execution overrun, and the execution budget was never spent.
+#[test]
+fn a_queue_past_its_bound_is_a_capacity_deferral_not_an_overrun() {
+    let error = follow_daemon_job_to_terminal(
+        "http://runner".into(),
+        "queued-gate",
+        super::super::daemon::DaemonWaitBudget::execution(Duration::from_secs(60))
+            .with_queue_bound(Duration::from_millis(50)),
+        &|| false,
+        |_| Ok(job(JobStatus::Queued)),
+        || Ok(None),
+    )
+    .expect_err("the queue bound ends the wait");
+    assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapacityBusy);
+    assert_eq!(error.retryable, Some(true));
+    assert!(error.details.get("daemon_queue_wait_timeout").is_some());
+    assert!(error.details.get("daemon_terminal_wait_timeout").is_none());
+    assert_eq!(
+        error.details["execution_step_disposition"],
+        "runner_ineligible"
+    );
+    assert!(homeboy_core::substrate_wait::is_transient_error(&error));
+    assert!(!daemon_observation_was_lost(&error));
+}
+
 fn job(status: JobStatus) -> Job {
     let mut job: Job = serde_json::from_value(serde_json::json!({
         "id": "7f0b7a7e-2f0e-4c4e-9a37-7a3e3c1f0001",

@@ -13,6 +13,7 @@ mod handoff;
 mod observation;
 mod policy;
 mod prepare;
+mod queued_gate_budget;
 mod redaction;
 #[cfg(target_os = "linux")]
 pub(crate) mod restart_in_place;
