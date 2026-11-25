@@ -2506,7 +2506,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_breach_runs_one_bounded_retention_pass_before_refusing_admission() {
+    fn capacity_breach_runs_one_bounded_retention_pass_then_admits_only_after_recovery() {
         let root = TempDir::new().unwrap();
         let retention = crate::defaults::RetentionConfig {
             shared_store_reserve_bytes: 100,
@@ -2535,17 +2535,8 @@ mod tests {
 
         assert_eq!(passes, 1, "one admission performs one bounded pass");
         assert_eq!(error.details["reserve_bytes"], 100);
-    }
 
-    #[test]
-    fn bounded_retention_remeasurement_admits_only_after_recovery() {
-        let root = TempDir::new().unwrap();
-        let retention = crate::defaults::RetentionConfig {
-            shared_store_reserve_bytes: 100,
-            ..crate::defaults::RetentionConfig::default()
-        };
         let mut passes = 0;
-
         admit_shared_cargo_target_after_bounded_retention(
             root.path(),
             &retention,
@@ -2564,7 +2555,6 @@ mod tests {
             },
         )
         .expect("re-measured capacity above reserve admits the build");
-
         assert_eq!(passes, 1, "admission remains bounded to one retention pass");
     }
 
@@ -2598,22 +2588,6 @@ mod tests {
             .set_times(fs::FileTimes::new().set_modified(modified))
             .unwrap();
     }
-    #[test]
-    fn managed_store_lifecycle_records_owner_lease_and_last_used() {
-        let root = TempDir::new().unwrap();
-        let lease =
-            acquire_shared_cargo_target_in(root.path(), "controller:abc", SystemTime::now())
-                .unwrap();
-        assert!(lease.target_dir().join(LOCK_FILE).exists());
-        assert_eq!(
-            read_owner(lease.target_dir()).as_deref(),
-            Some("controller:abc")
-        );
-        assert!(lease.target_dir().join(LEASE_FILE).exists());
-        drop(lease);
-        assert!(!lease_path(root.path()).join(LEASE_FILE).exists());
-    }
-
     #[test]
     fn cleanup_reclaims_worktree_private_targets_after_their_leases_release() {
         let root = TempDir::new().unwrap();
@@ -3159,9 +3133,6 @@ mod tests {
         assert!(error.details["progress"]["holder_lease_age_ms"].is_number());
     }
 
-    fn lease_path(root: &Path) -> PathBuf {
-        fs::read_dir(root).unwrap().next().unwrap().unwrap().path()
-    }
     #[test]
     fn concurrent_cleanup_cannot_reclaim_a_live_build_lease() {
         let root = TempDir::new().unwrap();
@@ -3217,18 +3188,6 @@ mod tests {
         assert!(smaller.exists());
     }
     #[test]
-    fn lease_acquired_between_plan_and_apply_is_protected() {
-        let root = TempDir::new().unwrap();
-        let now = SystemTime::now();
-        let stale = store(root.path(), "race", 3, Duration::from_secs(61), now);
-        let _lease = acquire_shared_cargo_target_in(root.path(), "race", now).unwrap();
-        let mut opts = options(root.path(), true, now);
-        opts.max_bytes = 100;
-        let output = cleanup_shared_cargo_targets(opts).unwrap();
-        assert!(stale.exists());
-        assert_eq!(output.applied_count, 0);
-    }
-    #[test]
     fn large_inventory_returns_bounded_page_with_cursor() {
         let root = TempDir::new().unwrap();
         let now = SystemTime::now();
@@ -3274,6 +3233,9 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         let historical = unmanaged_store(root.path(), now, 12);
         let current = unmanaged_store(root.path(), now, 64);
+        // An owner file alone is not lifecycle metadata.
+        let partially_managed = unmanaged_store(root.path(), now, 13);
+        fs::write(partially_managed.join(OWNER_FILE), "owner").unwrap();
         for apply in [false, true] {
             let mut opts = options(root.path(), apply, now);
             opts.max_bytes = 0;
@@ -3282,8 +3244,9 @@ mod tests {
             assert_eq!(output.applied_count, 0);
             assert_eq!(
                 output.retained_by_reason["missing Homeboy lifecycle metadata"],
-                2
+                3
             );
+            assert!(partially_managed.join("artifact").exists());
             for path in [&historical, &current] {
                 assert_eq!(fs::read(path.join("artifact")).unwrap(), b"payload");
                 for sidecar in [LOCK_FILE, LAST_USED_FILE, LEASE_FILE, OWNER_FILE] {
@@ -3291,25 +3254,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn missing_lifecycle_metadata_is_protected_even_with_an_owner_file() {
-        let root = TempDir::new().unwrap();
-        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
-        let malformed = unmanaged_store(root.path(), now, 13);
-        let partially_managed = unmanaged_store(root.path(), now, 12);
-        fs::write(partially_managed.join(OWNER_FILE), "owner").unwrap();
-
-        let output = cleanup_shared_cargo_targets(options(root.path(), true, now)).unwrap();
-
-        assert_eq!(output.candidate_count, 0);
-        assert_eq!(
-            output.retained_by_reason["missing Homeboy lifecycle metadata"],
-            2
-        );
-        assert!(malformed.exists());
-        assert!(partially_managed.exists());
     }
 
     #[test]

@@ -4,42 +4,7 @@ use super::super::scoping::{
 };
 use super::super::types::ScopedLintRun;
 use super::{component, split_lint_routes};
-use homeboy_core::component::Component;
 use homeboy_extension_contract::LintChangedFileRoute;
-
-#[test]
-fn manifest_changed_php_files_route_to_php_steps_only() {
-    let component = component("/repo");
-    let runs = build_changed_lint_runs_with_routes(
-        &component,
-        &["sample-plugin.php".to_string(), "inc/Foo.php".to_string()],
-        &split_lint_routes(),
-    );
-
-    assert_eq!(
-        runs,
-        vec![ScopedLintRun {
-            glob: "{/repo/sample-plugin.php,/repo/inc/Foo.php}".to_string(),
-            step: Some("phpcs,phpstan".to_string()),
-            changed_files: vec!["sample-plugin.php".to_string(), "inc/Foo.php".to_string()],
-        }]
-    );
-}
-
-#[test]
-fn manifest_changed_markdown_files_do_not_route_to_eslint() {
-    let component = component("/repo");
-    let runs = build_changed_lint_runs_with_routes(
-        &component,
-        &[
-            "docs/core-system/agent-bundles.md".to_string(),
-            "README.md".to_string(),
-        ],
-        &split_lint_routes(),
-    );
-
-    assert!(runs.is_empty());
-}
 
 #[test]
 fn manifest_changed_mixed_php_and_js_files_split_by_runner() {
@@ -98,12 +63,7 @@ fn manifest_changed_files_can_route_by_glob() {
 
 #[test]
 fn non_wordpress_changed_files_keep_existing_single_runner_scope() {
-    let component = Component::new(
-        "fixture".to_string(),
-        "/repo".to_string(),
-        "".to_string(),
-        None,
-    );
+    let component = component("/repo");
     let runs = build_changed_lint_runs(
         &component,
         &["src/main.rs".to_string(), "README.md".to_string()],
@@ -124,7 +84,11 @@ fn fixer_routes_dispatch_only_extension_declared_matching_steps() {
     let routes = split_lint_routes();
     assert_eq!(
         resolve_lint_fix_routes_with_routes(
-            &["assets/app.ts".to_string(), "inc/Foo.php".to_string()],
+            &[
+                "assets/app.ts".to_string(),
+                "inc/Foo.php".to_string(),
+                "README.md".to_string(),
+            ],
             &routes,
         ),
         vec![
@@ -138,11 +102,6 @@ fn fixer_routes_dispatch_only_extension_declared_matching_steps() {
             },
         ]
     );
-}
-
-#[test]
-fn fixer_routes_do_not_fall_back_to_an_unrelated_declared_step() {
-    let routes = split_lint_routes();
-
+    // Unrouted files never fall back to an unrelated declared step.
     assert!(resolve_lint_fix_routes_with_routes(&["README.md".to_string()], &routes).is_empty());
 }

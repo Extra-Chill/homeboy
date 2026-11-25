@@ -440,16 +440,10 @@ mod tests {
     }
 
     #[test]
-    fn matrix_fanout_dispatches_through_scheduler_and_aggregates_cells() {
+    fn matrix_fanout_rejects_no_op_cells() {
         let mut args = run_args(Some("studio-web"));
-        args.matrix = vec![
-            "model=gpt-5.5,kimi".to_string(),
-            "prompt=site-a,site-b".to_string(),
-        ];
+        args.matrix = vec!["model=gpt-5.5,kimi".to_string()];
         args.runner_pool = Some("local".to_string());
-        args.concurrency = 2;
-        args.matrix_max_queue_depth = Some(3);
-        args.expected_artifact = vec!["bench-results".to_string()];
 
         let err = match run_matrix_fanout(&args) {
             Ok(_) => panic!("no-op matrix cells must fail"),
@@ -476,16 +470,17 @@ mod tests {
     }
 
     #[test]
-    fn result_gate_fails_matrix_when_metric_exceeds_declared_limit() {
-        let aggregate = matrix_aggregate_with_metric("failed_fixture_count", 1.0);
+    fn declared_result_gate_decides_matrix_pass_from_metric() {
         let gates = vec![BenchGate {
             metric: "failed_fixture_count".to_string(),
             op: BenchGateOp::Lte,
             value: 0.0,
         }];
 
-        let (aggregate, results, failures) = apply_result_gates(aggregate, &gates);
-
+        let (aggregate, results, failures) = apply_result_gates(
+            matrix_aggregate_with_metric("failed_fixture_count", 1.0),
+            &gates,
+        );
         assert!(!aggregate.passed);
         assert_eq!(
             aggregate.execution_state,
@@ -495,29 +490,18 @@ mod tests {
             aggregate.cells[0].execution_state,
             AgentTaskMatrixExecutionState::ExecutedWithFindings
         );
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].passed);
         assert_eq!(results[0].actual, Some(1.0));
         assert!(failures[0].contains("failed_fixture_count lte 0"));
-    }
 
-    #[test]
-    fn result_gate_preserves_matrix_pass_when_metric_satisfies_declared_limit() {
-        let aggregate = matrix_aggregate_with_metric("failed_fixture_count", 0.0);
-        let gates = vec![BenchGate {
-            metric: "failed_fixture_count".to_string(),
-            op: BenchGateOp::Lte,
-            value: 0.0,
-        }];
-
-        let (aggregate, results, failures) = apply_result_gates(aggregate, &gates);
-
+        let (aggregate, results, failures) = apply_result_gates(
+            matrix_aggregate_with_metric("failed_fixture_count", 0.0),
+            &gates,
+        );
         assert!(aggregate.passed);
         assert_eq!(
             aggregate.execution_state,
             AgentTaskMatrixExecutionState::ExecutedClean
         );
-        assert_eq!(results.len(), 1);
         assert!(results[0].passed);
         assert!(failures.is_empty());
     }

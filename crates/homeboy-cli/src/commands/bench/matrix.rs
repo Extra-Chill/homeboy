@@ -977,34 +977,20 @@ mod tests {
 
     #[test]
     fn rig_bench_components_prefers_matrix_over_default_component() {
-        let rig_spec: RigSpec = serde_json::from_str(
-            r#"{
-                "id": "mdi-substrates",
-                "bench": {
-                    "default_component": "legacy-default",
-                    "components": ["mdi-sdi", "mdi-primary"]
-                }
-            }"#,
-        )
-        .expect("parse rig spec");
-
-        assert_eq!(
-            rig_bench_components(&rig_spec),
-            vec!["mdi-sdi".to_string(), "mdi-primary".to_string()]
-        );
-    }
-
-    #[test]
-    fn rig_bench_components_falls_back_to_default_component() {
-        let rig_spec: RigSpec = serde_json::from_str(
-            r#"{
-                "id": "single-component-rig",
-                "bench": { "default_component": "homeboy" }
-            }"#,
-        )
-        .expect("parse rig spec");
-
-        assert_eq!(rig_bench_components(&rig_spec), vec!["homeboy".to_string()]);
+        let cases = [
+            (
+                r#"{ "id": "matrix", "bench": { "default_component": "legacy-default", "components": ["mdi-sdi", "mdi-primary"] } }"#,
+                vec!["mdi-sdi", "mdi-primary"],
+            ),
+            (
+                r#"{ "id": "single", "bench": { "default_component": "homeboy" } }"#,
+                vec!["homeboy"],
+            ),
+        ];
+        for (json, expected) in cases {
+            let rig_spec: RigSpec = serde_json::from_str(json).expect("parse rig spec");
+            assert_eq!(rig_bench_components(&rig_spec), expected, "{json}");
+        }
     }
 
     #[test]
@@ -1026,46 +1012,32 @@ mod tests {
     }
 
     #[test]
-    fn bench_path_override_updates_rig_component_before_prepare() {
-        let mut rig_spec: RigSpec = serde_json::from_str(
-            r#"{
-                "id": "gutenberg-rtc",
-                "components": {
-                    "gutenberg": { "path": "~/Developer/gutenberg" }
-                },
-                "bench": { "default_component": "gutenberg" }
-            }"#,
-        )
-        .expect("parse rig spec");
-        let args = bench_args(None, Some("/home/user/Developer/_lab_workspaces/gutenberg"));
-
-        apply_bench_path_override(&mut rig_spec, &args);
-
-        assert_eq!(
-            rig_spec.components["gutenberg"].path,
-            "/home/user/Developer/_lab_workspaces/gutenberg"
-        );
-    }
-
-    #[test]
-    fn bench_path_override_prefers_explicit_component() {
-        let mut rig_spec: RigSpec = serde_json::from_str(
-            r#"{
-                "id": "dual",
-                "components": {
-                    "primary": { "path": "/src/primary" },
-                    "candidate": { "path": "/src/candidate" }
-                },
-                "bench": { "default_component": "primary" }
-            }"#,
-        )
-        .expect("parse rig spec");
-        let args = bench_args(Some("candidate"), Some("/tmp/candidate"));
-
-        apply_bench_path_override(&mut rig_spec, &args);
-
-        assert_eq!(rig_spec.components["primary"].path, "/src/primary");
-        assert_eq!(rig_spec.components["candidate"].path, "/tmp/candidate");
+    fn bench_path_override_targets_explicit_or_default_component() {
+        let rig_json = r#"{
+            "id": "dual",
+            "components": {
+                "primary": { "path": "/src/primary" },
+                "candidate": { "path": "/src/candidate" }
+            },
+            "bench": { "default_component": "primary" }
+        }"#;
+        // (explicit component, expected primary path, expected candidate path)
+        let cases = [
+            (None, "/tmp/override", "/src/candidate"),
+            (Some("candidate"), "/src/primary", "/tmp/override"),
+        ];
+        for (component, primary, candidate) in cases {
+            let mut rig_spec: RigSpec = serde_json::from_str(rig_json).expect("parse rig spec");
+            apply_bench_path_override(&mut rig_spec, &bench_args(component, Some("/tmp/override")));
+            assert_eq!(
+                rig_spec.components["primary"].path, primary,
+                "{component:?}"
+            );
+            assert_eq!(
+                rig_spec.components["candidate"].path, candidate,
+                "{component:?}"
+            );
+        }
     }
 
     #[test]
@@ -1124,6 +1096,15 @@ mod tests {
             .is_err());
 
             assert!(run_rig_workload_preflight(&rig_spec, None, &[], &[]).is_err());
+
+            // An unmapped scenario falls back to the full check.
+            assert!(run_rig_workload_preflight(
+                &rig_spec,
+                None,
+                &["unknown-scenario".to_string()],
+                &[],
+            )
+            .is_err());
         });
     }
 
@@ -1150,65 +1131,17 @@ mod tests {
                 .expect_err("failed check should abort bench preflight");
             let message = err.to_string();
 
-            assert!(message.contains("fixture matrix tests"), "error: {message}");
-            assert!(message.contains("check"), "error: {message}");
-            assert!(
-                message.contains("Command `printf 'tests 100"),
-                "error: {message}"
-            );
-            assert!(
-                message.contains("exited 7 (expected 0)"),
-                "error: {message}"
-            );
-            assert!(message.contains("stdout:"), "error: {message}");
-            assert!(message.contains("tests 100"), "error: {message}");
-            assert!(message.contains("stderr:"), "error: {message}");
-            assert!(
-                message.contains("[fixture-matrix] real failure"),
-                "error: {message}"
-            );
-        });
-    }
-
-    #[test]
-    fn rig_bench_preflight_falls_back_to_full_check_for_unmapped_scenario() {
-        with_isolated_home(|_| {
-            let rig_spec: RigSpec = serde_json::from_str(
-                r#"{
-                    "id": "woocommerce-performance",
-                    "bench": {
-                        "check_groups": ["common"],
-                        "scenario_check_groups": {
-                            "rest-product-batch-import": ["rest"]
-                        }
-                    },
-                    "pipeline": {
-                        "check": [
-                            {
-                                "kind": "check",
-                                "label": "REST endpoint healthy",
-                                "groups": ["rest"],
-                                "command": "true"
-                            },
-                            {
-                                "kind": "check",
-                                "label": "unmapped surface still enforced by full check",
-                                "groups": ["admin"],
-                                "command": "false"
-                            }
-                        ]
-                    }
-                }"#,
-            )
-            .expect("parse rig spec");
-
-            assert!(run_rig_workload_preflight(
-                &rig_spec,
-                None,
-                &["unknown-scenario".to_string()],
-                &[],
-            )
-            .is_err());
+            for expected in [
+                "fixture matrix tests",
+                "Command `printf 'tests 100",
+                "exited 7 (expected 0)",
+                "stdout:",
+                "tests 100",
+                "stderr:",
+                "[fixture-matrix] real failure",
+            ] {
+                assert!(message.contains(expected), "missing {expected}: {message}");
+            }
         });
     }
 
@@ -1289,19 +1222,7 @@ mod tests {
             }"#,
         )
         .expect("parse bench results");
-        let mut workflow = BenchRunWorkflowResult {
-            status: "passed".to_string(),
-            component: "static-site-importer".to_string(),
-            exit_code: 0,
-            iterations: 1,
-            results: Some(results),
-            gate_results: Vec::new(),
-            gate_failures: Vec::new(),
-            baseline_comparison: None,
-            hints: None,
-            failure: None,
-            diagnostics: Vec::new(),
-        };
+        let mut workflow = passed_workflow(results);
 
         apply_declared_bench_gates(&mut workflow, declared_bench_gates(Some(&rig_spec)));
 
@@ -1315,28 +1236,8 @@ mod tests {
         assert!(workflow.gate_failures[0].contains("failed_fixture_count lte 0"));
     }
 
-    #[test]
-    fn default_result_gate_fails_discovered_but_not_run_fixtures() {
-        let results = homeboy_core::extension::bench::parse_bench_results_str(
-            r#"{
-                "component_id": "static-site-importer",
-                "iterations": 1,
-                "scenarios": [
-                    {
-                        "id": "static-site-fixture-matrix",
-                        "iterations": 1,
-                        "metrics": {
-                            "fixture_count": 13,
-                            "not_run_fixture_count": 13,
-                            "failed_fixture_count": 0
-                        },
-                        "metadata": { "execution_status": "not_requested" }
-                    }
-                ]
-            }"#,
-        )
-        .expect("parse bench results");
-        let mut workflow = BenchRunWorkflowResult {
+    fn passed_workflow(results: BenchResults) -> BenchRunWorkflowResult {
+        BenchRunWorkflowResult {
             status: "passed".to_string(),
             component: "static-site-importer".to_string(),
             exit_code: 0,
@@ -1348,27 +1249,17 @@ mod tests {
             hints: None,
             failure: None,
             diagnostics: Vec::new(),
-        };
-
-        apply_declared_bench_gates(&mut workflow, DeclaredBenchGates::default());
-
-        assert_eq!(workflow.status, "failed");
-        assert_eq!(workflow.exit_code, 1);
-        assert_eq!(workflow.gate_results.len(), 1);
-        assert!(workflow.gate_results[0]
-            .id
-            .contains("not_run_fixture_count"));
-        assert!(workflow.gate_failures[0].contains("not_run_fixture_count lte 0"));
+        }
     }
 
     #[test]
-    fn default_not_run_fixture_gate_skips_explicit_planning_workload() {
-        let results = homeboy_core::extension::bench::parse_bench_results_str(
-            r#"{
-                "component_id": "static-site-importer",
-                "iterations": 1,
-                "scenarios": [
-                    {
+    fn default_not_run_fixture_gate_fails_unless_workload_is_planning() {
+        for (execution_status, fails) in [("not_requested", true), ("planning", false)] {
+            let results = homeboy_core::extension::bench::parse_bench_results_str(
+                &serde_json::json!({
+                    "component_id": "static-site-importer",
+                    "iterations": 1,
+                    "scenarios": [{
                         "id": "static-site-fixture-matrix",
                         "iterations": 1,
                         "metrics": {
@@ -1376,32 +1267,30 @@ mod tests {
                             "not_run_fixture_count": 13,
                             "failed_fixture_count": 0
                         },
-                        "metadata": { "execution_status": "planning" }
-                    }
-                ]
-            }"#,
-        )
-        .expect("parse bench results");
-        let mut workflow = BenchRunWorkflowResult {
-            status: "passed".to_string(),
-            component: "static-site-importer".to_string(),
-            exit_code: 0,
-            iterations: 1,
-            results: Some(results),
-            gate_results: Vec::new(),
-            gate_failures: Vec::new(),
-            baseline_comparison: None,
-            hints: None,
-            failure: None,
-            diagnostics: Vec::new(),
-        };
+                        "metadata": { "execution_status": execution_status }
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("parse bench results");
+            let mut workflow = passed_workflow(results);
 
-        apply_declared_bench_gates(&mut workflow, DeclaredBenchGates::default());
+            apply_declared_bench_gates(&mut workflow, DeclaredBenchGates::default());
 
-        assert_eq!(workflow.status, "passed");
-        assert_eq!(workflow.exit_code, 0);
-        assert!(workflow.gate_results.is_empty());
-        assert!(workflow.gate_failures.is_empty());
+            if fails {
+                assert_eq!(workflow.status, "failed");
+                assert_eq!(workflow.exit_code, 1);
+                assert!(workflow.gate_results[0]
+                    .id
+                    .contains("not_run_fixture_count"));
+                assert!(workflow.gate_failures[0].contains("not_run_fixture_count lte 0"));
+            } else {
+                assert_eq!(workflow.status, "passed");
+                assert_eq!(workflow.exit_code, 0);
+                assert!(workflow.gate_results.is_empty());
+                assert!(workflow.gate_failures.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1445,20 +1334,14 @@ mod tests {
             fixture_bench.settings.get("workspace"),
             Some(&serde_json::json!("apps/studio"))
         );
-    }
 
-    #[test]
-    fn rig_component_for_bench_absent_extension_config_falls_back() {
-        let rig_spec: RigSpec = serde_json::from_str(
-            r#"{
-                "id": "legacy",
-                "components": { "studio": { "path": "/tmp/studio" } },
-                "bench": { "default_component": "studio" }
-            }"#,
-        )
-        .expect("parse rig spec");
-
-        assert!(rig_component_for_bench(&rig_spec, "studio").is_none());
+        let mut without_extensions = rig_spec.clone();
+        without_extensions
+            .components
+            .get_mut("studio")
+            .expect("studio component")
+            .extensions = None;
+        assert!(rig_component_for_bench(&without_extensions, "studio").is_none());
         assert!(rig_component_for_bench(&rig_spec, "missing").is_none());
     }
 

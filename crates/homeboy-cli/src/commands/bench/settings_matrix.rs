@@ -441,34 +441,8 @@ fn collect_scenario_metric_samples(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::bench::BenchArgs;
     use crate::test_support::with_isolated_home;
     use clap::Parser;
-
-    #[derive(Parser)]
-    struct TestCli {
-        #[command(flatten)]
-        bench: BenchArgs,
-    }
-
-    #[test]
-    fn bench_matrix_command_accepts_multiple_setting_axes() {
-        TestCli::try_parse_from([
-            "homeboy",
-            "matrix",
-            "--rig",
-            "gutenberg-rtc",
-            "--scenario",
-            "gutenberg-rtc-protocol-load",
-            "--setting-matrix",
-            "clients=10,100",
-            "rounds=3",
-            "batch_size=1,10",
-            "--runs",
-            "3",
-        ])
-        .expect("bench matrix CLI should parse");
-    }
 
     #[test]
     fn resolves_single_cell_matrix_without_setting_axes_for_rig_profile() {
@@ -511,33 +485,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_setting_matrix_axes() {
-        let axes =
-            parse_setting_matrix_axes(&["clients=10,100".to_string(), "rounds=3".to_string()])
-                .expect("axes should parse");
-
-        assert_eq!(
-            axes,
-            vec![
-                BenchSettingsMatrixAxisOutput {
-                    name: "clients".to_string(),
-                    values: vec!["10".to_string(), "100".to_string()],
-                },
-                BenchSettingsMatrixAxisOutput {
-                    name: "rounds".to_string(),
-                    values: vec!["3".to_string()],
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn expands_cartesian_setting_cells() {
+    fn setting_matrix_axes_expand_to_cartesian_cells() {
         let axes = parse_setting_matrix_axes(&[
             "clients=10,100".to_string(),
             "batch_size=1,25".to_string(),
+            "rounds=3".to_string(),
         ])
         .expect("axes should parse");
+
+        assert_eq!(axes[0].name, "clients");
+        assert_eq!(axes[0].values, vec!["10", "100"]);
+        assert_eq!(axes[2].values, vec!["3"]);
 
         let cells = expand_setting_matrix_cells(&axes);
 
@@ -546,16 +504,11 @@ mod tests {
         assert_eq!(cells[0]["batch_size"], "1");
         assert_eq!(cells[3]["clients"], "100");
         assert_eq!(cells[3]["batch_size"], "25");
+        assert!(cells.iter().all(|cell| cell["rounds"] == "3"));
     }
 
     #[test]
     fn applies_dotted_setting_axes_as_string_settings() {
-        #[derive(Parser)]
-        struct MatrixCli {
-            #[command(flatten)]
-            bench: BenchMatrixArgs,
-        }
-
         let mut args = MatrixCli::parse_from([
             "homeboy",
             "--setting-matrix",

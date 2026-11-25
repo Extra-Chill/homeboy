@@ -113,11 +113,11 @@ mod retry_failure_tests {
     }
 
     #[test]
-    fn legacy_retry_policy_retries_with_the_legacy_unbounded_budget() {
+    fn retry_policy_retries_under_the_default_unbounded_budget() {
         let executor = RetryOnceExecutor::default();
         let attempts = Arc::clone(&executor.attempts);
         let scheduler = AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = AgentTaskPlan::new("legacy-retry", vec![request("task-1")]);
+        let mut plan = AgentTaskPlan::new("retry-policy", vec![request("task-1")]);
         plan.options.retry.max_attempts = 2;
 
         let aggregate = scheduler.run(plan);

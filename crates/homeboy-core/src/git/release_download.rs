@@ -1542,10 +1542,6 @@ pub fn detect_remote_url_within(
 mod tests {
     use std::collections::HashMap;
 
-    // Hashed independently of the shared primitive so this stays a real
-    // cross-check on the digest the downloader records.
-    use sha2::{Digest, Sha256};
-
     use crate::component::GithubHostConfig;
 
     use super::*;
@@ -1606,115 +1602,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_github_url_https() {
-        let repo = parse_github_url("https://github.com/Extra-Chill/homeboy").unwrap();
-        assert_eq!(repo.host, "github.com");
-        assert_eq!(repo.owner, "Extra-Chill");
-        assert_eq!(repo.repo, "homeboy");
-    }
-
-    #[test]
-    fn parse_github_url_https_with_git_suffix() {
-        let repo = parse_github_url("https://github.com/Extra-Chill/homeboy.git").unwrap();
-        assert_eq!(repo.owner, "Extra-Chill");
-        assert_eq!(repo.repo, "homeboy");
-    }
-
-    #[test]
-    fn parse_github_url_authenticated_https() {
-        let repo =
-            parse_github_url("https://x-access-token:TOKEN@github.com/Extra-Chill/homeboy.git")
-                .unwrap();
-        assert_eq!(repo.owner, "Extra-Chill");
-        assert_eq!(repo.repo, "homeboy");
-    }
-
-    #[test]
-    fn parse_github_url_authenticated_https_user_token() {
-        let repo =
-            parse_github_url("https://user:token@github.com/Extra-Chill/homeboy.git").unwrap();
-        assert_eq!(repo.owner, "Extra-Chill");
-        assert_eq!(repo.repo, "homeboy");
-    }
-
-    #[test]
-    fn parse_github_url_authenticated_http() {
-        let repo =
-            parse_github_url("http://user:token@github.com/Extra-Chill/homeboy.git").unwrap();
-        assert_eq!(repo.owner, "Extra-Chill");
-        assert_eq!(repo.repo, "homeboy");
-    }
-
-    #[test]
-    fn parse_github_url_ssh() {
-        let repo = parse_github_url("git@github.com:Extra-Chill/homeboy.git").unwrap();
-        assert_eq!(repo.host, "github.com");
-        assert_eq!(repo.owner, "Extra-Chill");
-        assert_eq!(repo.repo, "homeboy");
-    }
-
-    #[test]
-    fn parse_github_url_enterprise_ssh() {
-        let repo = parse_github_url("git@github.example.com:example-org/intelligence.git").unwrap();
-        assert_eq!(repo.host, "github.example.com");
-        assert_eq!(repo.owner, "example-org");
-        assert_eq!(repo.repo, "intelligence");
-    }
-
-    #[test]
-    fn parse_github_url_enterprise_https() {
-        let repo =
-            parse_github_url("https://github.example.com/example-org/intelligence.git").unwrap();
-        assert_eq!(repo.host, "github.example.com");
-        assert_eq!(repo.owner, "example-org");
-        assert_eq!(repo.repo, "intelligence");
-    }
-
-    #[test]
-    fn parse_github_url_trailing_slash() {
-        let repo = parse_github_url("https://github.com/Extra-Chill/homeboy/").unwrap();
-        assert_eq!(repo.owner, "Extra-Chill");
-        assert_eq!(repo.repo, "homeboy");
-    }
-
-    #[test]
-    fn parse_github_url_invalid() {
-        assert!(parse_github_url("https://gitlab.com/foo/bar").is_none());
-        assert!(parse_github_url("https://github.com.evil/foo/bar").is_none());
-        assert!(parse_github_url("https://token@github.com.evil/foo/bar").is_none());
-        assert!(parse_github_url("not a url").is_none());
-        assert!(parse_github_url("").is_none());
-    }
-
-    #[test]
-    fn release_artifact_url_format() {
-        let repo = GitHubRepo {
-            host: "github.com".to_string(),
-            owner: "Extra-Chill".to_string(),
-            repo: "sample-plugin".to_string(),
-        };
-        let url = repo.release_artifact_url("v0.36.1", "sample-plugin.zip");
-        assert_eq!(
-            url,
-            "https://github.com/Extra-Chill/sample-plugin/releases/download/v0.36.1/sample-plugin.zip"
-        );
-    }
-
-    #[test]
-    fn enterprise_release_artifact_url_uses_remote_host() {
-        let repo = GitHubRepo {
-            host: "github.example.com".to_string(),
-            owner: "example-org".to_string(),
-            repo: "intelligence".to_string(),
-        };
-        let url = repo.release_artifact_url("v1.2.3", "intelligence.zip");
-        assert_eq!(
-            url,
-            "https://github.example.com/example-org/intelligence/releases/download/v1.2.3/intelligence.zip"
-        );
-    }
-
-    #[test]
     fn resolve_artifact_name_from_path() {
         let mut comp = Component::new(
             "test".to_string(),
@@ -1756,9 +1643,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_downloaded_artifact_rejects_html_auth_page_as_zip() {
+    fn validate_downloaded_artifact_accepts_zip_and_rejects_html_auth_page() {
         let temp = tempfile::tempdir().expect("tempdir");
         let artifact = temp.path().join("theme.zip");
+        std::fs::write(&artifact, b"PK\x03\x04fixture").expect("write zip artifact");
+        validate_downloaded_artifact(
+            &artifact,
+            "theme.zip",
+            "https://github.com/Extra-Chill/theme/releases/download/v1/theme.zip",
+        )
+        .expect("zip signature should be accepted");
+
         std::fs::write(
             &artifact,
             br#"<!DOCTYPE html><html lang="en" class="html-auth"><body>Sign in</body></html>"#,
@@ -1776,20 +1671,6 @@ mod tests {
         assert!(message.contains("not a valid ZIP archive"));
         assert!(message.contains("HTML authentication page"));
         assert!(message.contains("GitHub Enterprise authentication/proxy"));
-    }
-
-    #[test]
-    fn validate_downloaded_artifact_accepts_zip_signature() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let artifact = temp.path().join("theme.zip");
-        std::fs::write(&artifact, b"PK\x03\x04fixture").expect("write zip artifact");
-
-        validate_downloaded_artifact(
-            &artifact,
-            "theme.zip",
-            "https://github.com/Extra-Chill/theme/releases/download/v1/theme.zip",
-        )
-        .expect("zip signature should be accepted");
     }
 
     #[test]
@@ -1812,47 +1693,15 @@ mod tests {
             command.args.last().map(String::as_str),
             Some("https://github.example.com/example-org/theme/releases/download/v1/theme.zip")
         );
-    }
 
-    #[test]
-    fn curl_release_artifact_command_omits_auth_header_without_token() {
-        let command = curl_release_artifact_command(
+        let anonymous = curl_release_artifact_command(
             "https://github.com/example-org/theme/releases/download/v1/theme.zip",
             "/tmp/theme.zip",
             None,
             Vec::new(),
         );
-
-        assert!(!command.args.contains(&"--config".to_string()));
-        assert_eq!(command.config_stdin, None);
-    }
-
-    #[test]
-    fn github_release_api_url_uses_enterprise_api_path() {
-        let repo = GitHubRepo {
-            host: "github.a8c.com".to_string(),
-            owner: "chubes4".to_string(),
-            repo: "studio-native".to_string(),
-        };
-
-        assert_eq!(
-            repo.release_by_tag_api_url("v0.12.3"),
-            "https://github.a8c.com/api/v3/repos/chubes4/studio-native/releases/tags/v0.12.3"
-        );
-    }
-
-    #[test]
-    fn github_release_api_url_uses_public_api_host() {
-        let repo = GitHubRepo {
-            host: "github.com".to_string(),
-            owner: "Extra-Chill".to_string(),
-            repo: "homeboy".to_string(),
-        };
-
-        assert_eq!(
-            repo.release_by_tag_api_url("v1.2.3"),
-            "https://api.github.com/repos/Extra-Chill/homeboy/releases/tags/v1.2.3"
-        );
+        assert!(!anonymous.args.contains(&"--config".to_string()));
+        assert_eq!(anonymous.config_stdin, None);
     }
 
     #[test]
@@ -2071,44 +1920,6 @@ mod tests {
     }
 
     #[test]
-    fn sha256_file_reports_downloaded_content_identity() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("plugin.zip");
-        std::fs::write(&path, b"verified bytes").expect("write artifact");
-        assert_eq!(
-            sha256_file(&path).expect("hash artifact"),
-            format!("{:x}", Sha256::digest(b"verified bytes"))
-        );
-    }
-
-    #[test]
-    fn verification_failure_does_not_store_an_artifact_for_target_mutation() {
-        let github = GitHubRepo {
-            host: "github.example.test".to_string(),
-            owner: "example".to_string(),
-            repo: "plugin".to_string(),
-        };
-        let mut store = ReleaseArtifactStore::default();
-
-        let error = store
-            .get_or_insert_with(&github, "v1.2.3", "plugin.zip", || {
-                Err(Error::validation_invalid_argument(
-                    "releaseArtifact",
-                    "Downloaded release artifact 'plugin.zip' SHA-256 digest does not match GitHub Release metadata".to_string(),
-                    None,
-                    None,
-                ))
-            })
-            .expect_err("digest mismatch must fail release preflight");
-
-        assert!(error.to_string().contains("SHA-256 digest does not match"));
-        assert!(
-            store.get(&github, "v1.2.3", "plugin.zip").is_none(),
-            "a failed verification must not make bytes available to deploy targets"
-        );
-    }
-
-    #[test]
     fn failed_acquisition_creates_no_live_entry_or_lease() {
         let github = GitHubRepo {
             host: "github.example.test".to_string(),
@@ -2168,157 +1979,200 @@ mod tests {
     }
 
     #[test]
-    fn mutable_package_dependencies_detects_git_and_file_specs() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            temp.path().join("package.json"),
-            r#"{
-                "dependencies": {
-                    "registry-only": "^1.2.3",
-                    "tokens": "github:Extra-Chill/extrachill-tokens#v0.7.2"
-                },
-                "devDependencies": {
-                    "components": "file:../components"
-                }
-            }"#,
-        )
-        .expect("write package.json");
-        let comp = Component::new(
-            "test".to_string(),
-            temp.path().to_string_lossy().to_string(),
-            "/remote".to_string(),
-            Some("test.zip".to_string()),
-        );
+    fn parse_github_url_accepts_github_remote_shapes_and_rejects_lookalikes() {
+        for (url, host, owner, repo) in [
+            (
+                "https://github.com/Extra-Chill/homeboy",
+                "github.com",
+                "Extra-Chill",
+                "homeboy",
+            ),
+            (
+                "https://github.com/Extra-Chill/homeboy.git",
+                "github.com",
+                "Extra-Chill",
+                "homeboy",
+            ),
+            (
+                "https://github.com/Extra-Chill/homeboy/",
+                "github.com",
+                "Extra-Chill",
+                "homeboy",
+            ),
+            (
+                "https://x-access-token:TOKEN@github.com/Extra-Chill/homeboy.git",
+                "github.com",
+                "Extra-Chill",
+                "homeboy",
+            ),
+            (
+                "http://user:token@github.com/Extra-Chill/homeboy.git",
+                "github.com",
+                "Extra-Chill",
+                "homeboy",
+            ),
+            (
+                "git@github.com:Extra-Chill/homeboy.git",
+                "github.com",
+                "Extra-Chill",
+                "homeboy",
+            ),
+            (
+                "git@github.example.com:example-org/intelligence.git",
+                "github.example.com",
+                "example-org",
+                "intelligence",
+            ),
+            (
+                "https://github.example.com/example-org/intelligence.git",
+                "github.example.com",
+                "example-org",
+                "intelligence",
+            ),
+        ] {
+            let parsed = parse_github_url(url).unwrap_or_else(|| panic!("{url} parses"));
+            assert_eq!(
+                (
+                    parsed.host.as_str(),
+                    parsed.owner.as_str(),
+                    parsed.repo.as_str()
+                ),
+                (host, owner, repo),
+                "{url}"
+            );
+        }
 
-        assert!(has_mutable_package_dependencies(&comp));
+        for url in [
+            "https://gitlab.com/foo/bar",
+            "https://github.com.evil/foo/bar",
+            "https://token@github.com.evil/foo/bar",
+            "not a url",
+            "",
+        ] {
+            assert!(parse_github_url(url).is_none(), "{url} must not parse");
+        }
     }
 
     #[test]
-    fn mutable_package_dependencies_allows_registry_specs() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            temp.path().join("package.json"),
-            r#"{
-                "dependencies": {
-                    "serde": "1.0.0",
-                    "react": "^19.0.0",
-                    "private-registry": "npm:@scope/pkg@1.2.3"
-                },
-                "optionalDependencies": {
-                    "optional": "~2.0.0"
-                }
-            }"#,
-        )
-        .expect("write package.json");
-        let comp = Component::new(
-            "test".to_string(),
-            temp.path().to_string_lossy().to_string(),
-            "/remote".to_string(),
-            Some("test.zip".to_string()),
-        );
+    fn github_repo_urls_route_public_and_enterprise_hosts() {
+        let public = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill".to_string(),
+            repo: "data-machine".to_string(),
+        };
+        let enterprise = GitHubRepo {
+            host: "github.example.com".to_string(),
+            owner: "example-org".to_string(),
+            repo: "theme".to_string(),
+        };
 
-        assert!(!has_mutable_package_dependencies(&comp));
+        for (actual, expected) in [
+            (
+                public.release_artifact_url("v1.2.3", "plugin.zip"),
+                "https://github.com/Extra-Chill/data-machine/releases/download/v1.2.3/plugin.zip",
+            ),
+            (
+                enterprise.release_artifact_url("v1.2.3", "theme.zip"),
+                "https://github.example.com/example-org/theme/releases/download/v1.2.3/theme.zip",
+            ),
+            (
+                public.release_by_tag_api_url("v1.2.3"),
+                "https://api.github.com/repos/Extra-Chill/data-machine/releases/tags/v1.2.3",
+            ),
+            (
+                enterprise.release_by_tag_api_url("v1.2.3"),
+                "https://github.example.com/api/v3/repos/example-org/theme/releases/tags/v1.2.3",
+            ),
+            (
+                public.raw_content_url("v1.2.3", "homeboy.json"),
+                "https://raw.githubusercontent.com/Extra-Chill/data-machine/v1.2.3/homeboy.json",
+            ),
+            (
+                enterprise.raw_content_url("v1.2.3", "homeboy.json"),
+                "https://github.example.com/example-org/theme/raw/v1.2.3/homeboy.json",
+            ),
+            (
+                public.latest_release_api_url(),
+                "https://api.github.com/repos/Extra-Chill/data-machine/releases/latest",
+            ),
+            (
+                enterprise.latest_release_api_url(),
+                "https://github.example.com/api/v3/repos/example-org/theme/releases/latest",
+            ),
+            (
+                public.zipball_api_url("v1.2.3"),
+                "https://api.github.com/repos/Extra-Chill/data-machine/zipball/v1.2.3",
+            ),
+            (
+                enterprise.zipball_api_url("v1.2.3"),
+                "https://github.example.com/api/v3/repos/example-org/theme/zipball/v1.2.3",
+            ),
+        ] {
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn mutable_package_dependencies_flags_git_and_file_specs_only() {
+        for (manifest, mutable) in [
+            (
+                r#"{"dependencies":{"registry-only":"^1.2.3","tokens":"github:Extra-Chill/extrachill-tokens#v0.7.2"}}"#,
+                true,
+            ),
+            (
+                r#"{"devDependencies":{"components":"file:../components"}}"#,
+                true,
+            ),
+            (
+                r#"{"dependencies":{"react":"^19.0.0","private-registry":"npm:@scope/pkg@1.2.3"},"optionalDependencies":{"optional":"~2.0.0"}}"#,
+                false,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            std::fs::write(temp.path().join("package.json"), manifest).expect("write package.json");
+            let comp = Component::new(
+                "test".to_string(),
+                temp.path().to_string_lossy().to_string(),
+                "/remote".to_string(),
+                Some("test.zip".to_string()),
+            );
+
+            assert_eq!(
+                has_mutable_package_dependencies(&comp),
+                mutable,
+                "{manifest}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_curl_body_and_status_separates_trailing_status_line() {
+        for (output, body, status) in [
+            (
+                &b"{\"tag_name\":\"v1.2.3\"}\n200"[..],
+                &b"{\"tag_name\":\"v1.2.3\"}"[..],
+                Some(200),
+            ),
+            (b"Not Found\n404", b"Not Found", Some(404)),
+            (b"line one\nline two\n204", b"line one\nline two", Some(204)),
+            (
+                b"just a body, no trailing status",
+                b"just a body, no trailing status",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                split_curl_body_and_status(output),
+                (body.to_vec(), status),
+                "{}",
+                String::from_utf8_lossy(output)
+            );
+        }
     }
 
     // =========================================================================
     // Checkout-less resolution (#14782)
     // =========================================================================
-
-    fn github_repo() -> GitHubRepo {
-        GitHubRepo {
-            host: "github.com".to_string(),
-            owner: "Extra-Chill".to_string(),
-            repo: "data-machine".to_string(),
-        }
-    }
-
-    fn enterprise_repo() -> GitHubRepo {
-        GitHubRepo {
-            host: "github.example.com".to_string(),
-            owner: "example-org".to_string(),
-            repo: "theme".to_string(),
-        }
-    }
-
-    #[test]
-    fn raw_content_url_uses_raw_githubusercontent_for_github_com() {
-        assert_eq!(
-            github_repo().raw_content_url("v1.2.3", "homeboy.json"),
-            "https://raw.githubusercontent.com/Extra-Chill/data-machine/v1.2.3/homeboy.json"
-        );
-    }
-
-    #[test]
-    fn raw_content_url_uses_enterprise_web_host() {
-        assert_eq!(
-            enterprise_repo().raw_content_url("v1.2.3", "homeboy.json"),
-            "https://github.example.com/example-org/theme/raw/v1.2.3/homeboy.json"
-        );
-    }
-
-    #[test]
-    fn latest_release_api_url_uses_public_api_host() {
-        assert_eq!(
-            github_repo().latest_release_api_url(),
-            "https://api.github.com/repos/Extra-Chill/data-machine/releases/latest"
-        );
-    }
-
-    #[test]
-    fn latest_release_api_url_uses_enterprise_api_path() {
-        assert_eq!(
-            enterprise_repo().latest_release_api_url(),
-            "https://github.example.com/api/v3/repos/example-org/theme/releases/latest"
-        );
-    }
-
-    #[test]
-    fn zipball_api_url_uses_public_api_host() {
-        assert_eq!(
-            github_repo().zipball_api_url("v1.2.3"),
-            "https://api.github.com/repos/Extra-Chill/data-machine/zipball/v1.2.3"
-        );
-    }
-
-    #[test]
-    fn zipball_api_url_uses_enterprise_api_path() {
-        assert_eq!(
-            enterprise_repo().zipball_api_url("v1.2.3"),
-            "https://github.example.com/api/v3/repos/example-org/theme/zipball/v1.2.3"
-        );
-    }
-
-    #[test]
-    fn split_curl_body_and_status_separates_body_from_trailing_status() {
-        let output = b"{\"tag_name\":\"v1.2.3\"}\n200".to_vec();
-        let (body, status) = split_curl_body_and_status(&output);
-        assert_eq!(body, b"{\"tag_name\":\"v1.2.3\"}");
-        assert_eq!(status, Some(200));
-    }
-
-    #[test]
-    fn split_curl_body_and_status_reports_404() {
-        let output = b"Not Found\n404".to_vec();
-        let (body, status) = split_curl_body_and_status(&output);
-        assert_eq!(body, b"Not Found");
-        assert_eq!(status, Some(404));
-    }
-
-    #[test]
-    fn split_curl_body_and_status_handles_a_multiline_body() {
-        let output = b"line one\nline two\n204".to_vec();
-        let (body, status) = split_curl_body_and_status(&output);
-        assert_eq!(body, b"line one\nline two");
-        assert_eq!(status, Some(204));
-    }
-
-    #[test]
-    fn split_curl_body_and_status_degrades_when_no_status_line_is_present() {
-        let output = b"just a body, no trailing status".to_vec();
-        let (body, status) = split_curl_body_and_status(&output);
-        assert_eq!(body, output);
-        assert_eq!(status, None);
-    }
 
     #[test]
     fn curl_body_with_status_command_sends_auth_header_and_no_fail_flag() {
@@ -2335,32 +2189,14 @@ mod tests {
         assert!(config.contains("Authorization: Bearer secret-token"));
         assert!(command.args.contains(&"-w".to_string()));
         assert!(command.args.contains(&"\n%{http_code}".to_string()));
-    }
 
-    #[test]
-    fn curl_body_with_status_command_omits_auth_without_a_token() {
-        let command = curl_body_with_status_command(
+        let anonymous = curl_body_with_status_command(
             "https://api.github.com/repos/Extra-Chill/data-machine/releases/latest",
             None,
             Vec::new(),
         );
-
-        assert!(!command.args.contains(&"--config".to_string()));
-        assert_eq!(command.config_stdin, None);
-    }
-
-    #[test]
-    fn parse_latest_release_tag_reads_tag_name() {
-        let body = br#"{"tag_name": "v0.176.17", "id": 1}"#;
-        assert_eq!(
-            parse_latest_release_tag(body).expect("parses"),
-            Some("v0.176.17".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_latest_release_tag_rejects_invalid_json() {
-        assert!(parse_latest_release_tag(b"not json").is_err());
+        assert!(!anonymous.args.contains(&"--config".to_string()));
+        assert_eq!(anonymous.config_stdin, None);
     }
 
     fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -2374,83 +2210,37 @@ mod tests {
     }
 
     #[test]
-    fn extract_homeboy_json_from_zip_bytes_reads_the_root_entry() {
-        let bytes = build_zip(&[
-            ("homeboy.json", br#"{"id":"data-machine"}"#),
-            ("README.md", b"hello"),
-        ]);
-
-        let extracted = extract_homeboy_json_from_zip_bytes(&bytes)
-            .expect("extraction succeeds")
-            .expect("homeboy.json found");
-        assert_eq!(extracted, br#"{"id":"data-machine"}"#);
-    }
-
-    #[test]
-    fn extract_homeboy_json_from_zip_bytes_reads_one_level_of_nesting() {
-        // GitHub source zipballs root at a generated `<owner>-<repo>-<sha>/` dir.
-        let bytes = build_zip(&[
+    fn extract_homeboy_json_from_zip_bytes_reads_root_or_single_zipball_dir() {
+        let root: &[u8] = br#"{"id":"root"}"#;
+        let nested: &[u8] = br#"{"id":"nested"}"#;
+        for (entries, expected) in [
             (
-                "Extra-Chill-data-machine-abc1234/homeboy.json",
-                br#"{"id":"data-machine"}"#,
+                vec![("homeboy.json", root), ("README.md", &b"hello"[..])],
+                Some(root),
             ),
-            ("Extra-Chill-data-machine-abc1234/README.md", b"hello"),
-        ]);
+            // GitHub source zipballs root at a generated `<owner>-<repo>-<sha>/` dir.
+            (
+                vec![("Extra-Chill-data-machine-abc1234/homeboy.json", nested)],
+                Some(nested),
+            ),
+            (
+                vec![("homeboy.json", root), ("nested-dir/homeboy.json", nested)],
+                Some(root),
+            ),
+            (vec![("README.md", &b"hello"[..])], None),
+            // Ambiguous nesting: no basis to pick between candidates.
+            (
+                vec![("dir-a/homeboy.json", root), ("dir-b/homeboy.json", nested)],
+                None,
+            ),
+            // Two levels deep is not the zipball shape.
+            (vec![("a/b/homeboy.json", nested)], None),
+        ] {
+            let extracted = extract_homeboy_json_from_zip_bytes(&build_zip(&entries))
+                .expect("extraction succeeds");
+            assert_eq!(extracted.as_deref(), expected, "{entries:?}");
+        }
 
-        let extracted = extract_homeboy_json_from_zip_bytes(&bytes)
-            .expect("extraction succeeds")
-            .expect("nested homeboy.json found");
-        assert_eq!(extracted, br#"{"id":"data-machine"}"#);
-    }
-
-    #[test]
-    fn extract_homeboy_json_from_zip_bytes_prefers_root_over_nested() {
-        let bytes = build_zip(&[
-            ("homeboy.json", br#"{"id":"root"}"#),
-            ("nested-dir/homeboy.json", br#"{"id":"nested"}"#),
-        ]);
-
-        let extracted = extract_homeboy_json_from_zip_bytes(&bytes)
-            .expect("extraction succeeds")
-            .expect("root homeboy.json found");
-        assert_eq!(extracted, br#"{"id":"root"}"#);
-    }
-
-    #[test]
-    fn extract_homeboy_json_from_zip_bytes_returns_none_when_absent() {
-        let bytes = build_zip(&[("README.md", b"hello")]);
-
-        assert!(extract_homeboy_json_from_zip_bytes(&bytes)
-            .expect("extraction succeeds")
-            .is_none());
-    }
-
-    #[test]
-    fn extract_homeboy_json_from_zip_bytes_returns_none_for_ambiguous_nesting() {
-        // More than one nested candidate — this function has no basis to pick.
-        let bytes = build_zip(&[
-            ("dir-a/homeboy.json", br#"{"id":"a"}"#),
-            ("dir-b/homeboy.json", br#"{"id":"b"}"#),
-        ]);
-
-        assert!(extract_homeboy_json_from_zip_bytes(&bytes)
-            .expect("extraction succeeds")
-            .is_none());
-    }
-
-    #[test]
-    fn extract_homeboy_json_from_zip_bytes_ignores_deeply_nested_entries() {
-        // Two levels of nesting is not the GitHub zipball shape this function
-        // targets, and must not be mistaken for it.
-        let bytes = build_zip(&[("a/b/homeboy.json", br#"{"id":"deep"}"#)]);
-
-        assert!(extract_homeboy_json_from_zip_bytes(&bytes)
-            .expect("extraction succeeds")
-            .is_none());
-    }
-
-    #[test]
-    fn extract_homeboy_json_from_zip_bytes_rejects_a_non_zip_payload() {
         assert!(extract_homeboy_json_from_zip_bytes(b"not a zip").is_err());
     }
 

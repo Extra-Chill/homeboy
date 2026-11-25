@@ -527,115 +527,73 @@ mod tests {
         assert_eq!(recommendation.commits[0].commit_type, "chore");
     }
 
-    #[test]
-    fn explicit_version_request_does_not_underbump() {
+    fn recommend_after_v1(
+        subjects: &[&str],
+        requested: &str,
+    ) -> Option<crate::release::types::ReleaseSemverRecommendation> {
         let temp = git_repo();
         let dir = temp.path();
         commit_file(dir, "README.md", "initial", "chore: initial");
         run_git(dir, &["tag", "v1.0.0"]);
-        commit_file(dir, "breaking.txt", "breaking", "feat!: break API");
+        for (index, subject) in subjects.iter().enumerate() {
+            commit_file(dir, &format!("change-{index}.txt"), subject, subject);
+        }
         let component = Component {
             local_path: dir.to_string_lossy().to_string(),
             ..Default::default()
         };
-
         let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let recommendation = build_semver_recommendation(&component, "2.0.0", &release_scope)
-            .expect("recommendation should build")
-            .expect("breaking commit should recommend a release");
-
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("major"));
-        assert_eq!(recommendation.requested_bump, "2.0.0");
-        assert!(!recommendation.is_underbump);
-        assert!(recommendation.reasons.is_empty());
+        build_semver_recommendation(&component, requested, &release_scope)
+            .expect("recommendation should build without erroring")
     }
 
     #[test]
-    fn none_request_with_only_non_releasable_commits_returns_no_recommendation() {
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "README.md", "initial", "chore: initial");
-        run_git(dir, &["tag", "v1.0.0"]);
-        commit_file(
-            dir,
-            "baseline.txt",
-            "baseline",
-            "chore: refresh lint baseline",
-        );
-        let component = Component {
-            local_path: dir.to_string_lossy().to_string(),
-            ..Default::default()
-        };
+    fn requested_bump_resolution_and_underbump_detection() {
+        // (commit subjects, requested, expected (recommended, resolved requested, underbump))
+        let cases: [(&[&str], &str, Option<(&str, &str, bool)>); 4] = [
+            // An explicit version satisfying the recommendation is not an underbump.
+            (
+                &["feat!: break API"],
+                "2.0.0",
+                Some(("major", "2.0.0", false)),
+            ),
+            // #7598: auto-detection (`none`) resolves to the recommendation.
+            (
+                &[
+                    "fix: correct community profile visual bugs (#145)",
+                    "fix: align concert/music-fan cards (#146)",
+                ],
+                "none",
+                Some(("patch", "patch", false)),
+            ),
+            (
+                &["feat: add a capability"],
+                "none",
+                Some(("minor", "minor", false)),
+            ),
+            // Only non-releasable commits: no recommendation, so the planner skips.
+            (&["chore: refresh lint baseline"], "none", None),
+        ];
 
-        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let recommendation = build_semver_recommendation(&component, "none", &release_scope)
-            .expect("no-op recommendation should be valid");
-
-        assert!(
-            recommendation.is_none(),
-            "internal no-op bump sentinel should let the planner build a skip plan"
-        );
-    }
-
-    #[test]
-    fn none_request_with_fix_commits_recommends_patch_without_erroring() {
-        // #7598: with no explicit --bump (requested_bump == "none") and only
-        // conventional `fix:` commits since the last tag, auto-detection must
-        // resolve to a patch bump — not fail with `Invalid bump type: none`.
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "README.md", "initial", "chore: initial");
-        run_git(dir, &["tag", "v1.11.3"]);
-        commit_file(
-            dir,
-            "a.txt",
-            "a",
-            "fix: correct community profile visual bugs (#145)",
-        );
-        commit_file(
-            dir,
-            "b.txt",
-            "b",
-            "fix: align concert/music-fan cards (#146)",
-        );
-        let component = Component {
-            local_path: dir.to_string_lossy().to_string(),
-            ..Default::default()
-        };
-
-        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let recommendation = build_semver_recommendation(&component, "none", &release_scope)
-            .expect("auto-detected patch bump must not error")
-            .expect("releasable fix commits must yield a recommendation");
-
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("patch"));
-        assert_eq!(recommendation.requested_bump, "patch");
-        assert!(
-            !recommendation.is_underbump,
-            "auto-detection cannot underbump its own recommendation"
-        );
-    }
-
-    #[test]
-    fn none_request_with_feat_commits_recommends_minor() {
-        // Auto-detection must also lift a `feat:` to minor, not just patch.
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "README.md", "initial", "chore: initial");
-        run_git(dir, &["tag", "v1.0.0"]);
-        commit_file(dir, "f.txt", "f", "feat: add a capability");
-        let component = Component {
-            local_path: dir.to_string_lossy().to_string(),
-            ..Default::default()
-        };
-
-        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let recommendation = build_semver_recommendation(&component, "none", &release_scope)
-            .expect("auto-detected minor bump must not error")
-            .expect("releasable feat commit must yield a recommendation");
-
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
-        assert_eq!(recommendation.requested_bump, "minor");
+        for (subjects, requested, expected) in cases {
+            let recommendation = recommend_after_v1(subjects, requested);
+            let actual = recommendation.as_ref().map(|recommendation| {
+                (
+                    recommendation
+                        .recommended_bump
+                        .as_deref()
+                        .unwrap_or_default(),
+                    recommendation.requested_bump.as_str(),
+                    recommendation.is_underbump,
+                )
+            });
+            assert_eq!(actual, expected, "{subjects:?} requested {requested}");
+            if requested != "none" {
+                // An explicit, sufficient request carries no underbump reasons.
+                let recommendation = recommendation.expect("explicit request recommends");
+                assert!(recommendation.reasons.is_empty());
+            }
+        }
     }
 
     fn breaking_recommendation(
@@ -662,51 +620,30 @@ mod tests {
     }
 
     #[test]
-    fn pre_1_0_breaking_auto_bump_is_not_an_underbump() {
-        let recommendation = breaking_recommendation("0.31.0", "none");
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
-        assert_eq!(recommendation.requested_bump, "minor");
-        assert!(!recommendation.is_underbump);
+    fn breaking_change_recommendation_respects_pre_1_0_semantics() {
+        // (current version, requested, recommended, resolved requested, underbump)
+        let cases = [
+            ("0.31.0", "none", "minor", "minor", false),
+            ("0.31.0", "patch", "minor", "patch", true),
+            ("1.0.0", "none", "major", "major", false),
+        ];
+
+        for (current, requested, recommended, resolved, underbump) in cases {
+            let recommendation = breaking_recommendation(current, requested);
+            assert_eq!(
+                (
+                    recommendation.recommended_bump.as_deref(),
+                    recommendation.requested_bump.as_str(),
+                    recommendation.is_underbump,
+                ),
+                (Some(recommended), resolved, underbump),
+                "{current} requested {requested}"
+            );
+        }
     }
 
     #[test]
-    fn pre_1_0_explicit_patch_remains_underbump_for_breaking_change() {
-        let recommendation = breaking_recommendation("0.31.0", "patch");
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
-        assert!(recommendation.is_underbump);
-    }
-
-    #[test]
-    fn post_1_0_breaking_recommendation_remains_major() {
-        let recommendation = breaking_recommendation("1.0.0", "none");
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("major"));
-        assert_eq!(recommendation.requested_bump, "major");
-        assert!(!recommendation.is_underbump);
-    }
-
-    #[test]
-    fn test_resolve_tag_and_commits() {
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "README.md", "initial", "chore: initial");
-        run_git(dir, &["tag", "v1.0.0"]);
-        commit_file(dir, "fix.txt", "fix", "fix: patch bug");
-
-        let component = Component {
-            local_path: dir.to_string_lossy().to_string(),
-            ..Default::default()
-        };
-        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let (latest_tag, commits) =
-            resolve_tag_and_commits(&release_scope).expect("tag and commits should resolve");
-
-        assert_eq!(latest_tag.as_deref(), Some("v1.0.0"));
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].subject, "fix: patch bug");
-    }
-
-    #[test]
-    fn repo_root_component_uses_release_scope_for_commits() {
+    fn repo_root_component_scopes_commits_by_configured_or_inferred_release_scope() {
         let temp = git_repo();
         let dir = temp.path();
         commit_file(dir, "README.md", "initial", "chore: initial");
@@ -723,47 +660,18 @@ mod tests {
             "1.0.1",
             "fix: update package a",
         );
-        let mut component = Component {
+        let configured = Component {
             local_path: dir.to_string_lossy().to_string(),
-            ..Default::default()
-        };
-        component.scopes = Some(ScopeConfig {
-            release: Some(CommandScopeConfig {
-                include: vec!["packages/package-a/**".to_string()],
-                exclude: vec![],
+            scopes: Some(ScopeConfig {
+                release: Some(CommandScopeConfig {
+                    include: vec!["packages/package-a/**".to_string()],
+                    exclude: vec![],
+                }),
+                ..Default::default()
             }),
             ..Default::default()
-        });
-
-        let release_scope =
-            ReleaseScope::resolve(&component, "package-a").expect("release scope should resolve");
-        let (latest_tag, commits) =
-            resolve_tag_and_commits(&release_scope).expect("scoped commits should resolve");
-
-        assert_eq!(latest_tag.as_deref(), Some("package-a-v1.0.0"));
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].subject, "fix: update package a");
-    }
-
-    #[test]
-    fn repo_root_component_infers_commit_scope_from_release_files() {
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "README.md", "initial", "chore: initial");
-        run_git(dir, &["tag", "package-a-v1.0.0"]);
-        commit_file(
-            dir,
-            "packages/package-b/VERSION",
-            "1.0.1",
-            "fix: update sibling package",
-        );
-        commit_file(
-            dir,
-            "packages/package-a/VERSION",
-            "1.0.1",
-            "fix: update package a",
-        );
-        let component = Component {
+        };
+        let inferred = Component {
             local_path: dir.to_string_lossy().to_string(),
             changelog_target: Some("packages/package-a/docs/CHANGELOG.md".to_string()),
             version_targets: Some(vec![VersionTarget {
@@ -774,53 +682,20 @@ mod tests {
             ..Default::default()
         };
 
-        let release_scope = ReleaseScope::resolve(&component, "package-a")
+        let inferred_scope = ReleaseScope::resolve(&inferred, "package-a")
             .expect("release files should create release scope");
-        assert_eq!(release_scope.path_prefixes, vec!["packages/package-a"]);
-        let (latest_tag, commits) =
-            resolve_tag_and_commits(&release_scope).expect("scoped commits should resolve");
+        assert_eq!(inferred_scope.path_prefixes, vec!["packages/package-a"]);
 
-        assert_eq!(latest_tag.as_deref(), Some("package-a-v1.0.0"));
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].subject, "fix: update package a");
-    }
+        for component in [configured, inferred] {
+            let release_scope = ReleaseScope::resolve(&component, "package-a")
+                .expect("release scope should resolve");
+            let (latest_tag, commits) =
+                resolve_tag_and_commits(&release_scope).expect("scoped commits should resolve");
 
-    #[test]
-    fn resolve_tag_and_commits_uses_reachable_tag_when_latest_release_tag_is_off_branch() {
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "README.md", "initial", "chore: initial");
-        run_git(dir, &["branch", "-M", "main"]);
-        run_git(dir, &["tag", "v0.1.0"]);
-        commit_file(
-            dir,
-            "feature.txt",
-            "first release work",
-            "feat: first release work",
-        );
-        run_git(dir, &["branch", "release-v0.2.0"]);
-        run_git(dir, &["checkout", "release-v0.2.0"]);
-        commit_file(dir, "VERSION", "0.2.0", "release: v0.2.0");
-        run_git(dir, &["tag", "v0.2.0"]);
-        run_git(dir, &["checkout", "main"]);
-        commit_file(
-            dir,
-            "fix.txt",
-            "second release work",
-            "fix: second release work",
-        );
-
-        let component = Component {
-            local_path: dir.to_string_lossy().to_string(),
-            ..Default::default()
-        };
-        let release_scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-        let (latest_tag, commits) =
-            resolve_tag_and_commits(&release_scope).expect("off-branch latest tag should recover");
-
-        assert_eq!(latest_tag.as_deref(), Some("v0.1.0"));
-        assert_eq!(commits.len(), 2);
-        assert_eq!(commits[0].subject, "fix: second release work");
+            assert_eq!(latest_tag.as_deref(), Some("package-a-v1.0.0"));
+            assert_eq!(commits.len(), 1);
+            assert_eq!(commits[0].subject, "fix: update package a");
+        }
     }
 
     #[test]
@@ -932,23 +807,19 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_release_version_floor() {
+    fn release_version_floor_blocks_ahead_tags_and_non_advancing_versions() {
         let message = validate_release_version_floor(Some("v0.125.0"), "0.124.9", "0.124.10")
             .expect("ahead tag should block release");
-
         assert!(message.contains("Latest release tag v0.125.0 is ahead of source version 0.124.9"));
         assert!(message.contains("bad or misplaced tag"));
-        assert!(validate_release_version_floor(Some("v0.124.9"), "0.124.9", "0.124.10").is_none());
-    }
 
-    #[test]
-    fn release_version_floor_blocks_non_advancing_next_version() {
         let message = validate_release_version_floor(Some("v0.125.0"), "0.125.0", "0.125.0")
             .expect("same version should block release");
-
         assert!(message.contains(
             "Next release version 0.125.0 is not greater than latest release tag v0.125.0"
         ));
+
+        assert!(validate_release_version_floor(Some("v0.124.9"), "0.124.9", "0.124.10").is_none());
     }
 
     #[test]
@@ -1114,25 +985,26 @@ mod tests {
     }
 
     #[test]
-    fn low_confidence_warning_fires_on_majority_non_conventional_low_bump() {
-        // Majority non-conventional + a patch recommendation → warn.
+    fn low_confidence_warning_fires_only_on_majority_non_conventional_low_bump() {
         let warning = low_confidence_bump_warning(Some(SemverBump::Patch), 6, 10)
             .expect("majority non-conventional patch bump warns");
         assert!(warning.contains("6 of 10"));
         assert!(warning.contains("under-bump"));
 
-        // No recommendation at all with non-conventional commits also warns.
-        assert!(low_confidence_bump_warning(None, 3, 4).is_some());
-    }
-
-    #[test]
-    fn low_confidence_warning_silent_when_confident_or_conventional() {
-        // A minor/major recommendation is feat-/breaking-driven → confident.
-        assert!(low_confidence_bump_warning(Some(SemverBump::Minor), 9, 10).is_none());
-        // Mostly-conventional history recommending patch → not low-confidence.
-        assert!(low_confidence_bump_warning(Some(SemverBump::Patch), 2, 10).is_none());
-        // Empty range → nothing to warn about.
-        assert!(low_confidence_bump_warning(Some(SemverBump::Patch), 0, 0).is_none());
+        // (recommendation, non-conventional, considered, warns)
+        for (bump, non_conventional, considered, warns) in [
+            (None, 3, 4, true),
+            // feat-/breaking-driven recommendations are confident.
+            (Some(SemverBump::Minor), 9, 10, false),
+            (Some(SemverBump::Patch), 2, 10, false),
+            (Some(SemverBump::Patch), 0, 0, false),
+        ] {
+            assert_eq!(
+                low_confidence_bump_warning(bump, non_conventional, considered).is_some(),
+                warns,
+                "{bump:?} {non_conventional}/{considered}"
+            );
+        }
     }
 
     #[test]

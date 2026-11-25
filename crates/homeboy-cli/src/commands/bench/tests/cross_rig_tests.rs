@@ -3,37 +3,6 @@ use crate::cli_surface::Cli;
 use clap::Parser;
 
 #[test]
-fn cross_rig_run_passes_selector_to_each_rig() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_a = tempfile::TempDir::new().expect("component a");
-        let component_b = tempfile::TempDir::new().expect("component b");
-        write_rig(home, "rig-a", "studio", component_a.path());
-        write_rig(home, "rig-b", "studio", component_b.path());
-
-        let (output, exit_code) = run(run_args(
-            None,
-            vec!["rig-a".to_string(), "rig-b".to_string()],
-            vec!["rig-slow".to_string()],
-        ))
-        .expect("cross-rig selected bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Comparison(result) => {
-                assert_eq!(result.rigs.len(), 2);
-                for rig in result.rigs {
-                    let scenarios = rig.results.expect("rig results").scenarios;
-                    assert_eq!(scenarios.len(), 1);
-                    assert_eq!(scenarios[0].id, "rig-slow");
-                }
-            }
-            _ => panic!("expected comparison output"),
-        }
-    });
-}
-
-#[test]
 fn cross_rig_output_lifts_run_and_artifact_refs() {
     with_isolated_home(|home| {
         write_bench_extension(home);

@@ -122,45 +122,36 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_systemd_unit_process_is_systemd_managed() {
-        assert_eq!(
-            DaemonServiceManager::detect_from(env(&[("INVOCATION_ID", "abc")]), Some("systemd")),
-            Some(DaemonServiceManager::Systemd)
-        );
-    }
-
-    #[test]
-    fn a_launchd_job_is_launchd_managed() {
-        assert_eq!(
-            DaemonServiceManager::detect_from(
-                env(&[("XPC_SERVICE_NAME", "com.extrachill.homeboy")]),
-                Some("launchd")
-            ),
-            Some(DaemonServiceManager::Launchd)
-        );
-    }
-
     /// The manager variables leak into descendants; only a direct child of the
-    /// manager is owned by it. A daemon launched by the Homeboy CLI, a shell,
-    /// or a test harness is not.
+    /// manager that also carries its variable is owned by it. A daemon launched
+    /// by the Homeboy CLI, a shell, or a test harness is not.
     #[test]
-    fn an_inherited_manager_variable_without_the_manager_as_parent_is_unmanaged() {
-        let vars = [("INVOCATION_ID", "abc"), ("XPC_SERVICE_NAME", "com.x")];
-        for parent in [Some("homeboy"), Some("bash"), Some("cargo"), None] {
-            assert_eq!(DaemonServiceManager::detect_from(env(&vars), parent), None);
+    fn only_a_direct_child_carrying_the_manager_variable_is_managed() {
+        let inherited = [("INVOCATION_ID", "abc"), ("XPC_SERVICE_NAME", "com.x")];
+        let cases: &[(&[(&str, &str)], Option<&str>, Option<DaemonServiceManager>)] = &[
+            (
+                &[("INVOCATION_ID", "abc")],
+                Some("systemd"),
+                Some(DaemonServiceManager::Systemd),
+            ),
+            (
+                &[("XPC_SERVICE_NAME", "com.extrachill.homeboy")],
+                Some("launchd"),
+                Some(DaemonServiceManager::Launchd),
+            ),
+            (&inherited, Some("homeboy"), None),
+            (&inherited, Some("bash"), None),
+            (&inherited, Some("cargo"), None),
+            (&inherited, None, None),
+            (&[], Some("systemd"), None),
+            (&[("XPC_SERVICE_NAME", "0")], Some("launchd"), None),
+        ];
+        for (vars, parent, expected) in cases {
+            assert_eq!(
+                DaemonServiceManager::detect_from(env(vars), *parent),
+                *expected,
+                "vars={vars:?} parent={parent:?}"
+            );
         }
-    }
-
-    #[test]
-    fn a_manager_parent_without_its_variable_is_unmanaged() {
-        assert_eq!(
-            DaemonServiceManager::detect_from(env(&[]), Some("systemd")),
-            None
-        );
-        assert_eq!(
-            DaemonServiceManager::detect_from(env(&[("XPC_SERVICE_NAME", "0")]), Some("launchd")),
-            None
-        );
     }
 }

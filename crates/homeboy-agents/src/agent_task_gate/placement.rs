@@ -2200,12 +2200,9 @@ mod tests {
             let mut request = request(root.path());
             request.preflight_only = true;
             request.toolchains = vec![AgentTaskGateToolchainRequirement {
-                resolve_only: false,
+                resolve_only: true,
                 command: "php".into(),
-                probe_arguments: vec![
-                    super::super::gate_runtime::RESOLVE_ONLY.into(),
-                    "php -v".into(),
-                ],
+                probe_arguments: vec!["php -v".into()],
             }];
             request
                 .environment
@@ -2226,11 +2223,6 @@ mod tests {
             )
             .unwrap();
             fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).unwrap();
-            let receipt = execute_with_context(request.clone(), root.path(), &context).unwrap();
-            assert_eq!(receipt.readiness.unwrap()["status"], "ready");
-            assert!(!marker.exists(), "legacy sentinel executed the command");
-            request.toolchains[0].resolve_only = true;
-            request.toolchains[0].probe_arguments = vec!["php -v".into()];
             let receipt = execute_with_context(request, root.path(), &context).unwrap();
             assert_eq!(receipt.readiness.unwrap()["status"], "ready");
             assert!(!marker.exists(), "typed readiness executed the command");

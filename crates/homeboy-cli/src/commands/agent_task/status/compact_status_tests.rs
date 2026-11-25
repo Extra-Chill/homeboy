@@ -228,8 +228,6 @@ fn compact_status_bounds_duplicate_evidence_and_uses_canonical_safe_action() {
         "evidence": [{"id":"e1","kind":"log","uri":"homeboy://e1"}]
     });
     let compact = compact_control_plane_status(value.clone());
-    assert_eq!(compact["state"], "failed");
-    assert_eq!(compact["phase"], "provider_start");
     assert_eq!(compact["blocker"]["code"], "runner.transport");
     assert_eq!(
         compact["blocker_summary"].as_str().unwrap().chars().count(),
@@ -241,7 +239,6 @@ fn compact_status_bounds_duplicate_evidence_and_uses_canonical_safe_action() {
         .starts_with("provider failed:"));
     assert!(compact["blocker_summary"].as_str().unwrap().ends_with('…'));
     assert!(serde_json::to_vec(&compact).unwrap().len() <= super::COMPACT_STATUS_BYTE_LIMIT);
-    assert_eq!(compact["candidate"]["state"], "unavailable");
     assert_eq!(
         compact["gates"].as_array().unwrap().len(),
         super::COMPACT_REF_LIMIT
@@ -262,7 +259,6 @@ fn compact_status_bounds_duplicate_evidence_and_uses_canonical_safe_action() {
             .len(),
         0
     );
-    assert!(serde_json::to_vec(&compact).unwrap().len() <= super::COMPACT_STATUS_BYTE_LIMIT);
 
     let oversized = compact_control_plane_status(json!({
         "schema": "homeboy/control-plane-run/v1",

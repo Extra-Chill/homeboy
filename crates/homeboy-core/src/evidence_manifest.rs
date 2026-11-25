@@ -367,18 +367,6 @@ mod tests {
         );
     }
 
-    /// The provenance member is additive: a manifest that never went through a
-    /// reader serializes exactly as it did before the member existed, so an
-    /// already-published manifest stays byte-identical.
-    #[test]
-    fn evidence_manifest_source_is_absent_until_a_reader_stamps_it() {
-        let manifest = EvidenceManifest::new(EvidenceManifestState::Passed, "Fine.");
-
-        assert!(manifest.source.is_none());
-        let value = serde_json::to_value(&manifest).expect("manifest json");
-        assert!(value.get("source").is_none());
-    }
-
     #[test]
     fn evidence_manifest_round_trips_every_source_value() {
         for (source, label) in [
@@ -419,38 +407,47 @@ mod tests {
     }
 
     #[test]
-    fn evidence_manifest_rejects_unknown_schema() {
-        let err = EvidenceManifest::parse_value(json!({
-            "schema": "example/manifest/v1",
-            "status": { "state": "unknown" },
-            "interpretation": { "summary": "Unknown schema." }
-        }))
-        .expect_err("schema error");
-
-        assert!(err.contains(EVIDENCE_MANIFEST_SCHEMA));
-    }
-
-    #[test]
-    fn evidence_manifest_rejects_a_blank_interpretation() {
-        let err = EvidenceManifest::parse_value(json!({
-            "schema": "homeboy/evidence-manifest/v1",
-            "status": { "state": "passed" },
-            "interpretation": { "summary": "   " }
-        }))
-        .expect_err("summary error");
-
-        assert!(err.contains("interpretation.summary"), "{err}");
-    }
-
-    #[test]
-    fn evidence_manifest_rejects_references_without_identifiers() {
+    fn evidence_manifest_rejects_invalid_members_naming_the_member() {
         let cases = [
-            ("tracker_refs", json!([{ "kind": "", "id": "HB-1" }])),
-            ("tracker_refs", json!([{ "kind": "issue", "id": " " }])),
-            ("run_refs", json!([{ "id": "" }])),
+            (
+                "schema",
+                json!("example/manifest/v1"),
+                EVIDENCE_MANIFEST_SCHEMA,
+            ),
+            (
+                "interpretation",
+                json!({ "summary": "   " }),
+                "interpretation.summary",
+            ),
+            (
+                "tracker_refs",
+                json!([{ "kind": "", "id": "HB-1" }]),
+                "tracker_refs",
+            ),
+            (
+                "tracker_refs",
+                json!([{ "kind": "issue", "id": " " }]),
+                "tracker_refs",
+            ),
+            ("run_refs", json!([{ "id": "" }]), "run_refs"),
+            (
+                "pr_refs",
+                json!([{ "repo": "", "number": 1 }]),
+                "pr_refs[0]",
+            ),
+            (
+                "pr_refs",
+                json!([{ "repo": "owner/repo", "number": 0 }]),
+                "pr_refs[0]",
+            ),
+            (
+                "blocking_conditions",
+                json!([{ "kind": "gate_failure", "summary": "" }]),
+                "blocking_conditions[0]",
+            ),
         ];
 
-        for (member, refs) in cases {
+        for (member, invalid, expected) in cases {
             let mut value = json!({
                 "schema": "homeboy/evidence-manifest/v1",
                 "status": { "state": "passed" },
@@ -459,46 +456,12 @@ mod tests {
             value
                 .as_object_mut()
                 .expect("object")
-                .insert(member.to_string(), refs);
+                .insert(member.to_string(), invalid);
 
-            let err = EvidenceManifest::parse_value(value).expect_err("reference error");
+            let err = EvidenceManifest::parse_value(value).expect_err("validation error");
 
-            assert!(err.contains(member), "{err}");
+            assert!(err.contains(expected), "{member}: {err}");
         }
-    }
-
-    #[test]
-    fn evidence_manifest_rejects_a_pull_request_reference_without_a_repo_or_number() {
-        let err = EvidenceManifest::parse_value(json!({
-            "schema": "homeboy/evidence-manifest/v1",
-            "status": { "state": "passed" },
-            "interpretation": { "summary": "Fine." },
-            "pr_refs": [{ "repo": "", "number": 1 }]
-        }))
-        .expect_err("pr error");
-        assert!(err.contains("pr_refs[0]"), "{err}");
-
-        let err = EvidenceManifest::parse_value(json!({
-            "schema": "homeboy/evidence-manifest/v1",
-            "status": { "state": "passed" },
-            "interpretation": { "summary": "Fine." },
-            "pr_refs": [{ "repo": "owner/repo", "number": 0 }]
-        }))
-        .expect_err("pr error");
-        assert!(err.contains("pr_refs[0]"), "{err}");
-    }
-
-    #[test]
-    fn evidence_manifest_rejects_a_blocking_condition_without_a_kind_or_summary() {
-        let err = EvidenceManifest::parse_value(json!({
-            "schema": "homeboy/evidence-manifest/v1",
-            "status": { "state": "failed" },
-            "interpretation": { "summary": "Failed." },
-            "blocking_conditions": [{ "kind": "gate_failure", "summary": "" }]
-        }))
-        .expect_err("blocking condition error");
-
-        assert!(err.contains("blocking_conditions[0]"), "{err}");
     }
 
     #[test]
@@ -513,25 +476,5 @@ mod tests {
 
         assert!(manifest.has_blocking_condition(BlockingSeverity::Critical));
         assert!(!manifest.has_blocking_condition(BlockingSeverity::Warning));
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn evidence_manifest_source_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (EvidenceManifestSource::RunMetadata, "run_metadata"),
-            (EvidenceManifestSource::Artifact, "artifact"),
-            (EvidenceManifestSource::Derived, "derived"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
     }
 }

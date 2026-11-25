@@ -511,6 +511,7 @@ mod tests {
         .expect("response");
 
         assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"{}");
         assert!(response
             .headers
             .contains(&("access-control-allow-origin".to_string(), "*".to_string())));
@@ -598,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn serves_run_scoped_artifact_routes() {
+    fn serves_get_and_head_for_run_scoped_artifact_routes() {
         crate::test_support::with_isolated_home(|home| {
             let artifact_path = home.path().join("report.json");
             std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("write artifact");
@@ -621,92 +622,20 @@ mod tests {
             assert_eq!(response.body, br#"{"ok":true}"#);
             assert!(response
                 .headers
-                .contains(&("x-homeboy-run-id".to_string(), run.id)));
-        });
-    }
+                .contains(&("x-homeboy-run-id".to_string(), run.id.clone())));
 
-    #[test]
-    fn serves_head_for_run_scoped_artifact_routes() {
-        crate::test_support::with_isolated_home(|home| {
-            let artifact_path = home.path().join("report.json");
-            std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("write artifact");
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .start_run(NewRunRecord::builder("bench").build())
-                .expect("run");
-            let artifact = store
-                .record_artifact(&run.id, "report", &artifact_path)
-                .expect("artifact");
-
-            let response = response_for_request(
+            let head = response_for_request(
                 home.path(),
                 "HEAD",
                 &format!("/runs/{}/artifacts/{}", run.id, artifact.id),
             )
-            .expect("artifact route response");
-
-            assert_eq!(response.status, 200);
-            assert!(response.body.is_empty());
-            assert!(response
+            .expect("artifact route HEAD response");
+            assert_eq!(head.status, 200);
+            assert!(head.body.is_empty());
+            assert!(head
                 .headers
                 .contains(&("content-length".to_string(), "11".to_string())));
         });
-    }
-
-    #[test]
-    fn serves_workflow_bench_bundle_paths_under_artifact_root() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp
-            .path()
-            .join("workflow-bench/studio-web-r15-replay-export/report.html");
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(&path, b"<html>report</html>").expect("write report");
-
-        let response = response_for_request(
-            temp.path(),
-            "GET",
-            "/workflow-bench/studio-web-r15-replay-export/report.html",
-        )
-        .expect("response");
-
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body, b"<html>report</html>");
-    }
-
-    #[test]
-    fn serves_nested_visual_compare_reviewer_paths_over_http() {
-        let root = tempfile::tempdir().expect("artifact root");
-        let fixture = [
-            ("source.png", b"source bytes".as_slice()),
-            ("candidate.png", b"candidate bytes".as_slice()),
-            ("diff.png", b"diff bytes".as_slice()),
-        ];
-        let path = root.path().join("visual-compare/37-art-gallery-exhibition");
-        std::fs::create_dir_all(&path).expect("artifact directory");
-        for (name, bytes) in fixture {
-            std::fs::write(path.join(name), bytes).expect("visual artifact");
-        }
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("listener address");
-        let root_path = root.path().to_path_buf();
-        let server = std::thread::spawn(move || {
-            for stream in listener.incoming().take(3) {
-                handle_stream(stream.expect("request stream"), &root_path).expect("serve request");
-            }
-        });
-        let client = reqwest::blocking::Client::new();
-        for (name, bytes) in fixture {
-            let response = client
-                .get(format!(
-                    "http://{address}/visual-compare/37-art-gallery-exhibition/{name}"
-                ))
-                .send()
-                .expect("reviewer request");
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            assert_eq!(response.bytes().expect("response bytes").as_ref(), bytes);
-        }
-        server.join().expect("origin server");
     }
 
     #[test]

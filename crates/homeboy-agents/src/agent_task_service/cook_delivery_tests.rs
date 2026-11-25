@@ -238,17 +238,6 @@ fn a_non_executed_lab_gate_blocker_names_its_typed_cause() {
     assert_eq!(delivery.gates[0].state, AgentTaskGateStatus::Unavailable);
 }
 
-/// The pre-#16049 spelling stopped parsing when its serde alias was retired
-/// (#16390); a delivery carrying it is not a delivery this binary understands.
-#[test]
-fn the_retired_no_op_gate_failed_spelling_is_no_longer_a_delivery() {
-    let delivery = CookDelivery::from_run_metadata(&delivery_metadata(
-        json!({ "promotion": promotion("no_op_gate_failed", failed_gate()) }),
-    ));
-
-    assert!(delivery.is_none());
-}
-
 #[test]
 fn publication_refusals_keep_the_writer_code_and_message() {
     let delivery = CookDelivery::from_run_metadata(&delivery_metadata(json!({

@@ -877,11 +877,13 @@ mod tests {
     }
 
     #[test]
-    fn rebase_under_root_preserves_subdirectory_offset() {
+    fn rebase_under_root_preserves_offset_and_refuses_paths_outside_the_root() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         let package = source.join("php-transformer");
+        let elsewhere = temp.path().join("elsewhere");
         std::fs::create_dir_all(&package).expect("package dir");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere dir");
         let worktree = temp.path().join("worktree");
 
         assert_eq!(
@@ -890,23 +892,9 @@ mod tests {
         );
         assert_eq!(
             rebase_under_root(&source, &source, &worktree),
-            Some(worktree.clone()),
-            "a root-level component stays at the worktree root"
+            Some(worktree.clone())
         );
-    }
-
-    #[test]
-    fn rebase_under_root_refuses_paths_outside_the_root() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let source = temp.path().join("source");
-        let elsewhere = temp.path().join("elsewhere");
-        std::fs::create_dir_all(&source).expect("source dir");
-        std::fs::create_dir_all(&elsewhere).expect("elsewhere dir");
-
-        assert_eq!(
-            rebase_under_root(&elsewhere, &source, &temp.path().join("worktree")),
-            None
-        );
+        assert_eq!(rebase_under_root(&elsewhere, &source, &worktree), None);
     }
 
     #[test]

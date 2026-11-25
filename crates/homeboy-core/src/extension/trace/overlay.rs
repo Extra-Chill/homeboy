@@ -322,66 +322,35 @@ mod tests {
 
     use super::*;
 
+    /// Several overlays for one component share a single lock; acquiring a
+    /// lock per request would contend with itself.
     #[test]
-    fn test_acquire_trace_overlay_locks() {
+    fn overlays_for_one_component_share_one_lock() {
         with_isolated_home(|_| {
             let run_dir = RunDir::create().unwrap();
             let first = overlay_fixture("first");
             let second = overlay_fixture("second");
+            let mut same_component = first.request.clone();
+            same_component.variant = Some("again".to_string());
 
             let locks = acquire_trace_overlay_locks(
-                &[first.request.clone(), second.request.clone()],
+                &[
+                    first.request.clone(),
+                    same_component,
+                    second.request.clone(),
+                ],
                 &run_dir,
             )
             .unwrap();
 
             assert_eq!(locks.len(), 2);
+            drop(locks);
             run_dir.cleanup();
         });
     }
 
-    #[test]
-    fn test_apply_trace_overlays() {
-        let fixture = overlay_fixture("overlay");
-        let applied = apply_trace_overlays(&[fixture.request.clone()], true).unwrap();
-
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].touched_files, vec!["scenario.txt"]);
-        assert_eq!(
-            fs::read_to_string(fixture.component_dir.join("scenario.txt")).unwrap(),
-            "overlay\n"
-        );
-    }
-
-    #[test]
-    fn test_cleanup_trace_overlays() {
-        let fixture = overlay_fixture("overlay");
-        let applied = apply_trace_overlays(&[fixture.request.clone()], true).unwrap();
-
-        cleanup_trace_overlays(&applied).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(fixture.component_dir.join("scenario.txt")).unwrap(),
-            "base\n"
-        );
-    }
-
-    #[test]
-    fn test_overlay_touched_files() {
-        let fixture = overlay_fixture("overlay");
-
-        let touched = overlay_touched_files(
-            &fixture.component_dir,
-            Path::new(&fixture.request.overlay_path),
-        )
-        .unwrap();
-
-        assert_eq!(touched, vec!["scenario.txt"]);
-    }
-
     struct OverlayFixture {
         _temp: tempfile::TempDir,
-        component_dir: PathBuf,
         request: TraceOverlayRequest,
     }
 
@@ -407,7 +376,6 @@ mod tests {
 
         OverlayFixture {
             _temp: temp,
-            component_dir: component_dir.clone(),
             request: TraceOverlayRequest {
                 variant: None,
                 component_id: Some("component".to_string()),

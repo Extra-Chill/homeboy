@@ -3,9 +3,8 @@
 //! When a provider runtime dies, its CLI exit code says almost nothing: the
 //! actionable cause — an account-level 403 with a human-readable message and
 //! an explicit non-retryable flag — is emitted as a structured error event on
-//! the provider's runtime stdout stream. Diagnose used to collapse that to
-//! "provider CLI exited with status 1" and leave `stdout_excerpt: null` while
-//! the actual error sat in a log file the same response already listed.
+//! the provider's runtime stdout stream. Diagnose surfaces that event instead
+//! of reporting only "provider CLI exited with status 1".
 //!
 //! This module is the provider adapter boundary for that evidence:
 //! - Runtime stream shapes (currently the JSONL terminal error event) are

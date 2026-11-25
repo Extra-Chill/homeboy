@@ -853,14 +853,19 @@ mod tests {
     }
 
     #[test]
-    fn deployment_provenance_policy_fails_before_mutable_selectors_can_run() {
+    fn accepted_ref_policy_refuses_mutable_or_unverifiable_selectors_before_source_work() {
         let component = component(Path::new("/unread-source"));
         let project = accepted_ref_project();
-        let mut config = config();
-        config.head = true;
-        let error = guard_deployment_provenance(&project, &[component], &mut config)
-            .expect_err("HEAD must fail before source work");
+        let mut head = config();
+        head.head = true;
+        let error =
+            guard_deployment_provenance(&project, std::slice::from_ref(&component), &mut head)
+                .expect_err("HEAD must fail before source work");
         assert_eq!(error.details["field"], "deployment_provenance");
+
+        let mut unverifiable = config();
+        unverifiable.requested_ref = Some("unverifiable".to_string());
+        assert!(guard_deployment_provenance(&project, &[component], &mut unverifiable).is_err());
     }
 
     #[test]
@@ -925,17 +930,6 @@ mod tests {
             .expect("forge evidence for exact SHA is accepted");
         assert_eq!(evidence["example"].kind, "forge");
         assert_eq!(evidence["example"].forge.as_deref(), Some("github"));
-    }
-
-    #[test]
-    fn accepted_ref_policy_refuses_unverifiable_ref() {
-        let component = component(Path::new("/unread-source"));
-        let mut config = config();
-        config.requested_ref = Some("unverifiable".to_string());
-        assert!(
-            guard_deployment_provenance(&accepted_ref_project(), &[component], &mut config)
-                .is_err()
-        );
     }
 
     #[test]
@@ -1008,10 +1002,12 @@ mod tests {
     }
 
     #[test]
-    fn semantic_downgrade_refuses_until_explicitly_allowed() {
+    fn only_proven_semantic_downgrades_refuse_until_explicitly_allowed() {
         let component = component(Path::new("."));
-        let local = HashMap::from([("example".to_string(), "1.2.3".to_string())]);
-        let remote = HashMap::from([("example".to_string(), "1.3.0".to_string())]);
+        let versions =
+            |version: &str| HashMap::from([("example".to_string(), version.to_string())]);
+        let local = versions("1.2.3");
+        let remote = versions("1.3.0");
         let error = guard_local_build_downgrades(
             std::slice::from_ref(&component),
             &local,
@@ -1024,38 +1020,16 @@ mod tests {
 
         let mut allowed = config();
         allowed.allow_downgrade = true;
-        guard_local_build_downgrades(&[component], &local, &remote, &allowed)
+        guard_local_build_downgrades(std::slice::from_ref(&component), &local, &remote, &allowed)
             .expect("explicit downgrade override must proceed");
-    }
 
-    #[test]
-    fn equal_or_newer_local_semantic_versions_are_allowed() {
-        let component = component(Path::new("."));
-        for (local_version, remote_version) in [("1.3.0", "1.3.0"), ("1.4.0", "1.3.0")] {
-            let local = HashMap::from([("example".to_string(), local_version.to_string())]);
-            let remote = HashMap::from([("example".to_string(), remote_version.to_string())]);
-            guard_local_build_downgrades(
-                std::slice::from_ref(&component),
-                &local,
-                &remote,
-                &config(),
-            )
-            .expect("equal or newer local version must proceed");
-        }
-    }
-
-    #[test]
-    fn unavailable_or_invalid_versions_do_not_create_false_downgrade_refusals() {
-        let component = component(Path::new("."));
-        for (local, remote) in [
-            (
-                HashMap::new(),
-                HashMap::from([("example".to_string(), "1.3.0".to_string())]),
-            ),
-            (
-                HashMap::from([("example".to_string(), "dev".to_string())]),
-                HashMap::from([("example".to_string(), "1.3.0".to_string())]),
-            ),
+        // Equal, newer, unavailable and non-semantic local versions are not
+        // proven downgrades.
+        for local in [
+            versions("1.3.0"),
+            versions("1.4.0"),
+            HashMap::new(),
+            versions("dev"),
         ] {
             guard_local_build_downgrades(
                 std::slice::from_ref(&component),
@@ -1063,7 +1037,7 @@ mod tests {
                 &remote,
                 &config(),
             )
-            .expect("unavailable or invalid versions are not proven downgrades");
+            .unwrap_or_else(|error| panic!("{local:?} must proceed: {error}"));
         }
     }
 
@@ -1096,51 +1070,28 @@ mod tests {
     }
 
     #[test]
-    fn checkout_required_selectors_pass_without_head_tagged_or_ref() {
+    fn checkout_required_selectors_refuse_only_without_a_checkout() {
         guard_checkout_required_selectors(&[checkout_less_component()], &config())
             .expect("no selector requiring a checkout was used");
-    }
 
-    #[test]
-    fn checkout_required_selectors_refuse_head_without_a_checkout() {
-        let mut cfg = config();
-        cfg.head = true;
-
-        let error = guard_checkout_required_selectors(&[checkout_less_component()], &cfg)
-            .expect_err("--head with no checkout must fail closed");
-        assert!(error.message.contains("example"));
-        assert!(error.message.contains("no local checkout"));
-        assert!(error.message.contains("--head"));
-    }
-
-    #[test]
-    fn checkout_required_selectors_refuse_tagged_without_a_checkout() {
-        let mut cfg = config();
-        cfg.tagged = true;
-
-        let error = guard_checkout_required_selectors(&[checkout_less_component()], &cfg)
-            .expect_err("--tagged with no checkout must fail closed");
-        assert!(error.message.contains("--tagged"));
-    }
-
-    #[test]
-    fn checkout_required_selectors_refuse_ref_without_a_checkout() {
-        let mut cfg = config();
-        cfg.requested_refs
+        let mut head = config();
+        head.head = true;
+        let mut tagged = config();
+        tagged.tagged = true;
+        let mut by_ref = config();
+        by_ref
+            .requested_refs
             .insert("example".to_string(), "v1.2.3".to_string());
+        for (cfg, flag) in [(&head, "--head"), (&tagged, "--tagged"), (&by_ref, "--ref")] {
+            let error = guard_checkout_required_selectors(&[checkout_less_component()], cfg)
+                .expect_err("selector with no checkout must fail closed");
+            assert!(error.message.contains("example"), "{flag}");
+            assert!(error.message.contains("no local checkout"), "{flag}");
+            assert!(error.message.contains(flag), "{flag}");
+        }
 
-        let error = guard_checkout_required_selectors(&[checkout_less_component()], &cfg)
-            .expect_err("--ref with no checkout must fail closed");
-        assert!(error.message.contains("--ref"));
-    }
-
-    #[test]
-    fn checkout_required_selectors_pass_when_a_checkout_exists() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let mut cfg = config();
-        cfg.head = true;
-
-        guard_checkout_required_selectors(&[component(temp.path())], &cfg)
+        guard_checkout_required_selectors(&[component(temp.path())], &head)
             .expect("a real checkout satisfies --head");
     }
 
@@ -1195,9 +1146,9 @@ mod tests {
 
     #[test]
     fn head_deploy_fails_closed_when_invocation_worktree_advanced_past_registered_checkout() {
-        // #7599: registered checkout (primary) is behind the worktree the
-        // operator is standing in. --head would build/report the primary's SHA,
-        // so refuse with an actionable message rather than ship the wrong commit.
+        // #7599: when the registered checkout (primary) is behind the worktree
+        // the operator is standing in, --head would build/report the primary's
+        // SHA, so refuse with an actionable message unless --force is given.
         let temp = tempfile::tempdir().expect("temp dir");
         let primary = temp.path().join("primary");
         init_repo_with_commit(&primary);
@@ -1206,41 +1157,28 @@ mod tests {
             &primary,
             &["worktree", "add", worktree.to_str().expect("worktree path")],
         );
-        // Advance the worktree past the primary.
-        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
-        git(&worktree, &["add", "."]);
-        git(&worktree, &["commit", "-m", "advance worktree"]);
 
         let mut cfg = config();
         cfg.head = true;
+        with_cwd(&worktree, || {
+            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
+                .expect("matching HEAD passes the guard")
+        });
 
+        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-m", "advance worktree"]);
         let error = with_cwd(&worktree, || {
             guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
                 .expect_err("advanced invocation worktree must fail closed")
         });
         assert_eq!(error.details["field"], "head");
         assert!(error.to_string().contains("different checkout"));
-    }
 
-    #[test]
-    fn head_deploy_passes_when_invocation_checkout_matches_registered_head() {
-        // Same repo, same HEAD (e.g. invoked from the registered checkout, or a
-        // worktree that has not advanced): nothing to reconcile.
-        let temp = tempfile::tempdir().expect("temp dir");
-        let primary = temp.path().join("primary");
-        init_repo_with_commit(&primary);
-        let worktree = temp.path().join("component@even");
-        git(
-            &primary,
-            &["worktree", "add", worktree.to_str().expect("worktree path")],
-        );
-
-        let mut cfg = config();
-        cfg.head = true;
-
+        cfg.force = true;
         with_cwd(&worktree, || {
             guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
-                .expect("matching HEAD passes the guard")
+                .expect("--force bypasses the guard")
         });
     }
 
@@ -1264,30 +1202,6 @@ mod tests {
         with_cwd(&unrelated, || {
             guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
                 .expect("an unrelated repo must not trip the same-repo guard")
-        });
-    }
-
-    #[test]
-    fn head_deploy_force_bypasses_the_invocation_checkout_guard() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let primary = temp.path().join("primary");
-        init_repo_with_commit(&primary);
-        let worktree = temp.path().join("component@forced");
-        git(
-            &primary,
-            &["worktree", "add", worktree.to_str().expect("worktree path")],
-        );
-        std::fs::write(worktree.join("file.txt"), "b").expect("edit");
-        git(&worktree, &["add", "."]);
-        git(&worktree, &["commit", "-m", "advance worktree"]);
-
-        let mut cfg = config();
-        cfg.head = true;
-        cfg.force = true;
-
-        with_cwd(&worktree, || {
-            guard_head_matches_invocation_checkout(&[component(&primary)], &cfg)
-                .expect("--force bypasses the guard")
         });
     }
 }

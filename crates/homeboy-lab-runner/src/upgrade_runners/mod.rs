@@ -59,7 +59,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         &self,
         tag: &str,
         runner_targets: &[String],
-    ) -> Result<homeboy_upgrade::RunnerReleasePrefetch> {
+    ) -> Result<homeboy_upgrade::upgrade::RunnerReleasePrefetch> {
         let runners: Vec<_> = runner_upgrade_targets(runner_targets)?
             .into_iter()
             .collect();

@@ -127,6 +127,9 @@ pub(crate) fn materialize_inline_agent_task_json_specs_in_args<T>(
     args: &[String],
     mut sync_inline_json: impl FnMut(AgentTaskInlineJsonSpec<'_>) -> Result<Option<(String, T)>>,
 ) -> Result<(Vec<String>, Vec<AgentTaskSpecWorkspaceEntry<T>>)> {
+    // A controller-generated cook attempt is fully defined by `--attempt-plan`.
+    // Its `--tasks` JSON is not materialized, so an unrelated stale payload
+    // cannot enter the Lab handoff or replace the controller's bounded plan.
     let controller_cook_attempt = agent_task_subcommand_is(args, &["cook"])
         && has_option_before_passthrough(args, "--attempt-plan");
     let (args, task_entry) = materialize_inline_json_option(
@@ -554,9 +557,8 @@ fn subcommand_index(args: &[String], command: &str) -> Option<usize> {
     args.iter().position(|arg| arg == command)
 }
 
-/// A controller-generated cook attempt is fully defined by `--attempt-plan`.
-/// Ignore legacy task-input JSON so an unrelated stale payload cannot enter the
-/// Lab handoff materializer or replace the controller's bounded plan.
+/// Whether `option` appears (as `--opt` or `--opt=value`) before the `--`
+/// passthrough boundary.
 fn has_option_before_passthrough(args: &[String], option: &str) -> bool {
     args.iter()
         .take_while(|arg| arg.as_str() != "--")

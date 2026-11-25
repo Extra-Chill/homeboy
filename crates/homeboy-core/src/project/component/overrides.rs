@@ -80,30 +80,6 @@ mod tests {
     }
 
     #[test]
-    fn component_override_config_sets_remote_path() {
-        let mut component = base_component("my-plugin");
-        let overrides = ProjectComponentOverrides {
-            remote_path: Some("wp-content/plugins/my-plugin".to_string()),
-            ..Default::default()
-        };
-
-        overrides.apply_to_component(&mut component);
-        assert_eq!(component.remote_path, "wp-content/plugins/my-plugin");
-    }
-
-    #[test]
-    fn component_override_config_sets_deploy_strategy() {
-        let mut component = base_component("my-plugin");
-        let overrides = ProjectComponentOverrides {
-            deploy_strategy: Some("git".to_string()),
-            ..Default::default()
-        };
-
-        overrides.apply_to_component(&mut component);
-        assert_eq!(component.deploy_strategy, Some("git".to_string()));
-    }
-
-    #[test]
     fn component_override_config_skips_none_fields() {
         let mut component = base_component("my-plugin");
         component.deploy_strategy = Some("rsync".to_string());
@@ -145,32 +121,80 @@ mod tests {
     }
 
     #[test]
-    fn no_overrides_returns_clone() {
+    fn project_overrides_apply_only_to_the_matching_component_id() {
+        let overrides = |id: &str| {
+            HashMap::from([(
+                id.to_string(),
+                ProjectComponentOverrides {
+                    remote_path: Some("wp-content/plugins/my-plugin".to_string()),
+                    remote_owner: Some("www-data:www-data".to_string()),
+                    ..Default::default()
+                },
+            )])
+        };
         let component = base_component("my-plugin");
-        let project = project_with_overrides("my-project", HashMap::new());
 
-        let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.remote_path, "original/path");
+        let matched = apply_component_overrides(
+            &component,
+            &project_with_overrides("my-project", overrides("my-plugin")),
+        );
+        assert_eq!(matched.remote_path, "wp-content/plugins/my-plugin");
+        assert_eq!(matched.remote_owner.as_deref(), Some("www-data:www-data"));
+
+        for project in [
+            project_with_overrides("my-project", HashMap::new()),
+            project_with_overrides("my-project", overrides("other-plugin")),
+        ] {
+            let result = apply_component_overrides(&component, &project);
+            assert_eq!(result.remote_path, "original/path");
+            assert_eq!(result.remote_owner, None);
+        }
     }
 
+    /// `cli_path` precedence (#1165): the component's own config wins, then
+    /// the project component override, then the project-scoped `cli_path`;
+    /// unset everywhere stays `None` so the extension default applies.
     #[test]
-    fn project_overrides_applied() {
-        let component = base_component("my-plugin");
-
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "my-plugin".to_string(),
-            ProjectComponentOverrides {
-                remote_path: Some("wp-content/plugins/my-plugin".to_string()),
-                remote_owner: Some("www-data:www-data".to_string()),
+    fn cli_path_resolves_component_then_override_then_project() {
+        for (component_cli, override_cli, project_cli, expected) in [
+            (None, None, None, None),
+            (None, None, Some("lando wp"), Some("lando wp")),
+            (None, Some("lando wp"), None, Some("lando wp")),
+            (
+                None,
+                Some("lando wp"),
+                Some("wp-env run cli wp"),
+                Some("lando wp"),
+            ),
+            (Some("docker wp"), None, Some("lando wp"), Some("docker wp")),
+        ] {
+            let mut component = base_component("my-plugin");
+            component.cli_path = component_cli.map(str::to_string);
+            let mut component_overrides = HashMap::new();
+            if let Some(cli_path) = override_cli {
+                component_overrides.insert(
+                    "my-plugin".to_string(),
+                    ProjectComponentOverrides {
+                        cli_path: Some(cli_path.to_string()),
+                        ..Default::default()
+                    },
+                );
+            }
+            let project = Project {
+                id: "my-site".to_string(),
+                cli_path: project_cli.map(str::to_string),
+                component_overrides,
                 ..Default::default()
-            },
-        );
-        let project = project_with_overrides("my-project", overrides);
+            };
 
-        let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.remote_path, "wp-content/plugins/my-plugin");
-        assert_eq!(result.remote_owner, Some("www-data:www-data".to_string()));
+            assert_eq!(
+                apply_component_overrides(&component, &project)
+                    .cli_path
+                    .as_deref(),
+                expected,
+                "component={component_cli:?} override={override_cli:?} project={project_cli:?}"
+            );
+        }
     }
 
     #[test]
@@ -236,113 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_component_id_not_applied() {
-        let component = base_component("my-plugin");
-
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "other-plugin".to_string(),
-            ProjectComponentOverrides {
-                remote_path: Some("wp-content/plugins/other".to_string()),
-                ..Default::default()
-            },
-        );
-        let project = project_with_overrides("my-project", overrides);
-
-        let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.remote_path, "original/path");
-    }
-
-    #[test]
-    fn component_override_config_sets_cli_path() {
-        let mut component = base_component("my-plugin");
-        assert_eq!(component.cli_path, None);
-
-        let overrides = ProjectComponentOverrides {
-            cli_path: Some("lando wp".to_string()),
-            ..Default::default()
-        };
-
-        overrides.apply_to_component(&mut component);
-        assert_eq!(component.cli_path, Some("lando wp".to_string()));
-    }
-
-    #[test]
-    fn cli_path_override_applied_via_project() {
-        let component = base_component("my-plugin");
-
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "my-plugin".to_string(),
-            ProjectComponentOverrides {
-                cli_path: Some("lando wp".to_string()),
-                ..Default::default()
-            },
-        );
-        let project = project_with_overrides("my-site", overrides);
-
-        let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.cli_path, Some("lando wp".to_string()));
-    }
-
-    /// Project-scoped `cli_path` fills in when no explicit component override sets it.
-    /// This is the headline of #1165 — one config line on the project, not per component.
-    #[test]
-    fn project_cli_path_fills_in_for_unset_components() {
-        let component = base_component("my-plugin");
-        let project = Project {
-            id: "my-site".to_string(),
-            cli_path: Some("lando wp".to_string()),
-            ..Default::default()
-        };
-
-        let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.cli_path, Some("lando wp".to_string()));
-    }
-
-    /// Component-level override is the most-specific escape hatch and wins
-    /// over project-scoped `cli_path`.
-    #[test]
-    fn component_override_wins_over_project_cli_path() {
-        let component = base_component("my-plugin");
-
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "my-plugin".to_string(),
-            ProjectComponentOverrides {
-                cli_path: Some("lando wp".to_string()),
-                ..Default::default()
-            },
-        );
-        let project = Project {
-            id: "my-site".to_string(),
-            cli_path: Some("wp-env run cli wp".to_string()),
-            component_overrides: overrides,
-            ..Default::default()
-        };
-
-        let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.cli_path, Some("lando wp".to_string()));
-    }
-
-    /// Component's own (homeboy.json) `cli_path` is the highest-precedence
-    /// escape hatch and should not be clobbered by project-scoped fallback.
-    #[test]
-    fn component_repo_cli_path_wins_over_project_cli_path() {
-        let mut component = base_component("my-plugin");
-        component.cli_path = Some("docker wp".to_string());
-
-        let project = Project {
-            id: "my-site".to_string(),
-            cli_path: Some("lando wp".to_string()),
-            ..Default::default()
-        };
-
-        let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.cli_path, Some("docker wp".to_string()));
-    }
-
-    #[test]
     fn deploy_override_inputs_keep_build_and_binding_fields_separate() {
         let component = base_component("my-plugin");
         let mut overrides = HashMap::new();
@@ -370,20 +287,5 @@ mod tests {
             binding.extract_command.as_deref(),
             Some("unzip {{artifact}}")
         );
-    }
-
-    /// When neither explicit overrides nor project-scoped `cli_path` are set,
-    /// `cli_path` stays `None` and downstream resolution falls through to the
-    /// extension default (or `"wp"`).
-    #[test]
-    fn unset_everywhere_stays_none() {
-        let component = base_component("my-plugin");
-        let project = Project {
-            id: "my-site".to_string(),
-            ..Default::default()
-        };
-
-        let result = apply_component_overrides(&component, &project);
-        assert_eq!(result.cli_path, None);
     }
 }

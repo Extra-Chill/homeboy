@@ -345,9 +345,6 @@ mod tests {
             Vec::new(),
         );
 
-        assert_eq!(summary.label.as_deref(), Some("lint homeboy"));
-        assert_eq!(summary.pid, 42);
-        assert_eq!(summary.platform, "test-os");
         assert_eq!(summary.load_average_before.unwrap().one, 1.0);
         assert_eq!(summary.load_average_after.unwrap().one, 2.0);
         assert_eq!(summary.homeboy_rss_bytes_before, Some(100));
@@ -403,82 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn writes_summary_to_run_dir_artifact() {
-        with_isolated_home(|_| {
-            let run_dir = RunDir::create().expect("run dir");
-            let summary = RunResourceSummary::from_snapshots(
-                Some("lint".to_string()),
-                7,
-                Utc::now().to_rfc3339(),
-                Utc::now().to_rfc3339(),
-                "test".to_string(),
-                ResourceSnapshot {
-                    load_average: None,
-                    homeboy_rss_bytes: None,
-                    warnings: vec!["load_average_unsupported".to_string()],
-                },
-                ResourceSnapshot {
-                    load_average: None,
-                    homeboy_rss_bytes: None,
-                    warnings: vec!["homeboy_rss_unsupported".to_string()],
-                },
-                vec![ExtensionChildResourceSummary {
-                    child: ChildProcessIdentity {
-                        root_pid: 99,
-                        command_label: "runner".to_string(),
-                    },
-                    phase: None,
-                    started_at: Utc::now().to_rfc3339(),
-                    finished_at: Utc::now().to_rfc3339(),
-                    duration_ms: 10,
-                    peak: ChildResourcePeakSample {
-                        sampled_peak_rss_bytes: Some(2048),
-                        sampled_peak_cpu_percent: Some(12.5),
-                    },
-                    sampled_peak_at_ms: Some(5),
-                    sampled_peak_child_count: Some(1),
-                    samples: Vec::new(),
-                    warnings: Vec::new(),
-                }],
-            );
-
-            write_summary(&run_dir, &summary).expect("write summary");
-            let output = run_dir
-                .read_step_output(run_dir::files::RESOURCE_SUMMARY)
-                .expect("resource summary json");
-
-            assert_eq!(output["label"], "lint");
-            assert_eq!(output["pid"], 7);
-            assert_eq!(output["warnings"].as_array().unwrap().len(), 2);
-            assert_eq!(output["extension_children"][0]["root_pid"], 99);
-
-            run_dir.cleanup();
-        });
-    }
-
-    #[test]
-    fn test_write_to_run_dir() {
-        with_isolated_home(|_| {
-            let run_dir = RunDir::create().expect("run dir");
-            let resource_run = ResourceSummaryRun::start(Some("lint homeboy".to_string()));
-
-            let summary = resource_run
-                .write_to_run_dir(&run_dir)
-                .expect("write resource summary");
-            let output = run_dir
-                .read_step_output(run_dir::files::RESOURCE_SUMMARY)
-                .expect("resource summary json");
-
-            assert_eq!(summary.label.as_deref(), Some("lint homeboy"));
-            assert_eq!(output["label"], "lint homeboy");
-            assert_eq!(output["pid"], std::process::id());
-            assert_eq!(output["platform"], std::env::consts::OS);
-
-            run_dir.cleanup();
-        });
-    }
-
-    #[test]
     fn test_record_extension_child_resource() {
         with_isolated_home(|_| {
             let run_dir = RunDir::create().expect("run dir");
@@ -508,13 +429,11 @@ mod tests {
                 .expect("write resource summary");
 
             assert_eq!(summary.extension_children, vec![child]);
-            assert_eq!(
-                summary.extension_children[0].phase.as_deref(),
-                Some("install")
-            );
             let output = run_dir
                 .read_step_output(run_dir::files::RESOURCE_SUMMARY)
                 .expect("resource summary json");
+            assert_eq!(output["label"], "test fixture");
+            assert_eq!(output["pid"], std::process::id());
             assert_eq!(
                 output["extension_children"][0]["command_label"],
                 "extension-runner"

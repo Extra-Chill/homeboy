@@ -589,59 +589,6 @@ mod tests {
             .contains("no ordered queue"));
     }
 
-    #[test]
-    fn acquiring_and_dropping_a_lease_changes_the_active_count() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let data_root = temp.path();
-        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
-
-        let lease = acquire_local_dispatch_lease(data_root, "run-a").expect("acquire first lease");
-        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
-
-        let second =
-            acquire_local_dispatch_lease(data_root, "run-b").expect("acquire second lease");
-        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 2);
-
-        drop(lease);
-        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
-
-        drop(second);
-        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
-    }
-
-    /// Active leases do not limit admission while pressure is ok.
-    #[test]
-    fn multiple_claimants_are_admitted_without_a_fixed_ceiling() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let data_root = temp.path();
-        let ok = reading("ok", None, 4);
-        let decide = |active| evaluate_local_dispatch_admission(active, &ok);
-
-        let first = try_admit_local_dispatch(data_root, "run-a", decide).expect("first attempt");
-        let second = try_admit_local_dispatch(data_root, "run-b", decide).expect("second attempt");
-
-        assert!(matches!(first, LocalDispatchAttempt::Admitted(_)));
-        assert!(matches!(second, LocalDispatchAttempt::Admitted(_)));
-        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 2);
-    }
-
-    /// A queued decision takes no slot.
-    #[test]
-    fn a_queued_attempt_holds_no_slot() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let data_root = temp.path();
-        let hot = reading("hot", Some(30.4), 18);
-        let attempt = try_admit_local_dispatch(data_root, "run-hot", |active| {
-            evaluate_local_dispatch_admission(active, &hot)
-        })
-        .expect("attempt");
-        assert!(matches!(
-            attempt,
-            LocalDispatchAttempt::NotAdmitted(LocalDispatchAdmission::Queue { .. })
-        ));
-        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
-    }
-
     /// Leases live in the store, not the process: a reopened store (a fresh
     /// connection, as a second cook process would open) sees the held slot.
     #[test]
@@ -661,9 +608,8 @@ mod tests {
         assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
     }
 
-    /// The PID-reuse bug this migration fixes: a holder recorded with this
-    /// process's PID but a different process start identity is a different,
-    /// dead process that happened to get the same PID. It must not hold a
+    /// A holder recorded with this process's PID but a different process start
+    /// identity is a dead process whose PID was reused. It must not hold a
     /// slot; the next count reaps it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]

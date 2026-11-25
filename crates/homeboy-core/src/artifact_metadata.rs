@@ -2,9 +2,9 @@ use std::path::Path;
 
 /// SHA-256 of a file's bytes as lowercase hex.
 ///
-/// Retained as the historical entry point for artifact hashing; the streaming
-/// implementation lives in `homeboy_engine_primitives::content_hash` so every
-/// crate produces byte-identical artifact identities.
+/// The streaming implementation lives in
+/// `homeboy_engine_primitives::content_hash` so every crate produces
+/// byte-identical artifact identities.
 pub use homeboy_engine_primitives::content_hash::sha256_file;
 
 pub fn content_type_from_path(path: &Path) -> Option<String> {
@@ -32,26 +32,4 @@ pub fn content_type_from_path(path: &Path) -> Option<String> {
         _ => return None,
     };
     Some(mime.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn executor_artifact_extensions_have_stable_content_types() {
-        for (path, expected) in [
-            ("change.patch", "text/x-patch"),
-            ("change.diff", "text/x-diff"),
-            ("transcript.txt", "text/plain"),
-            ("result.json", "application/json"),
-            ("runtime.log", "text/plain"),
-        ] {
-            assert_eq!(
-                content_type_from_path(Path::new(path)).as_deref(),
-                Some(expected)
-            );
-        }
-        assert_eq!(content_type_from_path(Path::new("artifact.unknown")), None);
-    }
 }

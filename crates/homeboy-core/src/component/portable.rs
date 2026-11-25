@@ -372,6 +372,9 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Writing back a component keeps the portable subsystem keys other tools
+    /// own, drops unknown keys, and never blanks a real `remote_path` with the
+    /// empty default `discover_from_portable` produces.
     #[test]
     fn write_preserves_portable_subsystem_fields_and_drops_unknown_fields() {
         let dir = TempDir::new().expect("temp dir");
@@ -391,7 +394,7 @@ mod tests {
         let component = Component::new(
             "test-comp".to_string(),
             dir.path().to_string_lossy().to_string(),
-            "wp-content/plugins/test".to_string(),
+            String::new(),
             None,
         );
         write_portable_config(dir.path(), &component).expect("write should succeed");
@@ -400,11 +403,7 @@ mod tests {
         let result: Value = serde_json::from_str(&content).unwrap();
 
         assert_eq!(
-            result
-                .get("baselines")
-                .and_then(|v| v.get("lint"))
-                .and_then(|v| v.get("item_count"))
-                .and_then(|v| v.as_i64()),
+            result["baselines"]["lint"]["item_count"].as_i64(),
             Some(42),
             "baselines should be preserved"
         );
@@ -412,44 +411,9 @@ mod tests {
             result.get("custom_field").is_none(),
             "unknown fields should not be preserved as active config"
         );
+        assert_eq!(result["id"].as_str(), Some("test-comp"));
         assert_eq!(
-            result.get("id").and_then(|v| v.as_str()),
-            Some("test-comp"),
-            "id should be present"
-        );
-    }
-
-    #[test]
-    fn write_does_not_blank_remote_path() {
-        let dir = TempDir::new().expect("temp dir");
-
-        // Write homeboy.json with a real remote_path
-        let initial = serde_json::json!({
-            "id": "test-comp",
-            "remote_path": "wp-content/plugins/test"
-        });
-        fs::write(
-            dir.path().join("homeboy.json"),
-            serde_json::to_string_pretty(&initial).unwrap(),
-        )
-        .unwrap();
-
-        // Write a component with empty remote_path (simulating discover_from_portable default)
-        let mut component = Component::new(
-            "test-comp".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            String::new(), // empty remote_path
-            None,
-        );
-        component.remote_path = String::new();
-        write_portable_config(dir.path(), &component).expect("write should succeed");
-
-        // Read back — remote_path should NOT be blanked
-        let content = fs::read_to_string(dir.path().join("homeboy.json")).unwrap();
-        let result: Value = serde_json::from_str(&content).unwrap();
-
-        assert_eq!(
-            result.get("remote_path").and_then(|v| v.as_str()),
+            result["remote_path"].as_str(),
             Some("wp-content/plugins/test"),
             "remote_path should not be blanked by an empty component value"
         );
@@ -509,135 +473,45 @@ mod tests {
         assert_eq!(component.local_path, "/new/path");
     }
 
+    /// A `homeboy.json` without a usable id is not a component: discovery skips
+    /// it, and explicit id inference fails with an actionable validation error.
     #[test]
-    fn blank_id_in_homeboy_json_returns_none_from_discover() {
-        let dir = TempDir::new().expect("temp dir");
-        let json = serde_json::json!({
-            "id": "",
-            "remote_path": "wp-content/plugins/test"
-        });
-        fs::write(
-            dir.path().join("homeboy.json"),
-            serde_json::to_string_pretty(&json).unwrap(),
-        )
-        .unwrap();
+    fn missing_or_blank_id_in_homeboy_json_is_not_a_component() {
+        for (json, expected) in [
+            (
+                serde_json::json!({ "remote_path": "wp-content/plugins/test" }),
+                "missing required 'id' field",
+            ),
+            (
+                serde_json::json!({ "id": "", "remote_path": "wp-content/plugins/test" }),
+                "blank 'id' field",
+            ),
+            (
+                serde_json::json!({ "id": "   ", "remote_path": "wp-content/plugins/test" }),
+                "blank 'id' field",
+            ),
+        ] {
+            let dir = TempDir::new().expect("temp dir");
+            fs::write(
+                dir.path().join("homeboy.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
 
-        // discover_from_portable should return None for blank id
-        let result = discover_from_portable(dir.path());
-        assert!(
-            result.is_none(),
-            "blank id should cause discover to return None"
-        );
-    }
-
-    #[test]
-    fn missing_id_in_homeboy_json_is_validation_error() {
-        let dir = TempDir::new().expect("temp dir");
-        let json = serde_json::json!({
-            "remote_path": "wp-content/plugins/test"
-        });
-        fs::write(
-            dir.path().join("homeboy.json"),
-            serde_json::to_string_pretty(&json).unwrap(),
-        )
-        .unwrap();
-
-        let error = infer_portable_component_id(dir.path()).expect_err("missing id must fail");
-
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        let rendered = error.to_string();
-        assert!(
-            rendered.contains("missing required 'id' field"),
-            "{rendered}"
-        );
-        assert!(
-            error
-                .details
-                .to_string()
-                .contains("Add an explicit non-empty id to homeboy.json"),
-            "{}",
-            error.details
-        );
-    }
-
-    #[test]
-    fn blank_id_in_homeboy_json_is_validation_error() {
-        let dir = TempDir::new().expect("temp dir");
-        let json = serde_json::json!({
-            "id": "   ",
-            "remote_path": "wp-content/plugins/test"
-        });
-        fs::write(
-            dir.path().join("homeboy.json"),
-            serde_json::to_string_pretty(&json).unwrap(),
-        )
-        .unwrap();
-
-        let error = infer_portable_component_id(dir.path()).expect_err("blank id must fail");
-
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        let rendered = error.to_string();
-        assert!(rendered.contains("blank 'id' field"), "{rendered}");
-        assert!(
-            error
-                .details
-                .to_string()
-                .contains("Add an explicit non-empty id to homeboy.json"),
-            "{}",
-            error.details
-        );
-    }
-
-    #[test]
-    fn missing_id_in_homeboy_json_returns_none_from_discover() {
-        let dir = TempDir::new().expect("temp dir");
-        let json = serde_json::json!({
-            "remote_path": "wp-content/plugins/test"
-        });
-        fs::write(
-            dir.path().join("homeboy.json"),
-            serde_json::to_string_pretty(&json).unwrap(),
-        )
-        .unwrap();
-
-        let result = discover_from_portable(dir.path());
-
-        assert!(
-            result.is_none(),
-            "missing id should cause discover to return None"
-        );
-    }
-
-    #[test]
-    fn merge_portable_config_keeps_only_explicit_subsystem_keys() {
-        let existing = serde_json::json!({
-            "id": "old",
-            "baselines": { "lint": {} },
-            "remote_path": "real/path",
-            "custom_field": "stale"
-        });
-        let component = serde_json::json!({
-            "id": "new",
-            "remote_path": "",
-            "auto_cleanup": false
-        });
-
-        let merged = merge_portable_config(existing, component);
-
-        assert_eq!(merged.get("id").and_then(|v| v.as_str()), Some("new"));
-        assert!(merged.get("baselines").is_some(), "baselines preserved");
-        assert!(
-            merged.get("custom_field").is_none(),
-            "arbitrary unknowns are dropped"
-        );
-        assert_eq!(
-            merged.get("remote_path").and_then(|v| v.as_str()),
-            Some("real/path")
-        );
-        assert_eq!(
-            merged.get("auto_cleanup").and_then(|v| v.as_bool()),
-            Some(false)
-        );
+            assert!(discover_from_portable(dir.path()).is_none(), "{json}");
+            let error = infer_portable_component_id(dir.path()).expect_err("id must fail");
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            let rendered = error.to_string();
+            assert!(rendered.contains(expected), "{rendered}");
+            assert!(
+                error
+                    .details
+                    .to_string()
+                    .contains("Add an explicit non-empty id to homeboy.json"),
+                "{}",
+                error.details
+            );
+        }
     }
 
     #[test]
@@ -703,40 +577,26 @@ mod tests {
     }
 
     #[test]
-    fn write_accepts_github_remote_urls() {
-        let dir = TempDir::new().expect("temp dir");
-        let mut component = Component::new(
-            "test-comp".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            String::new(),
-            None,
-        );
-        component.remote_url = Some("https://github.com/Extra-Chill/homeboy.git".to_string());
+    fn write_accepts_github_and_github_enterprise_remote_urls() {
+        for remote_url in [
+            "https://github.com/Extra-Chill/homeboy.git",
+            "git@github.example.com:example-org/intelligence.git",
+        ] {
+            let dir = TempDir::new().expect("temp dir");
+            let mut component = Component::new(
+                "test-comp".to_string(),
+                dir.path().to_string_lossy().to_string(),
+                String::new(),
+                None,
+            );
+            component.remote_url = Some(remote_url.to_string());
 
-        write_portable_config(dir.path(), &component).expect("GitHub remotes should be valid");
+            write_portable_config(dir.path(), &component).expect("GitHub remotes should be valid");
 
-        let content = fs::read_to_string(dir.path().join("homeboy.json")).unwrap();
-        let json: Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            json.get("remote_url").and_then(|v| v.as_str()),
-            Some("https://github.com/Extra-Chill/homeboy.git")
-        );
-    }
-
-    #[test]
-    fn write_accepts_github_enterprise_remote_urls() {
-        let dir = TempDir::new().expect("temp dir");
-        let mut component = Component::new(
-            "test-comp".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            String::new(),
-            None,
-        );
-        component.remote_url =
-            Some("git@github.example.com:example-org/intelligence.git".to_string());
-
-        write_portable_config(dir.path(), &component)
-            .expect("GitHub Enterprise remotes should be valid");
+            let content = fs::read_to_string(dir.path().join("homeboy.json")).unwrap();
+            let json: Value = serde_json::from_str(&content).unwrap();
+            assert_eq!(json["remote_url"].as_str(), Some(remote_url));
+        }
     }
 
     #[test]
@@ -763,16 +623,11 @@ mod tests {
         // standalone-registry fallback (or attachment normalization) supplies them.
         assert_eq!(component.local_path, "");
         assert!(component.remote_url.is_none());
-    }
 
-    #[test]
-    fn component_from_portable_bytes_defaults_a_missing_remote_path() {
-        let bytes = serde_json::json!({ "id": "data-machine" }).to_string();
-
+        let bare = serde_json::json!({ "id": "data-machine" }).to_string();
         let component =
-            component_from_portable_bytes(bytes.as_bytes(), Path::new("owner/repo @ v1.2.3"))
+            component_from_portable_bytes(bare.as_bytes(), Path::new("owner/repo @ v1.2.3"))
                 .expect("payload without remote_path parses");
-
         assert_eq!(component.remote_path, "");
     }
 

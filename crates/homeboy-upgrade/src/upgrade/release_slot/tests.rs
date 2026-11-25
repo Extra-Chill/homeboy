@@ -48,13 +48,13 @@ fn selected_release_upgrade_downloads_once_cold_and_zero_when_prefetched() {
                 .count();
             let lease =
                 homeboy_core::runtime_promotion::acquire("upgrade fixture", "controller").unwrap();
-            let release = crate::SelectedRelease {
+            let release = crate::upgrade::SelectedRelease {
                 tag: "v99.0.0".into(),
                 version: "99.0.0".into(),
                 target: None,
             };
             let result = super::super::execution::execute_upgrade(
-                crate::InstallMethod::Binary,
+                crate::upgrade::InstallMethod::Binary,
                 None,
                 false,
                 false,
@@ -124,7 +124,7 @@ fn prefetch_second_pass_hits_slot_and_prunes_old_slots() {
             cache,
             serde_json::to_vec(&super::super::update_check::UpdateCheckCache {
                 latest_version: "99.0.0".into(),
-                current_version: crate::current_version().into(),
+                current_version: crate::upgrade::current_version().into(),
                 update_available: true,
                 checked_at: homeboy_engine_primitives::now_secs(),
                 runtime_compatibility: None,
@@ -139,15 +139,20 @@ fn prefetch_second_pass_hits_slot_and_prunes_old_slots() {
         let running = binaries.join(format!("homeboy-{running_sha}"));
         std::fs::create_dir_all(&running).unwrap();
         std::fs::write(
-            binaries.join(format!(".release-v{}.sha256", crate::current_version())),
+            binaries.join(format!(
+                ".release-v{}.sha256",
+                crate::upgrade::current_version()
+            )),
             running_sha,
         )
         .unwrap();
-        let first = crate::update_check::prefetch_release().unwrap().unwrap();
+        let first = crate::upgrade::update_check::prefetch_release()
+            .unwrap()
+            .unwrap();
         assert!(!old.exists());
         assert!(running.exists(), "pruning preserves the running release");
         assert_eq!(
-            crate::update_check::prefetch_release().unwrap(),
+            crate::upgrade::update_check::prefetch_release().unwrap(),
             Some(first)
         );
         assert_eq!(
@@ -155,6 +160,9 @@ fn prefetch_second_pass_hits_slot_and_prunes_old_slots() {
             "download\n"
         );
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
-        assert_eq!(crate::update_check::prefetch_release().unwrap(), None);
+        assert_eq!(
+            crate::upgrade::update_check::prefetch_release().unwrap(),
+            None
+        );
     });
 }

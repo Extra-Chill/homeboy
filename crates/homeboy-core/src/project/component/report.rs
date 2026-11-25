@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_attachment_skips_git_worktrees_when_requested() {
+    fn batch_attachment_skip_policy_skips_linked_worktrees_but_not_submodules() {
         with_isolated_home(|home| {
             save(&Project {
                 id: "site".to_string(),
@@ -1023,37 +1023,6 @@ mod tests {
             let source = home.path().join("source");
             fs::create_dir_all(source.join(".git")).expect("source git directory");
             register_linked_worktree(&source, &worktree, "test");
-
-            let output = attach_component_paths_report(
-                "site",
-                vec![batch_input(worktree.to_string_lossy())],
-                BatchComponentAttachmentFailurePolicy::Continue,
-                BatchComponentAttachmentWorktreePolicy::Skip,
-            )
-            .expect("batch output");
-            let batch = output.batch.expect("batch details");
-
-            assert_eq!(batch.exit_code, 0);
-            assert_eq!(batch.skipped_count, 1);
-            assert!(matches!(
-                batch.items[0].status,
-                BatchComponentAttachmentItemStatus::Skipped
-            ));
-            assert_eq!(
-                batch.items[0].skip_reason.as_deref(),
-                Some("git worktree skipped by worktree_policy")
-            );
-        });
-    }
-
-    #[test]
-    fn batch_attachment_does_not_skip_submodule_pointer() {
-        with_isolated_home(|home| {
-            save(&Project {
-                id: "site".to_string(),
-                ..Default::default()
-            })
-            .expect("save project");
             let submodule = home.path().join("submodule");
             write_component(&submodule, "submodule");
             fs::write(
@@ -1064,17 +1033,28 @@ mod tests {
 
             let output = attach_component_paths_report(
                 "site",
-                vec![batch_input(submodule.to_string_lossy())],
+                vec![
+                    batch_input(worktree.to_string_lossy()),
+                    batch_input(submodule.to_string_lossy()),
+                ],
                 BatchComponentAttachmentFailurePolicy::Continue,
                 BatchComponentAttachmentWorktreePolicy::Skip,
             )
             .expect("batch output");
             let batch = output.batch.expect("batch details");
 
-            assert_eq!(batch.attached_count, 1);
-            assert_eq!(batch.skipped_count, 0);
+            assert_eq!(batch.exit_code, 0);
+            assert_eq!((batch.attached_count, batch.skipped_count), (1, 1));
             assert!(matches!(
                 batch.items[0].status,
+                BatchComponentAttachmentItemStatus::Skipped
+            ));
+            assert_eq!(
+                batch.items[0].skip_reason.as_deref(),
+                Some("git worktree skipped by worktree_policy")
+            );
+            assert!(matches!(
+                batch.items[1].status,
                 BatchComponentAttachmentItemStatus::Attached
             ));
         });

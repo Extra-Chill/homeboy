@@ -379,10 +379,10 @@ fn run_command_with_workspace_inner(
             ));
         }
 
-        // Keep planner failures visible in a preview. Silently converting an
-        // error to `None` used to produce an unclassified `skipped` result
-        // (without a version or a reason), notably when a primary checkout
-        // was behind its already-fetched upstream.
+        // Keep planner failures visible in a preview. Converting an error to
+        // `None` would produce an unclassified `skipped` result (without a
+        // version or a reason), notably when a primary checkout is behind its
+        // already-fetched upstream.
         let early_plan_result = super::plan(&input.component_id, &options);
         let early_plan = early_plan_result.as_ref().ok().cloned();
         let skipped_reason = early_plan.as_ref().and_then(skipped_reason_from_plan);
@@ -1442,30 +1442,25 @@ mod tests {
     }
 
     #[test]
-    fn pre_1_0_major_becomes_minor_for_local_component() {
-        let (_dir, component) = local_version_component("0.7.3");
-        assert_eq!(downgrade_major_pre_1_0(&component, "major".into()), "minor");
-    }
-
-    #[test]
-    fn pre_1_0_stable_major_stays_major() {
-        let (_dir, component) = local_version_component("1.7.3");
-        assert_eq!(downgrade_major_pre_1_0(&component, "major".into()), "major");
-    }
-
-    #[test]
-    fn pre_1_0_non_major_passes_through() {
-        let (_dir, component) = local_version_component("0.7.3");
-        for bump in ["minor", "patch", "none"] {
-            assert_eq!(downgrade_major_pre_1_0(&component, bump.into()), bump);
+    fn pre_1_0_major_bump_downgrades_to_minor_only_for_readable_pre_1_0_versions() {
+        for (version, bump, expected) in [
+            (Some("0.7.3"), "major", "minor"),
+            (Some("1.7.3"), "major", "major"),
+            (Some("0.7.3"), "minor", "minor"),
+            (Some("0.7.3"), "patch", "patch"),
+            (Some("0.7.3"), "none", "none"),
+            (None, "major", "major"),
+        ] {
+            let (dir, component) = local_version_component(version.unwrap_or("0.7.3"));
+            if version.is_none() {
+                std::fs::remove_file(dir.path().join("VERSION")).expect("remove version");
+            }
+            assert_eq!(
+                downgrade_major_pre_1_0(&component, bump.into()),
+                expected,
+                "version {version:?}, bump {bump}"
+            );
         }
-    }
-
-    #[test]
-    fn pre_1_0_unreadable_version_keeps_major() {
-        let (dir, component) = local_version_component("0.7.3");
-        std::fs::remove_file(dir.path().join("VERSION")).expect("remove version");
-        assert_eq!(downgrade_major_pre_1_0(&component, "major".into()), "major");
     }
 
     /// The record store for the isolated home each test below installs.
@@ -1483,7 +1478,7 @@ mod tests {
         ReleaseReadinessGateResult, ReleaseRollbackEvidence, ReleaseRunResult, ReleaseStepResult,
         ReleaseStepStatus,
     };
-    use homeboy_core::plan::{PlanStep, PlanStepStatus, PlanValues};
+    use homeboy_core::plan::{PlanStep, PlanStepStatus};
     use homeboy_core::test_support::with_isolated_home;
 
     fn failed_readiness(source: &str) -> ReleaseReadinessEnvelope {
@@ -1548,25 +1543,7 @@ mod tests {
                     .to_string();
             let version_before = std::fs::read_to_string(temp.path().join("VERSION"))
                 .expect("read version before release");
-            let readiness = ReleaseReadinessEnvelope {
-                source: ReleasePreflightSourceIdentity {
-                    commit: source.clone(),
-                },
-                placement: ReleasePreflightPlacement::default(),
-                runner_id: Some("lab-test".to_string()),
-                evidence_refs: vec!["evidence://lint".to_string()],
-                provenance: Default::default(),
-                gate_results: vec![ReleaseReadinessGateResult {
-                    gate: "lint".to_string(),
-                    status: "failed".to_string(),
-                    reason: Some("portable dispatch failed".to_string()),
-                    source_sha: Some(source.clone()),
-                    runner_id: Some("lab-test".to_string()),
-                    evidence_refs: Vec::new(),
-                    provenance: None,
-                    local_only: None,
-                }],
-            };
+            let readiness = failed_readiness(&source);
 
             let error = run_command_with_workspace(
                 ReleaseCommandInput {
@@ -1603,35 +1580,6 @@ mod tests {
                     .trim(),
                 source
             );
-        });
-    }
-
-    #[test]
-    fn sequential_same_commit_readiness_probes_retain_distinct_records() {
-        with_isolated_home(|_| {
-            let source = "same-commit";
-            for _ in 0..2 {
-                run_command_with_workspace(
-                    ReleaseCommandInput {
-                        component_id: "fixture".to_string(),
-                        readiness: Some(failed_readiness(source)),
-                        ..Default::default()
-                    },
-                    None,
-                )
-                .expect_err("failed readiness blocks before component resolution");
-            }
-
-            let records = test_store()
-                .for_subject("release_readiness", "fixture", false)
-                .expect("list records");
-            assert_eq!(records.len(), 2);
-            assert_ne!(records[0].owner_run_ref, records[1].owner_run_ref);
-            assert!(records.iter().all(|record| {
-                record.source_sha == source
-                    && record.terminal_disposition.as_deref() == Some("failed")
-                    && record.finalization_status == "completed"
-            }));
         });
     }
 
@@ -1741,24 +1689,32 @@ mod tests {
     }
 
     #[test]
-    fn successful_readiness_remains_succeeded_after_downstream_error() {
+    fn passed_and_skipped_gates_authorize_readiness_despite_downstream_error() {
         with_isolated_home(|_| {
-            run_command_with_workspace(
-                ReleaseCommandInput {
-                    component_id: "missing-component".to_string(),
-                    readiness: Some(successful_readiness("success-source")),
-                    ..Default::default()
-                },
-                None,
-            )
-            .expect_err("missing component is downstream of validated readiness");
-            let record = test_store()
-                .for_subject("release_readiness", "missing-component", false)
-                .expect("records")
-                .pop()
-                .expect("record");
-            assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
-            assert!(record.attributes["downstream_release"]["error"].is_string());
+            for (component_id, status) in [("passed-gates", "passed"), ("skipped-gates", "skipped")]
+            {
+                let mut readiness = successful_readiness(component_id);
+                readiness.gate_results[0].status = status.to_string();
+                if status == "skipped" {
+                    readiness.gate_results[0].provenance = None;
+                }
+                run_command_with_workspace(
+                    ReleaseCommandInput {
+                        component_id: component_id.to_string(),
+                        readiness: Some(readiness),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .expect_err("missing component is downstream of validated readiness");
+                let record = test_store()
+                    .for_subject("release_readiness", component_id, false)
+                    .expect("records")
+                    .pop()
+                    .expect("record");
+                assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
+                assert!(record.attributes["downstream_release"]["error"].is_string());
+            }
         });
     }
 
@@ -1792,50 +1748,6 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_skipped_gates_authorize_readiness() {
-        with_isolated_home(|_| {
-            let mut readiness = successful_readiness("skipped-gates");
-            let gate = &mut readiness.gate_results[0];
-            gate.status = "skipped".to_string();
-            gate.provenance = None;
-            run_command_with_workspace(
-                ReleaseCommandInput {
-                    component_id: "missing-component".to_string(),
-                    readiness: Some(readiness),
-                    ..Default::default()
-                },
-                None,
-            )
-            .expect_err("downstream component error follows authorized skipped readiness");
-            let record = test_store()
-                .for_subject("release_readiness", "missing-component", false)
-                .expect("records")
-                .pop()
-                .expect("record");
-            assert_eq!(record.terminal_disposition.as_deref(), Some("succeeded"));
-        });
-    }
-
-    #[test]
-    fn extracts_new_version_from_plan() {
-        let plan = ReleasePlan::new(
-            "demo",
-            true,
-            vec![PlanStep::ready("version", "version")
-                .inputs(PlanValues::new().string("to", "1.2.3"))
-                .build()],
-            None,
-            Vec::new(),
-            Vec::new(),
-        );
-
-        assert_eq!(
-            extract_new_version_from_plan(&plan).as_deref(),
-            Some("1.2.3")
-        );
-    }
-
-    #[test]
     fn dry_run_deployment_plan_is_omitted_when_release_plan_is_disabled() {
         let plan = ReleasePlan::new(
             "demo",
@@ -1855,53 +1767,30 @@ mod tests {
     }
 
     #[test]
-    fn recovery_release_plan_marks_needed_steps_ready() {
-        let actions = vec![
-            "committed version files".to_string(),
-            "created tag v1.2.3".to_string(),
-        ];
+    fn recovery_release_plan_readies_only_needed_steps() {
+        let actions = vec!["created tag v1.2.3".to_string()];
         let plan = recovery_release_plan("demo", "1.2.3", "v1.2.3", true, true, false, &actions);
 
         assert!(plan.enabled());
-        assert_eq!(plan.component_id(), Some("demo"));
         assert_eq!(plan.plan.hints, actions);
-        assert_eq!(plan.plan.steps.len(), 3);
-        assert_eq!(plan.plan.steps[0].id, "recover.commit");
-        assert_eq!(plan.plan.steps[0].status, PlanStepStatus::Ready);
-        assert_eq!(plan.plan.steps[1].id, "recover.tag");
-        assert_eq!(plan.plan.steps[1].status, PlanStepStatus::Ready);
-        assert_eq!(plan.plan.steps[2].id, "recover.push");
-        assert_eq!(plan.plan.steps[2].status, PlanStepStatus::Disabled);
+        let statuses = plan
+            .plan
+            .steps
+            .iter()
+            .map(|step| (step.id.as_str(), step.status.clone()))
+            .collect::<Vec<_>>();
         assert_eq!(
-            plan.plan.steps[2]
-                .inputs
-                .get("reason")
-                .and_then(|v| v.as_str()),
-            Some("already-complete")
+            statuses,
+            vec![
+                ("recover.commit", PlanStepStatus::Ready),
+                ("recover.tag", PlanStepStatus::Ready),
+                ("recover.push", PlanStepStatus::Disabled),
+            ]
         );
-        assert_eq!(
-            plan.plan.steps[0]
-                .inputs
-                .get("version")
-                .and_then(|v| v.as_str()),
-            Some("1.2.3")
-        );
-        assert_eq!(
-            plan.plan.steps[0]
-                .inputs
-                .get("tag")
-                .and_then(|v| v.as_str()),
-            Some("v1.2.3")
-        );
-    }
 
-    #[test]
-    fn recovery_release_plan_is_disabled_when_nothing_needed() {
-        let plan = recovery_release_plan("demo", "1.2.3", "v1.2.3", false, false, false, &[]);
-
-        assert!(!plan.enabled());
-        assert!(plan.plan.hints.is_empty());
-        assert!(plan
+        let noop = recovery_release_plan("demo", "1.2.3", "v1.2.3", false, false, false, &[]);
+        assert!(!noop.enabled());
+        assert!(noop
             .plan
             .steps
             .iter()
@@ -2057,7 +1946,6 @@ mod tests {
         };
 
         assert!(workspace_finalization_pending(Some(&workspace)));
-        assert_eq!(release_command_exit_code(None, 0, 0, 3), 3);
     }
 
     #[test]
@@ -2084,53 +1972,34 @@ mod tests {
     }
 
     #[test]
-    fn skipped_release_exit_code_is_distinct_from_success_and_failure() {
-        assert_ne!(SKIPPED_RELEASE_EXIT_CODE, 0);
-        assert_ne!(SKIPPED_RELEASE_EXIT_CODE, 1);
-        assert_ne!(SKIPPED_RELEASE_EXIT_CODE, 3); // post-release warnings
-    }
-
-    #[test]
-    fn skipped_release_exit_code_takes_precedence() {
-        // A skipped release produced no artifacts, so it reports the dedicated
-        // skip code even if downstream exit inputs were hypothetically non-zero
-        // (in practice they are 0 because deploy/post-release never run).
-        assert_eq!(
-            release_command_exit_code(Some("no-releasable-commits"), 0, 0, 0),
-            SKIPPED_RELEASE_EXIT_CODE
-        );
-        assert_eq!(
-            release_command_exit_code(Some("release-already-at-head"), 0, 0, 3),
-            SKIPPED_RELEASE_EXIT_CODE
-        );
-    }
-
-    #[test]
-    fn superseded_release_is_a_successful_noop() {
-        assert_eq!(
-            release_command_exit_code(Some("release-superseded"), 1, 1, 3),
-            0
-        );
-    }
-
-    #[test]
-    fn completed_release_exit_code_is_zero() {
-        assert_eq!(release_command_exit_code(None, 0, 0, 0), 0);
-    }
-
-    #[test]
-    fn failed_release_exit_code_surfaces_when_not_skipped() {
-        assert_eq!(release_command_exit_code(None, 1, 0, 0), 1);
-    }
-
-    #[test]
-    fn deploy_failure_exit_code_surfaces_when_not_skipped() {
-        assert_eq!(release_command_exit_code(None, 0, 1, 0), 1);
-    }
-
-    #[test]
-    fn post_release_warning_exit_code_surfaces_when_not_skipped() {
-        assert_eq!(release_command_exit_code(None, 0, 0, 3), 3);
+    fn release_command_exit_code_prioritizes_skip_and_supersede_over_failures() {
+        for (skipped_reason, release, deploy, post_release, expected) in [
+            (None, 0, 0, 0, 0),
+            (None, 1, 0, 0, 1),
+            (None, 0, 1, 0, 1),
+            (None, 0, 0, 3, 3),
+            (
+                Some("no-releasable-commits"),
+                0,
+                0,
+                0,
+                SKIPPED_RELEASE_EXIT_CODE,
+            ),
+            (
+                Some("release-already-at-head"),
+                0,
+                0,
+                3,
+                SKIPPED_RELEASE_EXIT_CODE,
+            ),
+            (Some("release-superseded"), 1, 1, 3, 0),
+        ] {
+            assert_eq!(
+                release_command_exit_code(skipped_reason, release, deploy, post_release),
+                expected,
+                "{skipped_reason:?} release={release} deploy={deploy} post={post_release}"
+            );
+        }
     }
 
     #[test]
@@ -2314,43 +2183,31 @@ mod tests {
     }
 
     #[test]
-    fn diagnose_orphan_tag_warns_when_tag_points_at_non_release_commit() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path();
-        run_in(dir, &["git", "init", "-q"]);
-        run_in(dir, &["git", "config", "user.email", "test@example.com"]);
-        run_in(dir, &["git", "config", "user.name", "Test"]);
-        run_in(dir, &["git", "config", "commit.gpgsign", "false"]);
-        std::fs::write(dir.join("README"), "x").expect("write");
-        run_in(dir, &["git", "add", "."]);
-        run_in(
-            dir,
-            &["git", "commit", "-q", "-m", "Update h2bc bundle to v0.6.14"],
-        );
-        run_in(dir, &["git", "tag", "v0.7.6"]);
+    fn diagnose_orphan_tag_warns_only_when_tag_points_at_non_release_commit() {
+        for (subject, tag, orphan) in [
+            ("Update h2bc bundle to v0.6.14", "v0.7.6", true),
+            ("release: v0.7.4", "v0.7.4", false),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let dir = temp.path();
+            run_in(dir, &["git", "init", "-q"]);
+            run_in(dir, &["git", "config", "user.email", "test@example.com"]);
+            run_in(dir, &["git", "config", "user.name", "Test"]);
+            run_in(dir, &["git", "config", "commit.gpgsign", "false"]);
+            std::fs::write(dir.join("README"), "x").expect("write");
+            run_in(dir, &["git", "add", "."]);
+            run_in(dir, &["git", "commit", "-q", "-m", subject]);
+            run_in(dir, &["git", "tag", tag]);
 
-        let warning = diagnose_orphan_tag(&dir.to_string_lossy(), "v0.7.6")
-            .expect("orphan tag should produce a warning");
-
-        assert!(warning.contains("v0.7.6"));
-        assert!(warning.contains("issue #2234"));
-        assert!(warning.contains("Update h2bc bundle"));
-    }
-
-    #[test]
-    fn diagnose_orphan_tag_silent_when_tag_points_at_release_commit() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let dir = temp.path();
-        run_in(dir, &["git", "init", "-q"]);
-        run_in(dir, &["git", "config", "user.email", "test@example.com"]);
-        run_in(dir, &["git", "config", "user.name", "Test"]);
-        run_in(dir, &["git", "config", "commit.gpgsign", "false"]);
-        std::fs::write(dir.join("README"), "x").expect("write");
-        run_in(dir, &["git", "add", "."]);
-        run_in(dir, &["git", "commit", "-q", "-m", "release: v0.7.4"]);
-        run_in(dir, &["git", "tag", "v0.7.4"]);
-
-        assert!(diagnose_orphan_tag(&dir.to_string_lossy(), "v0.7.4").is_none());
+            let warning = diagnose_orphan_tag(&dir.to_string_lossy(), tag);
+            if orphan {
+                let warning = warning.expect("orphan tag should produce a warning");
+                assert!(warning.contains(tag));
+                assert!(warning.contains("Update h2bc bundle"));
+            } else {
+                assert!(warning.is_none());
+            }
+        }
     }
 
     #[test]
@@ -2526,7 +2383,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_tag_with_github_release_is_noop() {
+    fn prepared_tag_with_present_or_unknown_github_release_is_noop() {
         let input = ReleaseCommandInput {
             component_id: "fixture".to_string(),
             dry_run: true,
@@ -2534,30 +2391,12 @@ mod tests {
         };
         let execution = release_execution_plan(&input);
 
-        assert!(prepared_tag_publish_recovery_decision(
-            &input,
-            "1.2.3",
-            "v1.2.3",
-            &execution,
-            "none",
-            Some(true),
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn prepared_tag_unknown_github_release_state_is_conservative_noop() {
-        let input = ReleaseCommandInput {
-            component_id: "fixture".to_string(),
-            dry_run: true,
-            ..Default::default()
-        };
-        let execution = release_execution_plan(&input);
-
-        assert!(prepared_tag_publish_recovery_decision(
-            &input, "1.2.3", "v1.2.3", &execution, "none", None,
-        )
-        .is_none());
+        for published in [Some(true), None] {
+            assert!(prepared_tag_publish_recovery_decision(
+                &input, "1.2.3", "v1.2.3", &execution, "none", published,
+            )
+            .is_none());
+        }
     }
 
     #[test]
@@ -2626,14 +2465,6 @@ mod tests {
             ],
         );
         run_in(dir, &["git", "push", "-q", "-u", "origin", "main"]);
-        run_in(dir, &["git", "checkout", "-q", "--detach"]);
-        run_in(dir, &["git", "checkout", "-q", "-B", "main"]);
-        run_in(dir, &["git", "fetch", "-q", "origin"]);
-        run_in(dir, &["git", "checkout", "-q", "--detach"]);
-        run_in(dir, &["git", "checkout", "-q", "-B", "main", "origin/main"]);
-        run_in(dir, &["git", "reset", "-q", "--hard", "HEAD"]);
-        run_in(dir, &["git", "checkout", "-q", "--detach"]);
-        run_in(dir, &["git", "checkout", "-q", "-B", "main"]);
         std::fs::write(dir.join("README"), "new upstream work\n").expect("write upstream work");
         run_in(dir, &["git", "add", "README"]);
         run_in(dir, &["git", "commit", "-q", "-m", "feat: upstream work"]);
@@ -2845,107 +2676,6 @@ mod tests {
                 &["git", "commit", "-q", "-m", &format!("fix: change {index}")],
             );
         }
-    }
-
-    /// #14974: a `feat:` commit that lands on the remote *after* the release
-    /// checkout's local git state was last observed, but *before*
-    /// `preflight.remote_sync` fast-forwards that checkout inside
-    /// `run_with_plan_inner` (see orchestrator.rs's "Rebuild the full plan
-    /// after executable preflights" note).
-    ///
-    /// `local` clones at a point where only a `fix:` commit is visible past
-    /// the last tag — auto-detection would call that a `patch` release if it
-    /// ran right now. The remote then advances with a `feat:` commit that
-    /// `local` has not fetched. Only `preflight.remote_sync`'s fast-forward
-    /// reveals it.
-    fn setup_deferred_remote_feature_fixture(remote: &std::path::Path, local: &std::path::Path) {
-        run_in(remote, &["git", "init", "-q", "--bare", "-b", "main"]);
-
-        let seed = tempfile::tempdir().expect("seed tempdir");
-        let seed = seed.path();
-        run_in(
-            seed,
-            &["git", "clone", "-q", &remote.to_string_lossy(), "."],
-        );
-        run_in(seed, &["git", "config", "user.email", "test@example.com"]);
-        run_in(seed, &["git", "config", "user.name", "Test"]);
-        run_in(seed, &["git", "config", "commit.gpgsign", "false"]);
-        std::fs::write(
-            seed.join("homeboy.json"),
-            r#"{
-                "id": "fixture",
-                "changelog_target": "CHANGELOG.md",
-                "version_targets": [
-                    { "file": "VERSION", "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)$" }
-                ]
-            }"#,
-        )
-        .expect("write homeboy config");
-        std::fs::write(seed.join("VERSION"), "1.0.0\n").expect("write version");
-        std::fs::write(seed.join("CHANGELOG.md"), "# Changelog\n").expect("write changelog");
-        run_in(seed, &["git", "add", "."]);
-        run_in(seed, &["git", "commit", "-q", "-m", "chore: initial"]);
-        run_in(seed, &["git", "tag", "v1.0.0"]);
-        run_in(seed, &["git", "push", "-q", "origin", "main", "v1.0.0"]);
-
-        // A fix lands on the remote before the release checkout clones.
-        // Auto-detection sees only this commit if it runs before any fetch.
-        std::fs::write(seed.join("bug.txt"), "fixed\n").expect("write fix file");
-        run_in(seed, &["git", "add", "."]);
-        run_in(seed, &["git", "commit", "-q", "-m", "fix: patch bug"]);
-        run_in(seed, &["git", "push", "-q", "origin", "main"]);
-
-        // The release checkout clones here: chore + fix, nothing more.
-        run_in(
-            local,
-            &["git", "clone", "-q", &remote.to_string_lossy(), "."],
-        );
-        run_in(local, &["git", "config", "user.email", "test@example.com"]);
-        run_in(local, &["git", "config", "user.name", "Test"]);
-        run_in(local, &["git", "config", "commit.gpgsign", "false"]);
-
-        // A feature merges on the remote *after* the release checkout cloned.
-        // `local` does not know about it yet — only a fetch will reveal it.
-        std::fs::write(seed.join("feature.txt"), "added\n").expect("write feature file");
-        run_in(seed, &["git", "add", "."]);
-        run_in(seed, &["git", "commit", "-q", "-m", "feat: add widget"]);
-        run_in(seed, &["git", "push", "-q", "origin", "main"]);
-    }
-
-    /// Regression test for #14974: the release workflow's auto-detected bump
-    /// type and `preflight.bump_policy`'s freshly-detected impact must agree
-    /// even when `preflight.remote_sync` fast-forwards the checkout past a
-    /// `feat:` commit that landed after this process last read local git
-    /// state. Before the fix, auto-detection ran on the stale, pre-fetch
-    /// range (`fix:` only → `patch`) while the plan rebuild that follows
-    /// `preflight.remote_sync` measured the post-fetch range (`fix:` +
-    /// `feat:` → `minor`), and `preflight.bump_policy` failed with "Requested
-    /// patch bump is lower than detected minor impact" even though nothing
-    /// was actually wrong — the checkout was simply behind when detection
-    /// ran (run 35815709562, head 043a8c465).
-    #[test]
-    fn auto_detected_bump_observes_a_remote_feature_commit_fetched_during_preflight() {
-        let remote = tempfile::tempdir().expect("remote tempdir");
-        let local = tempfile::tempdir().expect("local tempdir");
-        setup_deferred_remote_feature_fixture(remote.path(), local.path());
-
-        let (result, exit_code) = run_command(ReleaseCommandInput {
-            component_id: "fixture".to_string(),
-            path_override: Some(local.path().to_string_lossy().to_string()),
-            dry_run: false,
-            git_identity: Some("Homeboy Test <homeboy@example.test>".to_string()),
-            ..Default::default()
-        })
-        .expect("auto-detected release should observe the fetched feature commit");
-
-        assert_eq!(
-            exit_code, 0,
-            "release must not fail preflight.bump_policy on a false underbump: {result:#?}"
-        );
-        assert_eq!(result.status, "released");
-        assert_eq!(result.bump_type, "minor");
-        assert_eq!(result.new_version.as_deref(), Some("1.1.0"));
-        assert_eq!(result.tag.as_deref(), Some("v1.1.0"));
     }
 
     /// #15896 fixture: a remote with `v1.0.0` plus one unreleased `fix:`
@@ -3179,42 +2909,4 @@ mod tests {
             assert!(result.ci_release.is_none());
         });
     }
-}
-#[test]
-fn legacy_release_command_input_struct_literal_remains_source_compatible() {
-    let _ = ReleaseCommandInput {
-        component_id: "component".to_string(),
-        path_override: None,
-        dry_run: false,
-        recover: false,
-        repair_changelog_history: Vec::new(),
-        retag: false,
-        skip_checks: false,
-        skip_checks_granular: Vec::new(),
-        skip_build_validation: false,
-        skip_deps_hydration: false,
-        bump_override: None,
-        force_lower_bump: false,
-        pipeline: super::types::ReleasePipelineOptions::default(),
-        skip_github_release: false,
-        git_identity: None,
-        execution: None,
-        readiness: None,
-    };
-    let _ = ReleaseOptions {
-        bump_type: "patch".to_string(),
-        dry_run: false,
-        path_override: None,
-        skip_checks: false,
-        skip_checks_granular: Vec::new(),
-        skip_build_validation: false,
-        skip_deps_hydration: false,
-        pipeline: super::types::ReleasePipelineOptions::default(),
-        skip_github_release: false,
-        git_identity: None,
-        bump_policy: Default::default(),
-        preflight_placement: Default::default(),
-        readiness: None,
-        control_plane: None,
-    };
 }

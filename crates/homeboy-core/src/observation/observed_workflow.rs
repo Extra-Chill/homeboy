@@ -460,40 +460,32 @@ mod tests {
         assert!(events.borrow()[0].contains("simulated workflow error"));
     }
 
+    /// A completed-but-failed workflow and an error raised after finalization
+    /// both keep their scratch evidence for review.
     #[test]
-    fn observed_workflow_runner_retains_semantic_failure_evidence() {
-        let runner = ObservedWorkflowRunner::create("test demo").expect("runner");
-        let resource_summary_path = runner.run_dir().step_file("resource-summary.json");
+    fn observed_workflow_runner_retains_scratch_unless_the_run_succeeded() {
+        let cases: [(&str, crate::Result<i32>, bool); 2] = [
+            ("semantic failure", Ok(1), false),
+            (
+                "unfinalized error",
+                Err(crate::Error::internal_unexpected("finalization failed")),
+                true,
+            ),
+        ];
+        for (name, outcome, finalized) in cases {
+            let runner = ObservedWorkflowRunner::create("test demo").expect("runner");
+            let resource_summary_path = runner.run_dir().step_file("resource-summary.json");
 
-        let result = runner.finish_with_scratch_outcome(
-            None::<()>,
-            Ok::<_, crate::Error>(1),
-            false,
-            |_, _| {},
-            |_, _| {},
-        );
+            let _ = runner.finish_with_scratch_outcome(
+                None::<()>,
+                outcome,
+                finalized,
+                |_, _| {},
+                |_, _| {},
+            );
 
-        assert_eq!(result.expect("completed workflow"), 1);
-        assert!(
-            resource_summary_path.is_file(),
-            "completed but failed workflows retain evidence"
-        );
-    }
-
-    #[test]
-    fn observed_workflow_runner_retains_scratch_for_unfinalized_errors() {
-        let runner = ObservedWorkflowRunner::create("test demo").expect("runner");
-        let resource_summary_path = runner.run_dir().step_file("resource-summary.json");
-        let result = runner.finish_with_scratch_outcome(
-            None::<()>,
-            Err::<i32, _>(crate::Error::internal_unexpected("finalization failed")),
-            true,
-            |_, _| {},
-            |_, _| {},
-        );
-
-        assert!(result.is_err());
-        assert!(resource_summary_path.is_file());
+            assert!(resource_summary_path.is_file(), "{name} retains evidence");
+        }
     }
 
     #[test]

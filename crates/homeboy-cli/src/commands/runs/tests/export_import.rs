@@ -66,7 +66,7 @@ fn export_one_run_writes_directory_bundle() {
 }
 
 #[test]
-fn export_includes_findings_and_test_failures() {
+fn export_includes_findings_test_failures_and_trace_spans() {
     with_isolated_home(|home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
@@ -104,6 +104,15 @@ fn export_includes_findings_and_test_failures() {
                 }),
             })
             .expect("test failure");
+        let span = store
+            .record_trace_span(
+                NewTraceSpanRecord::builder(&run.id, "boot", "ok")
+                    .duration_ms(Some(12.5))
+                    .from_event(Some("start"))
+                    .to_event(Some("ready"))
+                    .build(),
+            )
+            .expect("span");
         let output = home.path().join("findings-bundle");
 
         let (result, _) = export_runs(
@@ -127,6 +136,8 @@ fn export_includes_findings_and_test_failures() {
             read_bundle_test_json(&output.join("test_failures.json"));
         assert_eq!(findings, vec![lint.into(), failure.clone().into()]);
         assert_eq!(test_failures, vec![failure.into()]);
+        let spans: Vec<TraceSpanRecord> = read_bundle_test_json(&output.join("trace_spans.json"));
+        assert_eq!(spans, vec![span]);
     });
 }
 
@@ -242,41 +253,6 @@ fn export_rewrites_unproven_remote_artifact_paths_as_metadata_only() {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_type, "metadata-only");
         assert_eq!(artifacts[0].path, "metadata-only:trace.zip");
-    });
-}
-
-#[test]
-fn export_trace_spans_when_present() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
-            .expect("run");
-        let span = store
-            .record_trace_span(
-                NewTraceSpanRecord::builder(&run.id, "boot", "ok")
-                    .duration_ms(Some(12.5))
-                    .from_event(Some("start"))
-                    .to_event(Some("ready"))
-                    .metadata(serde_json::json!({ "phase": "cold" }))
-                    .build(),
-            )
-            .expect("span");
-        let output = home.path().join("trace-bundle");
-
-        export_runs(
-            &test_store(),
-            RunsExportArgs {
-                run: Some(run.id),
-                since: None,
-                output: output.clone(),
-            },
-        )
-        .expect("export");
-
-        let spans: Vec<TraceSpanRecord> = read_bundle_test_json(&output.join("trace_spans.json"));
-        assert_eq!(spans, vec![span]);
     });
 }
 

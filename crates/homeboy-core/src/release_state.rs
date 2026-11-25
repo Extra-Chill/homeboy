@@ -178,23 +178,26 @@ pub struct ChangelogSnapshotData {
 }
 
 #[cfg(test)]
-mod wire_label_tests {
+mod tests {
     use super::*;
 
     #[test]
-    fn release_state_status_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (ReleaseStateStatus::Uncommitted, "uncommitted"),
-            (ReleaseStateStatus::NeedsRelease, "needs_release"),
-            (ReleaseStateStatus::DocsOnly, "docs_only"),
-            (ReleaseStateStatus::Clean, "clean"),
-            (ReleaseStateStatus::Unknown, "unknown"),
+    fn status_prefers_uncommitted_then_code_then_docs_commits() {
+        for (uncommitted, code, docs, expected) in [
+            (true, 3, 2, ReleaseStateStatus::Uncommitted),
+            (false, 1, 2, ReleaseStateStatus::NeedsRelease),
+            (false, 0, 2, ReleaseStateStatus::DocsOnly),
+            (false, 0, 0, ReleaseStateStatus::Clean),
         ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
+            let state = ReleaseState {
+                commits_since_version: code + docs,
+                code_commits: code,
+                docs_only_commits: docs,
+                has_uncommitted_changes: uncommitted,
+                baseline_ref: None,
+                baseline_warning: None,
+            };
+            assert_eq!(state.status(), expected);
         }
     }
 }

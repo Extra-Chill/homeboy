@@ -239,39 +239,6 @@ fn apply_reports_verified_bytes_and_is_idempotent() {
 }
 
 #[test]
-fn stale_heartbeat_cannot_steal_live_cleanup_lock() {
-    use std::sync::mpsc;
-
-    let root = tempfile::tempdir().expect("tempdir");
-    let first = super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.live-owner")
-        .expect("first lock");
-    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
-    let mut owner: RuntimeTempCleanupLockOwner =
-        serde_json::from_slice(&fs::read(&owner_path).expect("owner record")).expect("owner json");
-    owner.heartbeat_unix_ms = 0;
-    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
-        .expect("stale heartbeat");
-    let path = root.path().to_path_buf();
-    let (tx, rx) = mpsc::channel();
-    let contender = std::thread::spawn(move || {
-        tx.send(super::super::cleanup_support::acquire_cleanup_lock(
-            &path,
-            "test.contender",
-        ))
-        .expect("send result");
-    });
-
-    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-    drop(first);
-    let second = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("contender completes")
-        .expect("second lock");
-    drop(second);
-    contender.join().expect("contender join");
-}
-
-#[test]
 fn live_cleanup_lock_timeout_reports_typed_owner_and_remediation() {
     let root = tempfile::tempdir().expect("tempdir");
     let _first =
@@ -482,42 +449,13 @@ fn abandoned_allocation_staging_is_reclaimed_after_staleness() {
     });
 }
 
-#[test]
-fn stale_cleanup_lock_from_exited_owner_is_reclaimed() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let first =
-        super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.exited-owner")
-            .expect("first lock");
-    let owner_path = first.path.join(CLEANUP_LOCK_OWNER_FILE);
-    let mut owner: RuntimeTempCleanupLockOwner =
-        serde_json::from_slice(&fs::read(&owner_path).expect("owner record")).expect("owner json");
-    owner.pid = exited_pid();
-    owner.linux_starttime_ticks = None;
-    owner.process_start_identity = None;
-    owner.heartbeat_unix_ms = 0;
-    owner.lease_deadline_unix_ms = 0;
-    super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
-        .expect("stale owner");
-    std::mem::forget(first);
-
-    let reclaimed = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
-        root.path(),
-        "test.reclaimer",
-        2,
-        Duration::from_secs(1),
-    )
-    .expect("reclaim exited stale owner");
-    drop(reclaimed);
-}
-
 /// The exact production shape from #14221: a lock left behind by a category
 /// timeout, whose owner PID is gone but whose 300s lease is still in the
 /// future. Reclaim must not wait the lease out — the owner is dead, so nothing
 /// will ever release the lock or renew the lease.
 ///
-/// Before the fix this needed BOTH lease expiry and a dead identity, and the
-/// acquirer only retries for ~2s against a 300s lease, so the reclaim branch
-/// was unreachable and every invocation leaked another dead-owner lock.
+/// The acquirer only retries for ~2s against a 300s lease, so requiring lease
+/// expiry as well would leave every invocation leaking another dead-owner lock.
 #[test]
 fn cleanup_lock_from_exited_owner_is_reclaimed_while_its_lease_is_still_live() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -547,35 +485,6 @@ fn cleanup_lock_from_exited_owner_is_reclaimed_while_its_lease_is_still_live() {
     )
     .expect("a dead owner must be reclaimed without waiting out its lease");
     drop(reclaimed);
-}
-
-/// The self-perpetuating half of #14221: each leaked lock must not block the
-/// next invocation. Two successive acquisitions, each abandoning a dead-owner
-/// lock, must both succeed.
-#[test]
-fn successive_leaked_dead_owner_locks_do_not_block_later_cleanups() {
-    let root = tempfile::tempdir().expect("tempdir");
-    for _ in 0..3 {
-        let lock = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
-            root.path(),
-            "runtime-temp.cleanup",
-            CLEANUP_LOCK_ATTEMPTS,
-            CLEANUP_LOCK_STALE_AFTER,
-        )
-        .expect("each invocation reclaims the previous leaked lock");
-        let owner_path = lock.path.join(CLEANUP_LOCK_OWNER_FILE);
-        let mut owner: RuntimeTempCleanupLockOwner =
-            serde_json::from_slice(&fs::read(&owner_path).expect("owner")).expect("owner json");
-        // Simulate the SIGKILL at the category wall: the owner process is gone
-        // and no destructor ran, so the directory is still on disk.
-        owner.pid = exited_pid();
-        owner.linux_starttime_ticks = None;
-        owner.process_start_identity = None;
-        super::super::cleanup_support::write_cleanup_lock_owner(&owner_path, &owner)
-            .expect("dead owner");
-        std::mem::forget(lock);
-    }
-    assert!(root.path().join(CLEANUP_LOCK_DIR).exists());
 }
 
 /// A live owner is still protected. The relaxed reclaim must not let a

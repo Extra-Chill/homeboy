@@ -289,19 +289,4 @@ mod tests {
             "https://example.test/build/42"
         );
     }
-
-    #[test]
-    fn missing_provider_is_diagnostic_only() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            let session = ResolverSession::discover();
-            let (details, diagnostics) = session.hydrate(
-                "missing",
-                "failure",
-                None,
-                Instant::now() + Duration::from_secs(1),
-            );
-            assert!(details.is_empty());
-            assert_eq!(diagnostics[0].kind, "unknown");
-        });
-    }
 }

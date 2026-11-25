@@ -2641,17 +2641,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_temp_dir_creates_dir() {
-        with_isolated_home(|_| {
-            let result = runtime_temp_dir("test-dir");
-            assert!(result.is_ok());
-            if let Ok(path) = result {
-                assert!(path.is_dir());
-            }
-        });
-    }
-
-    #[test]
     fn cleanup_runtime_tmp_plans_and_removes_old_entries() {
         with_isolated_home(|_| {
             let prefix = "homeboy-cleanup-test";

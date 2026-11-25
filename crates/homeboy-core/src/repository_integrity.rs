@@ -405,25 +405,19 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn repo(link: &str, config: Option<&str>) -> tempfile::TempDir {
-        let repo = tempfile::tempdir().unwrap();
+    fn git(dir: &std::path::Path, args: &[&str]) {
         Command::new("git")
-            .args(["init"])
-            .current_dir(repo.path())
+            .args(args)
+            .current_dir(dir)
             .status()
             .unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(link, repo.path().join("link")).unwrap();
-        if let Some(config) = config {
-            fs::write(repo.path().join("homeboy.json"), config).unwrap();
-        }
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo.path())
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args([
+    }
+
+    fn commit_all(dir: &std::path::Path) {
+        git(dir, &["add", "."]);
+        git(
+            dir,
+            &[
                 "-c",
                 "user.name=test",
                 "-c",
@@ -431,11 +425,30 @@ mod tests {
                 "commit",
                 "-m",
                 "fixture",
-            ])
-            .current_dir(repo.path())
-            .status()
-            .unwrap();
+            ],
+        );
+    }
+
+    /// A committed repository whose tracked symlinks are `(path, target)`.
+    #[cfg(unix)]
+    fn repo_with_links(links: &[(&str, &str)], config: Option<&str>) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init"]);
+        for (path, target) in links {
+            let link = repo.path().join(path);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, link).unwrap();
+        }
+        if let Some(config) = config {
+            fs::write(repo.path().join("homeboy.json"), config).unwrap();
+        }
+        commit_all(repo.path());
         repo
+    }
+
+    #[cfg(unix)]
+    fn repo(link: &str, config: Option<&str>) -> tempfile::TempDir {
+        repo_with_links(&[("link", link)], config)
     }
 
     #[cfg(unix)]
@@ -448,69 +461,16 @@ mod tests {
             assert!(error.message.contains("raw target bytes base64"));
             assert!(error.message.contains("homeboy.json"));
         }
-        for target in ["missing", "dir/missing"] {
-            let fixture = repo(target, None);
-            verify_tracked_symlink_portability(fixture.path(), "HEAD", None).unwrap();
+        for links in [
+            &[("link", "missing")][..],
+            &[("link", "dir/missing")][..],
+            &[("dir/link", "../missing")][..],
+            &[("a", "b"), ("b", "a")][..],
+        ] {
+            let fixture = repo_with_links(links, None);
+            verify_tracked_symlink_portability(fixture.path(), "HEAD", None)
+                .unwrap_or_else(|err| panic!("{links:?}: {}", err.message));
         }
-        let fixture = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
-        fs::create_dir(fixture.path().join("dir")).unwrap();
-        std::os::unix::fs::symlink("../missing", fixture.path().join("dir/link")).unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-c",
-                "user.name=test",
-                "-c",
-                "user.email=test@example.test",
-                "commit",
-                "-m",
-                "nested fixture",
-            ])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
-        verify_tracked_symlink_portability(fixture.path(), "HEAD", None).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn preserves_internal_relative_cycles() {
-        let fixture = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
-        std::os::unix::fs::symlink("b", fixture.path().join("a")).unwrap();
-        std::os::unix::fs::symlink("a", fixture.path().join("b")).unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-c",
-                "user.name=test",
-                "-c",
-                "user.email=test@example.test",
-                "commit",
-                "-m",
-                "cycle fixture",
-            ])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
-        verify_tracked_symlink_portability(fixture.path(), "HEAD", None).unwrap();
     }
 
     #[cfg(unix)]
@@ -529,11 +489,10 @@ mod tests {
     #[test]
     fn common_dir_policy_is_bound_and_evidence_survives_policy_mutation() {
         let fixture = repo("/srv/example-assets", None);
-        Command::new("git")
-            .args(["remote", "add", "origin", "ssh://example.test/homeboy.git"])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
+        git(
+            fixture.path(),
+            &["remote", "add", "origin", "ssh://example.test/homeboy.git"],
+        );
         fs::write(
             fixture.path().join(".git").join(OPERATOR_POLICY_FILE),
             r#"{"schema":"homeboy/repository-integrity-policy/v1","origin":"ssh://example.test/homeboy.git","symlink_exceptions":[{"path":"link","target_base64":"L3Nydi9leGFtcGxlLWFzc2V0cw==","reason":"Lab fixture asset mount"}]}"#,
@@ -558,24 +517,7 @@ mod tests {
         // Validation consumes the immutable captured bytes, not mutable policy.
         verify_tracked_symlink_portability(fixture.path(), "HEAD", Some(&evidence)).unwrap();
         std::os::unix::fs::symlink("/srv/other-assets", fixture.path().join("other-link")).unwrap();
-        Command::new("git")
-            .args(["add", "other-link"])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
-        Command::new("git")
-            .args([
-                "-c",
-                "user.name=test",
-                "-c",
-                "user.email=test@example.test",
-                "commit",
-                "-m",
-                "add another link",
-            ])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
+        commit_all(fixture.path());
         assert!(
             verify_tracked_symlink_portability(fixture.path(), "HEAD", Some(&evidence)).is_err()
         );
@@ -598,11 +540,10 @@ mod tests {
         let error = collect_operator_policy_evidence(fixture.path()).unwrap_err();
         assert!(error.message.contains("mode 0600"));
 
-        Command::new("git")
-            .args(["remote", "add", "origin", "ssh://example.test/homeboy.git"])
-            .current_dir(fixture.path())
-            .status()
-            .unwrap();
+        git(
+            fixture.path(),
+            &["remote", "add", "origin", "ssh://example.test/homeboy.git"],
+        );
         fs::set_permissions(
             fixture.path().join(".git").join(OPERATOR_POLICY_FILE),
             std::os::unix::fs::PermissionsExt::from_mode(0o600),

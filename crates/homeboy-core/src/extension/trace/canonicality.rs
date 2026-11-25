@@ -590,22 +590,6 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn trace_canonical_policy_defaults_to_canonical() {
-        assert_eq!(
-            TraceCanonicalPolicy::from_flags(false, false),
-            TraceCanonicalPolicy::Canonical
-        );
-        assert_eq!(
-            TraceCanonicalPolicy::from_flags(true, false),
-            TraceCanonicalPolicy::Canonical
-        );
-        assert_eq!(
-            TraceCanonicalPolicy::from_flags(false, true),
-            TraceCanonicalPolicy::AllowLocalToolchain
-        );
-    }
-
-    #[test]
     fn canonical_trace_refuses_dirty_checkout_before_workload_execution() {
         let temp = tempfile::tempdir().unwrap();
         init_git_repo(temp.path());
@@ -632,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trace_refuses_checkout_behind_upstream() {
+    fn canonical_trace_refuses_checkout_diverged_from_upstream() {
         let local = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         let writer = tempfile::tempdir().unwrap();
@@ -654,34 +638,6 @@ mod tests {
         git(writer.path(), &["commit", "-m", "remote update"]);
         git(writer.path(), &["push", "origin", "main"]);
         git(local.path(), &["fetch", "origin"]);
-
-        let component = test_component(local.path());
-        let run_dir = RunDir::create().unwrap();
-        let mut args = test_run_args(local.path());
-        args.canonical_policy = TraceCanonicalPolicy::Canonical;
-
-        let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
-
-        assert_eq!(result.exit_code, 1);
-        assert!(result
-            .evidence
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("behind upstream by 1 commit")));
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn canonical_trace_refuses_checkout_ahead_of_upstream() {
-        let local = tempfile::tempdir().unwrap();
-        let remote = tempfile::tempdir().unwrap();
-        init_git_repo(local.path());
-        init_bare_repo(remote.path());
-        git(
-            local.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
-        git(local.path(), &["push", "-u", "origin", "main"]);
         std::fs::write(local.path().join("local.txt"), "local\n").unwrap();
         git(local.path(), &["add", "."]);
         git(local.path(), &["commit", "-m", "local update"]);
@@ -694,9 +650,11 @@ mod tests {
         let result = run_trace_workflow(&component, args, &run_dir, None).unwrap();
 
         assert_eq!(result.exit_code, 1);
-        assert!(result
-            .evidence
-            .reasons
+        let reasons = &result.evidence.reasons;
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.contains("behind upstream by 1 commit")));
+        assert!(reasons
             .iter()
             .any(|reason| reason.contains("ahead of upstream by 1 unmerged commit")));
         run_dir.cleanup();
@@ -894,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_trace_accepts_verified_lab_snapshot_without_git_metadata() {
+    fn lab_snapshot_without_git_metadata_is_accepted_only_when_verified() {
         let remote = tempfile::tempdir().unwrap();
         let mut reasons = Vec::new();
 
@@ -914,26 +872,21 @@ mod tests {
         assert!(reasons.is_empty());
         let check = check.expect("verified Lab snapshot accepted");
         assert_eq!(check.status, "managed-lab-snapshot");
-        assert_eq!(check.materialization_mode.as_deref(), Some("snapshot"));
+        assert_eq!(check.sha.as_deref(), Some("0123456789abcdef"));
         assert_eq!(check.runner_id.as_deref(), Some("homeboy-lab"));
-    }
 
-    #[test]
-    fn canonical_trace_surfaces_lab_snapshot_verification_failure() {
-        let remote = tempfile::tempdir().unwrap();
-        let mut reasons = Vec::new();
-
-        let check = verified_lab_snapshot_check(
+        let refused = verified_lab_snapshot_check(
             "component",
             remote.path(),
             Err("has an invalid source revision".to_string()),
             &mut reasons,
         );
 
-        assert!(check.is_none());
-        assert!(reasons
-            .iter()
-            .any(|reason| reason.contains("invalid source revision")));
+        assert!(refused.is_none());
+        assert_eq!(
+            reasons,
+            vec!["component Lab materialization has an invalid source revision".to_string()]
+        );
     }
 
     #[test]

@@ -2630,10 +2630,8 @@ fn live_replacement_gate_execution_error(run_id: &str) -> Error {
     error
 }
 
-/// Older applied reports lost the post-apply baseline when the final gate
-/// report replaced its checkpoint. Recover it only from one controller-owned
-/// checkpoint for this exact promotion; any conflicting or incomplete evidence
-/// leaves the destination unavailable for dirty-worktree reuse.
+/// Whether the attempt's run record is still non-terminal (or unreadable), so
+/// its provider execution has not settled yet.
 pub(crate) fn attempt_needs_execution_with_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,

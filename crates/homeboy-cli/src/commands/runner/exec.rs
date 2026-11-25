@@ -193,7 +193,7 @@ fn normalize_extension_env_providers(extension_ids: Vec<String>) -> Vec<String> 
     providers
 }
 
-pub(super) fn should_print_handoff(raw: bool, read_only_artifact: bool) -> bool {
+fn should_print_handoff(raw: bool, read_only_artifact: bool) -> bool {
     !raw && !read_only_artifact
 }
 

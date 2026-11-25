@@ -112,69 +112,34 @@ mod tests {
     }
 
     #[test]
-    fn findings_resolve_a_durable_run_label_and_report_the_record_id() {
-        // #6768: routing through `runs_service::require_run` resolves a
-        // durable run label, and filtering on the resolved id (not the
-        // caller's string) is what makes the lookup
-        // return the run's findings instead of an empty list.
+    fn findings_resolve_record_ids_and_durable_labels_to_the_record_id() {
+        // Filtering on the resolved id (not the caller's string) is what makes
+        // a durable label return the run's findings instead of an empty list.
         with_isolated_home(|_home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run_id = labeled_run(&store, "findings-label");
             record_finding(&store, &run_id);
 
-            let (output, exit) = findings(
-                &test_store(),
-                RunsFindingsArgs {
-                    run_id: "findings-label".to_string(),
-                    limit: 100,
-                    ..Default::default()
-                },
-            )
-            .expect("durable run label resolves through runs_service::require_run");
+            for requested in ["findings-label", run_id.as_str()] {
+                let (output, exit) = findings(
+                    &test_store(),
+                    RunsFindingsArgs {
+                        run_id: requested.to_string(),
+                        limit: 100,
+                        ..Default::default()
+                    },
+                )
+                .expect("run resolves");
 
-            assert_eq!(exit, 0);
-            let RunsOutput::Findings(output) = output else {
-                panic!("expected findings output");
-            };
-            assert_eq!(output.run_id, run_id);
-            assert_eq!(output.findings.len(), 1);
-        });
-    }
+                assert_eq!(exit, 0);
+                let RunsOutput::Findings(output) = output else {
+                    panic!("expected findings output");
+                };
+                assert_eq!(output.run_id, run_id, "{requested}");
+                assert_eq!(output.findings.len(), 1, "{requested}");
+            }
 
-    #[test]
-    fn findings_still_resolve_an_exact_record_id() {
-        // Behavior preservation: the facade tries the exact record id first, so
-        // the pre-existing contract is unchanged.
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let run_id = labeled_run(&store, "findings-exact");
-            record_finding(&store, &run_id);
-
-            let (output, _) = findings(
-                &test_store(),
-                RunsFindingsArgs {
-                    run_id: run_id.clone(),
-                    limit: 100,
-                    ..Default::default()
-                },
-            )
-            .expect("record id resolves");
-
-            let RunsOutput::Findings(output) = output else {
-                panic!("expected findings output");
-            };
-            assert_eq!(output.run_id, run_id);
-            assert_eq!(output.findings.len(), 1);
-        });
-    }
-
-    #[test]
-    fn findings_report_the_facade_missing_run_error() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let _store = ObservationStore::open_initialized().expect("store");
             // `RunsOutput` is not `Debug`, so match rather than `expect_err`.
             let error = match findings(
                 &test_store(),
@@ -187,11 +152,7 @@ mod tests {
                 Ok(_) => panic!("expected a missing-run error"),
                 Err(error) => error,
             };
-            assert!(
-                error.message.contains("run record not found"),
-                "unexpected message: {}",
-                error.message
-            );
+            assert!(error.message.contains("run record not found"));
         });
     }
 }

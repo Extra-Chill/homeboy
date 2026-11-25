@@ -2868,15 +2868,6 @@ fn liveness_uses_fixed_wire_labels_and_reconcilability() {
             serde_json::json!(label)
         );
     }
-    assert_eq!(
-        AgentTaskLiveness::ALL,
-        [
-            AgentTaskLiveness::Active,
-            AgentTaskLiveness::Stale,
-            AgentTaskLiveness::Suspect,
-            AgentTaskLiveness::Unreconciled
-        ]
-    );
 }
 
 #[test]

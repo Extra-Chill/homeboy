@@ -1439,12 +1439,21 @@ mod tests {
         path
     }
 
-    /// `json_family` and `dispatch_family` were two enums (`CommandJsonFamily`
-    /// and `CommandDispatchFamily`) joined by an identity `From` impl, so the
-    /// two exported strings were equal for every command by construction.
-    /// Collapsing to one enum makes that structural; this locks the exported
-    /// wire shape so a future divergence has to be a deliberate contract change
-    /// rather than a silent one.
+    fn validate_value(
+        schema_id: &str,
+        value: Value,
+    ) -> homeboy::core::Result<ContractValidateOutput> {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(&dir, "contract.json", value);
+        validate(ContractValidateArgs {
+            schema_id: schema_id.to_string(),
+            file,
+        })
+    }
+
+    /// `json_family` and `dispatch_family` are exported under two keys from one
+    /// enum; this locks the exported wire shape so a divergence has to be a
+    /// deliberate contract change.
     #[test]
     fn command_registry_export_reports_one_family_under_both_keys() {
         let export = command_registry_export();
@@ -1466,221 +1475,308 @@ mod tests {
         }
     }
 
-    /// `response_mode` and `stdout_mode` are rendered from the same
-    /// `CommandResponseMode` since `CommandStdoutMode` was folded into it, but
-    /// they keep their distinct exported spellings for the JSON case.
+    /// Inbound contracts are produced outside this repository (rigs,
+    /// homeboy-extensions, runners). A producer must be able to discover each
+    /// schema by registry name and check a minimal candidate before attaching it.
     #[test]
-    fn response_and_stdout_modes_keep_their_distinct_exported_spellings() {
-        assert_eq!(response_mode(CommandResponseMode::Json), "json");
-        assert_eq!(stdout_mode(CommandResponseMode::Json), "json_envelope");
+    fn registered_contracts_accept_valid_candidates() {
+        let cases: Vec<(Option<&str>, &str, Value)> = vec![
+            (
+                Some("evidence-manifest"),
+                EVIDENCE_MANIFEST_SCHEMA,
+                json!({
+                    "schema": EVIDENCE_MANIFEST_SCHEMA,
+                    "status": { "state": "blocked" },
+                    "interpretation": {
+                        "summary": "One scenario regressed.",
+                        "confidence": "medium"
+                    },
+                    "blocking_conditions": [{
+                        "kind": "coverage_gap",
+                        "summary": "Missing scenario.",
+                        "severity": "warning"
+                    }]
+                }),
+            ),
+            (
+                Some("fuzz-evidence-contract"),
+                FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                json!({
+                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                    "complete": false,
+                    "violations": [{
+                        "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                        "code": "artifact_ref_missing",
+                        "message": "declared artifact is absent from the fuzz artifact root",
+                        "declared_ref": "results.json",
+                        "resolution_base": "/run/fuzz-artifacts",
+                        "producer_contract": "HOMEBOY_FUZZ_ARTIFACTS_DIR"
+                    }]
+                }),
+            ),
+            (
+                Some("fuzz-proof"),
+                FUZZ_PROOF_SCHEMA,
+                json!({
+                    "schema": FUZZ_PROOF_SCHEMA,
+                    "source": "run_metadata",
+                    "run_id": "studio-pr-4356-homeboy-v6",
+                    "status": "pass",
+                    "verdict": {
+                        "overall": true,
+                        "workload": "passed",
+                        "evidence": "complete"
+                    },
+                    "component": { "role": "component", "id": "studio" },
+                    "execution": {},
+                    "gates": { "total": 4, "passed": 4, "failed": 0 },
+                    "evidence": {
+                        "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                        "complete": true
+                    },
+                    "markdown": "## Fuzz proof\n"
+                }),
+            ),
+            (
+                None,
+                SECRET_ENV_PLAN_SCHEMA,
+                json!({
+                    "schema": SECRET_ENV_PLAN_SCHEMA,
+                    "secret_env_names": ["API_TOKEN"]
+                }),
+            ),
+            (
+                None,
+                RUNNER_EXECUTION_RECORD_SCHEMA,
+                json!({
+                    "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
+                    "execution_id": "job-1",
+                    "runner_id": "lab-a",
+                    "transport": "daemon",
+                    "status": "succeeded"
+                }),
+            ),
+            (
+                None,
+                RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+                json!({
+                    "schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+                    "artifacts": [
+                        { "path": "artifacts/agent-loop/transcript.json", "kind": "transcript" }
+                    ]
+                }),
+            ),
+            (
+                None,
+                RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+                json!({
+                    "schema": RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+                    "envelope_id": "execution-1"
+                }),
+            ),
+            (
+                None,
+                PATH_MATERIALIZATION_PLAN_SCHEMA,
+                json!({
+                    "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+                    "entries": [{
+                        "role": "required_path",
+                        "owner": "runner_exec.require_paths",
+                        "remote_path": "/runner/cache",
+                        "materialization_mode": "existing_remote",
+                        "validation_status": "validated"
+                    }]
+                }),
+            ),
+            (
+                None,
+                RUN_OUTCOME_ENVELOPE_SCHEMA,
+                json!({ "schema": RUN_OUTCOME_ENVELOPE_SCHEMA, "status": "succeeded" }),
+            ),
+            (
+                Some("artifact-postprocess"),
+                ARTIFACT_POSTPROCESS_SCHEMA,
+                json!({
+                    "schema": ARTIFACT_POSTPROCESS_SCHEMA,
+                    "plan_id": "postprocess-1",
+                    "artifact_roots": [{ "id": "primary", "path": "artifacts" }],
+                    "actions": []
+                }),
+            ),
+            (
+                None,
+                HOST_MUTATION_LIFECYCLE_SCHEMA,
+                json!({
+                    "schema": HOST_MUTATION_LIFECYCLE_SCHEMA,
+                    "owner": "homeboy-test",
+                    "run_id": "run-1",
+                    "mutations": [
+                        {
+                            "id": "temp-workspace",
+                            "actor": "test",
+                            "kind": "temp_dir",
+                            "path": "/tmp/homeboy-run-1",
+                            "status": "applied",
+                            "revert": { "strategy": "remove_path" }
+                        },
+                        {
+                            "id": "manifest-rewrite",
+                            "actor": "test",
+                            "kind": "package_manifest_rewrite",
+                            "manifest_path": "package.json",
+                            "package_manager": "npm",
+                            "changes": [
+                                { "package": "example-package", "before": "^1.0.0", "after": "^1.1.0" }
+                            ],
+                            "status": "applied",
+                            "revert": {
+                                "strategy": "restore_package_manifest",
+                                "backup_path": "package.json.homeboy-backup"
+                            }
+                        }
+                    ]
+                }),
+            ),
+            (
+                None,
+                FUZZ_WORKLOAD_SCHEMA,
+                json!({
+                    "schema": FUZZ_WORKLOAD_SCHEMA,
+                    "id": "http-corpus",
+                    "label": "HTTP corpus",
+                    "safety_class": "read_only",
+                    "surface_ids": ["http-api"],
+                    "operations": ["parse"]
+                }),
+            ),
+            (
+                None,
+                RESOURCE_CLEANUP_INTENT_SCHEMA,
+                json!({
+                    "schema": RESOURCE_CLEANUP_INTENT_SCHEMA,
+                    "intent": "apply",
+                    "ownership": {
+                        "dry_run": {"owner": "rig", "declared_by": "test"},
+                        "apply": {"owner": "rig", "declared_by": "test"}
+                    }
+                }),
+            ),
+            (
+                None,
+                LOOP_RUN_SCHEMA,
+                json!({ "schema": LOOP_RUN_SCHEMA, "id": "loop-1", "status": "running" }),
+            ),
+        ];
 
-        for raw in [
-            CommandRawOutputMode::InteractivePassthrough,
-            CommandRawOutputMode::Markdown,
-            CommandRawOutputMode::PlainText,
-        ] {
-            assert_eq!(
-                response_mode(CommandResponseMode::Raw(raw)),
-                stdout_mode(CommandResponseMode::Raw(raw)),
-                "raw modes render identically under both keys"
-            );
+        for (name, schema_id, candidate) in cases {
+            if let Some(name) = name {
+                let contract = registered_contract(name)
+                    .unwrap_or_else(|| panic!("{name} has a registry entry"));
+                assert_eq!(contract.schema_id, schema_id, "{name}");
+                assert_eq!(registered_contract(schema_id), Some(contract), "{name}");
+            }
+            let output = validate_value(schema_id, candidate)
+                .unwrap_or_else(|err| panic!("{schema_id} should validate: {err:?}"));
+            assert_eq!(output.schema, schema_id);
+            assert!(output.valid, "{schema_id}");
         }
     }
 
-    fn validate_file(
-        schema_id: &str,
-        file: PathBuf,
-    ) -> homeboy::core::Result<ContractValidateOutput> {
-        validate(ContractValidateArgs {
-            schema_id: schema_id.to_string(),
-            file,
-        })
-    }
-
-    /// The evidence manifest is an inbound contract: a producer outside this
-    /// repository attaches one to a run. That is only usable if the producer can
-    /// discover the schema and check a candidate before attaching it.
+    /// Semantic and shape violations each surface a diagnostic naming the
+    /// offending field rather than a generic failure.
     #[test]
-    fn evidence_manifest_is_discoverable_and_validatable() {
-        let contract =
-            registered_contract("evidence-manifest").expect("evidence manifest registry entry");
-        assert_eq!(contract.schema_id, EVIDENCE_MANIFEST_SCHEMA);
-
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "manifest.json",
-            json!({
-                "schema": EVIDENCE_MANIFEST_SCHEMA,
-                "status": { "state": "blocked" },
-                "interpretation": {
-                    "summary": "One scenario regressed.",
-                    "confidence": "medium"
-                },
-                "blocking_conditions": [{
-                    "kind": "coverage_gap",
-                    "summary": "Missing scenario.",
-                    "severity": "warning"
-                }]
-            }),
-        );
-
-        let output = validate_file(EVIDENCE_MANIFEST_SCHEMA, file).expect("valid manifest");
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn evidence_manifest_validation_rejects_an_empty_interpretation() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "manifest.json",
-            json!({
-                "schema": EVIDENCE_MANIFEST_SCHEMA,
-                "status": { "state": "passed" },
-                "interpretation": { "summary": "" }
-            }),
-        );
-
-        let err = validate_file(EVIDENCE_MANIFEST_SCHEMA, file).expect_err("invalid manifest");
-        assert_eq!(err.details["valid"], json!(false));
-        assert!(
-            err.details["error"]
-                .as_str()
-                .expect("error detail")
-                .contains("interpretation.summary"),
-            "{:?}",
-            err.details
-        );
-    }
-
-    /// Fuzz evidence crosses the homeboy/homeboy-extensions boundary, so a rig
-    /// must be able to discover the schema and check a candidate before
-    /// attaching it. An inbound contract with no registry entry is unusable.
-    #[test]
-    fn fuzz_evidence_contract_is_discoverable_and_validatable() {
-        let contract = registered_contract("fuzz-evidence-contract")
-            .expect("fuzz evidence contract registry entry");
-        assert_eq!(contract.schema_id, FUZZ_EVIDENCE_CONTRACT_SCHEMA);
-        assert_eq!(
-            registered_contract(FUZZ_EVIDENCE_CONTRACT_SCHEMA),
-            Some(contract)
-        );
-
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "evidence.json",
-            json!({
-                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-                "complete": false,
-                "violations": [{
+    fn registered_contracts_reject_invalid_candidates_with_field_diagnostics() {
+        let cases: Vec<(&str, Value, &str)> = vec![
+            (
+                EVIDENCE_MANIFEST_SCHEMA,
+                json!({
+                    "schema": EVIDENCE_MANIFEST_SCHEMA,
+                    "status": { "state": "passed" },
+                    "interpretation": { "summary": "" }
+                }),
+                "interpretation.summary",
+            ),
+            (
+                FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                json!({
                     "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-                    "code": "artifact_ref_missing",
-                    "message": "declared artifact is absent from the fuzz artifact root",
-                    "declared_ref": "results.json",
-                    "resolution_base": "/run/fuzz-artifacts",
-                    "producer_contract": "HOMEBOY_FUZZ_ARTIFACTS_DIR"
-                }]
-            }),
-        );
+                    "complete": true,
+                    "violations": [{
+                        "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                        "code": "artifact_ref_missing",
+                        "message": "absent"
+                    }]
+                }),
+                "complete is true but violations were declared",
+            ),
+            (
+                FUZZ_PROOF_SCHEMA,
+                json!({
+                    "schema": FUZZ_PROOF_SCHEMA,
+                    "source": "run_metadata",
+                    "run_id": "run-1",
+                    "status": "pass",
+                    "verdict": { "overall": true, "workload": "passed", "evidence": "complete" },
+                    "component": { "role": "rig" },
+                    "execution": {},
+                    "gates": { "total": 0, "passed": 0, "failed": 0 },
+                    "evidence": { "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA, "complete": true },
+                    "markdown": ""
+                }),
+                "component.role",
+            ),
+            (
+                PATH_MATERIALIZATION_PLAN_SCHEMA,
+                json!({
+                    "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
+                    "paths": ["/runner/project"],
+                    "runtime_mounts": []
+                }),
+                "unknown field `paths`",
+            ),
+            (
+                PATH_MATERIALIZATION_PLAN_SCHEMA,
+                json!({ "schema": PATH_MATERIALIZATION_PLAN_SCHEMA }),
+                "missing field `entries`",
+            ),
+            (
+                HOST_MUTATION_LIFECYCLE_SCHEMA,
+                json!({
+                    "schema": HOST_MUTATION_LIFECYCLE_SCHEMA,
+                    "owner": "homeboy-test",
+                    "run_id": "run-1",
+                    "mutations": [{
+                        "id": "manifest-rewrite",
+                        "actor": "test",
+                        "kind": "package_manifest_rewrite",
+                        "manifest_path": "package.json",
+                        "changes": [{ "package": "example-package", "after": "^1.1.0" }],
+                        "status": "applied",
+                        "revert": { "strategy": "restore_package_manifest" }
+                    }]
+                }),
+                "mutations[0].revert.strategy",
+            ),
+            (
+                ARTIFACT_POSTPROCESS_SCHEMA,
+                json!({
+                    "schema": ARTIFACT_POSTPROCESS_SCHEMA,
+                    "plan_id": "postprocess-1",
+                    "artifact_roots": []
+                }),
+                "artifact postprocess plan",
+            ),
+        ];
 
-        let output = validate_file(FUZZ_EVIDENCE_CONTRACT_SCHEMA, file).expect("valid contract");
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn fuzz_evidence_contract_validation_rejects_completeness_that_disagrees_with_violations() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "evidence.json",
-            json!({
-                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-                "complete": true,
-                "violations": [{
-                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-                    "code": "artifact_ref_missing",
-                    "message": "absent"
-                }]
-            }),
-        );
-
-        let err = validate_file(FUZZ_EVIDENCE_CONTRACT_SCHEMA, file).expect_err("invalid");
-        assert_eq!(err.details["valid"], json!(false));
-        assert!(
-            err.details["error"]
-                .as_str()
-                .expect("error detail")
-                .contains("complete is true but violations were declared"),
-            "{:?}",
-            err.details
-        );
-    }
-
-    #[test]
-    fn fuzz_proof_is_discoverable_and_validatable() {
-        let contract = registered_contract("fuzz-proof").expect("fuzz proof registry entry");
-        assert_eq!(contract.schema_id, FUZZ_PROOF_SCHEMA);
-
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "proof.json",
-            json!({
-                "schema": FUZZ_PROOF_SCHEMA,
-                "source": "run_metadata",
-                "run_id": "studio-pr-4356-homeboy-v6",
-                "status": "pass",
-                "verdict": {
-                    "overall": true,
-                    "workload": "passed",
-                    "evidence": "complete"
-                },
-                "component": { "role": "component", "id": "studio" },
-                "execution": {},
-                "gates": { "total": 4, "passed": 4, "failed": 0 },
-                "evidence": {
-                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-                    "complete": true
-                },
-                "markdown": "## Fuzz proof\n"
-            }),
-        );
-
-        let output = validate_file(FUZZ_PROOF_SCHEMA, file).expect("valid proof");
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn fuzz_proof_validation_rejects_a_mislabelled_revision_role() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "proof.json",
-            json!({
-                "schema": FUZZ_PROOF_SCHEMA,
-                "source": "run_metadata",
-                "run_id": "run-1",
-                "status": "pass",
-                "verdict": { "overall": true, "workload": "passed", "evidence": "complete" },
-                "component": { "role": "rig" },
-                "execution": {},
-                "gates": { "total": 0, "passed": 0, "failed": 0 },
-                "evidence": { "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA, "complete": true },
-                "markdown": ""
-            }),
-        );
-
-        let err = validate_file(FUZZ_PROOF_SCHEMA, file).expect_err("invalid proof");
-        assert!(
-            err.details["error"]
-                .as_str()
-                .expect("error detail")
-                .contains("component.role"),
-            "{:?}",
-            err.details
-        );
+        for (schema_id, candidate, expected) in cases {
+            let err = validate_value(schema_id, candidate)
+                .expect_err(&format!("{schema_id} candidate should be rejected"));
+            let rendered = format!("{} {}", err.message, err.details);
+            assert!(
+                rendered.contains(expected),
+                "{schema_id}: expected `{expected}` in {rendered}"
+            );
+        }
     }
 
     #[test]
@@ -1717,24 +1813,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(catalog["schema"], CONTRACT_SCHEMA_CATALOG_SCHEMA);
-        assert!(catalog["contracts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|contract| contract["id"] == RUNNER_ARTIFACT_MANIFEST_SCHEMA));
-        assert!(catalog["contracts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|contract| contract["id"] == RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA));
-        assert!(catalog["contracts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|contract| contract["id"] == RUNNER_EXECUTION_ENVELOPE_SCHEMA));
-        let path_materialization = catalog["contracts"]
-            .as_array()
-            .unwrap()
+        let contracts = catalog["contracts"].as_array().unwrap();
+        let path_materialization = contracts
             .iter()
             .find(|contract| contract["id"] == PATH_MATERIALIZATION_PLAN_SCHEMA)
             .expect("path materialization contract export");
@@ -1748,90 +1828,62 @@ mod tests {
             .iter()
             .map(|field| field["name"].as_str().unwrap())
             .collect();
-        assert!(fields.contains(&"schema"));
-        assert!(fields.contains(&"entries"));
-        assert!(fields.contains(&"entries[].remote_path"));
-        assert!(fields.contains(&"entries[].materialization_mode"));
-        assert_eq!(
-            path_materialization["example"]["schema"],
-            PATH_MATERIALIZATION_PLAN_SCHEMA
-        );
-        assert!(path_materialization["example"].get("paths").is_none());
-        assert!(path_materialization["example"]
-            .get("runtime_mounts")
-            .is_none());
-        assert!(fields.contains(&"projection.path_remaps"));
-        assert!(catalog["contracts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|contract| contract["id"] == LAB_RUNNER_WORKLOAD_SCHEMA));
-        assert!(catalog["contracts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|contract| contract["id"] == ARTIFACT_POSTPROCESS_SCHEMA));
-        assert!(catalog["contracts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|contract| contract["id"] == HOST_MUTATION_LIFECYCLE_SCHEMA));
+        for field in [
+            "entries[].remote_path",
+            "entries[].materialization_mode",
+            "projection.path_remaps",
+        ] {
+            assert!(fields.contains(&field), "missing exported field {field}");
+        }
+        for schema_id in [
+            RUNNER_ARTIFACT_MANIFEST_SCHEMA,
+            RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA,
+            RUNNER_EXECUTION_ENVELOPE_SCHEMA,
+            LAB_RUNNER_WORKLOAD_SCHEMA,
+            ARTIFACT_POSTPROCESS_SCHEMA,
+            HOST_MUTATION_LIFECYCLE_SCHEMA,
+        ] {
+            assert!(
+                contracts.iter().any(|contract| contract["id"] == schema_id),
+                "catalog is missing {schema_id}"
+            );
+        }
     }
 
     #[test]
-    fn list_returns_registered_contracts() {
+    fn list_and_show_resolve_registered_contracts() {
         let (output, exit_code) = run(ContractArgs {
             command: ContractCommand::List,
         })
         .expect("list contracts");
-
         assert_eq!(exit_code, 0);
         let ContractOutput::List(output) = output else {
             panic!("expected list output");
         };
-        assert_eq!(output.kind, "list");
         assert!(output
             .contracts
             .iter()
             .any(|contract| contract.name == "secret-env-plan"));
-    }
 
-    #[test]
-    fn show_resolves_by_name() {
-        let (output, exit_code) = run(ContractArgs {
-            command: ContractCommand::Show(ContractShowArgs {
-                schema_id_or_name: "secret-env-plan".to_string(),
-            }),
-        })
-        .expect("show contract");
-
-        assert_eq!(exit_code, 0);
-        let ContractOutput::Show(output) = output else {
-            panic!("expected show output");
-        };
-        assert_eq!(output.kind, "show");
-        assert_eq!(
-            output.contract.schema_id,
-            crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA
-        );
-    }
-
-    #[test]
-    fn show_resolves_artifact_postprocess_contract_by_schema_id() {
-        let (output, exit_code) = run(ContractArgs {
-            command: ContractCommand::Show(ContractShowArgs {
-                schema_id_or_name: ARTIFACT_POSTPROCESS_SCHEMA.to_string(),
-            }),
-        })
-        .expect("show artifact postprocess contract");
-
-        assert_eq!(exit_code, 0);
-        let ContractOutput::Show(output) = output else {
-            panic!("expected show output");
-        };
-        assert_eq!(output.kind, "show");
-        assert_eq!(output.contract.schema_id, ARTIFACT_POSTPROCESS_SCHEMA);
-        assert_eq!(output.contract.name, "artifact-postprocess");
+        for (lookup, expected_schema) in [
+            (
+                "secret-env-plan",
+                crate::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA,
+            ),
+            (ARTIFACT_POSTPROCESS_SCHEMA, ARTIFACT_POSTPROCESS_SCHEMA),
+        ] {
+            let (output, exit_code) = run(ContractArgs {
+                command: ContractCommand::Show(ContractShowArgs {
+                    schema_id_or_name: lookup.to_string(),
+                }),
+            })
+            .expect("show contract");
+            assert_eq!(exit_code, 0);
+            let ContractOutput::Show(output) = output else {
+                panic!("expected show output");
+            };
+            assert_eq!(output.contract.schema_id, expected_schema, "{lookup}");
+        }
     }
 
     #[test]
@@ -1894,37 +1946,6 @@ mod tests {
     }
 
     #[test]
-    fn path_materialization_plan_normalizer_projects_runtime_path_remaps() {
-        let output = normalize_path_materialization_plan(json!({
-            "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
-            "entries": [
-                {
-                    "role": "primary_workspace",
-                    "owner": "lab.execution_context",
-                    "local_path": "/local/project",
-                    "remote_path": "/runner/project",
-                    "materialization_mode": "snapshot",
-                    "validation_status": "materialized"
-                },
-                {
-                    "role": "required_path",
-                    "owner": "runner_exec.require_paths",
-                    "remote_path": "/runner/cache",
-                    "materialization_mode": "existing_remote",
-                    "validation_status": "validated"
-                }
-            ]
-        }))
-        .expect("path materialization plan should normalize");
-
-        assert_eq!(output.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
-        assert_eq!(output.entries.len(), 2);
-        assert_eq!(output.path_remaps.len(), 1);
-        assert_eq!(output.path_remaps[0].local_path, "/local/project");
-        assert_eq!(output.path_remaps[0].remote_path, "/runner/project");
-    }
-
-    #[test]
     fn normalize_command_projects_path_materialization_plan_remaps() {
         let input = json!({
             "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
@@ -1962,22 +1983,10 @@ mod tests {
         else {
             panic!("expected path materialization normalize output");
         };
-        assert_eq!(output.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
         assert_eq!(output.entries.len(), 2);
         assert_eq!(output.path_remaps.len(), 1);
         assert_eq!(output.path_remaps[0].local_path, "/local/project");
         assert_eq!(output.path_remaps[0].remote_path, "/runner/project");
-    }
-
-    #[test]
-    fn path_materialization_plan_normalizer_rejects_alias_shape() {
-        let err = normalize_path_materialization_plan(json!({
-            "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
-            "paths": ["/runner/project"]
-        }))
-        .expect_err("alias-shaped plan should stay invalid");
-
-        assert!(err.message.contains("unknown field `paths`"));
     }
 
     #[test]
@@ -2075,371 +2084,16 @@ mod tests {
     }
 
     #[test]
-    fn validates_secret_env_plan_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "secret-env-plan.json",
-            json!({
-                "schema": SECRET_ENV_PLAN_SCHEMA,
-                "secret_env_names": ["API_TOKEN"]
-            }),
-        );
-
-        let output = validate_file(SECRET_ENV_PLAN_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, SECRET_ENV_PLAN_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn validates_runner_execution_record_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "runner-execution-record.json",
-            json!({
-                "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
-                "execution_id": "job-1",
-                "runner_id": "lab-a",
-                "transport": "daemon",
-                "status": "succeeded"
-            }),
-        );
-
-        let output = validate_file(RUNNER_EXECUTION_RECORD_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn validates_artifact_manifest_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "homeboy-artifact-manifest.json",
-            json!({
-                "schema": RUNNER_ARTIFACT_MANIFEST_SCHEMA,
-                "artifacts": [
-                    {
-                        "path": "artifacts/agent-loop/transcript.json",
-                        "kind": "transcript"
-                    }
-                ]
-            }),
-        );
-
-        let output = validate_file(RUNNER_ARTIFACT_MANIFEST_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, RUNNER_ARTIFACT_MANIFEST_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn validates_runner_execution_envelope_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "runner-execution-envelope.json",
-            json!({
-                "schema": RUNNER_EXECUTION_ENVELOPE_SCHEMA,
-                "envelope_id": "execution-1"
-            }),
-        );
-
-        let output = validate_file(RUNNER_EXECUTION_ENVELOPE_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, RUNNER_EXECUTION_ENVELOPE_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn validates_path_materialization_plan_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "path-materialization-plan.json",
-            json!({
-                "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
-                "entries": [
-                    {
-                        "role": "required_path",
-                        "owner": "runner_exec.require_paths",
-                        "remote_path": "/runner/cache",
-                        "materialization_mode": "existing_remote",
-                        "validation_status": "validated"
-                    }
-                ]
-            }),
-        );
-
-        let output = validate_file(PATH_MATERIALIZATION_PLAN_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn rejects_drifted_path_materialization_plan_shape() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "path-materialization-plan-drifted.json",
-            json!({
-                "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
-                "paths": ["/runner/project"],
-                "runtime_mounts": []
-            }),
-        );
-
-        let err = validate_file(PATH_MATERIALIZATION_PLAN_SCHEMA, file)
-            .expect_err("drifted path materialization shape should fail validation");
-
-        assert!(err.details["error"]
-            .as_str()
-            .unwrap()
-            .contains("unknown field `paths`"));
-    }
-
-    #[test]
-    fn rejects_path_materialization_plan_without_entries() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "path-materialization-plan-missing-entries.json",
-            json!({
-                "schema": PATH_MATERIALIZATION_PLAN_SCHEMA
-            }),
-        );
-
-        let err = validate_file(PATH_MATERIALIZATION_PLAN_SCHEMA, file)
-            .expect_err("entries is the canonical required field");
-
-        assert!(err.details["error"]
-            .as_str()
-            .unwrap()
-            .contains("missing field `entries`"));
-    }
-
-    #[test]
-    fn validates_run_outcome_envelope_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "run-outcome-envelope.json",
-            json!({
-                "schema": RUN_OUTCOME_ENVELOPE_SCHEMA,
-                "status": "succeeded"
-            }),
-        );
-
-        let output = validate_file(RUN_OUTCOME_ENVELOPE_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, RUN_OUTCOME_ENVELOPE_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn validates_artifact_postprocess_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "artifact-postprocess.json",
-            json!({
-                "schema": ARTIFACT_POSTPROCESS_SCHEMA,
-                "plan_id": "postprocess-1",
-                "artifact_roots": [
-                    {
-                        "id": "primary",
-                        "path": "artifacts"
-                    }
-                ],
-                "actions": []
-            }),
-        );
-
-        let output = validate_file(ARTIFACT_POSTPROCESS_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, ARTIFACT_POSTPROCESS_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn validates_host_mutation_lifecycle_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "host-mutation-lifecycle.json",
-            json!({
-                "schema": HOST_MUTATION_LIFECYCLE_SCHEMA,
-                "owner": "homeboy-test",
-                "run_id": "run-1",
-                "mutations": [
-                    {
-                        "id": "temp-workspace",
-                        "actor": "test",
-                        "kind": "temp_dir",
-                        "path": "/tmp/homeboy-run-1",
-                        "status": "applied",
-                        "revert": { "strategy": "remove_path" }
-                    },
-                    {
-                        "id": "manifest-rewrite",
-                        "actor": "test",
-                        "kind": "package_manifest_rewrite",
-                        "manifest_path": "package.json",
-                        "package_manager": "npm",
-                        "changes": [
-                            {
-                                "package": "example-package",
-                                "before": "^1.0.0",
-                                "after": "^1.1.0"
-                            }
-                        ],
-                        "status": "applied",
-                        "revert": {
-                            "strategy": "restore_package_manifest",
-                            "backup_path": "package.json.homeboy-backup"
-                        }
-                    }
-                ]
-            }),
-        );
-
-        let output = validate_file(HOST_MUTATION_LIFECYCLE_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, HOST_MUTATION_LIFECYCLE_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn rejects_host_mutation_lifecycle_without_reversible_manifest_backup() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "host-mutation-lifecycle.json",
-            json!({
-                "schema": HOST_MUTATION_LIFECYCLE_SCHEMA,
-                "owner": "homeboy-test",
-                "run_id": "run-1",
-                "mutations": [
-                    {
-                        "id": "manifest-rewrite",
-                        "actor": "test",
-                        "kind": "package_manifest_rewrite",
-                        "manifest_path": "package.json",
-                        "changes": [
-                            { "package": "example-package", "after": "^1.1.0" }
-                        ],
-                        "status": "applied",
-                        "revert": { "strategy": "restore_package_manifest" }
-                    }
-                ]
-            }),
-        );
-
-        let error = validate_file(HOST_MUTATION_LIFECYCLE_SCHEMA, file).unwrap_err();
-
-        assert_eq!(error.details["field"], "mutations[0].revert.strategy");
-    }
-
-    #[test]
-    fn rejects_invalid_artifact_postprocess_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "artifact-postprocess-invalid.json",
-            json!({
-                "schema": ARTIFACT_POSTPROCESS_SCHEMA,
-                "plan_id": "postprocess-1",
-                "artifact_roots": []
-            }),
-        );
-
-        let err = validate_file(ARTIFACT_POSTPROCESS_SCHEMA, file)
-            .expect_err("empty artifact roots should fail");
-
-        assert!(err.message.contains("artifact postprocess plan"));
-    }
-
-    #[test]
-    fn validates_fuzz_workload_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "fuzz-workload.json",
-            json!({
-                "schema": FUZZ_WORKLOAD_SCHEMA,
-                "id": "http-corpus",
-                "label": "HTTP corpus",
-                "safety_class": "read_only",
-                "surface_ids": ["http-api"],
-                "operations": ["parse"]
-            }),
-        );
-
-        let output = validate_file(FUZZ_WORKLOAD_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, FUZZ_WORKLOAD_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn validates_resource_cleanup_intent_with_semantic_hook() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "resource-cleanup-intent.json",
-            json!({
-                "schema": RESOURCE_CLEANUP_INTENT_SCHEMA,
-                "intent": "apply",
-                "ownership": {
-                    "dry_run": {"owner": "rig", "declared_by": "test"},
-                    "apply": {"owner": "rig", "declared_by": "test"}
-                }
-            }),
-        );
-
-        let output = validate_file(RESOURCE_CLEANUP_INTENT_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, RESOURCE_CLEANUP_INTENT_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
-    fn validates_loop_lifecycle_json_file() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "loop-run.json",
-            json!({
-                "schema": LOOP_RUN_SCHEMA,
-                "id": "loop-1",
-                "status": "running"
-            }),
-        );
-
-        let output = validate_file(LOOP_RUN_SCHEMA, file).unwrap();
-
-        assert_eq!(output.schema, LOOP_RUN_SCHEMA);
-        assert!(output.valid);
-    }
-
-    #[test]
     fn invalid_json_returns_path_aware_validation_error() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "bad-loop-run.json",
+        let error = validate_value(
+            LOOP_RUN_SCHEMA,
             json!({
                 "schema": LOOP_RUN_SCHEMA,
                 "id": "loop-1",
                 "status": "not-a-status"
             }),
-        );
-
-        let error = validate_file(LOOP_RUN_SCHEMA, file).unwrap_err();
+        )
+        .unwrap_err();
 
         assert_eq!(error.code, homeboy::core::ErrorCode::ValidationInvalidJson);
         assert_eq!(error.message, "Contract validation failed");
@@ -2456,18 +2110,15 @@ mod tests {
 
     #[test]
     fn schema_mismatch_preserves_validation_diagnostic() {
-        let dir = TempDir::new().unwrap();
-        let file = write_json(
-            &dir,
-            "loop-run-wrong-schema.json",
+        let error = validate_value(
+            LOOP_RUN_SCHEMA,
             json!({
                 "schema": LOOP_ITERATION_SCHEMA,
                 "id": "loop-1",
                 "status": "running"
             }),
-        );
-
-        let error = validate_file(LOOP_RUN_SCHEMA, file).unwrap_err();
+        )
+        .unwrap_err();
 
         assert_eq!(
             error.code,

@@ -594,15 +594,12 @@ mod tests {
     fn stale_destination_clean_with_nothing_ahead_is_fresh_even_when_behind() {
         let fixture = fixture();
         advance_origin(&fixture);
-        let classification =
+        assert_eq!(
             classify_worktree_destination(&fixture.worktree, HANDLE, BRANCH, "main")
-                .expect("classify");
-        assert_eq!(classification, DestinationFreshness::Fresh);
-    }
-
-    #[test]
-    fn stale_destination_without_tracking_base_is_unclassified() {
-        let fixture = fixture();
+                .expect("classify"),
+            DestinationFreshness::Fresh
+        );
+        // Without a tracking base the destination cannot be classified.
         assert_eq!(
             classify_worktree_destination(&fixture.worktree, HANDLE, BRANCH, "trunk")
                 .expect("classify"),

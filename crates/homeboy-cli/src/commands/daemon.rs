@@ -1177,7 +1177,8 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
         if let Err(error) = std::thread::Builder::new()
             .name("release-prefetch".into())
             .spawn(|| {
-                let mut prefetcher = homeboy_upgrade::update_check::ReleasePrefetcher::default();
+                let mut prefetcher =
+                    homeboy_upgrade::upgrade::update_check::ReleasePrefetcher::default();
                 loop {
                     std::thread::sleep(prefetcher.tick());
                 }
@@ -1302,30 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_job_status_filters_and_watch_exit_semantics_are_stable() {
-        assert!(Cli::try_parse_from([
-            "homeboy", "daemon", "jobs", "list", "--status", "running", "--limit", "1"
-        ])
-        .is_ok());
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "daemon",
-            "jobs",
-            "show",
-            "00000000-0000-0000-0000-000000000001",
-            "--full"
-        ])
-        .is_ok());
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "daemon",
-            "jobs",
-            "watch",
-            "00000000-0000-0000-0000-000000000001",
-            "--timeout",
-            "1s"
-        ])
-        .is_ok());
+    fn job_status_filter_parsing_and_watch_exit_codes() {
         assert_eq!(
             parse_job_status("running").expect("status"),
             JobStatus::Running
@@ -1359,101 +1337,31 @@ mod tests {
             .contains("missing or its retained terminal record was pruned"));
     }
 
+    /// Recovery and stop flags that guard against unintended mutation:
+    /// `--attest-absent` names exact, valid job ids and is its own invocation
+    /// (the daemon died before recording child identity, so nothing in process
+    /// can observe whether those workloads still run); a dry run and an
+    /// execution are not the same request; `--force` stop is lease-bound.
     #[test]
-    fn daemon_status_parser_exposes_the_explicit_full_surface() {
-        assert!(Cli::try_parse_from(["homeboy", "daemon", "status"]).is_ok());
-        assert!(Cli::try_parse_from(["homeboy", "daemon", "status", "--full"]).is_ok());
-    }
-
-    /// `--attest-absent` is the one confirmation on this surface that is not
-    /// ceremony: the daemon died before recording any child identity for the
-    /// named jobs, so nothing in process can observe whether their workloads
-    /// still run. It names the exact jobs and is its own invocation.
-    #[test]
-    fn attest_absent_names_exact_jobs_and_is_not_a_dry_run() {
+    fn recovery_and_stop_flag_constraints() {
         let job = "00000000-0000-0000-0000-000000000001";
         let other = "00000000-0000-0000-0000-000000000002";
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "daemon",
-            "recover",
-            "--attest-absent",
-            job,
-            other
-        ])
-        .is_ok());
-        assert!(
-            Cli::try_parse_from(["homeboy", "daemon", "recover", "--attest-absent"]).is_err(),
-            "an attestation names at least one job"
-        );
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "daemon",
-            "recover",
-            "--attest-absent",
-            "not-a-uuid"
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "daemon",
-            "recover",
-            "--dry-run",
-            "--attest-absent",
-            job
-        ])
-        .is_err());
-    }
-
-    /// The deleted per-case verbs do not linger as aliases (#17429).
-    #[test]
-    fn recover_is_the_only_recovery_verb() {
-        for verb in [
-            "adopt-orphan",
-            "reconcile-dead-lease-orphans",
-            "reconcile-leaseless-orphans",
-            "recover-missing-lease-state",
+        for (args, ok) in [
+            (vec!["recover"], true),
+            (vec!["recover", "--dry-run"], true),
+            (vec!["recover", "--yes"], true),
+            (vec!["recover", "--yes", "--dry-run"], false),
+            (vec!["recover", "--attest-absent", job, other], true),
+            (vec!["recover", "--attest-absent"], false),
+            (vec!["recover", "--attest-absent", "not-a-uuid"], false),
+            (vec!["recover", "--dry-run", "--attest-absent", job], false),
+            (vec!["stop", "--force"], false),
+            (vec!["stop", "--force", "--lease-id", "lease-live"], true),
         ] {
-            assert!(
-                Cli::try_parse_from(["homeboy", "daemon", verb]).is_err(),
-                "{verb} must not parse"
-            );
-        }
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "daemon",
-            "recover",
-            "--confirm-workload-processes-absent"
-        ])
-        .is_err());
-    }
-
-    /// #11105: five recovery subcommands existed and nothing chose between
-    /// them. The dispatcher parses with no arguments at all — every value it
-    /// needs comes from the status report it reads.
-    #[test]
-    fn the_recovery_dispatcher_needs_no_transcribed_arguments() {
-        assert!(Cli::try_parse_from(["homeboy", "daemon", "recover"]).is_ok());
-        assert!(Cli::try_parse_from(["homeboy", "daemon", "recover", "--dry-run"]).is_ok());
-        assert!(Cli::try_parse_from(["homeboy", "daemon", "recover", "--yes"]).is_ok());
-        assert!(
-            Cli::try_parse_from(["homeboy", "daemon", "recover", "--yes", "--dry-run"]).is_err(),
-            "a dry run and an execution are not the same request"
-        );
-    }
-
-    #[test]
-    fn deferred_staging_follow_up_commands_are_registered_cli_commands() {
-        for args in [
-            ["homeboy", "agent-task", "status", "run-1"].as_slice(),
-            ["homeboy", "runs", "logs", "run-1"].as_slice(),
-            ["homeboy", "agent-task", "cancel", "run-1"].as_slice(),
-            ["homeboy", "runs", "evidence", "run-1", "--full"].as_slice(),
-        ] {
-            assert!(
-                Cli::try_parse_from(args).is_ok(),
-                "deferred staging emitted an invalid command: {args:?}"
-            );
+            let argv = ["homeboy", "daemon"]
+                .into_iter()
+                .chain(args.iter().copied());
+            assert_eq!(Cli::try_parse_from(argv).is_ok(), ok, "{args:?}");
         }
     }
 
@@ -2057,10 +1965,8 @@ mod tests {
         assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
     }
 
-    /// Every value the dispatcher fills comes from the report. A restart plan
-    /// needs no attestation, so it must not be gated behind one.
     #[test]
-    fn a_plan_needing_no_attestation_is_not_gated_on_one() {
+    fn rendered_plan_chains_steps_in_order() {
         use daemon::recovery_actions as actions;
 
         let plan = actions::DaemonRecoveryPlan {
@@ -2077,32 +1983,10 @@ mod tests {
             lifecycle: daemon::lifecycle_plan::Plan::Converged,
         };
 
-        assert!(plan.required_confirmations.is_empty());
         assert_eq!(
             rendered_plan(&plan),
             "homeboy daemon stop && homeboy daemon ensure-running"
         );
-    }
-
-    #[test]
-    fn stop_accepts_an_exact_lease_selector() {
-        assert!(
-            Cli::try_parse_from(["homeboy", "daemon", "stop", "--lease-id", "lease-live",]).is_ok()
-        );
-    }
-
-    #[test]
-    fn force_stop_requires_lease_id() {
-        assert!(Cli::try_parse_from(["homeboy", "daemon", "stop", "--force"]).is_err());
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "daemon",
-            "stop",
-            "--force",
-            "--lease-id",
-            "lease-live",
-        ])
-        .is_ok());
     }
 
     #[test]

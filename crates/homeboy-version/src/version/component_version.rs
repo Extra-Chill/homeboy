@@ -1,15 +1,8 @@
 //! The single component-version read spine (#11144).
 //!
-//! Three call paths used to read a component's `versionTargets` config
-//! independently — `read_component_version`, `validate_version_targets_at`, and
-//! `bump_component_version_with_changelog` — each repeating the same
-//! local-path validation, the same `config_missing_key("versionTargets", ..)`,
-//! and the same empty-targets rejection, and two of them additionally
-//! repeating the same "resolve pattern, resolve path, read file, parse
-//! versions" block. Three copies meant three places for the contract to drift
-//! silently.
-//!
-//! Everything that reads a declared version target now goes through
+//! `read_component_version`, `validate_version_targets_at`, and
+//! `bump_component_version_with_changelog` all read a component's
+//! `versionTargets` config. Everything that reads a declared version target goes through
 //! `require_targets` / [`declared_targets`] (the config read) and
 //! `read_target` (the file read). Where the callers genuinely differ they
 //! differ *after* the read, on the [`TargetRead`] they get back:

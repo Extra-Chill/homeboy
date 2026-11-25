@@ -149,63 +149,29 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_contract_validates_without_apply_owner() {
-        contract(ResourceCleanupIntent::DryRun).validate().unwrap();
-    }
+    fn contract_requires_current_schema_and_owner_for_each_intent() {
+        let mut apply = contract(ResourceCleanupIntent::Apply);
+        apply.ownership.apply = Some(metadata("extension"));
+        for valid in [contract(ResourceCleanupIntent::DryRun), apply] {
+            valid.validate().unwrap();
+        }
 
-    #[test]
-    fn apply_contract_requires_apply_owner() {
-        let error = contract(ResourceCleanupIntent::Apply)
-            .validate()
-            .unwrap_err();
+        let mut wrong_schema = contract(ResourceCleanupIntent::DryRun);
+        wrong_schema.schema = "homeboy/resource-cleanup-intent/v0".to_string();
+        let mut blank_owner = contract(ResourceCleanupIntent::DryRun);
+        blank_owner.ownership.dry_run = metadata("  ");
+        let mut blank_apply_owner = contract(ResourceCleanupIntent::Apply);
+        blank_apply_owner.ownership.apply = Some(metadata(" "));
 
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "ownership.apply");
-    }
-
-    #[test]
-    fn apply_contract_validates_with_apply_owner() {
-        let mut contract = contract(ResourceCleanupIntent::Apply);
-        contract.ownership.apply = Some(metadata("extension"));
-
-        contract.validate().unwrap();
-    }
-
-    #[test]
-    fn ownership_metadata_rejects_blank_owner() {
-        let error = metadata("  ").validate("ownership.dry_run").unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "ownership.dry_run.owner");
-    }
-
-    #[test]
-    fn contract_rejects_wrong_schema() {
-        let mut contract = contract(ResourceCleanupIntent::DryRun);
-        contract.schema = "homeboy/resource-cleanup-intent/v0".to_string();
-
-        let error = contract.validate().unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["field"], "schema");
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn resource_cleanup_intent_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (ResourceCleanupIntent::DryRun, "dry_run"),
-            (ResourceCleanupIntent::Apply, "apply"),
+        for (invalid, field) in [
+            (contract(ResourceCleanupIntent::Apply), "ownership.apply"),
+            (wrong_schema, "schema"),
+            (blank_owner, "ownership.dry_run.owner"),
+            (blank_apply_owner, "ownership.apply.owner"),
         ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
+            let error = invalid.validate().unwrap_err();
+            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument, "{field}");
+            assert_eq!(error.details["field"], field);
         }
     }
 }

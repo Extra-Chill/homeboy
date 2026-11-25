@@ -785,39 +785,18 @@ pub(super) fn is_false(value: &bool) -> bool {
 mod tests {
     use super::ComponentReleaseConfig;
 
+    /// Release config is written back into `homeboy.json`, so undeclared
+    /// policy must not materialize as keys the operator never wrote, and
+    /// declared opt-ins must survive the round trip.
     #[test]
-    fn refresh_dependencies_is_opt_in_and_round_trips() {
-        let default = ComponentReleaseConfig::default();
-        assert!(!default.refresh_dependencies);
-        assert!(serde_json::to_value(default)
-            .unwrap()
-            .get("refresh_dependencies")
-            .is_none());
-        let declared: ComponentReleaseConfig =
-            serde_json::from_value(serde_json::json!({"refresh_dependencies": true})).unwrap();
-        assert!(declared.refresh_dependencies);
+    fn defaulted_release_policy_writes_no_keys_and_declared_policy_round_trips() {
         assert_eq!(
-            serde_json::to_value(declared).unwrap()["refresh_dependencies"],
-            true
+            serde_json::to_value(ComponentReleaseConfig::default()).expect("serialize"),
+            serde_json::json!({})
         );
-    }
 
-    #[test]
-    fn manual_changelog_edit_policy_is_absent_when_defaulted() {
-        let value = serde_json::to_value(ComponentReleaseConfig::default()).expect("serialize");
-
-        assert!(value.get("publish").is_none());
-        assert!(value.get("allow_manual_changelog_edits").is_none());
-        assert!(value.get("manual_version_targets").is_none());
-        assert!(value.get("manual_release_lockfiles").is_none());
-    }
-
-    #[test]
-    fn release_gates_are_absent_when_defaulted_and_round_trip_when_declared() {
-        let value = serde_json::to_value(ComponentReleaseConfig::default()).expect("serialize");
-        assert!(value.get("gates").is_none());
-
-        let config: ComponentReleaseConfig = serde_json::from_value(serde_json::json!({
+        let declared: ComponentReleaseConfig = serde_json::from_value(serde_json::json!({
+            "refresh_dependencies": true,
             "gates": [{
                 "id": "html-site-import",
                 "artifact": { "profile": "html-site-import" },
@@ -825,18 +804,13 @@ mod tests {
                 "evidence": "release-import-gate-evidence"
             }]
         }))
-        .expect("release gates configuration");
+        .expect("release configuration");
 
-        assert_eq!(config.gates.len(), 1);
-        assert_eq!(config.gates[0].id, "html-site-import");
-        assert_eq!(
-            config.gates[0]
-                .artifact
-                .as_ref()
-                .and_then(|selector| selector.profile.as_deref()),
-            Some("html-site-import")
-        );
-        config.validate_gates().expect("valid gates");
+        declared.validate_gates().expect("valid gates");
+        let value = serde_json::to_value(&declared).expect("serialize");
+        assert_eq!(value["refresh_dependencies"], true);
+        assert_eq!(value["gates"][0]["id"], "html-site-import");
+        assert_eq!(value["gates"][0]["artifact"]["profile"], "html-site-import");
     }
 
     #[test]

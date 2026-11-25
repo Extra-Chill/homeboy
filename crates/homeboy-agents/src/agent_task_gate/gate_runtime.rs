@@ -1,8 +1,6 @@
 //! Mutation-free executable discovery for declared shell gates.
 use super::*;
 
-pub(super) const RESOLVE_ONLY: &str = "__homeboy_gate_resolve_only__";
-
 /// Only literal bare command names resolved through PATH are inferred. Quoted
 /// separators are arguments, while pipelines, lists and newlines start another
 /// simple command. Path-style commands (`./scripts/check.sh`) are left to the

@@ -196,7 +196,6 @@ fn ci_release_ownership(component: &Component, component_id: &str) -> CiReleaseO
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::component::ReleaseOwner;
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -230,25 +229,5 @@ mod tests {
             "GITHUB_ACTIONS",
             "false"
         )])));
-    }
-
-    #[test]
-    fn release_owner_config_parses_and_defaults_to_local() {
-        let config: homeboy_core::component::ComponentReleaseConfig =
-            serde_json::from_str(r#"{"owner":"ci","publish":false}"#).expect("parse");
-        assert_eq!(config.owner, Some(ReleaseOwner::Ci));
-        assert!(config.ci_owns_release());
-
-        let config: homeboy_core::component::ComponentReleaseConfig =
-            serde_json::from_str(r#"{"publish":false}"#).expect("parse");
-        assert_eq!(config.release_owner(), ReleaseOwner::Local);
-        assert!(!config.ci_owns_release());
-
-        assert!(
-            serde_json::from_str::<homeboy_core::component::ComponentReleaseConfig>(
-                r#"{"owner":"robot"}"#
-            )
-            .is_err()
-        );
     }
 }

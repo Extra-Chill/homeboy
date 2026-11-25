@@ -195,51 +195,79 @@ mod tests {
     }
 
     #[test]
-    fn component_changed_preserves_raw_output_routing() {
-        let spec = crate::command_contract::COMMAND_SPECS
-            .iter()
-            .find(|s| s.name == "component")
-            .unwrap();
-        for format in ["json", "matrix", "ids"] {
-            let cli = Cli::try_parse_from([
-                "homeboy",
+    fn subcommand_output_overrides_route_raw_responses() {
+        let cases: [(&str, &[&str], CommandRawOutputMode); 4] = [
+            (
                 "component",
-                "changed",
-                "--base",
-                "HEAD^",
-                "--head",
-                "HEAD",
-                "--format",
-                format,
-            ])
-            .unwrap();
+                &[
+                    "homeboy",
+                    "component",
+                    "changed",
+                    "--base",
+                    "HEAD^",
+                    "--head",
+                    "HEAD",
+                    "--format",
+                    "json",
+                ],
+                CommandRawOutputMode::PlainText,
+            ),
+            (
+                "component",
+                &[
+                    "homeboy",
+                    "component",
+                    "changed",
+                    "--base",
+                    "HEAD^",
+                    "--head",
+                    "HEAD",
+                    "--format",
+                    "matrix",
+                ],
+                CommandRawOutputMode::PlainText,
+            ),
+            (
+                "component",
+                &[
+                    "homeboy",
+                    "component",
+                    "changed",
+                    "--base",
+                    "HEAD^",
+                    "--head",
+                    "HEAD",
+                    "--format",
+                    "ids",
+                ],
+                CommandRawOutputMode::PlainText,
+            ),
+            (
+                "runs",
+                &[
+                    "homeboy",
+                    "runs",
+                    "report",
+                    "failure-digest",
+                    "--output-dir",
+                    "artifacts",
+                    "--results",
+                    r#"{"audit":"pass"}"#,
+                ],
+                CommandRawOutputMode::Markdown,
+            ),
+        ];
+        for (name, argv, raw_mode) in cases {
+            let spec = crate::command_contract::COMMAND_SPECS
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("command spec");
+            let cli = Cli::try_parse_from(argv).expect("invocation should parse");
             assert_eq!(
                 cli.command.route(spec, false).descriptor.response_mode,
-                CommandResponseMode::Raw(CommandRawOutputMode::PlainText)
+                CommandResponseMode::Raw(raw_mode),
+                "{argv:?}"
             );
         }
-    }
-
-    #[test]
-    fn runs_report_preserves_markdown_output_routing() {
-        let spec = crate::command_contract::COMMAND_SPECS
-            .iter()
-            .find(|spec| spec.name == "runs")
-            .expect("runs command spec");
-        let markdown = Cli::try_parse_from([
-            "homeboy",
-            "runs",
-            "report",
-            "failure-digest",
-            "--output-dir",
-            "artifacts",
-            "--results",
-            r#"{"audit":"pass"}"#,
-        ])
-        .expect("markdown report invocation should parse");
-        assert_eq!(
-            markdown.command.route(spec, false).descriptor.response_mode,
-            CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
-        );
     }
 }

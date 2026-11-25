@@ -1504,7 +1504,6 @@ mod tests {
     use homeboy::core::observation::{FindingListFilter, ObservationStore};
     use homeboy_core::extension::test::{TestAnalysisInput, TestCounts, TestFailure};
     use std::fs;
-    use std::path::PathBuf;
 
     struct EnvVarGuard {
         name: &'static str,
@@ -1579,15 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_ci_job_flag() {
-        let cli = TestCli::try_parse_from(["test", "homeboy", "--ci-job", "unit"])
-            .expect("test should parse --ci-job");
-
-        assert_eq!(cli.test.ci_job.as_deref(), Some("unit"));
-    }
-
-    #[test]
-    fn parses_differential_flags_and_keeps_them_out_of_self_check_dispatch() {
+    fn differential_mode_stays_out_of_self_check_dispatch_and_lab_offload() {
         let cli = TestCli::try_parse_from([
             "test",
             "homeboy",
@@ -1602,9 +1593,6 @@ mod tests {
         ])
         .expect("differential test arguments should parse");
 
-        assert!(cli.test.differential);
-        assert_eq!(cli.test.differential_base, "main");
-        assert!(cli.test.populate_differential_baseline);
         assert!(!cli
             .test
             .should_use_self_check_dispatch(&filter_homeboy_flags(&cli.test.args)));
@@ -1788,33 +1776,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fixture_keeps_target_explicit_and_internal_source_absent() {
-        let args = TestArgs::for_test("fixture", "/tmp/fixture");
-
-        assert_eq!(args.comp.component.as_deref(), Some("fixture"));
-        assert_eq!(args.comp.path.as_deref(), Some("/tmp/fixture"));
-        assert!(args.release_readiness_source.is_none());
-    }
-
-    #[test]
-    fn parses_repeated_settings_json_file() {
-        let cli = TestCli::try_parse_from([
-            "test",
-            "homeboy",
-            "--settings-json-file",
-            "base.json",
-            "--settings-json-file",
-            "profile.json",
-        ])
-        .expect("test should parse settings file flags");
-
-        assert_eq!(
-            cli.test.setting_args.settings_json_file,
-            vec![PathBuf::from("base.json"), PathBuf::from("profile.json")]
-        );
-    }
-
-    #[test]
     fn baseline_and_ratchet_test_modes_remain_controller_local() {
         for flag in ["--baseline", "--ratchet"] {
             let args = TestCli::try_parse_from(["test", "homeboy", flag])
@@ -1834,38 +1795,31 @@ mod tests {
     /// The portable test contract must declare the ComponentTest secret env
     /// source so a Lab offload names the component's `test.secret_env` to the
     /// runner, which resolves them from its own `secret_env` refs (#15938).
+    /// Externally configured settings files keep the run portable.
     #[test]
     fn portable_test_contract_declares_component_test_secret_env_source() {
-        let args = TestCli::try_parse_from(["test", "homeboy"])
-            .expect("test command should parse")
-            .test;
-        let contract = args.lab_contract();
+        for argv in [
+            vec!["test", "homeboy"],
+            vec![
+                "test",
+                "homeboy",
+                "--settings-json-file",
+                "phpunit-db-service.json",
+                "--setting-json",
+                "database_service={\"host\":\"127.0.0.1\",\"port\":3306}",
+            ],
+        ] {
+            let args = TestCli::try_parse_from(argv.clone())
+                .expect("test command should parse")
+                .test;
+            let contract = args.lab_contract();
 
-        assert!(contract.is_portable());
-        assert_eq!(
-            contract.secret_env_sources,
-            crate::command_contract::LAB_COMPONENT_TEST_SECRET_ENV_SOURCES
-        );
-        assert_eq!(
-            contract.secret_env_sources,
-            &[homeboy_core::lab_contract::LabSecretEnvSource::ComponentTest]
-        );
-    }
-
-    #[test]
-    fn externally_configured_test_mode_remains_lab_portable() {
-        let args = TestCli::try_parse_from([
-            "test",
-            "homeboy",
-            "--settings-json-file",
-            "phpunit-db-service.json",
-            "--setting-json",
-            "database_service={\"host\":\"127.0.0.1\",\"port\":3306}",
-        ])
-        .expect("external database-service settings should parse")
-        .test;
-
-        assert!(args.lab_contract().is_portable());
+            assert!(contract.is_portable(), "{argv:?}");
+            assert_eq!(
+                contract.secret_env_sources,
+                &[homeboy_core::lab_contract::LabSecretEnvSource::ComponentTest]
+            );
+        }
     }
 
     #[test]
@@ -1941,9 +1895,11 @@ mod tests {
         with_isolated_home(|home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let args = sample_args();
+            let run_dir = RunDir::create().expect("run dir");
 
-            let observation = start_test_observation("homeboy", home.path(), &args, "test", None)
-                .expect("observation should start");
+            let observation =
+                start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
+                    .expect("observation should start");
             let run_id = observation.active.run_id().to_string();
 
             finish_test_observation_error(
@@ -1975,28 +1931,7 @@ mod tests {
                 run.metadata_json.get("run_dir").is_none(),
                 "temporary run_dir paths must not be persisted in observation metadata"
             );
-        });
-    }
-
-    #[test]
-    fn test_observation_keeps_run_dir_out_of_initial_metadata() {
-        with_isolated_home(|home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let args = sample_args();
-            let run_dir = RunDir::create().expect("run dir");
-
-            let observation =
-                start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
-                    .expect("observation should start");
-            let run_id = observation.active.run_id().to_string();
-
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .get_run(&run_id)
-                .expect("read run")
-                .expect("run exists");
-
-            assert!(run.metadata_json.get("run_dir").is_none());
+            run_dir.cleanup();
         });
     }
 
@@ -2681,158 +2616,60 @@ mod tests {
     }
 
     #[test]
-    fn parses_one_shot_extension_override() {
-        let cli = TestCli::try_parse_from([
-            "test",
-            "--path",
-            "/tmp/repo",
-            "--extension",
-            "fixture-test",
-            "--changed-since",
-            "origin/main",
-        ])
-        .expect("test should parse --extension override");
-
-        assert_eq!(cli.test.extension_override.extensions, vec!["fixture-test"]);
-        assert_eq!(cli.test.changed.changed_since(), Some("origin/main"));
-    }
-
-    #[test]
-    fn filter_strips_boolean_flags() {
-        let args = vec!["--analyze".to_string(), "--filter=SomeTest".to_string()];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn filter_strips_multiple_boolean_flags() {
-        let args = vec![
-            "--analyze".to_string(),
-            "--baseline".to_string(),
-            "--ignore-baseline".to_string(),
-            "--ratchet".to_string(),
-            "--skip-lint".to_string(),
-            "--coverage".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn filter_strips_value_flags_space_separated() {
-        let args = vec![
-            "--changed-since".to_string(),
-            "origin/main".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-
-        let args = vec![
-            "--extension".to_string(),
-            "fixture-test".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn filter_strips_value_flags_equals_form() {
-        let args = vec![
-            "--changed-since=v0.36.0".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn filter_strips_coverage_min() {
-        let args = vec![
-            "--coverage-min".to_string(),
-            "80".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn filter_strips_setting() {
-        let args = vec![
-            "--setting".to_string(),
-            "database_type=mysql".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn filter_strips_settings_json_file_flags() {
-        let args = vec![
-            "--settings-json-file".to_string(),
-            "base.json".to_string(),
-            "--settings-json-file=profile.json".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn filter_preserves_unknown_flags() {
-        let args = vec![
-            "--filter=SomeTest".to_string(),
-            "--group".to_string(),
-            "ajax".to_string(),
-            "--verbose".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(args, result);
-    }
-
-    #[test]
-    fn filter_handles_empty() {
-        let result = filter_homeboy_flags(&[]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn filter_handles_mixed() {
-        let args = vec![
-            "--analyze".to_string(),
-            "--skip-lint".to_string(),
-            "--changed-since".to_string(),
-            "v0.35.0".to_string(),
-            "--filter=FlowAbilities".to_string(),
-            "--coverage-min=80".to_string(),
-            "--verbose".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=FlowAbilities", "--verbose"]);
-    }
-
-    #[test]
-    fn filter_strips_path_flag() {
-        let args = vec![
-            "--path".to_string(),
-            "/tmp/checkout".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn filter_strips_json_summary_flag() {
-        let args = vec![
-            "--json-summary".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
+    fn filter_strips_homeboy_flags_and_preserves_runner_passthrough() {
+        for (args, expected) in [
+            (vec![], vec![]),
+            (
+                vec!["--analyze", "--filter=SomeTest"],
+                vec!["--filter=SomeTest"],
+            ),
+            (
+                vec![
+                    "--analyze",
+                    "--baseline",
+                    "--ignore-baseline",
+                    "--ratchet",
+                    "--skip-lint",
+                    "--coverage",
+                    "--json-summary",
+                ],
+                vec![],
+            ),
+            (
+                vec![
+                    "--changed-since",
+                    "origin/main",
+                    "--extension",
+                    "fixture-test",
+                    "--coverage-min",
+                    "80",
+                    "--setting",
+                    "database_type=mysql",
+                    "--settings-json-file",
+                    "base.json",
+                    "--path",
+                    "/tmp/checkout",
+                    "--filter=SomeTest",
+                ],
+                vec!["--filter=SomeTest"],
+            ),
+            (
+                vec![
+                    "--changed-since=v0.36.0",
+                    "--coverage-min=80",
+                    "--settings-json-file=profile.json",
+                    "--filter=SomeTest",
+                ],
+                vec!["--filter=SomeTest"],
+            ),
+            (
+                vec!["--filter=SomeTest", "--group", "ajax", "--verbose"],
+                vec!["--filter=SomeTest", "--group", "ajax", "--verbose"],
+            ),
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(filter_homeboy_flags(&args), expected, "{args:?}");
+        }
     }
 }
 #[cfg(test)]

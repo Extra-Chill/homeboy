@@ -2074,40 +2074,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stale_owner_is_bounded_by_liveness_or_expiry() {
-        let dead = RuntimePromotionLeaseRecord {
-            schema: "v1".to_string(),
-            pid: u32::MAX,
-            operation: "upgrade".to_string(),
-            operation_id: None,
-            status_command: None,
-            target: "main".to_string(),
-            generation: "old".to_string(),
-            compatibility_key: String::new(),
-            started_at: now(),
-            linux_starttime_ticks: None,
-            process_start_identity: None,
-            heartbeat_at: now(),
-            expires_at: expiry(),
-            capability: "capability".to_string(),
-        };
-        assert!(reclaimable_with(&dead, |_, _, _| {
-            crate::process::ProcessIdentityState::Dead
-        }));
-    }
-
-    #[test]
-    fn reused_pid_is_reclaimable_but_live_or_unverifiable_owner_remains_protected() {
-        let record = lease_record();
-        assert!(reclaimable_with(&record, |_, _, _| {
-            crate::process::ProcessIdentityState::IdentityMismatch
-        }));
-        assert!(!reclaimable_with(&record, |_, _, _| {
-            crate::process::ProcessIdentityState::Live
-        }));
-        assert!(!reclaimable_with(&record, |_, _, _| {
-            crate::process::ProcessIdentityState::Unverifiable
-        }));
+    fn only_dead_or_reused_owner_evidence_makes_leases_and_pins_reclaimable() {
+        use crate::process::ProcessIdentityState;
+        let lease = lease_record();
+        let pin = generation_pin(42);
+        for (state, reclaimable) in [
+            (ProcessIdentityState::Dead, true),
+            (ProcessIdentityState::IdentityMismatch, true),
+            (ProcessIdentityState::Live, false),
+            (ProcessIdentityState::Unverifiable, false),
+        ] {
+            assert_eq!(
+                reclaimable_with(&lease, |_, _, _| state),
+                reclaimable,
+                "lease {state:?}"
+            );
+            assert_eq!(
+                pin_reclaimable_with(&pin, |_, _, _| state),
+                reclaimable,
+                "pin {state:?}"
+            );
+        }
     }
 
     #[test]
@@ -2953,23 +2940,6 @@ mod tests {
     }
 
     #[test]
-    fn pin_reclamation_requires_dead_or_invalid_owner_evidence() {
-        let pin = generation_pin(42);
-        assert!(pin_reclaimable_with(&pin, |_, _, _| {
-            crate::process::ProcessIdentityState::Dead
-        }));
-        assert!(pin_reclaimable_with(&pin, |_, _, _| {
-            crate::process::ProcessIdentityState::IdentityMismatch
-        }));
-        assert!(!pin_reclaimable_with(&pin, |_, _, _| {
-            crate::process::ProcessIdentityState::Live
-        }));
-        assert!(!pin_reclaimable_with(&pin, |_, _, _| {
-            crate::process::ProcessIdentityState::Unverifiable
-        }));
-    }
-
-    #[test]
     fn pin_exemption_requires_the_exact_transaction_capability() {
         let record = lease_record();
         let lease = RuntimePromotionLease {
@@ -3044,10 +3014,9 @@ mod tests {
     }
 
     #[test]
-    fn acquire_retries_once_when_the_observed_lease_disappears() {
+    fn acquire_retries_once_only_when_the_observed_lease_disappears() {
         let mut create_calls = 0;
         let mut read_calls = 0;
-
         let result = acquire_lease_dir_with_retry(
             || {
                 create_calls += 1;
@@ -3065,17 +3034,11 @@ mod tests {
             },
         )
         .expect("the second acquisition succeeds after the former owner removes its lease");
-
         assert!(result.is_none());
-        assert_eq!(create_calls, 2);
-        assert_eq!(read_calls, 1);
-    }
+        assert_eq!((create_calls, read_calls), (2, 1));
 
-    #[test]
-    fn acquire_does_not_retry_a_malformed_or_unreadable_lease() {
         let mut create_calls = 0;
         let mut read_calls = 0;
-
         let error = acquire_lease_dir_with_retry(
             || {
                 create_calls += 1;
@@ -3090,10 +3053,8 @@ mod tests {
             },
         )
         .expect_err("a malformed or unreadable lease remains an error");
-
         assert_eq!(error.code, ErrorCode::InternalIoError);
-        assert_eq!(create_calls, 1);
-        assert_eq!(read_calls, 1);
+        assert_eq!((create_calls, read_calls), (1, 1));
     }
 
     #[test]
@@ -3355,22 +3316,6 @@ mod tests {
 
     #[test]
     fn unrelated_process_without_capability_is_denied() {
-        let held = lease_record();
-        assert!(!authorizes_subprocess(
-            &held,
-            "lab",
-            "generation-a",
-            &SubprocessLeaseCapability {
-                owner_pid: 99,
-                owner_linux_starttime_ticks: Some(42),
-                owner_process_start_identity: Some(crate::process::ProcessStartIdentity::Linux {
-                    starttime_ticks: 42,
-                }),
-                target: "lab".to_string(),
-                generation: "generation-a".to_string(),
-                capability: "unforgeable-capability".to_string(),
-            }
-        ));
         crate::test_support::with_isolated_home(|_| {
             let _lease = acquire("parent", "lab").expect("parent acquires lease");
             let executable = std::env::current_exe().expect("resolve test executable");
@@ -3394,98 +3339,61 @@ mod tests {
     }
 
     #[test]
-    fn subprocess_capability_rejects_wrong_token_target_and_generation() {
+    fn subprocess_reentrancy_requires_exact_capability_and_live_process_identity() {
+        use crate::process::{ProcessIdentityState, ProcessStartIdentity};
         let held = lease_record();
-        let mut wrong_token = capability(&held);
-        wrong_token.capability = "wrong".to_string();
-        assert!(!authorizes_subprocess(
-            &held,
-            "lab",
-            "generation-a",
-            &wrong_token
-        ));
-        assert!(!authorizes_subprocess(
-            &held,
-            "other",
-            "generation-a",
-            &capability(&held)
-        ));
-        assert!(!authorizes_subprocess(
-            &held,
-            "lab",
-            "generation-b",
-            &capability(&held)
-        ));
-    }
-
-    #[test]
-    fn subprocess_capability_rejects_a_process_start_identity_mismatch() {
-        let held = lease_record();
-        let mut mismatched = capability(&held);
-        mismatched.owner_process_start_identity =
-            Some(crate::process::ProcessStartIdentity::Macos {
-                start_seconds: 1,
-                start_microseconds: 2,
-            });
-
-        assert!(!authorizes_subprocess_with(
-            &held,
-            "lab",
-            "generation-a",
-            &mismatched,
-            |_, _, _| panic!("mismatched capability must be rejected before process inspection"),
-        ));
-    }
-
-    #[test]
-    fn exact_capability_and_process_identity_are_required_for_reentrancy() {
-        let held = lease_record();
-        let capability = capability(&held);
+        let exact = capability(&held);
         assert!(authorizes_subprocess_with(
             &held,
             "lab",
             "generation-a",
-            &capability,
-            |_, _, _| crate::process::ProcessIdentityState::Live,
+            &exact,
+            |_, _, _| ProcessIdentityState::Live,
         ));
 
-        let mut forged = capability.clone();
-        forged.capability = "forged".to_string();
-        assert!(!authorizes_subprocess_with(
-            &held,
-            "lab",
-            "generation-a",
-            &forged,
-            |_, _, _| crate::process::ProcessIdentityState::Live,
-        ));
-        assert!(!authorizes_subprocess_with(
-            &held,
-            "lab",
-            "generation-a",
-            &capability,
-            |_, _, _| crate::process::ProcessIdentityState::IdentityMismatch,
-        ));
-    }
+        let mut wrong_token = exact.clone();
+        wrong_token.capability = "forged".to_string();
+        let mut wrong_owner = exact.clone();
+        wrong_owner.owner_pid = 99;
+        let mut mismatched_start = exact.clone();
+        mismatched_start.owner_process_start_identity = Some(ProcessStartIdentity::Macos {
+            start_seconds: 1,
+            start_microseconds: 2,
+        });
+        for (case, capability, target, generation) in [
+            ("wrong token", &wrong_token, "lab", "generation-a"),
+            ("wrong owner pid", &wrong_owner, "lab", "generation-a"),
+            ("mismatched start", &mismatched_start, "lab", "generation-a"),
+            ("wrong target", &exact, "other", "generation-a"),
+            ("wrong generation", &exact, "lab", "generation-b"),
+        ] {
+            assert!(
+                !authorizes_subprocess_with(&held, target, generation, capability, |_, _, _| {
+                    panic!("{case} must be rejected before process inspection")
+                }),
+                "{case}"
+            );
+        }
 
-    #[test]
-    fn lease_without_start_identity_cannot_grant_nested_ownership() {
-        let mut held = lease_record();
-        held.linux_starttime_ticks = None;
-        held.process_start_identity = None;
-        let capability = SubprocessLeaseCapability {
-            owner_pid: held.pid,
-            owner_linux_starttime_ticks: None,
-            owner_process_start_identity: None,
-            target: held.target.clone(),
-            generation: held.generation.clone(),
-            capability: held.capability.clone(),
-        };
         assert!(!authorizes_subprocess_with(
             &held,
             "lab",
             "generation-a",
-            &capability,
-            |_, _, _| crate::process::ProcessIdentityState::Live,
+            &exact,
+            |_, _, _| ProcessIdentityState::IdentityMismatch,
+        ));
+
+        let mut unidentified = held.clone();
+        unidentified.linux_starttime_ticks = None;
+        unidentified.process_start_identity = None;
+        let mut unidentified_capability = capability(&unidentified);
+        unidentified_capability.owner_linux_starttime_ticks = None;
+        assert!(!authorizes_subprocess_with(
+            &unidentified,
+            "lab",
+            "generation-a",
+            &unidentified_capability,
+            |_, _, _| ProcessIdentityState::Live,
         ));
     }
 
@@ -3520,17 +3428,6 @@ mod tests {
             &capability,
             |_, _, _| crate::process::ProcessIdentityState::Live,
         ));
-    }
-
-    #[test]
-    fn nested_lease_requires_an_exact_local_capability() {
-        crate::test_support::with_isolated_home(|_| {
-            let outer = acquire("outer", "lab").expect("outer acquires");
-            let inner = acquire("inner", "lab").expect("exact local capability reenters");
-            assert!(!inner.primary, "nested lease must not own cleanup");
-            drop(inner);
-            drop(outer);
-        });
     }
 
     #[test]

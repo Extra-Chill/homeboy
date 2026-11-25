@@ -2260,12 +2260,10 @@ where
                 if !daemon_poll_transport_was_lost(&err) {
                     return Err(err);
                 }
-                // Checked before the endpoint-change fast path below, not
-                // after it. An endpoint change is still tolerated — it retries
-                // immediately and skips the backoff — but it can no longer
-                // extend the grace window without limit. When `reload_endpoint`
-                // alternates between two endpoints, every iteration used to
-                // `continue` past this check and the loop never terminated.
+                // Checked before the endpoint-change fast path below, so an
+                // endpoint change retries immediately and skips the backoff
+                // but cannot extend the grace window: a `reload_endpoint` that
+                // alternates between two endpoints still hits this deadline.
                 if Instant::now() >= transient_deadline {
                     let mut surfaced = err;
                     surfaced.retryable = surfaced.retryable.or(Some(true));

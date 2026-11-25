@@ -226,92 +226,22 @@ mod tests {
 
     use crate::commands::runs::test_support::sample_run;
     #[test]
-    fn distribution_counts_scalar_metadata_values() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            for family in ["serif", "sans", "serif"] {
-                let run = store
-                    .start_run(sample_run(
-                        "bench",
-                        "studio",
-                        "rig-a",
-                        serde_json::json!({ "fingerprint": { "font": family } }),
-                    ))
-                    .expect("run");
-                store
-                    .finish_run(&run.id, RunStatus::Pass, None)
-                    .expect("finish");
-            }
-
-            let output = distribution_output(RunsDistributionArgs {
-                kind: Some("bench".to_string()),
-                component_id: Some("studio".to_string()),
-                fields: vec!["fingerprint.font".to_string()],
-                limit: 20,
-                ..RunsDistributionArgs::default()
-            });
-
-            let field = &output.fields[0];
-            assert_eq!(field.matched_run_count, 3);
-            assert_eq!(field.missing_run_count, 0);
-            assert_eq!(field.total_value_count, 3);
-            assert_eq!(field.unique_value_count, 2);
-            assert_eq!(field.values[0].value, "serif");
-            assert_eq!(field.values[0].count, 2);
-            assert_eq!(field.values[0].run_count, 2);
-            assert!((field.values[0].percent - (100.0 * 2.0 / 3.0)).abs() < 0.000_000_001);
-            assert_eq!(field.repeated_values.len(), 1);
-        });
-    }
-
-    #[test]
-    fn distribution_flattens_array_metadata_values() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            for motifs in [
-                serde_json::json!(["grid", "cards"]),
-                serde_json::json!(["grid", "hero"]),
-            ] {
-                let run = store
-                    .start_run(sample_run(
-                        "bench",
-                        "studio",
-                        "rig-a",
-                        serde_json::json!({ "fingerprint": { "motifs": motifs } }),
-                    ))
-                    .expect("run");
-                store
-                    .finish_run(&run.id, RunStatus::Pass, None)
-                    .expect("finish");
-            }
-
-            let output = distribution_output(RunsDistributionArgs {
-                kind: Some("bench".to_string()),
-                component_id: Some("studio".to_string()),
-                fields: vec!["fingerprint.motifs".to_string()],
-                limit: 20,
-                ..RunsDistributionArgs::default()
-            });
-
-            let field = &output.fields[0];
-            assert_eq!(field.matched_run_count, 2);
-            assert_eq!(field.total_value_count, 4);
-            assert_eq!(field.unique_value_count, 3);
-            assert_eq!(field.values[0].value, "grid");
-            assert_eq!(field.values[0].count, 2);
-            assert_eq!(field.values[0].run_count, 2);
-        });
-    }
-
-    #[test]
-    fn distribution_reports_missing_fields() {
+    fn distribution_counts_scalar_array_and_nested_values_and_reports_missing_runs() {
         with_isolated_home(|_home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             for metadata in [
-                serde_json::json!({ "category": "timeout" }),
+                serde_json::json!({
+                    "font": "serif",
+                    "motifs": ["grid", "cards", "grid"],
+                    "scenario_metrics": [{ "design": { "motifs": ["terminal", "glow"] } }]
+                }),
+                serde_json::json!({
+                    "font": "sans",
+                    "motifs": ["grid", "hero"],
+                    "scenario_metrics": [{ "design": { "motifs": ["terminal", "cards"] } }]
+                }),
+                serde_json::json!({ "font": "serif" }),
                 serde_json::json!({ "other": "value" }),
             ] {
                 let run = store
@@ -325,15 +255,41 @@ mod tests {
             let output = distribution_output(RunsDistributionArgs {
                 kind: Some("bench".to_string()),
                 component_id: Some("studio".to_string()),
-                fields: vec!["category".to_string()],
+                fields: vec![
+                    "font".to_string(),
+                    "motifs".to_string(),
+                    "scenario_metrics.design.motifs".to_string(),
+                ],
                 limit: 20,
                 ..RunsDistributionArgs::default()
             });
 
-            let field = &output.fields[0];
-            assert_eq!(field.matched_run_count, 1);
-            assert_eq!(field.missing_run_count, 1);
-            assert_eq!(field.values[0].value, "timeout");
+            let font = &output.fields[0];
+            assert_eq!(font.matched_run_count, 3);
+            assert_eq!(font.missing_run_count, 1);
+            assert_eq!(font.unique_value_count, 2);
+            assert_eq!(font.values[0].value, "serif");
+            assert_eq!(font.values[0].run_count, 2);
+            assert!((font.values[0].percent - (100.0 * 2.0 / 3.0)).abs() < 0.000_000_001);
+
+            // Array values are flattened; a value repeated inside one run is
+            // counted per occurrence but once per run.
+            let motifs = &output.fields[1];
+            assert_eq!(motifs.matched_run_count, 2);
+            assert_eq!(motifs.missing_run_count, 2);
+            assert_eq!(motifs.total_value_count, 5);
+            assert_eq!(motifs.unique_value_count, 3);
+            assert_eq!(motifs.values[0].value, "grid");
+            assert_eq!(motifs.values[0].count, 3);
+            assert_eq!(motifs.values[0].run_count, 2);
+            assert_eq!(motifs.repeated_values.len(), 1);
+
+            // Paths traverse arrays of objects.
+            let nested = &output.fields[2];
+            assert_eq!(nested.matched_run_count, 2);
+            assert_eq!(nested.total_value_count, 4);
+            assert_eq!(nested.values[0].value, "terminal");
+            assert_eq!(nested.values[0].count, 2);
         });
     }
 
@@ -413,86 +369,6 @@ mod tests {
             assert_eq!(output.filters.inspected_run_count, 1);
             assert_eq!(field.values.len(), 1);
             assert_eq!(field.values[0].value, "kept");
-        });
-    }
-
-    #[test]
-    fn distribution_traverses_nested_arrays_in_metadata_paths() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            for motifs in [
-                serde_json::json!(["terminal_window", "glow_overlay"]),
-                serde_json::json!(["terminal_window", "cards_grid"]),
-            ] {
-                let run = store
-                    .start_run(sample_run(
-                        "bench",
-                        "studio",
-                        "rig-a",
-                        serde_json::json!({
-                            "selected_scenarios": ["site-build"],
-                            "scenario_metrics": [{
-                                "scenario_id": "site-build",
-                                "metadata": { "design": { "motifs": motifs } }
-                            }]
-                        }),
-                    ))
-                    .expect("run");
-                store
-                    .finish_run(&run.id, RunStatus::Pass, None)
-                    .expect("finish");
-            }
-
-            let output = distribution_output(RunsDistributionArgs {
-                kind: Some("bench".to_string()),
-                component_id: Some("studio".to_string()),
-                scenario_id: Some("site-build".to_string()),
-                fields: vec!["scenario_metrics.metadata.design.motifs".to_string()],
-                limit: 20,
-                ..RunsDistributionArgs::default()
-            });
-
-            let field = &output.fields[0];
-            assert_eq!(field.matched_run_count, 2);
-            assert_eq!(field.total_value_count, 4);
-            assert_eq!(field.unique_value_count, 3);
-            assert_eq!(field.values[0].value, "terminal_window");
-            assert_eq!(field.values[0].count, 2);
-            assert_eq!(field.values[0].run_count, 2);
-        });
-    }
-
-    #[test]
-    fn distribution_reports_repeated_categories_by_occurrence() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .start_run(sample_run(
-                    "bench",
-                    "studio",
-                    "rig-a",
-                    serde_json::json!({ "choices": ["sqlite", "sqlite", "mysql"] }),
-                ))
-                .expect("run");
-            store
-                .finish_run(&run.id, RunStatus::Pass, None)
-                .expect("finish");
-
-            let output = distribution_output(RunsDistributionArgs {
-                kind: Some("bench".to_string()),
-                component_id: Some("studio".to_string()),
-                fields: vec!["choices".to_string()],
-                limit: 20,
-                ..RunsDistributionArgs::default()
-            });
-
-            let repeated = &output.fields[0].repeated_values;
-            assert_eq!(repeated.len(), 1);
-            assert_eq!(repeated[0].value, "sqlite");
-            assert_eq!(repeated[0].count, 2);
-            assert_eq!(repeated[0].run_count, 1);
         });
     }
 

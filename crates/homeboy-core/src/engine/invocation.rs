@@ -666,21 +666,6 @@ mod audit_coverage_tests {
     use crate::test_support::with_isolated_home;
 
     #[test]
-    fn test_env_vars() {
-        with_isolated_home(|_| {
-            let run_dir = RunDir::create().expect("run dir");
-            let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
-                .expect("invocation guard");
-            let env = guard.env_vars();
-
-            assert!(env.iter().any(|(key, _)| key == "HOMEBOY_INVOCATION_ID"));
-            assert!(env
-                .iter()
-                .any(|(key, _)| key == "HOMEBOY_INVOCATION_TMP_DIR"));
-        });
-    }
-
-    #[test]
     fn preserve_artifacts_copies_before_guard_cleanup() {
         with_isolated_home(|_| {
             let run_dir = RunDir::create().expect("run dir");

@@ -291,28 +291,6 @@ mod tests {
     }
 
     #[test]
-    fn append_file_to_zip_places_artifact_at_target() {
-        let dir = TempDir::new().unwrap();
-        let zip_path = dir.path().join("consumer.zip");
-        let source_path = dir.path().join("producer.zip");
-        fs::write(&source_path, b"producer bytes").unwrap();
-
-        {
-            let file = File::create(&zip_path).unwrap();
-            zip::ZipWriter::new(file).finish().unwrap();
-        }
-
-        append_file_to_zip(&zip_path, &source_path, "runtime/packages/producer.zip").unwrap();
-
-        let file = File::open(&zip_path).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
-        let mut embedded = archive.by_name("runtime/packages/producer.zip").unwrap();
-        let mut bytes = Vec::new();
-        std::io::copy(&mut embedded, &mut bytes).unwrap();
-        assert_eq!(bytes, b"producer bytes");
-    }
-
-    #[test]
     fn append_file_to_zip_replaces_existing_target() {
         let dir = TempDir::new().unwrap();
         let zip_path = dir.path().join("consumer.zip");

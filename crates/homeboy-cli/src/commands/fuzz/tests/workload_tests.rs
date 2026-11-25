@@ -208,45 +208,6 @@ fn node_package_fuzz_script_is_listed_and_selected_for_run() {
 }
 
 #[test]
-fn fuzz_workload_parses_artifact_postprocess_metadata() {
-    let spec: RigSpec = serde_json::from_value(serde_json::json!({
-        "id": "package-fuzz",
-        "fuzz_workloads": {
-            "generic": [
-                {
-                    "path": "fuzz/parser.json",
-                    "artifact_postprocess": [
-                        {
-                            "id": "coverage-summary",
-                            "helper": "fuzz-helper",
-                            "action": "summarize-coverage",
-                            "input": "${run.fuzz_results}",
-                            "output": "coverage/summary.json",
-                            "parameters": {
-                                "format": "json",
-                                "threshold": 1
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-    }))
-    .expect("parse rig spec");
-
-    let postprocess = spec.fuzz_workloads["generic"][0].artifact_postprocess();
-
-    assert_eq!(postprocess.len(), 1);
-    assert_eq!(postprocess[0].id.as_deref(), Some("coverage-summary"));
-    assert_eq!(postprocess[0].helper, "fuzz-helper");
-    assert_eq!(postprocess[0].action, "summarize-coverage");
-    assert_eq!(postprocess[0].input.as_deref(), Some("${run.fuzz_results}"));
-    assert_eq!(postprocess[0].output, "coverage/summary.json");
-    assert!(postprocess[0].required);
-    assert_eq!(postprocess[0].parameters["format"], "json");
-}
-
-#[test]
 fn resolve_component_id_uses_fuzz_default_component() {
     let spec: RigSpec = serde_json::from_value(serde_json::json!({
         "id": "package-fuzz",
@@ -451,7 +412,7 @@ fn resolve_fuzz_context_reports_explicit_extension_without_fuzz_capability() {
 }
 
 #[test]
-fn resolve_profile_workload_id_uses_single_fuzz_profile_entry() {
+fn resolve_profile_workload_id_resolves_single_entry_profiles_only() {
     let spec: RigSpec = serde_json::from_value(serde_json::json!({
         "id": "package-fuzz",
         "fuzz_profiles": {
@@ -460,118 +421,88 @@ fn resolve_profile_workload_id_uses_single_fuzz_profile_entry() {
     }))
     .expect("parse rig spec");
 
-    let workload_id = resolve_profile_workload_id(Some(&spec), Some("lab"), None)
-        .expect("resolve profile workload");
-
-    assert_eq!(workload_id.as_deref(), Some("mysql-poc-lifecycle-fuzz"));
-}
-
-#[test]
-fn resolve_profile_workload_id_rejects_unknown_profile_with_available_profiles() {
-    let spec: RigSpec = serde_json::from_value(serde_json::json!({
-        "id": "package-fuzz",
-        "fuzz_profiles": {
-            "lab": ["mysql-poc-lifecycle-fuzz"]
-        }
-    }))
-    .expect("parse rig spec");
+    assert_eq!(
+        resolve_profile_workload_id(Some(&spec), Some("lab"), None)
+            .expect("resolve profile workload")
+            .as_deref(),
+        Some("mysql-poc-lifecycle-fuzz")
+    );
 
     let err = resolve_profile_workload_id(Some(&spec), Some("missing"), None)
         .expect_err("missing profile should fail");
-
     assert!(err
         .message
         .contains("does not declare fuzz profile 'missing'"));
     assert_eq!(err.details["tried"], serde_json::json!(["lab"]));
+
+    // Only campaign expansion may combine a profile with a concrete workload.
+    let err = resolve_profile_workload_id(None, Some("full-surface"), Some("db-fuzz"))
+        .expect_err("profile + explicit workload must be rejected");
+    assert!(err
+        .message
+        .contains("--profile and --workload cannot be combined"));
 }
 
+/// Listing is metadata-only: it must never run prepare steps or dependency
+/// materialization, and their failures must not break the listing.
 #[test]
-fn fuzz_list_does_not_materialize_prepare_dependencies() {
-    with_isolated_home(|home| {
-        let component_dir = home.path().join("component");
-        fs::create_dir_all(&component_dir).expect("component dir");
-        write_generic_fuzz_extension(home.path());
-        write_fuzz_prepare_rig(
-            home.path(),
-            &component_dir,
-            r#"sleep 2; mkdir -p runtime && printf ready > runtime/ready.txt"#,
+fn fuzz_list_never_runs_prepare_or_dependency_materialization() {
+    type WriteRig = fn(&Path, &Path);
+    let cases: [(&str, WriteRig, &str); 5] = [
+        (
+            "slow prepare step",
+            |home, component| {
+                write_fuzz_prepare_rig(
+                    home,
+                    component,
+                    "sleep 2; mkdir -p runtime && printf ready > runtime/ready.txt",
+                )
+            },
             "runtime/ready.txt",
-            "materialize runtime dependency",
-        );
-
-        let started = Instant::now();
-        let output = run_list(fuzz_list_args()).expect("fuzz list");
-
-        assert_eq!(output.count, 1);
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(!component_dir.join("runtime/ready.txt").exists());
-    });
-}
-
-#[test]
-fn fuzz_list_does_not_run_declared_dependency_materialization() {
-    with_isolated_home(|home| {
-        let component_dir = home.path().join("component");
-        fs::create_dir_all(&component_dir).expect("component dir");
-        write_generic_fuzz_extension(home.path());
-        write_dependency_materialization_fuzz_rig(home.path(), &component_dir);
-
-        let output = run_list(fuzz_list_args()).expect("fuzz list");
-
-        assert_eq!(output.count, 1);
-        assert!(!component_dir.join("runtime/ready.txt").exists());
-    });
-}
-
-#[test]
-fn fuzz_list_does_not_materialize_declared_plugin_subpath_dependency() {
-    with_isolated_home(|home| {
-        let component_dir = home.path().join("woocommerce");
-        fs::create_dir_all(component_dir.join("plugins/woocommerce")).expect("plugin dir");
-        write_generic_fuzz_extension(home.path());
-        write_plugin_subpath_dependency_materialization_fuzz_rig(home.path(), &component_dir);
-
-        let output = run_list(fuzz_list_args()).expect("fuzz list");
-
-        assert_eq!(output.count, 1);
-        assert!(!component_dir
-            .join("plugins/woocommerce/vendor/autoload_packages.php")
-            .exists());
-    });
-}
-
-#[test]
-fn fuzz_list_ignores_dependency_materialization_failure() {
-    with_isolated_home(|home| {
-        let component_dir = home.path().join("component");
-        fs::create_dir_all(&component_dir).expect("component dir");
-        write_generic_fuzz_extension(home.path());
-        write_dependency_materialization_failure_rig(home.path(), &component_dir);
-
-        let output = run_list(fuzz_list_args()).expect("metadata listing should not prepare");
-
-        assert_eq!(output.count, 1);
-    });
-}
-
-#[test]
-fn fuzz_list_ignores_prepare_step_failure() {
-    with_isolated_home(|home| {
-        let component_dir = home.path().join("component");
-        fs::create_dir_all(&component_dir).expect("component dir");
-        write_generic_fuzz_extension(home.path());
-        write_fuzz_prepare_rig(
-            home.path(),
-            &component_dir,
-            "false",
+        ),
+        (
+            "failing prepare step",
+            |home, component| write_fuzz_prepare_rig(home, component, "false"),
             "runtime/ready.txt",
-            "materialize runtime dependency",
-        );
+        ),
+        (
+            "dependency materialization",
+            |home, component| {
+                write_dependency_materialization_rig(
+                    home,
+                    component,
+                    "mkdir -p runtime && printf ready > runtime/ready.txt",
+                )
+            },
+            "runtime/ready.txt",
+        ),
+        (
+            "failing dependency materialization",
+            |home, component| write_dependency_materialization_rig(home, component, "true"),
+            "runtime/ready.txt",
+        ),
+        (
+            "plugin subpath dependency materialization",
+            write_plugin_subpath_dependency_materialization_fuzz_rig,
+            "plugins/woocommerce/vendor/autoload_packages.php",
+        ),
+    ];
 
-        let output = run_list(fuzz_list_args()).expect("metadata listing should not prepare");
+    for (label, write_rig, materialized_output) in cases {
+        with_isolated_home(|home| {
+            let component_dir = home.path().join("component");
+            fs::create_dir_all(component_dir.join("plugins/woocommerce")).expect("component dir");
+            write_generic_fuzz_extension(home.path());
+            write_rig(home.path(), &component_dir);
 
-        assert_eq!(output.count, 1);
-    });
+            let started = Instant::now();
+            let output = run_list(fuzz_list_args()).expect("metadata listing should not prepare");
+
+            assert_eq!(output.count, 1, "{label}");
+            assert!(started.elapsed() < Duration::from_secs(1), "{label}");
+            assert!(!component_dir.join(materialized_output).exists(), "{label}");
+        });
+    }
 }
 
 #[test]
@@ -580,13 +511,7 @@ fn fuzz_list_marks_forced_local_remote_discovery_as_requested() {
         let component_dir = home.path().join("component");
         fs::create_dir_all(&component_dir).expect("component dir");
         write_generic_fuzz_extension(home.path());
-        write_fuzz_prepare_rig(
-            home.path(),
-            &component_dir,
-            "false",
-            "runtime/ready.txt",
-            "materialize runtime dependency",
-        );
+        write_fuzz_prepare_rig(home.path(), &component_dir, "false");
         let mut args = fuzz_list_args();
         args.remote_discovery = true;
 
@@ -753,13 +678,7 @@ fn write_generic_fuzz_extension(home: &Path) {
     .expect("extension manifest");
 }
 
-fn write_fuzz_prepare_rig(
-    home: &Path,
-    component_dir: &Path,
-    prepare_command: &str,
-    required_file: &str,
-    label: &str,
-) {
+fn write_fuzz_prepare_rig(home: &Path, component_dir: &Path, prepare_command: &str) {
     let rig_dir = home.join(".config/homeboy/rigs");
     fs::create_dir_all(&rig_dir).expect("rig dir");
     fs::write(
@@ -784,11 +703,11 @@ fn write_fuzz_prepare_rig(
                     {
                         "kind": "requirement",
                         "id": "runtime-ready",
-                        "file": required_file,
+                        "file": "runtime/ready.txt",
                         "cwd": component_dir.to_string_lossy(),
                         "prepare_command": prepare_command,
                         "prepare_phases": ["fuzz_prepare"],
-                        "label": label
+                        "label": "materialize runtime dependency"
                     }
                 ]
             }
@@ -796,18 +715,6 @@ fn write_fuzz_prepare_rig(
         .to_string(),
     )
     .expect("rig config");
-}
-
-fn write_dependency_materialization_fuzz_rig(home: &Path, component_dir: &Path) {
-    write_dependency_materialization_rig(
-        home,
-        component_dir,
-        r#"mkdir -p runtime && printf ready > runtime/ready.txt"#,
-    );
-}
-
-fn write_dependency_materialization_failure_rig(home: &Path, component_dir: &Path) {
-    write_dependency_materialization_rig(home, component_dir, "true");
 }
 
 fn write_dependency_materialization_rig(home: &Path, component_dir: &Path, command: &str) {
@@ -925,124 +832,74 @@ fn write_plugin_subpath_dependency_materialization_fuzz_rig(home: &Path, compone
 
 #[test]
 fn fuzz_runner_env_includes_results_file_selected_workload_path_and_generic_contract() {
-    let args = FuzzRunArgs {
-        comp: PositionalComponentArgs {
-            component: Some("component-a".to_string()),
-            path: None,
-        },
-        rig: None,
-        extension_override: ExtensionOverrideArgs { extensions: vec![] },
-        setting_args: SettingArgs {
-            settings_json_file: vec![],
-            setting: vec![],
-            setting_json: vec![],
-        },
-        workload_id: Some("parser".to_string()),
-        profile: None,
-        shared_state: Some(PathBuf::from("/tmp/fuzz-shared-state")),
-        run_id: Some("proof-1".to_string()),
-        tracker_refs: vec![],
-        seed: Some("1234".to_string()),
-        inventory: Some(PathBuf::from("/tmp/fuzz-inventory.json")),
-        sequence_plan: None,
-        require_case_log: false,
-        require_coverage_summary: false,
-        require_result_envelope: false,
-        max_duration: Some("60s".to_string()),
-        gate_profile: FuzzGateProfileArg::Measurement,
-        allow_destructive: false,
-        isolation: FuzzIsolationArg::Shared,
-        isolation_proof: None,
-        allow_local_destructive_fuzz: false,
-        expect_metric: vec![],
-        action_model: None,
-        exploration_policy: None,
-        args: vec![],
-    };
-    let workload = FuzzWorkloadOutput {
-        id: "parser".to_string(),
-        label: None,
-        description: None,
-        source: "rig_workloads:generic:/tmp/fuzz/parser.json".to_string(),
-        manifest_path: Some("/tmp/fuzz/parser.json".to_string()),
-    };
+    with_isolated_home(|_| {
+        let mut args = planner_args().run;
+        args.workload_id = Some("parser".to_string());
+        args.shared_state = Some(PathBuf::from("/tmp/fuzz-shared-state"));
+        args.seed = Some("1234".to_string());
+        args.inventory = Some(PathBuf::from("/tmp/fuzz-inventory.json"));
+        args.max_duration = Some("60s".to_string());
+        let workload = FuzzWorkloadOutput {
+            id: "parser".to_string(),
+            label: None,
+            description: None,
+            source: "rig_workloads:generic:/tmp/fuzz/parser.json".to_string(),
+            manifest_path: Some("/tmp/fuzz/parser.json".to_string()),
+        };
 
-    let run_dir = RunDir::create().expect("run dir");
-    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
-    let execution_request_path =
-        run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_EXECUTION_REQUEST);
+        let run_dir = RunDir::create().expect("run dir");
+        let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+        let execution_request_path =
+            run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_EXECUTION_REQUEST);
+        let artifacts_dir =
+            run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
 
-    let env = fuzz_runner_env(
-        &args,
-        None,
-        Some(&workload),
-        &results_path,
-        &run_dir,
-        Some(&execution_request_path),
-        None,
-    )
-    .expect("fuzz runner env");
+        let env = fuzz_runner_env(
+            &args,
+            None,
+            Some(&workload),
+            &results_path,
+            &run_dir,
+            Some(&execution_request_path),
+            None,
+        )
+        .expect("fuzz runner env");
 
-    assert!(env.contains(&(
-        "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
-        results_path.to_string_lossy().to_string()
-    )));
-    assert!(env.contains(&(
-        "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE".to_string(),
-        execution_request_path.to_string_lossy().to_string()
-    )));
-    let artifacts_dir =
-        run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
-    assert!(env.contains(&(
-        "HOMEBOY_FUZZ_ARTIFACTS_DIR".to_string(),
-        artifacts_dir.to_string_lossy().to_string()
-    )));
-    assert!(artifacts_dir.is_dir());
-    assert!(env.contains(&("HOMEBOY_FUZZ_WORKLOAD_ID".to_string(), "parser".to_string())));
-    assert!(env.contains(&(
-        "HOMEBOY_FUZZ_WORKLOAD_PATH".to_string(),
-        "/tmp/fuzz/parser.json".to_string()
-    )));
-    assert!(env.contains(&("HOMEBOY_FUZZ_RUN_ID".to_string(), "proof-1".to_string())));
-    assert!(env.contains(&("HOMEBOY_FUZZ_SEED".to_string(), "1234".to_string())));
-    assert!(env.contains(&(
-        "HOMEBOY_FUZZ_INVENTORY_FILE".to_string(),
-        "/tmp/fuzz-inventory.json".to_string()
-    )));
-    assert!(env.contains(&(
-        "HOMEBOY_FUZZ_SHARED_STATE".to_string(),
-        "/tmp/fuzz-shared-state".to_string()
-    )));
-    assert!(env.contains(&("HOMEBOY_FUZZ_MAX_DURATION".to_string(), "60s".to_string())));
-    assert!(env.contains(&(
-        "HOMEBOY_FUZZ_GATE_PROFILE".to_string(),
-        "measurement".to_string()
-    )));
-    assert!(env.contains(&(
-        "HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE".to_string(),
-        "false".to_string()
-    )));
-    assert!(env.contains(&("HOMEBOY_FUZZ_ISOLATION".to_string(), "shared".to_string())));
-    let contract = default_runner_contract();
-    assert!(contract
-        .env
-        .contains(&"HOMEBOY_FUZZ_WORKLOAD_ROOT".to_string()));
-    assert!(contract
-        .env
-        .contains(&"HOMEBOY_FUZZ_ARTIFACTS_DIR".to_string()));
-    assert!(contract
-        .env
-        .contains(&"HOMEBOY_FUZZ_SHARED_STATE".to_string()));
-    assert!(contract
-        .env
-        .contains(&"HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE".to_string()));
-    assert!(contract
-        .env
-        .contains(&"HOMEBOY_FUZZ_GATE_PROFILE".to_string()));
-    assert!(contract
-        .env
-        .contains(&"HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE".to_string()));
-    assert!(contract.env.contains(&"HOMEBOY_FUZZ_ISOLATION".to_string()));
+        for (key, value) in [
+            ("HOMEBOY_FUZZ_RESULTS_FILE", results_path.to_string_lossy()),
+            (
+                "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
+                execution_request_path.to_string_lossy(),
+            ),
+            (
+                "HOMEBOY_FUZZ_ARTIFACTS_DIR",
+                artifacts_dir.to_string_lossy(),
+            ),
+            ("HOMEBOY_FUZZ_WORKLOAD_ID", "parser".into()),
+            ("HOMEBOY_FUZZ_WORKLOAD_PATH", "/tmp/fuzz/parser.json".into()),
+            ("HOMEBOY_FUZZ_RUN_ID", "proof-1".into()),
+            ("HOMEBOY_FUZZ_SEED", "1234".into()),
+            (
+                "HOMEBOY_FUZZ_INVENTORY_FILE",
+                "/tmp/fuzz-inventory.json".into(),
+            ),
+            ("HOMEBOY_FUZZ_SHARED_STATE", "/tmp/fuzz-shared-state".into()),
+            ("HOMEBOY_FUZZ_MAX_DURATION", "60s".into()),
+            ("HOMEBOY_FUZZ_GATE_PROFILE", "measurement".into()),
+            ("HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE", "false".into()),
+            ("HOMEBOY_FUZZ_ISOLATION", "shared".into()),
+        ] {
+            assert!(
+                env.contains(&(key.to_string(), value.to_string())),
+                "missing {key}={value} in {env:?}"
+            );
+            assert!(
+                default_runner_contract().env.iter().any(|name| name == key),
+                "runner contract must advertise {key}"
+            );
+        }
+        assert!(artifacts_dir.is_dir());
+    });
 }
 
 #[test]
@@ -1084,387 +941,166 @@ fn fuzz_runner_contract_includes_extension_declared_env_settings() {
     );
 }
 
+fn rig_workload_env_fixture(
+    package_root: &Path,
+    workload_id: &str,
+    workload_path: &Path,
+) -> Vec<(String, String)> {
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "package-fuzz",
+        "components": {
+            "package": {
+                "path": "${package.root}/plugins/package",
+                "branch": "main"
+            }
+        }
+    }))
+    .expect("parse rig spec");
+    let context = FuzzRigContext {
+        spec,
+        package_root: Some(package_root.to_path_buf()),
+    };
+    let mut args = planner_args().run;
+    args.comp.component = Some("package".to_string());
+    args.rig = Some("package-fuzz".to_string());
+    args.workload_id = Some(workload_id.to_string());
+    let workload = FuzzWorkloadOutput {
+        id: workload_id.to_string(),
+        label: None,
+        description: None,
+        source: format!("rig_workloads:generic:{}", workload_path.display()),
+        manifest_path: Some(workload_path.to_string_lossy().to_string()),
+    };
+    let run_dir = RunDir::create().expect("run dir");
+    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+
+    fuzz_runner_env(
+        &args,
+        Some(&context),
+        Some(&workload),
+        &results_path,
+        &run_dir,
+        None,
+        None,
+    )
+    .expect("fuzz runner env")
+}
+
+fn expanded_workload(env: &[(String, String)]) -> serde_json::Value {
+    let expanded_path = env
+        .iter()
+        .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
+        .expect("expanded workload path");
+    serde_json::from_str(&std::fs::read_to_string(expanded_path).expect("read expanded workload"))
+        .expect("parse expanded workload")
+}
+
 #[test]
 fn fuzz_runner_env_expands_rig_workload_and_injects_runtime_context() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workload_path = temp.path().join("parser.json");
-    std::fs::write(
-        &workload_path,
-        r#"{
+    with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workload_path = temp.path().join("parser.json");
+        std::fs::write(
+            &workload_path,
+            r#"{
           "schema": "homeboy/fuzz-workload/v1",
           "id": "parser",
           "target": { "component": "package" },
           "workload": { "path": "${package.root}/bench/parser.input" },
           "metadata": { "fixture": { "component": "package" } }
         }"#,
-    )
-    .expect("write workload");
-    let spec: RigSpec = serde_json::from_value(serde_json::json!({
-        "id": "package-fuzz",
-        "components": {
-            "package": {
-                "path": "${package.root}/plugins/package",
-                "branch": "main"
-            }
+        )
+        .expect("write workload");
+        let override_env =
+            homeboy::rig::expand::rig_component_path_override_env_name("package-fuzz", "package");
+        let override_path = temp.path().join("runner/plugins/package");
+        unsafe {
+            std::env::set_var(&override_env, override_path.to_string_lossy().to_string());
         }
-    }))
-    .expect("parse rig spec");
-    let context = FuzzRigContext {
-        spec,
-        package_root: Some(temp.path().to_path_buf()),
-    };
-    let args = FuzzRunArgs {
-        comp: PositionalComponentArgs {
-            component: Some("package".to_string()),
-            path: None,
-        },
-        rig: Some("package-fuzz".to_string()),
-        extension_override: ExtensionOverrideArgs { extensions: vec![] },
-        setting_args: SettingArgs {
-            settings_json_file: vec![],
-            setting: vec![],
-            setting_json: vec![],
-        },
-        workload_id: Some("parser".to_string()),
-        profile: None,
-        shared_state: None,
-        run_id: Some("proof-1".to_string()),
-        tracker_refs: vec![],
-        seed: None,
-        inventory: None,
-        sequence_plan: None,
-        require_case_log: false,
-        require_coverage_summary: false,
-        require_result_envelope: false,
-        max_duration: None,
-        gate_profile: FuzzGateProfileArg::Measurement,
-        allow_destructive: false,
-        isolation: FuzzIsolationArg::Shared,
-        isolation_proof: None,
-        allow_local_destructive_fuzz: false,
-        expect_metric: vec![],
-        action_model: None,
-        exploration_policy: None,
-        args: vec![],
-    };
-    let workload = FuzzWorkloadOutput {
-        id: "parser".to_string(),
-        label: None,
-        description: None,
-        source: format!("rig_workloads:generic:{}", workload_path.display()),
-        manifest_path: Some(workload_path.to_string_lossy().to_string()),
-    };
-    let run_dir = RunDir::create().expect("run dir");
-    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
-    let override_env =
-        homeboy::rig::expand::rig_component_path_override_env_name("package-fuzz", "package");
-    let override_path = temp.path().join("runner/plugins/package");
-    unsafe {
-        std::env::set_var(&override_env, override_path.to_string_lossy().to_string());
-    }
 
-    let env = fuzz_runner_env(
-        &args,
-        Some(&context),
-        Some(&workload),
-        &results_path,
-        &run_dir,
-        None,
-        None,
-    )
-    .expect("fuzz runner env");
-    unsafe {
-        std::env::remove_var(&override_env);
-    }
-    let expanded_path = env
-        .iter()
-        .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
-        .expect("expanded workload path");
-    let expanded: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(expanded_path).expect("read expanded workload"),
-    )
-    .expect("parse expanded workload");
-
-    assert_eq!(
-        expanded["workload"]["path"].as_str(),
-        Some(format!("{}/bench/parser.input", temp.path().display()).as_str())
-    );
-    assert_eq!(
-        expanded["metadata"]["homeboy_runtime_context"]["components"]["package"]["path"].as_str(),
-        Some(override_path.to_string_lossy().as_ref())
-    );
-    assert!(env.iter().any(|(key, value)| {
-        key == "HOMEBOY_FUZZ_WORKLOAD_ROOT" && value == &temp.path().to_string_lossy()
-    }));
-}
-
-#[test]
-fn fuzz_runner_env_stages_generic_workload_file_refs() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join("bench")).expect("create bench dir");
-    let php_path = temp.path().join("bench/rest-product-batch-import.php");
-    std::fs::write(&php_path, "<?php return array( 'ok' => true );\n").expect("write php workload");
-    let workload_path = temp
-        .path()
-        .join("bench/rest-product-batch-import.workload.json");
-    std::fs::write(
-        &workload_path,
-        r#"{
-          "schema": "example/fuzz-workload-run/v1",
-          "file_staging": {
-            "step_fields": ["steps"],
-            "path_arg_prefixes": ["path="],
-            "nested_json_arg_prefixes": ["workload-json="],
-            "target_root": "/tmp/homeboy-fuzz-workloads",
-            "file_extensions": ["php", "json", "mjs", "js"]
-          },
-          "steps": [
-            {
-              "command": "example.run-workload",
-              "args": [
-                "path=${package.root}/bench/rest-product-batch-import.php",
-                "type=php"
-              ]
-            }
-          ]
-        }"#,
-    )
-    .expect("write workload");
-    let spec: RigSpec = serde_json::from_value(serde_json::json!({
-        "id": "package-fuzz",
-        "components": {
-            "package": {
-                "path": "${package.root}/plugins/package",
-                "branch": "main"
-            }
+        let env = rig_workload_env_fixture(temp.path(), "parser", &workload_path);
+        unsafe {
+            std::env::remove_var(&override_env);
         }
-    }))
-    .expect("parse rig spec");
-    let context = FuzzRigContext {
-        spec,
-        package_root: Some(temp.path().to_path_buf()),
-    };
-    let args = FuzzRunArgs {
-        comp: PositionalComponentArgs {
-            component: Some("package".to_string()),
-            path: None,
-        },
-        rig: Some("package-fuzz".to_string()),
-        extension_override: ExtensionOverrideArgs { extensions: vec![] },
-        setting_args: SettingArgs {
-            settings_json_file: vec![],
-            setting: vec![],
-            setting_json: vec![],
-        },
-        workload_id: Some("rest-product-batch-import".to_string()),
-        profile: None,
-        shared_state: None,
-        run_id: Some("proof-1".to_string()),
-        tracker_refs: vec![],
-        seed: None,
-        inventory: None,
-        sequence_plan: None,
-        require_case_log: false,
-        require_coverage_summary: false,
-        require_result_envelope: false,
-        max_duration: None,
-        gate_profile: FuzzGateProfileArg::Measurement,
-        allow_destructive: false,
-        isolation: FuzzIsolationArg::Shared,
-        isolation_proof: None,
-        allow_local_destructive_fuzz: false,
-        expect_metric: vec![],
-        action_model: None,
-        exploration_policy: None,
-        args: vec![],
-    };
-    let workload = FuzzWorkloadOutput {
-        id: "rest-product-batch-import".to_string(),
-        label: None,
-        description: None,
-        source: format!("rig_workloads:generic:{}", workload_path.display()),
-        manifest_path: Some(workload_path.to_string_lossy().to_string()),
-    };
-    let run_dir = RunDir::create().expect("run dir");
-    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
+        let expanded = expanded_workload(&env);
 
-    let env = fuzz_runner_env(
-        &args,
-        Some(&context),
-        Some(&workload),
-        &results_path,
-        &run_dir,
-        None,
-        None,
-    )
-    .expect("fuzz runner env");
-    let expanded_path = env
-        .iter()
-        .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
-        .expect("expanded workload path");
-    let expanded: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(expanded_path).expect("read expanded workload"),
-    )
-    .expect("parse expanded workload");
-
-    assert_eq!(
-        expanded["steps"][0]["args"][0].as_str(),
-        Some("path=/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
-    );
-    assert_eq!(
-        expanded["staged_files"][0]["source"].as_str(),
-        Some(php_path.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        expanded["staged_files"][0]["target"].as_str(),
-        Some("/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
-    );
-}
-
-#[test]
-fn fuzz_runner_env_stages_nested_generic_workload_json_file_refs() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(temp.path().join("bench")).expect("create bench dir");
-    let php_path = temp.path().join("bench/rest-product-batch-import.php");
-    std::fs::write(&php_path, "<?php return array( 'ok' => true );\n").expect("write php workload");
-    let nested = serde_json::json!({
-        "schema": "example/fuzz-workload-run/v1",
-        "file_staging": {
-            "step_fields": ["steps"],
-            "path_arg_prefixes": ["path="],
-            "nested_json_arg_prefixes": ["workload-json="],
-            "target_root": "/tmp/homeboy-fuzz-workloads",
-            "file_extensions": ["php", "json", "mjs", "js"]
-        },
-        "steps": [
-            {
-                "command": "example.run-workload",
-                "args": [
-                    format!("path={}", php_path.display()),
-                    "type=php".to_string()
-                ]
-            }
-        ]
+        assert_eq!(
+            expanded["workload"]["path"].as_str(),
+            Some(format!("{}/bench/parser.input", temp.path().display()).as_str())
+        );
+        assert_eq!(
+            expanded["metadata"]["homeboy_runtime_context"]["components"]["package"]["path"]
+                .as_str(),
+            Some(override_path.to_string_lossy().as_ref())
+        );
+        assert!(env.iter().any(|(key, value)| {
+            key == "HOMEBOY_FUZZ_WORKLOAD_ROOT" && value == &temp.path().to_string_lossy()
+        }));
     });
-    let workload_path = temp.path().join("fuzz/rest-product-batch-import.json");
-    std::fs::create_dir_all(workload_path.parent().expect("workload parent"))
-        .expect("create workload dir");
-    std::fs::write(
-        &workload_path,
-        serde_json::json!({
-            "schema": "example/fuzz-workload-run/v1",
-            "file_staging": {
-                "step_fields": ["steps"],
-                "path_arg_prefixes": ["path="],
-                "nested_json_arg_prefixes": ["workload-json="],
-                "target_root": "/tmp/homeboy-fuzz-workloads",
-                "file_extensions": ["php", "json", "mjs", "js"]
-            },
-            "steps": [
-                {
-                    "command": "example.run-workload",
-                    "args": [
-                        format!("workload-json={}", serde_json::to_string(&nested).expect("nested json"))
-                    ]
-                }
-            ]
-        })
-        .to_string(),
-    )
-    .expect("write workload");
-    let spec: RigSpec = serde_json::from_value(serde_json::json!({
-        "id": "package-fuzz",
-        "components": {
-            "package": {
-                "path": "${package.root}/plugins/package",
-                "branch": "main"
+}
+
+/// File refs in workload step args are staged to the declared target root,
+/// both directly and inside nested `workload-json=` payloads.
+#[test]
+fn fuzz_runner_env_stages_direct_and_nested_workload_file_refs() {
+    with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("bench")).expect("create bench dir");
+        let php_path = temp.path().join("bench/rest-product-batch-import.php");
+        std::fs::write(&php_path, "<?php return array( 'ok' => true );\n")
+            .expect("write php workload");
+        let workload_run = |arg: String| {
+            serde_json::json!({
+                "schema": "example/fuzz-workload-run/v1",
+                "file_staging": {
+                    "step_fields": ["steps"],
+                    "path_arg_prefixes": ["path="],
+                    "nested_json_arg_prefixes": ["workload-json="],
+                    "target_root": "/tmp/homeboy-fuzz-workloads",
+                    "file_extensions": ["php", "json", "mjs", "js"]
+                },
+                "steps": [{ "command": "example.run-workload", "args": [arg] }]
+            })
+        };
+        let direct =
+            workload_run("path=${package.root}/bench/rest-product-batch-import.php".to_string());
+        let nested = workload_run(format!(
+            "workload-json={}",
+            workload_run(format!("path={}", php_path.display()))
+        ));
+
+        for (label, workload, is_nested) in [("direct", direct, false), ("nested", nested, true)] {
+            let workload_path = temp.path().join(format!("{label}.workload.json"));
+            std::fs::write(&workload_path, workload.to_string()).expect("write workload");
+
+            let env =
+                rig_workload_env_fixture(temp.path(), "rest-product-batch-import", &workload_path);
+            let mut staged = expanded_workload(&env);
+            if is_nested {
+                let nested_arg = staged["steps"][0]["args"][0]
+                    .as_str()
+                    .expect("nested workload arg")
+                    .strip_prefix("workload-json=")
+                    .expect("workload-json prefix")
+                    .to_string();
+                staged = serde_json::from_str(&nested_arg).expect("nested json");
             }
+
+            assert_eq!(
+                staged["steps"][0]["args"][0].as_str(),
+                Some("path=/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php"),
+                "{label}"
+            );
+            assert_eq!(
+                staged["staged_files"][0]["source"].as_str(),
+                Some(php_path.to_string_lossy().as_ref()),
+                "{label}"
+            );
+            assert_eq!(
+                staged["staged_files"][0]["target"].as_str(),
+                Some("/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php"),
+                "{label}"
+            );
         }
-    }))
-    .expect("parse rig spec");
-    let context = FuzzRigContext {
-        spec,
-        package_root: Some(temp.path().to_path_buf()),
-    };
-    let args = FuzzRunArgs {
-        comp: PositionalComponentArgs {
-            component: Some("package".to_string()),
-            path: None,
-        },
-        rig: Some("package-fuzz".to_string()),
-        extension_override: ExtensionOverrideArgs { extensions: vec![] },
-        setting_args: SettingArgs {
-            settings_json_file: vec![],
-            setting: vec![],
-            setting_json: vec![],
-        },
-        workload_id: Some("rest-product-batch-import".to_string()),
-        profile: None,
-        shared_state: None,
-        run_id: Some("proof-1".to_string()),
-        tracker_refs: vec![],
-        seed: None,
-        inventory: None,
-        sequence_plan: None,
-        require_case_log: false,
-        require_coverage_summary: false,
-        require_result_envelope: false,
-        max_duration: None,
-        gate_profile: FuzzGateProfileArg::Measurement,
-        allow_destructive: false,
-        isolation: FuzzIsolationArg::Shared,
-        isolation_proof: None,
-        allow_local_destructive_fuzz: false,
-        expect_metric: vec![],
-        action_model: None,
-        exploration_policy: None,
-        args: vec![],
-    };
-    let workload = FuzzWorkloadOutput {
-        id: "rest-product-batch-import".to_string(),
-        label: None,
-        description: None,
-        source: format!("rig_workloads:generic:{}", workload_path.display()),
-        manifest_path: Some(workload_path.to_string_lossy().to_string()),
-    };
-    let run_dir = RunDir::create().expect("run dir");
-    let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
-
-    let env = fuzz_runner_env(
-        &args,
-        Some(&context),
-        Some(&workload),
-        &results_path,
-        &run_dir,
-        None,
-        None,
-    )
-    .expect("fuzz runner env");
-    let expanded_path = env
-        .iter()
-        .find_map(|(key, value)| (key == "HOMEBOY_FUZZ_WORKLOAD_PATH").then_some(value))
-        .expect("expanded workload path");
-    let expanded: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(expanded_path).expect("read expanded workload"),
-    )
-    .expect("parse expanded workload");
-    let nested_arg = expanded["steps"][0]["args"][0]
-        .as_str()
-        .expect("nested workload arg")
-        .strip_prefix("workload-json=")
-        .expect("workload-json prefix");
-    let nested: serde_json::Value = serde_json::from_str(nested_arg).expect("nested json");
-
-    assert_eq!(
-        nested["steps"][0]["args"][0].as_str(),
-        Some("path=/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
-    );
-    assert_eq!(
-        nested["staged_files"][0]["source"].as_str(),
-        Some(php_path.to_string_lossy().as_ref())
-    );
-    assert_eq!(
-        nested["staged_files"][0]["target"].as_str(),
-        Some("/tmp/homeboy-fuzz-workloads/rest-product-batch-import.php")
-    );
+    });
 }

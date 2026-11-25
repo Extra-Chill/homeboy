@@ -26,79 +26,126 @@ fn assets(count: usize) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn published_release_with_nothing_to_attach_is_an_idempotent_no_op() {
-    assert_eq!(
-        existing_release_action(false, false, &assets(13), None, true),
-        ExistingReleaseAction::AlreadyPublished
-    );
+fn names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
 }
 
 #[test]
-fn completed_publication_is_adopted_when_tagged_recovery_reaches_delivery() {
-    // The release may have completed after recovery began. Delivery sees the
-    // exact published tag and must stop rather than recreate or republish it.
-    let declared = vec![
-        "dist-manifest.json".to_string(),
-        "homeboy-aarch64-apple-darwin.tar.xz".to_string(),
-        "homeboy-x86_64-unknown-linux-gnu.tar.xz".to_string(),
+fn existing_release_without_run_artifacts_is_classified_by_draft_state_and_contract() {
+    use ExistingReleaseAction::{AlreadyPublished, EmptyDraft, PublishDraft};
+    let linux = "homeboy-x86_64-unknown-linux-gnu.tar.xz";
+    let darwin = "homeboy-aarch64-apple-darwin.tar.xz";
+
+    // (case, is_draft, present assets, declared contract, artifact component, expected)
+    let cases: Vec<(
+        &str,
+        bool,
+        Vec<String>,
+        Option<Vec<String>>,
+        bool,
+        ExistingReleaseAction,
+    )> = vec![
+        // Asset count and contract are only consulted for drafts: a published
+        // release is `verify-published`'s problem, never something to re-publish.
+        (
+            "published with assets",
+            false,
+            assets(13),
+            None,
+            true,
+            AlreadyPublished,
+        ),
+        (
+            "published without assets",
+            false,
+            assets(0),
+            None,
+            true,
+            AlreadyPublished,
+        ),
+        (
+            "published missing a declared asset",
+            false,
+            names(&["source.tar.gz"]),
+            Some(names(&[linux])),
+            true,
+            AlreadyPublished,
+        ),
+        // The v0.320.0 / v0.321.1 state: assets uploaded, only the un-draft
+        // edit is missing. Reporting `skipped` let those tags sit undeliverable.
+        (
+            "stranded draft with assets",
+            true,
+            assets(15),
+            None,
+            true,
+            PublishDraft,
+        ),
+        (
+            "stranded draft with one asset",
+            true,
+            assets(1),
+            None,
+            true,
+            PublishDraft,
+        ),
+        // Publishing an assetless draft marks it latest and points every
+        // downloader at a release with no binaries.
+        (
+            "empty draft, artifact component",
+            true,
+            assets(0),
+            None,
+            true,
+            EmptyDraft,
+        ),
+        (
+            "empty draft, assetless component",
+            true,
+            assets(0),
+            None,
+            false,
+            PublishDraft,
+        ),
+        // Extra assets beyond the contract (sidecars, source archives, the
+        // Homebrew formula) are not a reason to refuse.
+        (
+            "draft carrying every declared asset",
+            true,
+            names(&[darwin, linux, "homeboy.rb", "sha256.sum", "source.tar.gz"]),
+            Some(names(&[darwin, linux])),
+            true,
+            PublishDraft,
+        ),
+        // An unresolvable contract must not make a component unreleasable.
+        (
+            "draft without a contract",
+            true,
+            names(&["some-artifact.zip"]),
+            None,
+            true,
+            PublishDraft,
+        ),
     ];
-    let published = vec![
-        "dist-manifest.json".to_string(),
-        "homeboy-aarch64-apple-darwin.tar.xz".to_string(),
-        "homeboy-x86_64-unknown-linux-gnu.tar.xz".to_string(),
-    ];
 
-    assert_eq!(
-        existing_release_action(false, false, &published, Some(&declared), true),
-        ExistingReleaseAction::AlreadyPublished
-    );
-}
+    for (case, is_draft, present, declared, artifact_component, expected) in cases {
+        assert_eq!(
+            existing_release_action(
+                is_draft,
+                false,
+                &present,
+                declared.as_deref(),
+                artifact_component
+            ),
+            expected,
+            "{case}"
+        );
+    }
 
-#[test]
-fn published_release_with_no_assets_is_still_an_idempotent_no_op() {
-    // Asset count is only consulted for drafts: a published release with no
-    // assets is a delivery problem for `verify-published` to report, not a
-    // reason for this step to re-publish something already public.
-    assert_eq!(
-        existing_release_action(false, false, &assets(0), None, true),
-        ExistingReleaseAction::AlreadyPublished
-    );
-}
-
-#[test]
-fn stranded_draft_carrying_assets_is_published_not_skipped() {
-    // The v0.320.0 / v0.321.1 state: the tag is durable on origin, cargo-dist
-    // already uploaded every asset, and only the un-draft edit is missing.
-    // Reporting `skipped` here is what let those tags sit undeliverable.
-    assert_eq!(
-        existing_release_action(true, false, &assets(15), None, true),
-        ExistingReleaseAction::PublishDraft
-    );
-    assert_eq!(
-        existing_release_action(true, false, &assets(1), None, true),
-        ExistingReleaseAction::PublishDraft
-    );
-}
-
-#[test]
-fn empty_draft_for_artifact_component_is_refused_rather_than_published() {
-    // Publishing an assetless draft marks it `latest` and points every
-    // downloader (and the Homebrew formula) at a release with no binaries.
-    // That is strictly worse than leaving the draft for the recovery path,
-    // which can still upload artifacts into it.
-    assert_eq!(
-        existing_release_action(true, false, &assets(0), None, true),
-        ExistingReleaseAction::EmptyDraft
-    );
-}
-
-#[test]
-fn empty_draft_for_assetless_component_is_published() {
-    assert_eq!(
-        existing_release_action(true, false, &assets(0), None, false),
-        ExistingReleaseAction::PublishDraft
-    );
+    // No contract, or an empty one, declares nothing missing.
+    let present = names(&["anything.zip"]);
+    assert!(missing_declared_assets(&present, None).is_empty());
+    assert!(missing_declared_assets(&present, Some(&[])).is_empty());
 }
 
 #[test]
@@ -166,63 +213,4 @@ fn partially_uploaded_draft_is_refused_rather_than_published() {
         }
         other => panic!("a partially uploaded draft must be refused, got {other:?}"),
     }
-}
-
-/// A draft carrying everything its manifest declares still publishes. Extra
-/// assets beyond the contract (sidecars, source archives, the Homebrew
-/// formula) are not a reason to refuse.
-#[test]
-fn draft_carrying_every_declared_asset_still_publishes() {
-    let declared = vec![
-        "homeboy-aarch64-apple-darwin.tar.xz".to_string(),
-        "homeboy-x86_64-unknown-linux-gnu.tar.xz".to_string(),
-    ];
-    let present = vec![
-        "homeboy-aarch64-apple-darwin.tar.xz".to_string(),
-        "homeboy-x86_64-unknown-linux-gnu.tar.xz".to_string(),
-        "homeboy.rb".to_string(),
-        "sha256.sum".to_string(),
-        "source.tar.gz".to_string(),
-    ];
-
-    assert_eq!(
-        existing_release_action(true, false, &present, Some(&declared), true),
-        ExistingReleaseAction::PublishDraft
-    );
-}
-
-/// An unresolvable contract must not block publication. A component that ships
-/// no distribution manifest has no declared set to compare against, and
-/// refusing on that basis would make it unreleasable.
-#[test]
-fn a_draft_without_a_resolvable_contract_is_not_refused() {
-    let present = vec!["some-artifact.zip".to_string()];
-
-    assert_eq!(
-        existing_release_action(true, false, &present, None, true),
-        ExistingReleaseAction::PublishDraft
-    );
-    assert!(missing_declared_assets(&present, None).is_empty());
-}
-
-/// An empty declared set is a contract that is trivially met, not an
-/// unresolvable one.
-#[test]
-fn an_empty_declared_contract_is_satisfied() {
-    let present = vec!["anything.zip".to_string()];
-    assert!(missing_declared_assets(&present, Some(&[])).is_empty());
-}
-
-/// Refusal is reserved for drafts. A published release missing declared assets
-/// is `verify-published`'s problem to report; re-classifying it here would let
-/// this step try to re-publish something already public.
-#[test]
-fn a_published_release_is_never_reclassified_as_partial() {
-    let declared = vec!["homeboy-x86_64-unknown-linux-gnu.tar.xz".to_string()];
-    let present = vec!["source.tar.gz".to_string()];
-
-    assert_eq!(
-        existing_release_action(false, false, &present, Some(&declared), true),
-        ExistingReleaseAction::AlreadyPublished
-    );
 }

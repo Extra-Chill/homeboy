@@ -168,7 +168,7 @@ fn publish_step_result(
 /// registry then refuses for lack of credentials, the release promised a
 /// publication it did not make, so the step fails rather than skipping.
 ///
-/// Skipping here used to let a release report `succeeded` with nothing
+/// Skipping here would let a release report `succeeded` with nothing
 /// published and no warning in the operator summary (#14983). A component
 /// that does not want to publish from a given environment says so with
 /// `release.publish: false` or `--skip-publish`, never by lacking a token.
@@ -509,49 +509,14 @@ mod tests {
     }
 
     #[test]
-    fn run_publish_passes_component_id_from_release_payload_to_action_env() {
+    fn run_publish_passes_component_identity_and_github_hosts_to_action() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir_in(std::env::temp_dir())
                 .expect("component tempdir with mismatched basename");
             let publish = release_publish_extension(
                 "registry",
-                "printf '{\"component_id\":\"%s\",\"component_path\":\"%s\"}' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\"",
+                "printf '{\"component_id\":\"%s\",\"component_path\":\"%s\",\"settings\":%s}' \"$HOMEBOY_COMPONENT_ID\" \"$HOMEBOY_COMPONENT_PATH\" \"$HOMEBOY_SETTINGS_JSON\"",
             );
-            homeboy_core::extension::catalog::save_manifest(&publish)
-                .expect("save publish extension");
-
-            let result = run_publish(
-                &[ReleaseExtension::from_manifest(&publish)],
-                &ReleaseState::default(),
-                "intelligence-horse-theme",
-                &component.path().to_string_lossy(),
-                None,
-                "registry",
-            )
-            .expect("publish step");
-
-            assert_eq!(result.status, ReleaseStepStatus::Success);
-            assert_ne!(
-                component.path().file_name().unwrap().to_string_lossy(),
-                "intelligence-horse-theme"
-            );
-            let data = result.data.expect("publish data");
-            let stdout = data["response"]["stdout"].as_str().expect("stdout");
-            let env: serde_json::Value = serde_json::from_str(stdout).expect("env stdout json");
-            assert_eq!(env["component_id"], "intelligence-horse-theme");
-            assert_eq!(
-                env["component_path"].as_str().expect("component path"),
-                component.path().to_string_lossy()
-            );
-        });
-    }
-
-    #[test]
-    fn run_publish_passes_github_host_config_to_action_payload() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let component = tempfile::tempdir_in(std::env::temp_dir()).expect("component tempdir");
-            let publish =
-                release_publish_extension("registry", "printf '%s' \"$HOMEBOY_SETTINGS_JSON\"");
             homeboy_core::extension::catalog::save_manifest(&publish)
                 .expect("save publish extension");
             let github = GithubConfig {
@@ -579,212 +544,131 @@ mod tests {
             .expect("publish step");
 
             assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert_ne!(
+                component.path().file_name().unwrap().to_string_lossy(),
+                "intelligence-horse-theme"
+            );
             let data = result.data.expect("publish data");
             let stdout = data["response"]["stdout"].as_str().expect("stdout");
-            let payload: serde_json::Value = serde_json::from_str(stdout).expect("payload json");
+            let env: serde_json::Value = serde_json::from_str(stdout).expect("env stdout json");
+            assert_eq!(env["component_id"], "intelligence-horse-theme");
             assert_eq!(
-                payload["config"]["github"]["hosts"]["github.enterprise.test"]["proxy"],
-                "socks5://127.0.0.1:9999"
+                env["component_path"].as_str().expect("component path"),
+                component.path().to_string_lossy()
             );
+            let host = &env["settings"]["config"]["github"]["hosts"]["github.enterprise.test"];
+            assert_eq!(host["proxy"], "socks5://127.0.0.1:9999");
+            assert_eq!(host["env"]["NO_PROXY"], "localhost,127.0.0.1");
+        });
+    }
+
+    #[test]
+    fn publish_step_classifies_extension_failures_and_private_package_skips() {
+        // (response, expected status, text expected in the error or warnings)
+        let cases = [
+            (
+                serde_json::json!({
+                    "success": false,
+                    "status": "missing_secret",
+                    "reason": "registry token is not configured",
+                }),
+                ReleaseStepStatus::Failed,
+                vec!["registry token is not configured"],
+            ),
+            (
+                serde_json::json!({
+                    "success": false,
+                    "status": "auth_required",
+                    "message": "run the extension login command",
+                }),
+                ReleaseStepStatus::Failed,
+                vec!["run the extension login command", "--skip-publish"],
+            ),
+            (
+                serde_json::json!({
+                    "success": false,
+                    "exitCode": 1,
+                    "stderr": "npm ERR! code ENEEDAUTH\nnpm ERR! need auth This command requires you to be logged in to https://registry.npmjs.org/",
+                }),
+                ReleaseStepStatus::Failed,
+                vec!["ENEEDAUTH"],
+            ),
+            (
+                serde_json::json!({
+                    "success": false,
+                    "exitCode": 1,
+                    "stderr": "error: failed to upload package: 500 server error",
+                }),
+                ReleaseStepStatus::Failed,
+                vec!["500 server error"],
+            ),
+            // EPRIVATE skips, and takes precedence over auth-required output.
+            (
+                serde_json::json!({
+                    "success": false,
+                    "exitCode": 1,
+                    "stderr": "npm error code EPRIVATE\nnpm error This package has been marked as private\nnpm ERR! code ENEEDAUTH",
+                }),
+                ReleaseStepStatus::Skipped,
+                vec!["marked private"],
+            ),
+        ];
+
+        for (response, status, expected) in cases {
+            let result = publish_step_result(
+                "publish.registry",
+                "registry",
+                "registry",
+                None,
+                &response,
+                None,
+            );
+            assert_eq!(result.status, status, "{response}");
+            let text = if status == ReleaseStepStatus::Skipped {
+                assert!(result.error.is_none());
+                let warnings = result.warnings.join("\n");
+                assert!(!warnings.contains("ENEEDAUTH"), "{warnings}");
+                warnings
+            } else {
+                assert!(result.warnings.is_empty());
+                result.error.expect("failure must carry an error")
+            };
+            for needle in expected {
+                assert!(text.contains(needle), "{needle} missing from: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn publish_step_verifies_the_published_version_in_the_registry() {
+        for (status, body, expected) in [
+            (404, r#"{"error":"not found"}"#, ReleaseStepStatus::Failed),
+            (200, r#"{"version":"0.5.2"}"#, ReleaseStepStatus::Success),
+        ] {
+            let server = registry_server(status, body);
+            let response = serde_json::json!({
+                "success": true,
+                "registry_verification": {
+                    "registry_url": server.registry_url,
+                    "package_name": "@extrachill/components",
+                    "version": "0.5.2"
+                }
+            });
+
+            let result =
+                publish_step_result("publish.npm", "npm", "npm", None, &response, Some("0.5.2"));
+
+            assert_eq!(result.status, expected);
+            if expected == ReleaseStepStatus::Failed {
+                assert!(result
+                    .error
+                    .unwrap()
+                    .contains("registry returned 404 Not Found"));
+            }
             assert_eq!(
-                payload["config"]["github"]["hosts"]["github.enterprise.test"]["env"]["NO_PROXY"],
-                "localhost,127.0.0.1"
+                server.handle.join().expect("server request"),
+                "GET /%40extrachill%2Fcomponents/0.5.2 HTTP/1.1"
             );
-        });
-    }
-
-    #[test]
-    fn publish_step_fails_when_extension_reports_missing_secret() {
-        let response = serde_json::json!({
-            "success": false,
-            "status": "missing_secret",
-            "reason": "registry token is not configured",
-            "stdout": "",
-            "stderr": "",
-        });
-        let data = serde_json::json!({ "response": response.clone() });
-
-        let result = publish_step_result(
-            "publish.registry",
-            "registry",
-            "registry",
-            Some(data),
-            &response,
-            None,
-        );
-
-        assert_eq!(result.status, ReleaseStepStatus::Failed);
-        assert!(result
-            .error
-            .unwrap()
-            .contains("registry token is not configured"));
-        assert!(result.warnings.is_empty());
-    }
-
-    #[test]
-    fn publish_step_fails_when_extension_reports_auth_required() {
-        let response = serde_json::json!({
-            "success": false,
-            "status": "auth_required",
-            "message": "run the extension login command",
-        });
-
-        let result = publish_step_result(
-            "publish.registry",
-            "registry",
-            "registry",
-            None,
-            &response,
-            None,
-        );
-
-        assert_eq!(result.status, ReleaseStepStatus::Failed);
-        let error = result.error.expect("auth failure must carry an error");
-        assert!(error.contains("run the extension login command"));
-        assert!(error.contains("--skip-publish"));
-        assert!(result.warnings.is_empty());
-    }
-
-    #[test]
-    fn publish_step_fails_when_npm_output_reports_eneedauth() {
-        let response = serde_json::json!({
-            "success": false,
-            "exitCode": 1,
-            "stdout": "",
-            "stderr": "npm ERR! code ENEEDAUTH\nnpm ERR! need auth This command requires you to be logged in to https://registry.npmjs.org/",
-        });
-
-        let result = publish_step_result(
-            "publish.package-runtime",
-            "package-runtime",
-            "package-runtime",
-            None,
-            &response,
-            None,
-        );
-
-        assert_eq!(result.status, ReleaseStepStatus::Failed);
-        assert!(result
-            .error
-            .expect("auth failure must carry an error")
-            .contains("ENEEDAUTH"));
-        assert!(result.warnings.is_empty());
-    }
-
-    #[test]
-    fn publish_step_skips_when_npm_output_reports_eprivate() {
-        let response = serde_json::json!({
-            "success": false,
-            "exitCode": 1,
-            "stdout": "",
-            "stderr": "npm error code EPRIVATE\nnpm error This package has been marked as private",
-        });
-
-        let result = publish_step_result(
-            "publish.package-runtime",
-            "package-runtime",
-            "package-runtime",
-            None,
-            &response,
-            None,
-        );
-
-        assert_eq!(result.status, ReleaseStepStatus::Skipped);
-        assert!(result.warnings.join("\n").contains("marked private"));
-        assert!(result.error.is_none());
-    }
-
-    #[test]
-    fn publish_step_eprivate_skip_takes_precedence_over_auth_required_output() {
-        let response = serde_json::json!({
-            "success": false,
-            "exitCode": 1,
-            "stdout": "",
-            "stderr": "npm error code EPRIVATE\nnpm error This package has been marked as private\nnpm ERR! code ENEEDAUTH",
-        });
-
-        let result = publish_step_result(
-            "publish.package-runtime",
-            "package-runtime",
-            "package-runtime",
-            None,
-            &response,
-            None,
-        );
-
-        assert_eq!(result.status, ReleaseStepStatus::Skipped);
-        let warnings = result.warnings.join("\n");
-        assert!(warnings.contains("marked private"));
-        assert!(!warnings.contains("ENEEDAUTH"));
-        assert!(result.error.is_none());
-    }
-
-    #[test]
-    fn publish_step_fails_when_extension_error_has_no_skip_status() {
-        let response = serde_json::json!({
-            "success": false,
-            "exitCode": 1,
-            "stderr": "error: failed to upload package: 500 server error",
-        });
-
-        let result = publish_step_result(
-            "publish.registry",
-            "registry",
-            "registry",
-            None,
-            &response,
-            None,
-        );
-
-        assert_eq!(result.status, ReleaseStepStatus::Failed);
-        assert!(result.error.unwrap().contains("500 server error"));
-    }
-
-    #[test]
-    fn publish_step_fails_when_registry_version_is_missing() {
-        let server = registry_server(404, r#"{"error":"not found"}"#);
-        let response = serde_json::json!({
-            "success": true,
-            "registry_verification": {
-                "registry_url": server.registry_url,
-                "package_name": "@extrachill/components",
-                "version": "0.5.2"
-            }
-        });
-
-        let result =
-            publish_step_result("publish.npm", "npm", "npm", None, &response, Some("0.5.2"));
-
-        assert_eq!(result.status, ReleaseStepStatus::Failed);
-        assert!(result
-            .error
-            .unwrap()
-            .contains("registry returned 404 Not Found"));
-        assert_eq!(
-            server.handle.join().expect("server request"),
-            "GET /%40extrachill%2Fcomponents/0.5.2 HTTP/1.1"
-        );
-    }
-
-    #[test]
-    fn publish_step_succeeds_when_registry_version_is_present() {
-        let server = registry_server(200, r#"{"version":"0.5.2"}"#);
-        let response = serde_json::json!({
-            "success": true,
-            "registry_verification": {
-                "registry_url": server.registry_url,
-                "package_name": "@extrachill/components",
-                "version": "0.5.2"
-            }
-        });
-
-        let result =
-            publish_step_result("publish.npm", "npm", "npm", None, &response, Some("0.5.2"));
-
-        assert_eq!(result.status, ReleaseStepStatus::Success);
-        assert_eq!(
-            server.handle.join().expect("server request"),
-            "GET /%40extrachill%2Fcomponents/0.5.2 HTTP/1.1"
-        );
+        }
     }
 }

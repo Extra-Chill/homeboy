@@ -7,6 +7,22 @@ use homeboy_core::engine::run_dir::RunDir;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Run `git` in `dir`, asserting success and returning trimmed stdout.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
 #[test]
 fn test_run_self_check_lint_workflow() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -377,19 +393,7 @@ exit 1
 fn changed_since_missing_component_path_uses_empty_baseline() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(source.path())
-                .output()
-                .expect("git command");
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap().trim().to_string()
-        };
+        let git = |args: &[&str]| git(source.path(), args);
         git(&["init", "-q"]);
         git(&["config", "user.email", "homeboy@example.com"]);
         git(&["config", "user.name", "Homeboy Test"]);
@@ -452,17 +456,7 @@ fn accepted_pr_finding_stays_accepted_on_full_default_branch_run() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
         let run_git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(source.path())
-                .output()
-                .expect("git command");
-            assert!(
-                output.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
+            git(source.path(), args);
         };
         run_git(&["init", "-q"]);
         run_git(&["config", "user.email", "homeboy@example.com"]);
@@ -532,17 +526,7 @@ fn scoped_zero_findings_do_not_compare_unrelated_legacy_baseline() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
         let run_git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(source.path())
-                .output()
-                .expect("git command");
-            assert!(
-                output.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
+            git(source.path(), args);
         };
         run_git(&["init", "-q"]);
         run_git(&["config", "user.email", "homeboy@example.com"]);
@@ -630,17 +614,7 @@ fn changed_since_gate_treats_full_scope_stored_baseline_findings_as_known() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
         let run_git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(source.path())
-                .output()
-                .expect("git command");
-            assert!(
-                output.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
+            git(source.path(), args);
         };
         run_git(&["init", "-q"]);
         run_git(&["config", "user.email", "homeboy@example.com"]);
@@ -867,17 +841,7 @@ fn nested_component_scope_uses_existing_component_relative_file_paths() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let repo = tempfile::tempdir().expect("repo dir");
         let run_git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .args(args)
-                .current_dir(repo.path())
-                .output()
-                .expect("git command");
-            assert!(
-                output.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
+            git(repo.path(), args);
         };
         run_git(&["init", "-q"]);
         run_git(&["config", "user.email", "homeboy@example.com"]);
@@ -986,27 +950,6 @@ exit 0
 }
 
 #[test]
-fn lint_config_deserializes_changed_file_routes() {
-    let config: homeboy_extension_contract::manifest_toolchain_config::LintConfig =
-        serde_json::from_str(
-            r#"{
-                "extension_script": "scripts/lint.sh",
-                "changed_file_routes": [
-                    { "extensions": ["php"], "step": "phpcs,phpstan" },
-                    { "globs": ["assets/**/*.css"], "step": "stylelint" }
-                ]
-            }"#,
-        )
-        .expect("parse lint config");
-
-    assert_eq!(config.changed_file_routes.len(), 2);
-    assert_eq!(config.changed_file_routes[0].extensions, vec!["php"]);
-    assert_eq!(config.changed_file_routes[0].step, "phpcs,phpstan");
-    assert_eq!(config.changed_file_routes[1].globs, vec!["assets/**/*.css"]);
-    assert_eq!(config.changed_file_routes[1].step, "stylelint");
-}
-
-#[test]
 fn scoped_lint_run_dir_disposes_success_and_failure_explicitly() {
     let _guard = homeboy_core::test_support::home_env_guard();
     let root = tempfile::tempdir().expect("runtime root");
@@ -1049,16 +992,7 @@ exit 1
         std::fs::write(source.join("homeboy.json"), portable.to_string()).unwrap();
         std::fs::write(source.join("old.php"), "<?php // standing warning\n").unwrap();
         let git = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .current_dir(repo.path())
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            git(repo.path(), args);
         };
         git(&["init", "-q"]);
         git(&["config", "user.email", "test@example.com"]);
