@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.24] - 2026-11-25
+
+### Changed
+- prune workspace snapshot, snapshots, types and util tests file by file
+- prune and fold low-value tests in lab-runner slice 1/12
+- prune and fold redundant agent-task gate and lifecycle tests
+
 ## [0.497.23] - 2026-11-25
 
 ### Changed
