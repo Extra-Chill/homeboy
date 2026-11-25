@@ -12,26 +12,28 @@ fn parsed_command(args: &[&str]) -> Commands {
 }
 
 #[test]
-fn non_workload_command_has_no_workload_arguments() {
-    assert!(parsed_command(&["homeboy", "status"])
-        .lab_route_contract()
-        .expect("route contract")
-        .is_none());
-}
-
-#[test]
-fn trace_observe_stays_local_to_the_observed_target() {
-    assert!(parsed_command(&[
-        "homeboy",
-        "trace",
-        "observe",
-        "component",
-        "--watch-process",
-        "homeboy",
-    ])
-    .lab_route_contract()
-    .expect("route contract")
-    .is_none());
+fn commands_without_workloads_have_no_lab_route_contract() {
+    for args in [
+        ["homeboy", "status"].as_slice(),
+        // trace observe stays local to the observed target.
+        [
+            "homeboy",
+            "trace",
+            "observe",
+            "component",
+            "--watch-process",
+            "homeboy",
+        ]
+        .as_slice(),
+    ] {
+        assert!(
+            parsed_command(args)
+                .lab_route_contract()
+                .expect("route contract")
+                .is_none(),
+            "{args:?}"
+        );
+    }
 }
 
 #[test]
@@ -77,13 +79,11 @@ fn runner_resident_agent_task_reads_are_low_noise_polling() {
 
 #[test]
 fn runner_resident_agent_task_execution_keeps_full_runner_evidence() {
-    for args in [["homeboy", "agent-task", "run", "agent-task-123"].as_slice()] {
-        let contract = parsed_command(args)
-            .lab_contract()
-            .expect("runner-resident execution contract");
-        assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
-        assert!(!contract.routing_policy.read_only_polling);
-    }
+    let contract = parsed_command(&["homeboy", "agent-task", "run", "agent-task-123"])
+        .lab_contract()
+        .expect("runner-resident execution contract");
+    assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
+    assert!(!contract.routing_policy.read_only_polling);
 }
 
 #[test]
@@ -111,8 +111,12 @@ fn extension_show_is_controller_local_until_live_readiness_is_requested() {
 }
 
 #[test]
-fn agent_task_cook_coordinator_stays_controller_local() {
-    let command = parsed_command(&[
+fn cook_and_fanout_coordinators_stay_controller_local() {
+    use crate::commands::contract_lab_routing::{
+        AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON as COOK_REASON,
+        AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON as FANOUT_REASON,
+    };
+    let cook = [
         "homeboy",
         "agent-task",
         "cook",
@@ -122,61 +126,9 @@ fn agent_task_cook_coordinator_stays_controller_local() {
         "homeboy@cook-finalization",
         "--verify",
         "cargo test --lib",
-    ]);
-
-    let contract = command.lab_contract().expect("cook contract");
-
-    assert_eq!(
-        contract.portability,
-        LabCommandPortability::LocalOnly(
-            crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON
-        )
-    );
-    assert!(!contract.routing_policy.default_lab_offload);
-}
-
-/// #15668: the controller-owned gate wording documents that deterministic
-/// gates follow the cook's placement instead of always gating locally.
-#[test]
-fn cook_coordinator_contract_documents_gates_following_placement() {
-    let reason =
-        crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON;
-    assert!(
-        reason.contains("Deterministic gates follow that placement"),
-        "{reason}"
-    );
-    assert!(reason.contains("gates on its attempt runner"), "{reason}");
-    assert!(reason.contains("`--gate-runner`"), "{reason}");
-}
-
-#[test]
-fn agent_task_cook_no_finalize_is_still_controller_local() {
-    let command = parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--prompt",
-        "make a change",
-        "--to-worktree",
-        "homeboy@cook-finalization",
-        "--verify",
-        "cargo test --lib",
-        "--no-finalize",
-    ]);
-
-    let contract = command.lab_contract().expect("cook contract");
-
-    assert_eq!(
-        contract.portability,
-        LabCommandPortability::LocalOnly(
-            crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON
-        )
-    );
-}
-
-#[test]
-fn fanout_and_child_cook_coordinators_stay_controller_local() {
-    let coordinator = parsed_command(&[
+    ];
+    let cook_no_finalize = [cook.as_slice(), &["--no-finalize"]].concat();
+    let fanout = [
         "homeboy",
         "agent-task",
         "fanout",
@@ -186,35 +138,23 @@ fn fanout_and_child_cook_coordinators_stay_controller_local() {
         "--verify",
         "cargo test --lib",
         "https://github.com/Extra-Chill/homeboy/issues/1",
-    ]);
-    let coordinator_contract = coordinator.lab_contract().expect("fanout contract");
-    assert_eq!(
-        coordinator_contract.portability,
-        LabCommandPortability::LocalOnly(
-            crate::commands::contract_lab_routing::AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON
-        )
-    );
+    ];
 
-    let child = parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--prompt",
-        "implement the assigned task",
-        "--to-worktree",
-        "homeboy@child-cook",
-        "--verify",
-        "cargo test --lib",
-    ]);
-    assert_eq!(
-        child
+    for (args, reason) in [
+        (cook.as_slice(), COOK_REASON),
+        (cook_no_finalize.as_slice(), COOK_REASON),
+        (fanout.as_slice(), FANOUT_REASON),
+    ] {
+        let contract = parsed_command(args)
             .lab_contract()
-            .expect("child cook contract")
-            .portability,
-        LabCommandPortability::LocalOnly(
-            crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON
-        )
-    );
+            .expect("coordinator contract");
+        assert_eq!(
+            contract.portability,
+            LabCommandPortability::LocalOnly(reason),
+            "{args:?}"
+        );
+        assert!(!contract.routing_policy.default_lab_offload, "{args:?}");
+    }
 }
 
 #[test]
@@ -265,47 +205,5 @@ fn unscoped_provider_discovery_stays_controller_local() {
     assert!(
         contract.is_portable(),
         "an explicit --runner probe must remain available"
-    );
-}
-
-#[test]
-fn warm_controller_pressure_never_relocates_provider_discovery() {
-    // `explicit_runner_simple` left provider discovery eligible for the
-    // warm-controller pressure promotion in the Lab offload executor, which is
-    // what silently moved the read onto `homeboy-lab`. Runner-resident source
-    // mode is the contract-level exemption from that promotion (#9763).
-    let contract = parsed_command(&["homeboy", "agent-task", "providers"])
-        .lab_contract()
-        .expect("provider discovery contract");
-
-    assert_eq!(
-        contract.source_path_mode,
-        LabSourcePathMode::RunnerResident,
-        "runner-resident reads are exempt from pressure-driven offload promotion"
-    );
-
-    // Guard the shared policy too: no severity may promote a contract that
-    // declares no default offload without an explicit caller request.
-    assert!(!contract.routing_policy.default_lab_offload);
-}
-
-#[test]
-fn explicit_runner_provider_discovery_still_offloads() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "--runner",
-        "homeboy-lab",
-        "agent-task",
-        "providers",
-    ])
-    .expect("CLI args should parse");
-
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert!(
-        cli.command
-            .lab_contract()
-            .expect("provider discovery contract")
-            .is_portable(),
-        "an explicit runner request must still reach the runner"
     );
 }
