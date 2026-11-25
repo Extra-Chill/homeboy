@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.2] - 2026-11-25
+
+### Changed
+- prune redundant execution/connection tests and dead tunnel wrapper
+- prune and fold low-value tests in output, paths, preflight, plan, process and project component modules
+- prune and fold homeboy-core extension tests (wave 2, slice 11/22)
+- prune low-value tests in engine, evidence manifest, execution and bench modules
+- prune and fold low-value tests in extension test/trace modules
+- prune restating and duplicate tests in daemon, defaults, deps and cli_tool
+
 ## [0.497.1] - 2026-11-25
 
 ### Changed
