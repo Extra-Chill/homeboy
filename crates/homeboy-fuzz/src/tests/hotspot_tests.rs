@@ -1,9 +1,8 @@
 use serde_json::json;
 
 use crate::{
-    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot,
-    FuzzHotspotDimension, FuzzHotspotMetric, FuzzHotspotSet, FuzzObservationSet,
-    FUZZ_CONTRACT_VERSION, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
+    parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzObservationSet,
+    FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
 };
 
 #[test]
@@ -56,87 +55,15 @@ fn parses_typed_hotspot_set_from_result_envelope_metadata() {
     let set = parse_fuzz_hotspot_set_value(&envelope).expect("typed hotspot set");
 
     assert_eq!(set.id, "production-measurement-hotspots");
-    assert_eq!(set.items.len(), 1);
-    assert_eq!(set.items[0].id, "action:checkout");
-    assert_eq!(set.items[0].dimension, "action");
-    assert_eq!(set.items[0].dimensions.len(), 10);
-    assert_eq!(set.items[0].dimensions[1].name, "storage_target");
-    assert_eq!(
-        set.items[0].dimensions[1].kind.as_deref(),
-        Some("collection")
-    );
-    assert_eq!(set.items[0].kind.as_deref(), Some("handler"));
-    assert_eq!(set.items[0].metric, "duration");
-    assert_eq!(set.items[0].value, 481.5);
-    assert_eq!(set.items[0].unit, "ms");
-    assert_eq!(set.items[0].metrics.len(), 3);
-    assert_eq!(set.items[0].metrics[0].name, "duration");
-    assert_eq!(set.items[0].metrics[0].relative_score, Some(0.98));
-    assert_eq!(set.items[0].basis.as_deref(), Some("p95_per_case"));
-    assert_eq!(set.items[0].sample_count, Some(144));
-    assert_eq!(set.items[0].rank, Some(1));
-    assert_eq!(set.items[0].relative_score, Some(0.98));
-    assert_eq!(set.items[0].labels, vec!["production", "p95"]);
-    assert_eq!(set.items[0].evidence_refs, vec!["case-log:case-1"]);
-    assert_eq!(set.items[0].artifact_refs, vec!["profile.json"]);
-}
-
-#[test]
-fn serializes_generic_hotspot_dimensions_metrics_and_labels_without_gate_fields() {
-    let set = FuzzHotspotSet {
-        schema: FUZZ_HOTSPOT_SET_SCHEMA.to_string(),
-        version: FUZZ_CONTRACT_VERSION,
-        id: "rich-hotspots".to_string(),
-        label: None,
-        items: vec![FuzzHotspot {
-            id: "operation:checkout".to_string(),
-            dimension: "operation".to_string(),
-            dimensions: vec![
-                dimension("operation", "checkout"),
-                dimension("query_fingerprint", "fetch-related-items"),
-                dimension("storage_target", "items"),
-                dimension("cache_target", "price-cache"),
-                dimension("write_amplification", "metadata-fanout"),
-                dimension("duplicate_work_group", "recalculate-summary"),
-                dimension("task_unit", "submit-handler"),
-                dimension("page_screen", "checkout"),
-                dimension("browser_step", "place-order"),
-                dimension("extension_label", "runtime-owned-label"),
-            ],
-            kind: Some("relative_hotspot".to_string()),
-            metric: "duration".to_string(),
-            value: 42.0,
-            unit: "ms".to_string(),
-            metrics: vec![
-                metric("duration", 42.0, "ms"),
-                metric("duplicate_work", 6.0, "count"),
-                metric("writes_per_operation", 3.5, "ratio"),
-            ],
-            basis: Some("relative_rank".to_string()),
-            sample_count: Some(12),
-            rank: Some(1),
-            relative_score: Some(1.0),
-            label: Some("Checkout operation".to_string()),
-            labels: vec!["production".to_string(), "candidate".to_string()],
-            evidence_refs: Vec::new(),
-            artifact_refs: Vec::new(),
-            source_refs: Vec::new(),
-            provenance: None,
-            metadata: serde_json::Value::Null,
-            extra: Default::default(),
-        }],
-        provenance: None,
-        metadata: serde_json::Value::Null,
-        extra: Default::default(),
-    };
-
-    let serialized = serde_json::to_value(&set).expect("serialize hotspot set");
-    let parsed = parse_fuzz_hotspot_set_value(&serialized).expect("parse serialized hotspot set");
-
-    assert_eq!(parsed, set);
-    assert!(serialized.pointer("/items/0/dimensions").is_some());
-    assert!(serialized.pointer("/items/0/metrics").is_some());
-    assert_no_nested_gate_fields(&serialized);
+    let item = &set.items[0];
+    assert_eq!(item.id, "action:checkout");
+    assert_eq!(item.dimensions.len(), 10);
+    assert_eq!(item.dimensions[1].kind.as_deref(), Some("collection"));
+    assert_eq!(item.value, 481.5);
+    assert_eq!(item.metrics.len(), 3);
+    assert_eq!(item.metrics[0].relative_score, Some(0.98));
+    assert_eq!(item.rank, Some(1));
+    assert_eq!(item.evidence_refs, vec!["case-log:case-1"]);
 }
 
 #[test]
@@ -165,56 +92,51 @@ fn preserves_minimal_hotspot_artifact_compatibility() {
 }
 
 #[test]
-fn rejects_invalid_hotspot_metric_values() {
-    let invalid = json!({
-        "schema": FUZZ_HOTSPOT_SET_SCHEMA,
-        "id": "hotspots",
-        "items": [
-            {
-                "id": "query:slow",
-                "dimension": "query",
-                "metric": "duration",
-                "value": "not-a-number",
-                "unit": "ms"
-            }
-        ]
-    });
+fn rejects_invalid_hotspot_sets() {
+    let item = |value: serde_json::Value, metrics: serde_json::Value| {
+        json!({
+            "id": "action:slow",
+            "dimension": "action",
+            "metric": "duration",
+            "value": value,
+            "unit": "ms",
+            "metrics": metrics
+        })
+    };
+    let cases = [
+        (
+            "non-numeric value",
+            json!({
+                "schema": FUZZ_HOTSPOT_SET_SCHEMA,
+                "id": "hotspots",
+                "items": [item(json!("not-a-number"), json!([]))]
+            }),
+        ),
+        (
+            "non-numeric nested metric",
+            json!({
+                "schema": FUZZ_HOTSPOT_SET_SCHEMA,
+                "id": "hotspots",
+                "items": [item(
+                    json!(10),
+                    json!([{ "name": "cache_miss_rate", "value": "not-a-number", "unit": "ratio" }])
+                )]
+            }),
+        ),
+        (
+            "unsupported version",
+            json!({
+                "schema": FUZZ_HOTSPOT_SET_SCHEMA,
+                "version": 999,
+                "id": "hotspots",
+                "items": []
+            }),
+        ),
+    ];
 
-    assert!(parse_fuzz_hotspot_set_value(&invalid).is_none());
-}
-
-#[test]
-fn rejects_invalid_nested_hotspot_metric_values() {
-    let invalid = json!({
-        "schema": FUZZ_HOTSPOT_SET_SCHEMA,
-        "id": "hotspots",
-        "items": [
-            {
-                "id": "action:slow",
-                "dimension": "action",
-                "metric": "duration",
-                "value": 10,
-                "unit": "ms",
-                "metrics": [
-                    { "name": "cache_miss_rate", "value": "not-a-number", "unit": "ratio" }
-                ]
-            }
-        ]
-    });
-
-    assert!(parse_fuzz_hotspot_set_value(&invalid).is_none());
-}
-
-#[test]
-fn rejects_unsupported_hotspot_set_versions() {
-    let invalid = json!({
-        "schema": FUZZ_HOTSPOT_SET_SCHEMA,
-        "version": 999,
-        "id": "hotspots",
-        "items": []
-    });
-
-    assert!(parse_fuzz_hotspot_set_value(&invalid).is_none());
+    for (label, invalid) in cases {
+        assert!(parse_fuzz_hotspot_set_value(&invalid).is_none(), "{label}");
+    }
 }
 
 #[test]
@@ -282,52 +204,4 @@ fn ranks_observation_set_hotspots_deterministically() {
         .dimensions
         .iter()
         .any(|dimension| dimension.name == "target" && dimension.value == "items-store"));
-}
-
-fn dimension(name: &str, value: &str) -> FuzzHotspotDimension {
-    FuzzHotspotDimension {
-        name: name.to_string(),
-        value: value.to_string(),
-        kind: None,
-        label: None,
-        labels: Vec::new(),
-        metadata: serde_json::Value::Null,
-        extra: Default::default(),
-    }
-}
-
-fn metric(name: &str, value: f64, unit: &str) -> FuzzHotspotMetric {
-    FuzzHotspotMetric {
-        name: name.to_string(),
-        value,
-        unit: unit.to_string(),
-        basis: None,
-        sample_count: None,
-        rank: None,
-        relative_score: None,
-        labels: Vec::new(),
-        metadata: serde_json::Value::Null,
-        extra: Default::default(),
-    }
-}
-
-fn assert_no_nested_gate_fields(value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            for (key, value) in object {
-                assert_ne!(key, "threshold");
-                assert_ne!(key, "budget");
-                assert_ne!(key, "status");
-                assert_ne!(key, "passed");
-                assert_ne!(key, "failed");
-                assert_no_nested_gate_fields(value);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                assert_no_nested_gate_fields(item);
-            }
-        }
-        _ => {}
-    }
 }

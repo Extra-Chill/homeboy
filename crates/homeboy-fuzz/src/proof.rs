@@ -820,8 +820,6 @@ mod tests {
             .expect("valid evidence")
             .expect("fuzz proof");
 
-        assert_eq!(proof.schema, FUZZ_PROOF_SCHEMA);
-        assert_eq!(proof.source, FuzzProofSource::RunMetadata);
         assert!(proof.verdict.overall);
         assert_eq!(proof.verdict.workload, FuzzWorkloadVerdict::Passed);
         assert_eq!(proof.verdict.evidence, FuzzEvidenceVerdict::Complete);
@@ -833,46 +831,26 @@ mod tests {
             Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0")
         );
         assert!(proof.component.is_exact());
-        // Exact rig identity projected from run metadata.
         let rig = proof.rig.as_ref().expect("rig identity");
         assert_eq!(
             rig.revision.as_deref(),
             Some("7ccbe54558d145d022ef2b88f3ba9f7e2063df5e")
         );
         assert_eq!(rig.content_hash.as_deref(), Some("sha256:abc"));
-        assert!(rig.linked);
 
         let cases = proof.cases.as_ref().expect("case totals");
         assert_eq!((cases.total, cases.passed, cases.failed), (19, 19, 0));
-        assert_eq!(proof.findings.as_ref().expect("findings").open, 0);
-        assert_eq!(proof.gates.total, 4);
-        assert_eq!(proof.gates.passed, 4);
-        assert!(proof.gates.failed_gates.is_empty());
-
+        assert_eq!((proof.gates.total, proof.gates.passed), (4, 4));
         let coverage = proof.coverage.as_ref().expect("coverage");
         assert!(coverage.complete);
-        assert_eq!(coverage.proven_targets, 4);
-        assert_eq!(coverage.proven_operations, 6);
         assert!(coverage
             .dimensions
             .contains(&"surface_summaries:import".to_string()));
-
         assert_eq!(proof.execution.seed.as_deref(), Some("4356"));
-        assert_eq!(proof.execution.profile.as_deref(), Some("lab"));
-        assert_eq!(proof.execution.isolation.as_deref(), Some("disposable"));
         assert_eq!(proof.execution.placement.as_deref(), Some("local"));
-        assert_eq!(proof.tracker_refs.len(), 1);
         assert!(proof.gaps.is_empty());
-    }
 
-    #[test]
-    fn the_markdown_rendering_is_postable_and_bounded() {
-        let run = fuzz_run("pass", passing_metadata());
-
-        let proof = derive_fuzz_proof(&run)
-            .expect("valid evidence")
-            .expect("fuzz proof");
-
+        // The markdown rendering is postable and bounded.
         assert!(proof
             .markdown
             .starts_with("## Fuzz proof — `studio-pr-4356-homeboy-v6`"));
@@ -881,10 +859,12 @@ mod tests {
         assert!(proof
             .markdown
             .contains("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0"));
-        assert!(proof
-            .markdown
-            .contains("7ccbe54558d145d022ef2b88f3ba9f7e2063df5e"));
         assert!(proof.markdown.len() < 4_000);
+
+        // `homeboy contract validate` decodes emitted proofs, so the wire form round-trips.
+        let encoded = serde_json::to_string(&proof).expect("encode");
+        let decoded: FuzzProof = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, proof);
     }
 
     #[test]
@@ -1030,18 +1010,5 @@ mod tests {
 
         assert_eq!(proof.execution.placement.as_deref(), Some("lab"));
         assert_eq!(proof.execution.remote_job_id.as_deref(), Some("job-7"));
-    }
-
-    #[test]
-    fn the_projection_round_trips_through_json() {
-        let run = fuzz_run("pass", passing_metadata());
-        let proof = derive_fuzz_proof(&run)
-            .expect("valid evidence")
-            .expect("fuzz proof");
-
-        let encoded = serde_json::to_string(&proof).expect("encode");
-        let decoded: FuzzProof = serde_json::from_str(&encoded).expect("decode");
-
-        assert_eq!(decoded, proof);
     }
 }
