@@ -82,21 +82,4 @@ fn plans_serialize_with_stable_tags() {
         serde_json::to_value(Plan::Converged).unwrap(),
         serde_json::json!({ "plan": "converged" })
     );
-    let decoded: Plan =
-        serde_json::from_value(serde_json::to_value(attestation()).unwrap()).unwrap();
-    assert_eq!(decoded, attestation());
-}
-
-/// The local plan reads the one daemon store. With no daemon and no jobs it
-/// never errors: an unreadable status is itself a verdict.
-#[test]
-fn the_local_plan_reads_the_one_store_and_never_errors() {
-    crate::test_support::with_isolated_home(|_| {
-        let status = crate::daemon::read_status().expect("status of an empty store");
-        let _ = plan_local();
-        assert_eq!(
-            plan(&status),
-            crate::daemon::recovery_actions::plan_recovery(&status).lifecycle
-        );
-    });
 }

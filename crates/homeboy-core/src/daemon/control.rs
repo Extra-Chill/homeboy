@@ -1626,30 +1626,7 @@ mod termination_tests {
     #[test]
     fn submitting_cli_build_selects_reuse_restart_or_drain() {
         crate::test_support::with_isolated_home(|_| {
-            let mut status = read_status().unwrap();
-            status.running = true;
-            status.reachable = true;
-            status.fresh = true;
-            status.state = Some(super::super::DaemonState {
-                schema: super::super::DAEMON_LEASE_SCHEMA.to_string(),
-                lease_id: "test-lease".into(),
-                startup_token: "test-token".into(),
-                address: "127.0.0.1:0".into(),
-                pid: 0,
-                state_path: String::new(),
-                started_at: String::new(),
-                last_seen_at: String::new(),
-                build_identity: crate::build_identity::current(),
-                lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
-                executable: Default::default(),
-                runtime_paths: super::super::DaemonRuntimeSnapshot {
-                    pressure: None,
-                    pressure_thresholds: Default::default(),
-                    loaded_at: String::new(),
-                    paths: Vec::new(),
-                },
-                service_manager: None,
-            });
+            let mut status = ready_status();
             for (different_build, same_executable, active_jobs, expected) in [
                 (false, true, 0, None),
                 (true, true, 0, Some("restart")),
@@ -1681,6 +1658,8 @@ mod termination_tests {
         });
     }
 
+    /// An overlong record is discarded whole and marked, never retained as
+    /// an unredacted suffix.
     #[test]
     fn termination_output_reader_retains_only_a_bounded_redacted_tail() {
         let mut bytes = vec![b'x'; 8 * 1024 * 1024];

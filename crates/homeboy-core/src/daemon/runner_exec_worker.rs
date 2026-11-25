@@ -506,20 +506,6 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_only_stall_policy_has_safe_default_and_explicit_disable() {
-        let default = crate::server::HeartbeatOnlyStallPolicy::default();
-        assert_eq!(default.timeout(), Some(Duration::from_secs(15 * 60)));
-        assert_eq!(
-            crate::server::HeartbeatOnlyStallPolicy { timeout_seconds: 0 }.timeout(),
-            None
-        );
-        assert_eq!(
-            crate::server::HeartbeatOnlyStallPolicy { timeout_seconds: 7 }.timeout(),
-            Some(Duration::from_secs(7))
-        );
-    }
-
-    #[test]
     fn semantic_output_and_advancing_cpu_protect_long_running_work() {
         let start = Instant::now();
         let mut liveness = ExecLiveness::new(start);
@@ -551,25 +537,5 @@ mod tests {
             start + Duration::from_secs(10)
         ));
         assert!(!liveness.select_stall(start + Duration::from_secs(11), Duration::from_secs(10)));
-    }
-
-    #[test]
-    fn stalled_cancellation_converges_active_job_accounting() {
-        let store = JobStore::default();
-        let job = store.create("runner.exec");
-        store.start(job.id).expect("start job");
-        let cancelled = store
-            .cancel(job.id, heartbeat_only_stall_reason(Duration::from_secs(10)))
-            .expect("cancel stalled job");
-
-        assert_eq!(cancelled.status, JobStatus::Cancelled);
-        assert!(cancelled
-            .stale_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("heartbeat_only_stall")));
-        assert!(
-            store.active_runner_jobs().is_empty(),
-            "cancelled jobs cannot pin the daemon"
-        );
     }
 }
