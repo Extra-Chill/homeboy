@@ -1742,74 +1742,59 @@ fn pre_provider_cancellation_rejects_mismatched_job_without_mutating_record() {
     assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
 }
 
+/// A cancellation snapshot that does not prove the provider never started
+/// (the runner reported a start, or the event history is truncated) stays
+/// pending instead of terminalizing without an inner aggregate.
 #[test]
-fn cancellation_after_runner_start_stays_pending_without_an_inner_aggregate() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-    let mut record = record_detached_lab_run_in_store(
-        &lifecycle_store,
-        DetachedLabRunRecord {
-            run_id: "cook-14599-cancelled-after-start",
-            runner_id: "homeboy-lab",
-            runner_job_id: "00000000-0000-0000-0000-000000000123",
-            remote_workspace: "/runner/workspace/homeboy",
-            remote_command: &command,
-        },
-    )
-    .expect("accepted detached handoff");
-    let mut snapshot = pre_provider_cancellation_snapshot();
-    snapshot.events.insert(
-        1,
-        homeboy_core::api_jobs::JobEvent {
-            sequence: 2,
-            job_id: snapshot.job.id,
-            kind: JobEventKind::Status,
-            timestamp_ms: 2,
-            message: Some("runner job started".to_string()),
-            data: Some(json!({ "status": "running" })),
-        },
-    );
-    snapshot.events[2].sequence = 3;
-    snapshot.job.event_count = snapshot.events.len();
+fn unproven_pre_provider_cancellation_stays_pending_without_an_inner_aggregate() {
+    type Mutate = fn(&mut homeboy_core::api_jobs::RunnerJobLogSnapshot);
+    let cases: [(&str, Mutate); 2] = [
+        ("cook-14599-cancelled-after-start", |snapshot| {
+            snapshot.events.insert(
+                1,
+                homeboy_core::api_jobs::JobEvent {
+                    sequence: 2,
+                    job_id: snapshot.job.id,
+                    kind: JobEventKind::Status,
+                    timestamp_ms: 2,
+                    message: Some("runner job started".to_string()),
+                    data: Some(json!({ "status": "running" })),
+                },
+            );
+            snapshot.events[2].sequence = 3;
+            snapshot.job.event_count = snapshot.events.len();
+        }),
+        ("cook-14599-truncated-cancellation-history", |snapshot| {
+            snapshot.job.event_count = 3;
+        }),
+    ];
+    for (run_id, mutate) in cases {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run_in_store(
+            &lifecycle_store,
+            DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "00000000-0000-0000-0000-000000000123",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+            },
+        )
+        .expect("accepted detached handoff");
+        let mut snapshot = pre_provider_cancellation_snapshot();
+        mutate(&mut snapshot);
 
-    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
-        .expect("ambiguous terminal transport stays pending");
-    assert_eq!(record.state(), RunExecutionState::Running);
-    assert_eq!(
-        record.metadata["runner_result_synchronization"]["state"],
-        "pending"
-    );
-    assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
-}
-
-#[test]
-fn truncated_cancellation_history_stays_pending_without_an_inner_aggregate() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-    let mut record = record_detached_lab_run_in_store(
-        &lifecycle_store,
-        DetachedLabRunRecord {
-            run_id: "cook-14599-truncated-cancellation-history",
-            runner_id: "homeboy-lab",
-            runner_job_id: "00000000-0000-0000-0000-000000000123",
-            remote_workspace: "/runner/workspace/homeboy",
-            remote_command: &command,
-        },
-    )
-    .expect("accepted detached handoff");
-    let mut snapshot = pre_provider_cancellation_snapshot();
-    snapshot.job.event_count = 3;
-
-    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
-        .expect("truncated terminal transport stays pending");
-    assert_eq!(record.state(), RunExecutionState::Running);
-    assert_eq!(
-        record.metadata["runner_result_synchronization"]["state"],
-        "pending"
-    );
-    assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
+        reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+            .expect("ambiguous terminal transport stays pending");
+        assert_eq!(record.state(), RunExecutionState::Running, "{run_id}");
+        assert_eq!(
+            record.metadata["runner_result_synchronization"]["state"], "pending",
+            "{run_id}"
+        );
+        assert!(lifecycle_store.read_aggregate(&record.run_id).is_err());
+    }
 }
 
 #[test]
@@ -3616,37 +3601,26 @@ fn terminal_aggregate_projection_owns_provider_models_and_status_leaves_them() {
 }
 
 #[test]
-fn cancel_keeps_run_state_and_execution_state_paired() {
+fn cancel_settles_queued_and_running_runs_with_paired_execution_state() {
     with_isolated_home(|_| {
         let plan = test_plan();
-        submit_plan(&plan, Some("run-cancel-pairing")).expect("submitted");
-        mark_running("run-cancel-pairing").expect("marked running");
+        for (run_id, running) in [("run-cancel", false), ("run-cancel-pairing", true)] {
+            submit_plan(&plan, Some(run_id)).expect("submitted");
+            if running {
+                mark_running(run_id).expect("marked running");
+            }
 
-        let cancelled = cancel("run-cancel-pairing").expect("cancelled");
+            let cancelled = cancel(run_id).expect("cancelled");
 
-        assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-        assert_eq!(
-            cancelled.lifecycle.execution.state,
-            RunExecutionState::from(cancelled.state()),
-        );
-        assert_eq!(
-            cancelled.lifecycle.execution.state,
-            RunExecutionState::Cancelled,
-        );
-    });
-}
-
-#[test]
-fn cancel_marks_queued_run_and_tasks_cancelled() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("run-cancel")).expect("submitted");
-
-        let record = cancel("run-cancel").expect("cancelled");
-
-        assert_eq!(record.state(), RunExecutionState::Cancelled);
-        assert_eq!(record.tasks[0].state(), ControlPlaneState::Cancelled);
-        assert!(record.metadata["cancel_requested_at"].is_string());
+            assert_eq!(cancelled.state(), RunExecutionState::Cancelled, "{run_id}");
+            assert_eq!(
+                cancelled.lifecycle.execution.state,
+                RunExecutionState::Cancelled,
+                "{run_id}"
+            );
+            assert_eq!(cancelled.tasks[0].state(), ControlPlaneState::Cancelled);
+            assert!(cancelled.metadata["cancel_requested_at"].is_string());
+        }
     });
 }
 
@@ -4276,35 +4250,6 @@ fn local_provider_reservation_persists_reusable_owner_identity_before_execution(
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Both status reads follow the store the reservation was written
-/// into, so "the live owner is still running after a second read" describes
-/// this test's own reservation.
-#[test]
-fn status_keeps_live_local_provider_owner_running_idempotently() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("owner-live")).expect("submitted");
-        mark_running("owner-live").expect("running");
-        reserve_provider_execution_in_store(
-            &test_lifecycle_store(),
-            "owner-live",
-            &plan.tasks[0],
-            1,
-        )
-        .expect("reserved");
-
-        let first = reconcile_status("owner-live").expect("first status");
-        let second = reconcile_status("owner-live").expect("second status");
-        assert_eq!(first.state(), RunExecutionState::Running);
-        assert_eq!(second.state(), RunExecutionState::Running);
-        assert_eq!(
-            second.metadata["provider_executions"][0]["owner_state"],
-            json!("live")
-        );
-    });
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The reservation, the recorded provider success and the status read
 /// that must *not* terminalize it all name the same installation.
 #[test]
@@ -4329,13 +4274,16 @@ fn status_does_not_terminalize_a_live_owner_after_provider_success() {
         )
         .expect("provider success recorded");
 
-        let record =
-            reconcile_status("owner-live-late-import").expect("status before aggregate import");
-        assert_eq!(record.state(), RunExecutionState::Running);
-        assert_eq!(
-            record.metadata["provider_executions"][0]["owner_state"],
-            json!("live")
-        );
+        // Repeated status reads keep a live owner running.
+        for _ in 0..2 {
+            let record =
+                reconcile_status("owner-live-late-import").expect("status before aggregate import");
+            assert_eq!(record.state(), RunExecutionState::Running);
+            assert_eq!(
+                record.metadata["provider_executions"][0]["owner_state"],
+                json!("live")
+            );
+        }
     });
 }
 
@@ -4930,12 +4878,13 @@ fn provider_terminalization_observes_cancellation_that_won_the_race() {
 }
 
 #[test]
-fn provider_terminalization_rejects_an_invalid_terminal_state() {
+fn provider_terminalization_rejects_invalid_requests_without_writing() {
     with_isolated_home(|_| {
         let plan = test_plan();
+        let store = test_lifecycle_store();
         submit_plan(&plan, Some("invalid-provider-terminal-state")).expect("submitted");
         reserve_provider_execution_in_store(
-            &test_lifecycle_store(),
+            &store,
             "invalid-provider-terminal-state",
             &plan.tasks[0],
             1,
@@ -4943,14 +4892,13 @@ fn provider_terminalization_rejects_an_invalid_terminal_state() {
         .expect("reserved");
 
         let error = record_provider_execution_terminal_in_store(
-            &test_lifecycle_store(),
+            &store,
             "invalid-provider-terminal-state",
             "task-a",
             1,
             "running",
         )
         .expect_err("running is not a terminal provider state");
-
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
         assert_eq!(
             reconcile_status("invalid-provider-terminal-state")
@@ -4958,24 +4906,16 @@ fn provider_terminalization_rejects_an_invalid_terminal_state() {
                 .metadata["provider_executions"][0]["state"],
             json!("running")
         );
-    });
-}
 
-#[test]
-fn provider_terminalization_rejects_a_missing_execution_attempt() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
         submit_plan(&plan, Some("missing-provider-terminal-attempt")).expect("submitted");
-
         let error = record_provider_execution_terminal_in_store(
-            &test_lifecycle_store(),
+            &store,
             "missing-provider-terminal-attempt",
             "task-a",
             1,
             "timed_out",
         )
         .expect_err("a terminal result needs a reserved execution attempt");
-
         assert_eq!(error.code, ErrorCode::InternalUnexpected);
     });
 }
@@ -5127,86 +5067,88 @@ fn controller_failure_cannot_terminalize_a_successful_aggregate() {
     });
 }
 
+/// A workspace snapshot fence invalidation never replaces an outcome it did
+/// not cause: a cancellation, an unrelated pre-execution failure, or a
+/// same-class diagnostic that lacks pre-provider identity.
 #[test]
-fn snapshot_fence_transition_preserves_cancelled_terminal_winner() {
-    with_isolated_home(|_| {
-        let run_id = "snapshot-fence-cancelled";
-        let plan = test_plan();
-        submit_plan(&plan, Some(run_id)).expect("submit");
-        cancel_run(run_id, Some("operator cancellation")).expect("cancel");
-        let store = AgentTaskLifecycleStore::from_environment().expect("store");
-        let error = Error::validation_invalid_argument(
-            "workspace",
-            "Cook workspace snapshot was invalidated before provider execution",
-            None,
-            None,
-        )
-        .with_retryable(true);
-        let record = store
-            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &error)
-            .expect("preserve cancellation");
-        assert_eq!(record.state(), RunExecutionState::Cancelled);
-        assert!(record.metadata.get("pre_execution_failure").is_none());
-    });
-}
-
-#[test]
-fn snapshot_fence_transition_preserves_unrelated_zero_execution_failure() {
-    with_isolated_home(|_| {
-        let run_id = "snapshot-fence-unrelated-failure";
-        let plan = test_plan();
-        let store = AgentTaskLifecycleStore::from_environment().expect("store");
-        submit_plan(&plan, Some(run_id)).expect("submit");
+fn snapshot_fence_transition_preserves_an_existing_terminal_outcome() {
+    type Setup = fn(&AgentTaskLifecycleStore, &str, &AgentTaskPlan);
+    let unrelated_failure: Setup = |store, run_id, plan| {
         let original =
             Error::validation_invalid_argument("workspace", "unrelated failure", None, None);
-        record_pre_execution_failure_in_store(&store, run_id, &plan, "unrelated_phase", &original)
+        record_pre_execution_failure_in_store(store, run_id, plan, "unrelated_phase", &original)
             .expect("record unrelated failure");
+    };
+    let cases: [(&str, Setup, RunExecutionState, Option<&str>); 3] = [
+        (
+            "snapshot-fence-cancelled",
+            |_, run_id, _| {
+                cancel_run(run_id, Some("operator cancellation")).expect("cancel");
+            },
+            RunExecutionState::Cancelled,
+            None,
+        ),
+        (
+            "snapshot-fence-unrelated-failure",
+            unrelated_failure,
+            RunExecutionState::Failed,
+            Some("unrelated_phase"),
+        ),
+        (
+            "snapshot-fence-same-class-provider-outcome",
+            |store, run_id, plan| {
+                let original = Error::validation_invalid_argument(
+                    "workspace",
+                    "unrelated failure",
+                    None,
+                    None,
+                );
+                record_pre_execution_failure_in_store(
+                    store,
+                    run_id,
+                    plan,
+                    "unrelated_phase",
+                    &original,
+                )
+                .expect("record unrelated failure");
+                let mut aggregate = store.read_aggregate(run_id).expect("aggregate");
+                aggregate.outcomes[0]
+                    .diagnostics
+                    .push(crate::agent_task::AgentTaskDiagnostic {
+                        class: "agent_task.workspace_snapshot_invalidated".to_string(),
+                        message: "provider-side diagnostic must not authorize replacement"
+                            .to_string(),
+                        data: json!({ "pre_provider": false }),
+                    });
+                store
+                    .write_aggregate(run_id, &aggregate)
+                    .expect("persist aggregate");
+            },
+            RunExecutionState::Failed,
+            Some("unrelated_phase"),
+        ),
+    ];
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         let fence =
             Error::validation_invalid_argument("workspace", "snapshot invalidated", None, None)
                 .with_retryable(true);
-        let record = store
-            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &fence)
-            .expect("preserve unrelated failure");
-        assert_eq!(record.state(), RunExecutionState::Failed);
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["phase"],
-            "unrelated_phase"
-        );
-    });
-}
+        for (run_id, setup, state, phase) in cases {
+            submit_plan(&plan, Some(run_id)).expect("submit");
+            setup(&store, run_id, &plan);
 
-#[test]
-fn snapshot_fence_transition_rejects_same_class_without_pre_provider_identity() {
-    with_isolated_home(|_| {
-        let run_id = "snapshot-fence-same-class-provider-outcome";
-        let plan = test_plan();
-        let store = AgentTaskLifecycleStore::from_environment().expect("store");
-        submit_plan(&plan, Some(run_id)).expect("submit");
-        let original =
-            Error::validation_invalid_argument("workspace", "unrelated failure", None, None);
-        record_pre_execution_failure_in_store(&store, run_id, &plan, "unrelated_phase", &original)
-            .expect("record unrelated failure");
-        let mut aggregate = store.read_aggregate(run_id).expect("aggregate");
-        aggregate.outcomes[0]
-            .diagnostics
-            .push(crate::agent_task::AgentTaskDiagnostic {
-                class: "agent_task.workspace_snapshot_invalidated".to_string(),
-                message: "provider-side diagnostic must not authorize replacement".to_string(),
-                data: json!({ "pre_provider": false }),
-            });
-        store
-            .write_aggregate(run_id, &aggregate)
-            .expect("persist aggregate");
-        let fence =
-            Error::validation_invalid_argument("workspace", "snapshot invalidated", None, None)
-                .with_retryable(true);
-        let record = store
-            .record_workspace_snapshot_fence_invalidation(run_id, &plan, &fence)
-            .expect("preserve non-fence outcome");
-        assert_eq!(
-            record.metadata["pre_execution_failure"]["phase"],
-            "unrelated_phase"
-        );
+            let record = store
+                .record_workspace_snapshot_fence_invalidation(run_id, &plan, &fence)
+                .expect("preserve existing outcome");
+
+            assert_eq!(record.state(), state, "{run_id}");
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["phase"].as_str(),
+                phase,
+                "{run_id}"
+            );
+        }
     });
 }
 
@@ -5331,87 +5273,6 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
             reloaded.metadata["transport_follow_up_failure"]["reason"],
             "post_provider_transport_failure"
         );
-    });
-}
-
-/// The model a provider actually ran is aggregate evidence, so the terminal
-/// write that commits the aggregate projects it (#9411). It used to be repaired
-/// on a later status read for records that went terminal before that projection
-/// existed; under the no-legacy policy (#15742) there are no such records, and
-/// reads never write (#15718). The property finalize-pr relies on is asserted
-/// against the durable record directly after the terminal write, with no
-/// reconciling read in between.
-#[test]
-fn terminal_write_persists_the_aggregate_provider_model() {
-    with_isolated_home(|_| {
-        let lifecycle_store = test_lifecycle_store();
-        let mut plan = test_plan();
-        plan.tasks[0].executor.backend = "pi".to_string();
-        plan.tasks[0].executor.model = None;
-        let mut aggregate = succeeded_aggregate(&plan);
-        // Authoritative: the aggregate outcome recorded the selected model.
-        aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
-
-        let run_id = "terminal-null-model-9411";
-        record_completed_run(&plan, &aggregate, Some(run_id)).expect("terminal record");
-
-        let persisted = lifecycle_store
-            .read_record(run_id)
-            .expect("persisted record");
-        assert!(persisted.state().is_terminal(), "terminal state committed");
-        assert_eq!(
-            persisted.tasks[0].model.as_deref(),
-            Some("openai/gpt-5.6-terra")
-        );
-        let runtime = persisted
-            .lifecycle
-            .provider_runtime
-            .first()
-            .expect("provider runtime");
-        assert_eq!(runtime.metadata["model"], "openai/gpt-5.6-terra");
-        for handle in &persisted.provider_handles {
-            assert_eq!(handle.metadata["model"], "openai/gpt-5.6-terra");
-        }
-    });
-}
-
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The assertion is that a read left the record *unchanged*, which is
-/// only meaningful if the before-read and the status read address one record in
-/// one home.
-#[test]
-fn status_leaves_terminal_record_untouched_when_aggregate_has_no_model() {
-    with_isolated_home(|_| {
-        let lifecycle_store = test_lifecycle_store();
-        let mut plan = test_plan();
-        plan.tasks[0].executor.backend = "pi".to_string();
-        plan.tasks[0].executor.model = None;
-        // Aggregate records no model — nothing authoritative to reproject.
-        let aggregate = succeeded_aggregate(&plan);
-
-        let run_id = "terminal-no-model-9411";
-        let record =
-            record_completed_run(&plan, &aggregate, Some(run_id)).expect("terminal record");
-        assert!(record.state().is_terminal());
-
-        let before = lifecycle_store.read_record(run_id).expect("record before");
-        let reconciled = reconcile_status_in_store(
-            &lifecycle_store,
-            run_id,
-            AgentTaskStatusOptions::default(),
-            false,
-        )
-        .expect("status")
-        .record;
-
-        // No model to reproject: task model stays absent and the run stays terminal.
-        assert!(reconciled.state().is_terminal());
-        assert!(reconciled.tasks[0]
-            .model
-            .as_deref()
-            .map(str::trim)
-            .is_none_or(str::is_empty));
-        assert_eq!(before.tasks[0].model, reconciled.tasks[0].model);
     });
 }
 

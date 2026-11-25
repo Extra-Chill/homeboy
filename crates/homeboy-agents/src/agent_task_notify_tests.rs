@@ -239,25 +239,6 @@ fn non_recoverable_failure_never_offers_recover() {
         .all(|action| !action.command.contains("agent-task recover")));
 }
 
-#[test]
-fn intentional_no_change_terminal_notifications_match_policy_outcome() {
-    let accepted = terminal_payload(&report("intentional_no_change", None), None, 0);
-    assert_eq!(accepted.kind, NotifyEventKind::Completed);
-    assert!(accepted.render_body().contains("succeeded"));
-
-    let refused = terminal_payload(&report("no_candidate", None), None, 1);
-    assert_eq!(refused.kind, NotifyEventKind::NeedsAttention);
-    assert!(refused.render_body().contains("needs attention"));
-}
-
-#[test]
-fn green_no_finalize_is_completed_without_a_pull_request_link() {
-    let payload = terminal_payload(&report("green_no_finalize", None), None, 0);
-    assert_eq!(payload.kind, NotifyEventKind::Completed);
-    assert!(payload.links.is_empty());
-    assert!(payload.render_body().contains("succeeded"));
-}
-
 /// #15881: a primary route skipped before dispatch is named in the terminal
 /// notification as one bounded line per skipped route.
 #[test]
@@ -375,29 +356,40 @@ fn failure_recommends_only_the_first_legal_next_action() {
     }
 }
 
+/// The terminal kind follows the Cook status and its publication evidence,
+/// never the exit code alone: a provider cannot advertise publication without
+/// a PR receipt, and a green Cook without a PR links nothing.
 #[test]
-fn terminal_kind_requires_publication_evidence_even_with_zero_exit() {
-    // A provider result cannot advertise publication without a PR receipt.
-    let unknown = report("failed", None);
-    assert_eq!(
-        terminal_payload(&unknown, None, 1).kind,
-        NotifyEventKind::NeedsAttention
-    );
-    assert_eq!(
-        terminal_payload(&unknown, None, 0).kind,
-        NotifyEventKind::NeedsAttention
-    );
-    let published = report(
-        "review_ready",
-        Some(serde_json::json!({
-            "status": "review_ready",
-            "pr_url": "https://example.test/pull/43",
-        })),
-    );
-    assert_eq!(
-        terminal_payload(&published, None, 0).kind,
-        NotifyEventKind::Completed
-    );
+fn terminal_kind_follows_status_and_publication_evidence() {
+    use NotifyEventKind::{Completed, NeedsAttention};
+    let published = json!({"status": "review_ready", "pr_url": "https://example.test/pull/43"});
+    for (status, finalization, exit_code, kind, outcome, linked) in [
+        ("failed", None, 1, NeedsAttention, "needs attention", false),
+        ("failed", None, 0, NeedsAttention, "needs attention", false),
+        (
+            "no_candidate",
+            None,
+            1,
+            NeedsAttention,
+            "needs attention",
+            false,
+        ),
+        (
+            "intentional_no_change",
+            None,
+            0,
+            Completed,
+            "succeeded",
+            false,
+        ),
+        ("green_no_finalize", None, 0, Completed, "succeeded", false),
+        ("review_ready", Some(published), 0, Completed, "", true),
+    ] {
+        let payload = terminal_payload(&report(status, finalization), None, exit_code);
+        assert_eq!(payload.kind, kind, "{status}/{exit_code}");
+        assert!(payload.render_body().contains(outcome), "{status}");
+        assert_eq!(!payload.links.is_empty(), linked, "{status}");
+    }
 }
 
 #[test]
@@ -445,33 +437,6 @@ fn only_terminal_events_reach_an_ambient_default_transport() {
     // An explicitly routed cook gets the full arc.
     assert!(should_deliver(NotifyEventKind::Started, true));
     assert!(should_deliver(NotifyEventKind::Progress, true));
-}
-
-#[test]
-fn cook_lifecycle_emission_is_inert_without_a_configured_transport() {
-    // End-to-end guard that emission never panics or fails a cook when no
-    // transport is installed at all.
-    homeboy_core::test_support::with_isolated_home(|_| {
-        cook_started(
-            &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
-            "cook-abc",
-            "run-1",
-            "task",
-            None,
-            "main",
-            3,
-            "claude",
-            false,
-        );
-        cook_retrying("cook-abc", "run-1", None, 2, 3);
-        cook_terminal(&report("review_ready", None), None, 0);
-        // A distinct cook: the terminal event is now claimed once per cook,
-        // so reusing `cook-abc` would exercise the dedupe rather than the
-        // failure path.
-        let mut failed = report("durable_failure", None);
-        failed.cook_id = "cook-def".to_string();
-        cook_terminal(&failed, None, 1);
-    });
 }
 
 fn route(destination: &str) -> NotificationRoute {
@@ -830,10 +795,15 @@ fn terminal_delivery_records_success_and_confirms_the_once_marker() {
 #[test]
 fn non_delivery_is_recorded_and_leaves_terminal_delivery_eligible() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        assert!(!cook_terminal_announced("cook-abc"), "no outcome yet");
         cook_terminal(&report("durable_failure", None), None, 1);
         let delivery = latest_delivery("cook-abc");
         assert_eq!(delivery["status"], "not_configured");
         assert_eq!(delivery["error_class"], "not_configured");
+        assert!(
+            !cook_terminal_announced("cook-abc"),
+            "an undelivered terminal leaves the continuation alert as the only signal"
+        );
         assert!(
             crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
                 &test_lifecycle_store(),
@@ -925,27 +895,9 @@ fn a_terminal_outcome_survives_a_transport_outage() {
                 .map(|marker| marker.subject_id.as_str()),
             Some("cook-abc"),
         );
-
-        // The transport comes back. The daemon tick's drain delivers it,
-        // and no producer had to be alive for that to happen.
-        install_transport("test.outage", vec!["true"]);
-        let drained =
-            homeboy_core::notify_outbox::drain(chrono::Utc::now() + chrono::Duration::seconds(60));
-        assert_eq!(drained.delivered, 1, "{drained:?}");
-        assert!(homeboy_core::notify_outbox::pending_entries().is_empty());
-    });
-}
-
-#[test]
-fn a_queued_terminal_event_consumes_its_once_claim() {
-    // Once the event is durable the outbox owns delivery. Leaving the claim
-    // merely *held* would let its five-minute lease expire inside the
-    // twenty-minute retry budget, and a second observer would announce the
-    // same outcome a second time.
-    homeboy_core::test_support::with_isolated_home(|_| {
-        install_transport("test.hold", vec!["false"]);
-        set_default_transport("test.hold");
-        cook_terminal(&report("review_ready", None), None, 0);
+        // Once the event is durable the outbox owns delivery. A merely *held*
+        // claim would let its lease expire inside the retry budget, and a
+        // second observer would announce the same outcome twice.
         assert!(
             !crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
                 &test_lifecycle_store(),
@@ -955,6 +907,14 @@ fn a_queued_terminal_event_consumes_its_once_claim() {
             .unwrap(),
             "a queued terminal event must not stay re-claimable",
         );
+
+        // The transport comes back. The daemon tick's drain delivers it,
+        // and no producer had to be alive for that to happen.
+        install_transport("test.outage", vec!["true"]);
+        let drained =
+            homeboy_core::notify_outbox::drain(chrono::Utc::now() + chrono::Duration::seconds(60));
+        assert_eq!(drained.delivered, 1, "{drained:?}");
+        assert!(homeboy_core::notify_outbox::pending_entries().is_empty());
     });
 }
 
@@ -978,43 +938,24 @@ fn resumed_terminal_delivery_uses_the_durable_route_and_stays_deduplicated() {
 }
 
 #[test]
-fn a_cook_resumed_in_a_new_process_recovers_its_route_from_the_durable_record() {
-    // #11115: `notification_route::current()` is a thread-local, so a
-    // process that did not launch the cook (`agent-task recover`, controller
-    // adoption, claimed continuation) has none. Without the durable
-    // fallback the whole arc degrades: Started/Progress are dropped and the
-    // terminal event lands on the ambient default transport instead of the
-    // thread that asked for this work. No route is bound here — that is the
-    // resumed process.
+fn effective_route_prefers_the_bound_route_then_the_durable_record() {
+    // #11115: `notification_route::current()` is a thread-local, so a process
+    // that did not launch the cook (`agent-task recover`, controller adoption,
+    // claimed continuation) has none and must recover the route from the
+    // durable record. A route bound in this process is the caller's live
+    // intent and still wins; an unroutable run is silent, not a failure.
     homeboy_core::test_support::with_isolated_home(|_| {
         seed_run_with_route("cook-resumed-attempt-1-aaaa", "thread-42");
         assert!(notification_route::current().is_none());
 
-        let resolved = effective_route("cook-resumed-attempt-1-aaaa");
-
-        assert_eq!(resolved, Some(route("thread-42")));
-    });
-}
-
-#[test]
-fn an_explicitly_bound_route_still_wins_over_durable_metadata() {
-    // The thread-local is the caller's live intent; durable metadata is
-    // only the fallback for a process that has none. In-process thread hops
-    // keep using capture/bind and must not be overridden.
-    homeboy_core::test_support::with_isolated_home(|_| {
-        seed_run_with_route("cook-bound-attempt-1-aaaa", "durable-thread");
-
-        let resolved = notification_route::with_current(Some(route("live-thread")), || {
-            effective_route("cook-bound-attempt-1-aaaa")
+        assert_eq!(
+            effective_route("cook-resumed-attempt-1-aaaa"),
+            Some(route("thread-42"))
+        );
+        let bound = notification_route::with_current(Some(route("live-thread")), || {
+            effective_route("cook-resumed-attempt-1-aaaa")
         });
-
-        assert_eq!(resolved, Some(route("live-thread")));
-    });
-}
-
-#[test]
-fn an_unroutable_run_is_silent_rather_than_a_cook_failure() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+        assert_eq!(bound, Some(route("live-thread")));
         assert!(effective_route("no-such-run").is_none());
         assert!(effective_route("").is_none());
     });
@@ -1043,23 +984,6 @@ fn the_terminal_event_is_claimed_once_per_cook_not_once_per_attempt() {
         // An empty id is never claimable, so it can never suppress a real one.
         assert!(!claim(""));
     });
-}
-
-// -----------------------------------------------------------------------
-// W3-5 emitters
-// -----------------------------------------------------------------------
-
-#[test]
-fn progress_does_not_reach_an_ambient_default_transport() {
-    // An operator who configured a default transport asked for outcomes, not
-    // per-attempt progress.
-    assert!(!should_deliver(NotifyEventKind::Progress, false));
-    assert!(should_deliver(NotifyEventKind::NeedsAttention, false));
-}
-
-#[test]
-fn batch_emission_is_inert_without_a_configured_transport() {
-    homeboy_core::test_support::with_isolated_home(|_| {});
 }
 
 #[test]
@@ -1112,46 +1036,36 @@ fn failed_terminal_continuation_is_announced_once_without_consuming_cook_termina
     });
 }
 
+/// A Cook terminal outcome, whether delivered or suppressed for resolved work,
+/// silences later continuation alerts for every attempt of that Cook.
 #[test]
 fn terminal_outcome_suppresses_continuation_alerts_across_attempts() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let marker = install_counting_transport(home.path());
-        let store = test_lifecycle_store();
-        let cook_id = "cook-abc";
+    for (tracker, status, delivered) in [
+        (None, "delivered", 1),
+        (
+            Some("https://github.com/o/r/issues/628".to_string()),
+            "suppressed",
+            0,
+        ),
+    ] {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let marker = install_counting_transport(home.path());
+            let store = test_lifecycle_store();
+            let cook_id = "cook-abc";
 
-        cook_terminal_with(&report("durable_failure", None), None, 1, |_| None);
-        assert_eq!(latest_delivery(cook_id)["status"], "delivered");
-        cook_continuation_failed(cook_id, "cook-abc-attempt-3", "failed");
-        cook_continuation_failed(cook_id, "cook-abc-attempt-1", "failed");
-        assert_eq!(deliveries(&marker), 1);
-        for run_id in ["cook-abc-attempt-3", "cook-abc-attempt-1"] {
-            assert!(store
-                .claim_cook_continuation_failed_notification(cook_id, run_id)
-                .unwrap());
-        }
-    });
-}
-
-#[test]
-fn suppressed_terminal_outcome_suppresses_continuation_alerts() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let marker = install_counting_transport(home.path());
-        let store = test_lifecycle_store();
-        let cook_id = "cook-abc";
-
-        cook_terminal_with(&report("durable_failure", None), None, 1, |_| {
-            Some("https://github.com/o/r/issues/628".to_string())
+            cook_terminal_with(&report("durable_failure", None), None, 1, |_| tracker);
+            assert_eq!(latest_delivery(cook_id)["status"], status);
+            assert!(cook_terminal_announced(cook_id), "{status}");
+            cook_continuation_failed(cook_id, "cook-abc-attempt-3", "failed");
+            cook_continuation_failed(cook_id, "cook-abc-attempt-1", "failed");
+            assert_eq!(deliveries(&marker), delivered, "{status}");
+            for run_id in ["cook-abc-attempt-3", "cook-abc-attempt-1"] {
+                assert!(store
+                    .claim_cook_continuation_failed_notification(cook_id, run_id)
+                    .unwrap());
+            }
         });
-        assert_eq!(latest_delivery(cook_id)["status"], "suppressed");
-        cook_continuation_failed(cook_id, "cook-abc-attempt-3", "failed");
-        cook_continuation_failed(cook_id, "cook-abc-attempt-1", "failed");
-        assert_eq!(deliveries(&marker), 0);
-        for run_id in ["cook-abc-attempt-3", "cook-abc-attempt-1"] {
-            assert!(store
-                .claim_cook_continuation_failed_notification(cook_id, run_id)
-                .unwrap());
-        }
-    });
+    }
 }
 
 #[test]
@@ -1212,17 +1126,6 @@ fn needs_attention_for_a_resolved_tracker_is_recorded_but_not_delivered() {
 }
 
 #[test]
-fn needs_attention_for_an_open_tracker_is_delivered() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let marker = install_counting_transport(home.path());
-        cook_terminal_with(&report("durable_failure", None), None, 1, |_| None);
-        assert_eq!(deliveries(&marker), 1);
-        assert_eq!(latest_delivery("cook-abc")["status"], "delivered");
-        assert!(cook_terminal_announced("cook-abc"));
-    });
-}
-
-#[test]
 fn success_is_announced_without_asking_the_tracker() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let marker = install_counting_transport(home.path());
@@ -1259,19 +1162,6 @@ fn continuation_failure_for_a_resolved_tracker_is_not_delivered() {
 
         cook_continuation_failed_with(cook_id, "cook-resolved-attempt-2", "failed", |_| None);
         assert_eq!(deliveries(&marker), 1, "open work still pages");
-    });
-}
-
-#[test]
-fn terminal_announced_ignores_undelivered_outcomes() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        assert!(!cook_terminal_announced("cook-abc"), "no outcome yet");
-        cook_terminal(&report("durable_failure", None), None, 1);
-        assert_eq!(latest_delivery("cook-abc")["status"], "not_configured");
-        assert!(
-            !cook_terminal_announced("cook-abc"),
-            "an undelivered terminal leaves the continuation alert as the only signal"
-        );
     });
 }
 
