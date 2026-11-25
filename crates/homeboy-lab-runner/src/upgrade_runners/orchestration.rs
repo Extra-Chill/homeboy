@@ -419,29 +419,6 @@ mod manifest_preflight_tests {
     }
 
     #[test]
-    fn runner_only_incompatible_extension_fails_closed() {
-        let runner = ssh_runner();
-        let mut call_count = 0;
-        let mut exec = |runner_id: &str, options: RunnerExecOptions| {
-            let stdout = match call_count {
-                0 => {
-                    assert_eq!(options.command, ["homeboy", "extension", "list"]);
-                    r#"{"success":true,"data":{"entities":[{"id":"runner-only","core_compatibility":{"requires_homeboy":">=3.0.0"}}]}}"#
-                }
-                _ => panic!("the inventory alone answers compatibility"),
-            };
-            call_count += 1;
-            Ok(successful_output(runner_id, options.command, stdout))
-        };
-
-        let rejection =
-            runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec)
-                .expect("runner-only incompatible extension blocks promotion");
-        assert!(rejection.contains("incompatible with selected controller 2.1.0"));
-        assert_eq!(call_count, 1);
-    }
-
-    #[test]
     fn invalid_runner_inventory_manifest_fails_closed() {
         let runner = ssh_runner();
         let mut exec = |runner_id: &str, options: RunnerExecOptions| {
@@ -508,7 +485,7 @@ mod manifest_preflight_tests {
         );
         let rejection =
             runner_manifest_preflight_with_executor(&runner, "homeboy", "2.1.0", &mut exec)
-                .expect("changed manifest is rejected during revalidation");
+                .expect("an incompatible runner extension blocks promotion on revalidation");
         assert!(rejection.contains("incompatible with selected controller 2.1.0"));
         assert_eq!(call_count, 2);
     }

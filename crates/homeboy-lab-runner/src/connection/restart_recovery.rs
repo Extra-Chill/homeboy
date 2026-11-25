@@ -527,23 +527,17 @@ mod tests {
     }
 
     #[test]
-    fn a_rebind_never_overwrites_a_session_of_another_daemon() {
+    fn a_rebind_is_refused_over_another_daemon_or_without_a_restarted_lease() {
         crate::test_support::with_isolated_home(|_| {
+            let mut leaseless = session("lease-new", None);
+            leaseless.remote_daemon_lease_id = None;
+            assert!(rebind_restarted_lease("runner-a", "lease-old", &leaseless).is_err());
+
             let other = session("lease-other", Some(101));
             write_session(&other).expect("another daemon's session");
-
             let restarted = session("lease-new", Some(202));
             assert!(rebind_restarted_lease("runner-a", "lease-old", &restarted).is_err());
             assert_eq!(read_session("runner-a").expect("read"), Some(other));
-        });
-    }
-
-    #[test]
-    fn a_rebind_without_a_restarted_lease_is_refused() {
-        crate::test_support::with_isolated_home(|_| {
-            let mut restarted = session("lease-new", None);
-            restarted.remote_daemon_lease_id = None;
-            assert!(rebind_restarted_lease("runner-a", "lease-old", &restarted).is_err());
         });
     }
 

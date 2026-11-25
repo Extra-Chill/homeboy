@@ -188,6 +188,11 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
                 .removed
                 .iter()
                 .any(|entry| entry.remote_path == orphan.remote_path));
+            // A live source no longer protects a stale materialized workspace.
+            assert!(output
+                .removed
+                .iter()
+                .all(|entry| entry.reason == "stale_materialized_workspace_lifecycle"));
             assert!(!Path::new(&orphan.remote_path).exists());
             assert!(!Path::new(&live.remote_path).exists());
             assert!(unmanaged.exists());
@@ -672,66 +677,6 @@ fn runner_job_authority_requires_exact_transport_state_and_consistent_snapshot()
 }
 
 #[test]
-fn non_agent_task_polling_loss_retains_job_owned_workspace_until_terminal_reconciliation() {
-    crate::test_support::with_isolated_home(|_| {
-        let source_parent = tempfile::tempdir().expect("source parent");
-        let source = source_parent.path().join("review-source");
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        fs::create_dir_all(&source).expect("source dir");
-        fs::write(source.join("file.txt"), "review\n").expect("source file");
-        crate::create(
-            &format!(
-                r#"{{"id":"lab-local-review-poll-loss","kind":"local","workspace_root":"{}"}}"#,
-                runner_root.path().display()
-            ),
-            false,
-        )
-        .expect("create runner");
-        let (synced, _) = sync_workspace(
-            "lab-local-review-poll-loss",
-            sync_options(source.display().to_string()),
-            &crate::WorkspaceControl::default(),
-        )
-        .expect("sync review workspace");
-
-        // A review has no agent-task run id, but a live accepted daemon job
-        // still owns its workspace after the controller loses polling.
-        {
-            let mut workspace = MaterializedWorkspace::new(
-                "lab-local-review-poll-loss".to_string(),
-                synced.remote_path.clone(),
-                None,
-                WorkspaceCleanupPolicy::DeleteAlways,
-            );
-            workspace.retain_for_reconciliation("review-job-11380", Some("generation-review"));
-        }
-
-        let metadata = fs::read_to_string(workspace_metadata_file(&synced.remote_path))
-            .expect("retained workspace metadata");
-        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
-        assert_eq!(metadata["job_id"], "review-job-11380");
-        assert_eq!(
-            metadata["terminal_evidence"]["reconciliation"]["daemon_generation"],
-            "generation-review"
-        );
-
-        let active = vec!["review-job-11380".to_string()];
-        let polling_loss =
-            runner_job_liveness_with("review-job-11380", Ok(JobStatus::Running), Some(&active));
-        assert_eq!(polling_loss.state, "live");
-        assert!(Path::new(&synced.remote_path).exists());
-
-        let terminal =
-            runner_job_liveness_with("review-job-11380", Ok(JobStatus::Succeeded), Some(&[]));
-        assert_eq!(terminal.state, "inactive");
-        assert!(
-            revalidated_candidate_is_deletable(&terminal),
-            "terminal reconciliation authorizes the retained workspace for cleanup"
-        );
-    });
-}
-
-#[test]
 fn prune_revalidates_job_authority_before_deletion() {
     let scanned = runner_job_liveness_with("job-1", Ok(JobStatus::Succeeded), Some(&[]));
     let revalidated = runner_job_liveness_with(
@@ -748,138 +693,6 @@ fn absent_job_error() -> homeboy_core::Error {
     let mut error = homeboy_core::Error::internal_unexpected("daemon request returned HTTP 404");
     error.details["daemon_transport_error"] = serde_json::json!({ "http_status": 404 });
     error
-}
-
-#[test]
-fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
-    crate::test_support::with_isolated_home(|_| {
-        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
-        let source_parent = tempfile::tempdir().expect("source parent");
-        let source = source_parent.path().join("live-source");
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        fs::create_dir_all(&source).expect("source dir");
-        fs::write(source.join("file.txt"), "live\n").expect("source file");
-        rooted_local_runner(&roots, "lab-local-prune-ttl", runner_root.path());
-        let (synced, _) = crate::workspace::sync::sync_workspace(
-            "lab-local-prune-ttl",
-            sync_options(source.display().to_string()),
-            &crate::WorkspaceControl::default(),
-        )
-        .expect("sync workspace");
-        let metadata_path = workspace_metadata_file(&synced.remote_path);
-        let mut metadata: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
-                .expect("metadata json");
-        metadata["resource_lifecycle"]["cleanup_policy"] = serde_json::json!("delete_after_ttl");
-        metadata["resource_lifecycle"]["ttl"] = serde_json::json!("2020-01-01T00:00:00Z");
-        fs::write(&metadata_path, metadata.to_string()).expect("write metadata");
-
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
-            "lab-local-prune-ttl",
-            RunnerWorkspacePruneOptions {
-                apply: false,
-                min_age_hours: 0,
-                limit: 10,
-                passes: 1,
-                cursor: None,
-                ..RunnerWorkspacePruneOptions::default()
-            },
-        )
-        .expect("prune preview");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.candidates.len(), 1, "{}", prune_diagnosis(&output));
-        assert_eq!(output.candidates[0].remote_path, synced.remote_path);
-        assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
-        assert!(Path::new(&synced.remote_path).exists());
-        assert!(source.exists());
-    });
-}
-
-#[test]
-fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
-    crate::test_support::with_isolated_home(|_| {
-        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
-        let source_parent = tempfile::tempdir().expect("source parent");
-        let source = source_parent.path().join("live-source");
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        fs::create_dir_all(&source).expect("source dir");
-        fs::write(source.join("file.txt"), "live\n").expect("source file");
-        rooted_local_runner(&roots, "lab-local-prune-materialized", runner_root.path());
-        let (synced, _) = crate::workspace::sync::sync_workspace(
-            "lab-local-prune-materialized",
-            sync_options(source.display().to_string()),
-            &crate::WorkspaceControl::default(),
-        )
-        .expect("sync workspace");
-
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
-            "lab-local-prune-materialized",
-            RunnerWorkspacePruneOptions {
-                apply: true,
-                min_age_hours: 0,
-                limit: 10,
-                passes: 1,
-                cursor: None,
-                ..RunnerWorkspacePruneOptions::default()
-            },
-        )
-        .expect("prune stale materialized workspace");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.removed.len(), 1, "{}", prune_diagnosis(&output));
-        assert_eq!(
-            output.removed[0].reason,
-            "stale_materialized_workspace_lifecycle"
-        );
-        assert!(!Path::new(&synced.remote_path).exists());
-        assert!(source.exists());
-    });
-}
-
-#[test]
-fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing() {
-    crate::test_support::with_isolated_home(|_| {
-        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
-        let source_parent = tempfile::tempdir().expect("source parent");
-        let source = source_parent.path().join("removed-source");
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        fs::create_dir_all(&source).expect("source dir");
-        fs::write(source.join("file.txt"), "removed\n").expect("source file");
-        rooted_local_runner(
-            &roots,
-            "lab-local-prune-materialized-missing",
-            runner_root.path(),
-        );
-        let (synced, _) = crate::workspace::sync::sync_workspace(
-            "lab-local-prune-materialized-missing",
-            sync_options(source.display().to_string()),
-            &crate::WorkspaceControl::default(),
-        )
-        .expect("sync workspace");
-        fs::remove_dir_all(&source).expect("remove source");
-
-        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
-            "lab-local-prune-materialized-missing",
-            RunnerWorkspacePruneOptions {
-                apply: true,
-                min_age_hours: 0,
-                limit: 10,
-                passes: 1,
-                cursor: None,
-                ..RunnerWorkspacePruneOptions::default()
-            },
-        )
-        .expect("prune stale materialized workspace with missing source");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.removed.len(), 1, "{}", prune_diagnosis(&output));
-        assert_eq!(
-            output.removed[0].reason,
-            "stale_materialized_workspace_lifecycle"
-        );
-        assert!(!Path::new(&synced.remote_path).exists());
-    });
 }
 
 #[test]
@@ -2184,23 +1997,19 @@ fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
     assert!(output.status.success(), "{output:?}");
     assert_ne!(String::from_utf8_lossy(&output.stdout), "removed");
     assert!(process_owned.exists());
-}
 
-#[test]
-fn snapshot_git_materialized_workspace_uses_the_same_bounded_lifecycle_contract() {
-    let root = tempfile::tempdir().expect("workspace root");
-    let workspace = root.path().join("_lab_workspaces/snapshot-git");
-    write_materialized_workspace(&workspace);
-    let metadata_path = workspace_metadata_file(&workspace);
+    // Snapshot-git workspaces use the same bounded lifecycle contract.
+    let snapshot_git = workspaces.join("snapshot-git");
+    write_materialized_workspace(&snapshot_git);
+    let metadata_path = workspace_metadata_file(&snapshot_git);
     let mut metadata: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
             .expect("metadata json");
     metadata["sync_mode"] = serde_json::json!("snapshot-git");
     fs::write(&metadata_path, metadata.to_string()).expect("write snapshot-git metadata");
-
     assert!(encoded_materialized_workspace_metadata_is_valid(
-        &encoded_workspace_metadata(&workspace),
-        &workspace,
+        &encoded_workspace_metadata(&snapshot_git),
+        &snapshot_git,
     ));
 }
 

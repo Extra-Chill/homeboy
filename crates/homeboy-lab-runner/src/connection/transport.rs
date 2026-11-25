@@ -401,68 +401,68 @@ mod tests {
         report
     }
 
+    /// SSH authentication is not a dead daemon, an unopened tunnel or silent
+    /// health is unreachable, and another daemon answering is a mismatch.
     #[test]
-    fn ssh_authentication_failures_are_ssh_not_a_dead_daemon() {
-        for message in [
-            "SSH tunnel setup failed: user@lab: Permission denied (publickey).",
-            "SSH tunnel setup failed: Host key verification failed.",
-        ] {
-            let report = failed_report(RunnerFailureKind::TunnelFailure, message, None);
-            assert_eq!(
-                TransportFailure::classify(&report),
-                TransportFailure::Ssh,
-                "{message}"
-            );
-        }
-        let report = failed_report(RunnerFailureKind::SshFailure, "ssh exited 255", None);
-        assert_eq!(TransportFailure::classify(&report), TransportFailure::Ssh);
-    }
-
-    #[test]
-    fn unopened_tunnels_and_silent_health_are_unreachable() {
-        for (kind, message, stage) in [
+    fn connect_failures_classify_into_ssh_unreachable_or_identity_mismatch() {
+        use RunnerFailureKind::{DaemonStartupFailure, SshFailure, TunnelFailure};
+        use TransportFailure::{IdentityMismatch, Ssh, Unreachable};
+        for (kind, message, stage, expected) in [
             (
-                RunnerFailureKind::TunnelFailure,
+                TunnelFailure,
+                "SSH tunnel setup failed: user@lab: Permission denied (publickey).",
+                None,
+                Ssh,
+            ),
+            (
+                TunnelFailure,
+                "SSH tunnel setup failed: Host key verification failed.",
+                None,
+                Ssh,
+            ),
+            (SshFailure, "ssh exited 255", None, Ssh),
+            (
+                TunnelFailure,
                 "local tunnel 127.0.0.1:4000 did not become reachable",
                 None,
+                Unreachable,
             ),
             (
-                RunnerFailureKind::TunnelFailure,
+                TunnelFailure,
                 "SSH tunnel setup failed: connect to host lab port 22: Connection refused",
                 None,
+                Unreachable,
             ),
             (
-                RunnerFailureKind::DaemonStartupFailure,
+                DaemonStartupFailure,
                 "remote daemon health endpoint failed after 4 bounded requests",
                 Some("health_settle"),
+                Unreachable,
             ),
             (
-                RunnerFailureKind::DaemonStartupFailure,
+                DaemonStartupFailure,
                 "owned SSH tunnel exited",
                 Some("tunnel_durability"),
+                Unreachable,
+            ),
+            (
+                DaemonStartupFailure,
+                "remote daemon health identity changed",
+                Some("health_identity"),
+                IdentityMismatch,
+            ),
+            (
+                DaemonStartupFailure,
+                "remote daemon health identity changed",
+                Some("endpoint_identity"),
+                IdentityMismatch,
             ),
         ] {
             let report = failed_report(kind, message, stage);
             assert_eq!(
                 TransportFailure::classify(&report),
-                TransportFailure::Unreachable,
-                "{message}"
-            );
-        }
-    }
-
-    #[test]
-    fn another_daemon_answering_health_is_an_identity_mismatch() {
-        for stage in ["health_identity", "endpoint_identity"] {
-            let report = failed_report(
-                RunnerFailureKind::DaemonStartupFailure,
-                "remote daemon health identity changed",
-                Some(stage),
-            );
-            assert_eq!(
-                TransportFailure::classify(&report),
-                TransportFailure::IdentityMismatch,
-                "{stage}"
+                expected,
+                "{message} ({stage:?})"
             );
         }
     }

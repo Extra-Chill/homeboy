@@ -664,29 +664,12 @@ mod tests {
     }
 
     #[test]
-    fn cancel_remains_available_for_a_live_owner_after_candidate_recovery() {
-        let mut record = record(RunExecutionState::CandidateRecoverable);
-        record.metadata["runner_pid"] = serde_json::json!(std::process::id());
-        assert_eq!(
-            decision(
-                &lifecycle_action_eligibility(&record, None),
-                ControlPlaneAction::Cancel
-            ),
-            ControlPlaneActionAvailability::Available
-        );
-    }
+    fn cancel_is_available_for_a_live_owner_staging_job_or_pending_runner_transport() {
+        let mut recovered = record(RunExecutionState::CandidateRecoverable);
+        recovered.metadata["runner_pid"] = serde_json::json!(std::process::id());
 
-    #[test]
-    fn cancel_eligibility_accepts_rooted_controller_staging_and_pending_runner_transport() {
         let mut staging = record(RunExecutionState::Queued);
         staging.metadata["lab_staging_controller_job_id"] = serde_json::json!("controller-job");
-        assert_eq!(
-            decision(
-                &lifecycle_action_eligibility(&staging, None),
-                ControlPlaneAction::Cancel
-            ),
-            ControlPlaneActionAvailability::Available
-        );
 
         let mut submission = record(RunExecutionState::Queued);
         submission.metadata["runner_submission_intent"] = serde_json::json!({
@@ -694,12 +677,20 @@ mod tests {
             "runner_id": "homeboy-lab",
             "submission_key": "agent-task:v1:homeboy-lab:run",
         });
-        assert_eq!(
-            decision(
-                &lifecycle_action_eligibility(&submission, None),
-                ControlPlaneAction::Cancel
-            ),
-            ControlPlaneActionAvailability::Available
-        );
+
+        for (label, record) in [
+            ("live owner after candidate recovery", recovered),
+            ("rooted controller staging", staging),
+            ("pending runner transport", submission),
+        ] {
+            assert_eq!(
+                decision(
+                    &lifecycle_action_eligibility(&record, None),
+                    ControlPlaneAction::Cancel
+                ),
+                ControlPlaneActionAvailability::Available,
+                "{label}"
+            );
+        }
     }
 }

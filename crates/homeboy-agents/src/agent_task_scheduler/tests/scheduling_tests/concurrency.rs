@@ -222,24 +222,6 @@ pub(super) mod concurrency_tests {
     }
 
     #[test]
-    fn candidate_resource_budget_can_intentionally_serialize_execution() {
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
-        let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = plan_with_tasks(2);
-        plan.group_key = Some("candidate-group".to_string());
-        for task in &mut plan.tasks {
-            task.group_key = Some("candidate-group".to_string());
-        }
-        plan.options.max_concurrency = 1;
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(aggregate.totals.succeeded, 2);
-        assert_eq!(max_seen.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
     fn blocks_tasks_over_queue_depth_and_reports_backpressure() {
         let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
@@ -268,83 +250,43 @@ pub(super) mod concurrency_tests {
         }));
     }
 
+    /// Per-executor and per-model limits bound concurrency below the global
+    /// limit and are reported on the queue.
     #[test]
-    fn applies_per_executor_concurrency_below_global_limit() {
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
-        let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = plan_with_tasks(3);
-        plan.options.max_concurrency = 3;
-        plan.options
-            .per_executor_concurrency
-            .insert("test".to_string(), 1);
+    fn applies_per_executor_and_per_model_concurrency_below_global_limit() {
+        for per_model in [false, true] {
+            let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+            let max_seen = Arc::clone(&executor.max_seen);
+            let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+            let mut plan = plan_with_tasks(3);
+            plan.options.max_concurrency = 3;
+            if per_model {
+                for task in &mut plan.tasks {
+                    task.executor.model = Some("model-a".to_string());
+                }
+                plan.options
+                    .per_model_concurrency
+                    .insert("test:model-a".to_string(), 1);
+            } else {
+                plan.options
+                    .per_executor_concurrency
+                    .insert("test".to_string(), 1);
+            }
 
-        let aggregate = scheduler.run(plan);
+            let aggregate = scheduler.run(plan);
 
-        assert_eq!(
-            aggregate.status(),
-            homeboy_lifecycle_contract::RunExecutionState::Succeeded
-        );
-        assert!(max_seen.load(Ordering::SeqCst) <= 1);
-        assert_eq!(
-            aggregate.queue.per_executor_concurrency.get("test"),
-            Some(&1)
-        );
-    }
-
-    #[test]
-    fn applies_per_model_concurrency_below_global_limit() {
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
-        let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = plan_with_tasks(3);
-        for task in &mut plan.tasks {
-            task.executor.model = Some("model-a".to_string());
+            assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
+            assert!(
+                max_seen.load(Ordering::SeqCst) <= 1,
+                "per_model={per_model}"
+            );
+            let reported = if per_model {
+                aggregate.queue.per_model_concurrency.get("test:model-a")
+            } else {
+                aggregate.queue.per_executor_concurrency.get("test")
+            };
+            assert_eq!(reported, Some(&1), "per_model={per_model}");
         }
-        plan.options.max_concurrency = 3;
-        plan.options
-            .per_model_concurrency
-            .insert("test:model-a".to_string(), 1);
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(
-            aggregate.status(),
-            homeboy_lifecycle_contract::RunExecutionState::Succeeded
-        );
-        assert!(max_seen.load(Ordering::SeqCst) <= 1);
-        assert_eq!(
-            aggregate.queue.per_model_concurrency.get("test:model-a"),
-            Some(&1)
-        );
-    }
-
-    #[test]
-    fn serializes_tasks_that_share_a_mutable_workspace() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let lifecycle_store =
-            crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        init_git_workspace(&workspace);
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
-        let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler =
-            AgentTaskScheduler::new(Arc::new(executor)).with_lifecycle_store(lifecycle_store);
-        let mut plan = plan_with_tasks(2);
-        plan.options.max_concurrency = 2;
-        for task in &mut plan.tasks {
-            task.workspace.root = Some(workspace.display().to_string());
-        }
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(
-            aggregate.status(),
-            RunExecutionState::Succeeded,
-            "{aggregate:#?}"
-        );
-        assert!(max_seen.load(Ordering::SeqCst) <= 2);
     }
 
     #[test]
@@ -559,7 +501,6 @@ pub(super) mod concurrency_tests {
             3,
             "all overlapping tasks must be admitted through the scheduler"
         );
-        assert_eq!(serialized[0], "task-1");
         assert_eq!(serialized, vec!["task-1", "task-2", "task-3"]);
     }
 

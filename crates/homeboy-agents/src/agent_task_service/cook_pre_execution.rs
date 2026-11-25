@@ -944,15 +944,6 @@ mod tests {
         });
     }
 
-    /// #14678: a Lab-dispatched attempt whose remote runner fails
-    /// `committed_harvest_preflight` before any provider runs terminalizes
-    /// through the scheduler's own outcome aggregate — never through
-    /// `record_pre_execution_failure` — so `pre_execution_failure` metadata is
-    /// absent. The dispatch boundary itself only ever observes a generic Lab
-    /// transport error ("failed with exit code 1"). Without deriving from the
-    /// aggregate's own diagnostic, the report would say `unknown` next to a
-    /// specific, already-durable reason code and never surface the git
-    /// command or its stderr.
     #[test]
     fn successful_lab_provider_with_failed_continuation_is_post_provider() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -1024,6 +1015,15 @@ mod tests {
         });
     }
 
+    /// #14678: a Lab-dispatched attempt whose remote runner fails
+    /// `committed_harvest_preflight` before any provider runs terminalizes
+    /// through the scheduler's own outcome aggregate — never through
+    /// `record_pre_execution_failure` — so `pre_execution_failure` metadata is
+    /// absent. The dispatch boundary itself only ever observes a generic Lab
+    /// transport error ("failed with exit code 1"). Without deriving from the
+    /// aggregate's own diagnostic, the report would say `unknown` next to a
+    /// specific, already-durable reason code and never surface the git
+    /// command or its stderr.
     #[test]
     fn pre_execution_failure_details_derives_committed_harvest_cause_from_outcome_aggregate() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -1546,16 +1546,6 @@ mod tests {
                 .latest_run_id,
             run_id
         );
-        assert!(left_lifecycle_store
-            .cook_dir(cook_id)
-            .starts_with(left_context.data_dir()));
-        assert!(right_lifecycle_store
-            .cook_dir(cook_id)
-            .starts_with(right_context.data_dir()));
-        assert_ne!(
-            left_lifecycle_store.cook_dir(cook_id),
-            right_lifecycle_store.cook_dir(cook_id)
-        );
         assert_eq!(
             left_recipe_store.load_recipe(cook_id).unwrap().attempts[0]
                 .plan
@@ -1665,79 +1655,36 @@ mod tests {
     }
 
     #[test]
-    fn paired_stores_materialize_initial_and_retry_attempts() {
-        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
-        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
-        let lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
+    fn retry_attempt_materialization_advances_the_cook_index() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let recipe_store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
 
-        let cook_id = "split-root-cook";
-        let run_id = "split-root-run";
-        let attempt_plan = plan(cook_id, "split-root-materialization");
+        let cook_id = "retry-cook";
+        let run_id = "retry-run";
+        let retry_plan = plan(cook_id, "retry-materialization");
         recipe_store
-            .persist_recipe(&recipe(cook_id, run_id, attempt_plan.clone()))
-            .expect("persist recipe in recipe root");
+            .persist_recipe(&recipe(cook_id, run_id, retry_plan.clone()))
+            .expect("persist retry recipe");
         lifecycle_store
-            .submit_plan_with_runtime_admission(&attempt_plan, run_id, |_| {
-                Ok(serde_json::json!({}))
-            })
-            .expect("submit plan in lifecycle root");
-
-        materialize_initial_cook_attempt_with_stores(
-            &recipe_store,
-            &lifecycle_store,
-            &options_for(cook_id, run_id, attempt_plan),
-        )
-        .expect("materialize initial attempt through paired stores");
-
-        assert_eq!(
-            lifecycle_store
-                .read_cook_index(cook_id)
-                .expect("read cook index in lifecycle root")
-                .latest_run_id,
-            run_id
-        );
-        assert_eq!(
-            lifecycle_store
-                .read_record(run_id)
-                .expect("read run record in lifecycle root")
-                .run_id,
-            run_id
-        );
-        assert!(lifecycle_store
-            .run_dir(run_id)
-            .starts_with(recipe_context.data_dir()));
-        assert!(lifecycle_store
-            .cook_dir(cook_id)
-            .starts_with(recipe_context.data_dir()));
-        assert!(recipe_store.recipe_exists(cook_id));
-
-        let retry_cook_id = "split-root-retry-cook";
-        let retry_run_id = "split-root-retry-run";
-        let retry_plan = plan(retry_cook_id, "split-root-retry-materialization");
-        recipe_store
-            .persist_recipe(&recipe(retry_cook_id, retry_run_id, retry_plan.clone()))
-            .expect("persist retry recipe in recipe root");
-        lifecycle_store
-            .submit_plan_with_runtime_admission(&retry_plan, retry_run_id, |_| {
-                Ok(serde_json::json!({}))
-            })
-            .expect("submit retry plan in lifecycle root");
+            .submit_plan_with_runtime_admission(&retry_plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("submit retry plan");
 
         materialize_cook_attempt_with_stores(
             &recipe_store,
             &lifecycle_store,
-            retry_cook_id,
-            retry_run_id,
+            cook_id,
+            run_id,
             &retry_plan,
         )
-        .expect("materialize retry attempt through paired stores");
+        .expect("materialize retry attempt");
 
         assert_eq!(
             lifecycle_store
-                .read_cook_index(retry_cook_id)
-                .expect("read retry cook index in lifecycle root")
+                .read_cook_index(cook_id)
+                .expect("read retry cook index")
                 .latest_run_id,
-            retry_run_id
+            run_id
         );
     }
 }

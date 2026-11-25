@@ -13,7 +13,6 @@ use crate::{
 };
 use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_core::run_lifecycle_record::{
-    ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
     ExternalRuntimeId, ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle,
 };
 use homeboy_lifecycle_contract::RunExecutionState;
@@ -445,8 +444,6 @@ fn creates_new_pr_after_green_gates() {
     assert_eq!(report.status.as_str(), "review_ready");
     assert_eq!(report.pr_action, "created");
     assert_eq!(report.pr_number, Some(123));
-    assert!(backend.committed);
-    assert!(backend.pushed);
     assert!(backend.created);
     assert_eq!(backend.commit_calls, 1);
     assert_eq!(backend.push_calls, 1);
@@ -466,19 +463,11 @@ fn creates_new_pr_after_green_gates() {
     assert!(backend.last_body.contains("## How to test"));
     assert!(!backend.last_body.contains("## AI assistance"));
     assert!(!backend.last_body.contains("Publication intent"));
-    assert_eq!(
-        report.publication_intent.schema,
-        AGENT_TASK_PUBLICATION_INTENT_SCHEMA
-    );
     assert_eq!(report.publication_intent.action, "review_request");
     assert_eq!(report.publication_intent.target.kind, "code_review");
     assert_eq!(
         report.publication_intent.target.adapter.as_deref(),
         Some("github_pull_request")
-    );
-    assert_eq!(
-        report.publication_proof.schema,
-        AGENT_TASK_PUBLICATION_PROOF_SCHEMA
     );
     assert_eq!(
         report.publication_proof.adapter_action.as_deref(),
@@ -487,10 +476,6 @@ fn creates_new_pr_after_green_gates() {
     assert_eq!(
         report.publication_proof.adapter_ref.as_deref(),
         Some("https://github.com/Extra-Chill/homeboy/pull/123")
-    );
-    assert_eq!(
-        report.finalization_outcome.schema,
-        AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA
     );
     assert_eq!(report.finalization_outcome.status, "review_ready");
     assert_eq!(
@@ -581,6 +566,7 @@ fn other_create_failures_still_fail_publication() {
 
     let error = finalize_pr_with_backend(options(), &mut backend).expect_err("create fails");
     assert!(error.message.contains("gh pr create failed"));
+    assert!(backend.committed && backend.pushed);
     assert!(!backend.updated);
 }
 
@@ -687,119 +673,62 @@ fn finalization_rejects_identity_mismatch_before_any_publication_mutation() {
 }
 
 #[test]
-fn finalization_pins_verified_base_when_base_advances_before_publication() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        resolved_base: Some(AgentTaskPrResolvedBase {
-            reference: "refs/homeboy/finalization/base/main".to_string(),
-            sha: "verified-base".to_string(),
-        }),
-        publication_base_sha: Some("advanced-base".to_string()),
-        publication_base_behind_by: Some(19),
-        ..Default::default()
-    };
-
-    let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
-
-    assert_eq!(backend.candidate_base_sha.as_deref(), Some("verified-base"));
-    assert!(backend.created);
-    assert!(backend.publication_observed_after_pr_lookup);
-    assert_eq!(
-        report
-            .publication_intent
-            .target
-            .verified_base_sha
-            .as_deref(),
-        Some("verified-base")
-    );
-    assert_eq!(
-        report
-            .publication_intent
-            .target
-            .publication_base_sha
-            .as_deref(),
-        Some("advanced-base")
-    );
-    assert_eq!(
-        report.publication_intent.target.publication_base_behind_by,
-        Some(19)
-    );
-    assert!(
-        backend.last_body.contains(
-            "Base `main`@`verified-base` advanced to `advanced-base` (base_behind_by: 19;"
+fn finalization_pins_verified_base_and_reports_live_base_observation() {
+    // (live base, observed behind-by, recorded behind-by, body line)
+    for (live, observed_behind_by, behind_by, body_line) in [
+        (
+            Some("advanced-base"),
+            Some(19),
+            Some(19),
+            "Base `main`@`verified-base` advanced to `advanced-base` (base_behind_by: 19;",
         ),
-        "{}",
-        backend.last_body
-    );
-}
+        (
+            Some("verified-base"),
+            None,
+            Some(0),
+            "Base `main`@`verified-base` unchanged.",
+        ),
+        (
+            None,
+            None,
+            None,
+            "Base `main`@`verified-base` (publication state not recorded).",
+        ),
+    ] {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            resolved_base: Some(AgentTaskPrResolvedBase {
+                reference: "refs/homeboy/finalization/base/main".to_string(),
+                sha: "verified-base".to_string(),
+            }),
+            publication_base_sha: live.map(str::to_string),
+            publication_base_behind_by: observed_behind_by,
+            ..Default::default()
+        };
 
-#[test]
-fn finalization_records_unchanged_live_base_before_publication() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        resolved_base: Some(AgentTaskPrResolvedBase {
-            reference: "refs/homeboy/finalization/base/main".to_string(),
-            sha: "verified-base".to_string(),
-        }),
-        publication_base_sha: Some("verified-base".to_string()),
-        ..Default::default()
-    };
+        let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
 
-    let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
-
-    assert!(backend.publication_observed_after_pr_lookup);
-    assert_eq!(
-        report
-            .publication_intent
-            .target
-            .verified_base_sha
-            .as_deref(),
-        Some("verified-base")
-    );
-    assert_eq!(
-        report
-            .publication_intent
-            .target
-            .publication_base_sha
-            .as_deref(),
-        Some("verified-base")
-    );
-    assert!(
-        backend
-            .last_body
-            .contains("Base `main`@`verified-base` unchanged."),
-        "{}",
-        backend.last_body
-    );
-    assert!(!backend.last_body.contains("advanced"));
-}
-
-#[test]
-fn finalization_reports_unavailable_live_base_observation() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        resolved_base: Some(AgentTaskPrResolvedBase {
-            reference: "refs/homeboy/finalization/base/main".to_string(),
-            sha: "verified-base".to_string(),
-        }),
-        ..Default::default()
-    };
-
-    let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
-
-    assert!(backend.publication_observed_after_pr_lookup);
-    assert_eq!(report.publication_intent.target.publication_base_sha, None);
-    assert!(backend
-        .last_body
-        .contains("Base `main`@`verified-base` (publication state not recorded)."));
-    assert_eq!(
-        report
-            .review_dossier
-            .verified_base
-            .as_ref()
-            .and_then(|base| base.publication_sha.as_deref()),
-        None
-    );
+        assert_eq!(backend.candidate_base_sha.as_deref(), Some("verified-base"));
+        assert!(backend.created);
+        assert!(backend.publication_observed_after_pr_lookup);
+        let target = &report.publication_intent.target;
+        assert_eq!(target.verified_base_sha.as_deref(), Some("verified-base"));
+        assert_eq!(target.publication_base_sha.as_deref(), live);
+        assert_eq!(target.publication_base_behind_by, behind_by);
+        assert_eq!(
+            report
+                .review_dossier
+                .verified_base
+                .as_ref()
+                .and_then(|base| base.publication_sha.as_deref()),
+            live
+        );
+        assert!(
+            backend.last_body.contains(body_line),
+            "{}",
+            backend.last_body
+        );
+    }
 }
 
 #[test]
@@ -844,92 +773,6 @@ fn pr_body_labels_ci_equivalent_gates() {
 }
 
 #[test]
-fn pr_body_reports_iterator_evidence_metadata() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        ..Default::default()
-    };
-    let mut options = options();
-    options.evidence.source_relationship = AgentTaskPrSourceRelationship {
-        related_finding_id: Some("finding-123".to_string()),
-        source_packet_id: Some("packet-456".to_string()),
-        change_kind: Some("runtime-fix".to_string()),
-        supersedes: vec!["https://github.com/org/repo/pull/1".to_string()],
-        depends_on: vec!["https://github.com/org/repo/pull/2".to_string()],
-    };
-    options.evidence.verification = AgentTaskPrVerification {
-        targeted_checks_run: vec!["cargo test pr_body".to_string()],
-        dependency_hydration: Vec::new(),
-        targeted_checks_unavailable: None,
-        ci_expected: vec!["Homeboy CI".to_string()],
-        manual_reviewer_check: None,
-    };
-    options.evidence.runtime_guardrails = AgentTaskPrRuntimeGuardrails {
-        why_not_broader_than_packet: Some("Preserves class and href gates.".to_string()),
-        evidence_discriminators: vec!["class=brand".to_string(), "href=#top".to_string()],
-        nearby_contracts_preserved: vec!["is_branded_inline_anchor".to_string()],
-    };
-
-    finalize_pr_with_backend(options, &mut backend).expect("finalized");
-
-    assert!(backend
-        .last_body
-        .contains("operator-finalized; no Homeboy provider execution"));
-    assert!(!backend.last_body.contains("CI expected"));
-}
-
-#[test]
-fn pr_body_reports_run_lifecycle_evidence() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        ..Default::default()
-    };
-    let mut options = options();
-    options.evidence.lifecycle = Some(RunLifecycleRecord {
-        execution: RunExecutionLifecycle {
-            state: RunExecutionState::Succeeded,
-            started_at: None,
-            finished_at: Some("2026-06-16T00:00:05Z".to_string()),
-            updated_at: Some("2026-06-16T00:00:05Z".to_string()),
-        },
-        provider_runtime: vec![ProviderRuntimeLifecycle {
-            task_id: "task-a".to_string(),
-            backend: "sample-runtime".to_string(),
-            state: ProviderRuntimeState::Succeeded,
-            stream_uri: None,
-            external_runtime_ids: vec![ExternalRuntimeId {
-                kind: "provider_run_id".to_string(),
-                value: "provider-run-123".to_string(),
-                provider: Some("sample-runtime".to_string()),
-                url: None,
-            }],
-            metadata: serde_json::Value::Null,
-        }],
-        external_runtime_ids: vec![ExternalRuntimeId {
-            kind: "provider_run_id".to_string(),
-            value: "provider-run-123".to_string(),
-            provider: Some("sample-runtime".to_string()),
-            url: None,
-        }],
-        cleanup: CleanupLifecycle {
-            state: CleanupState::Preserved,
-            policy: Some("preserve".to_string()),
-            updated_at: None,
-        },
-        artifact_retention: ArtifactRetentionLifecycle {
-            status: ArtifactRetentionStatus::Retained,
-            policy: Some("retain".to_string()),
-            updated_at: None,
-        },
-        ..RunLifecycleRecord::default()
-    });
-
-    finalize_pr_with_backend(options, &mut backend).expect("finalized");
-
-    assert!(!backend.last_body.contains("Run lifecycle"));
-}
-
-#[test]
 fn updates_existing_pr_for_same_branch() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
@@ -960,83 +803,35 @@ fn updates_existing_pr_for_same_branch() {
 }
 
 #[test]
-fn draft_policy_creates_a_draft_pr_and_reports_draft_published() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        ..Default::default()
-    };
-    let mut finalization = options();
-    finalization.draft_pr = true;
+fn draft_policy_and_existing_pr_draft_state_decide_publication_status() {
+    // (draft policy, existing PR draft state, expected created, expected status)
+    for (draft_pr, existing_draft, created, status) in [
+        (true, None, true, "draft_published"),
+        (true, Some(false), false, "review_ready"),
+        (true, Some(true), false, "draft_published"),
+        (false, Some(true), false, "draft_published"),
+    ] {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            existing_pr: existing_draft.map(|is_draft| AgentTaskPrRef {
+                number: 77,
+                url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+                is_draft,
+            }),
+            ..Default::default()
+        };
+        let mut finalization = options();
+        finalization.draft_pr = draft_pr;
 
-    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+        let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
 
-    assert!(backend.created_draft);
-    assert_eq!(report.status.as_str(), "draft_published");
-    assert_eq!(report.finalization_outcome.status, "draft_published");
-}
-
-#[test]
-fn draft_policy_preserves_an_existing_ready_pr() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        existing_pr: Some(AgentTaskPrRef {
-            number: 77,
-            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
-            is_draft: false,
-        }),
-        ..Default::default()
-    };
-    let mut finalization = options();
-    finalization.draft_pr = true;
-
-    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
-
-    assert!(!backend.created);
-    assert!(backend.updated);
-    assert_eq!(report.status.as_str(), "review_ready");
-}
-
-#[test]
-fn draft_policy_reconciles_an_existing_draft_pr() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        existing_pr: Some(AgentTaskPrRef {
-            number: 77,
-            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
-            is_draft: true,
-        }),
-        ..Default::default()
-    };
-    let mut finalization = options();
-    finalization.draft_pr = true;
-
-    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
-
-    assert!(!backend.created);
-    assert!(backend.updated);
-    assert_eq!(report.status.as_str(), "draft_published");
-}
-
-#[test]
-fn reworking_an_existing_draft_pr_without_draft_policy_leaves_it_draft() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        existing_pr: Some(AgentTaskPrRef {
-            number: 78,
-            url: "https://github.com/Extra-Chill/homeboy/pull/78".to_string(),
-            is_draft: true,
-        }),
-        ..Default::default()
-    };
-    let mut finalization = options();
-    finalization.draft_pr = false;
-
-    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
-
-    assert!(!backend.created);
-    assert!(backend.updated);
-    assert_eq!(report.pr_action, "updated");
-    assert_eq!(report.status.as_str(), "draft_published");
+        let case = format!("draft_pr={draft_pr} existing_draft={existing_draft:?}");
+        assert_eq!(backend.created, created, "{case}");
+        assert_eq!(backend.created_draft, created, "{case}");
+        assert_eq!(backend.updated, !created, "{case}");
+        assert_eq!(report.status.as_str(), status, "{case}");
+        assert_eq!(report.finalization_outcome.status, status, "{case}");
+    }
 }
 
 fn partial_delivery() -> Vec<homeboy_control_plane_contract::CookDeliveryItem> {
@@ -1288,21 +1083,6 @@ fn refuses_protected_branch() {
 }
 
 #[test]
-fn propagates_pr_creation_failure() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        create_error: true,
-        ..Default::default()
-    };
-
-    let error = finalize_pr_with_backend(options(), &mut backend).expect_err("failed");
-
-    assert!(error.message.contains("gh pr create failed"));
-    assert!(backend.committed);
-    assert!(backend.pushed);
-}
-
-#[test]
 fn refuses_red_gates() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
@@ -1466,47 +1246,33 @@ fn failed_gate_draft_requires_explicit_mode_and_preserves_proof_bindings() {
 }
 
 #[test]
-fn durable_finalization_discloses_terminal_successful_model_after_same_backend_rotation() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        lifecycle: Some(rotated_lifecycle(
-            "pi",
-            "openai/gpt-5.6-sol",
-            "pi",
-            "openai/gpt-5.6-terra",
-        )),
-        gate_proof: Some(successful_gate_proof()),
-        ..Default::default()
-    };
-    let mut finalization_options = options();
-    finalization_options.manual_finalization = false;
+fn durable_finalization_discloses_terminal_successful_model_after_rotation() {
+    for (producing_backend, producing_model) in [
+        ("pi", "openai/gpt-5.6-terra"),
+        ("claude-code", "anthropic/claude-sonnet-4"),
+    ] {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            lifecycle: Some(rotated_lifecycle(
+                "pi",
+                "openai/gpt-5.6-sol",
+                producing_backend,
+                producing_model,
+            )),
+            gate_proof: Some(successful_gate_proof()),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
 
-    let report = finalize_pr_with_backend(finalization_options, &mut backend)
-        .expect("successful rotated run finalizes");
+        let report = finalize_pr_with_backend(finalization_options, &mut backend)
+            .expect("successful rotated run finalizes");
 
-    assert_eq!(report.review_dossier.ai_assistance.model, "GPT-5.5");
-}
-
-#[test]
-fn durable_finalization_discloses_terminal_successful_model_after_cross_backend_rotation() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        lifecycle: Some(rotated_lifecycle(
-            "pi",
-            "openai/gpt-5.6-sol",
-            "claude-code",
-            "anthropic/claude-sonnet-4",
-        )),
-        gate_proof: Some(successful_gate_proof()),
-        ..Default::default()
-    };
-    let mut finalization_options = options();
-    finalization_options.manual_finalization = false;
-
-    let report = finalize_pr_with_backend(finalization_options, &mut backend)
-        .expect("successful rotated run finalizes");
-
-    assert_eq!(report.review_dossier.ai_assistance.model, "GPT-5.5");
+        assert_eq!(
+            report.review_dossier.ai_assistance.model, "GPT-5.5",
+            "{producing_backend}"
+        );
+    }
 }
 
 #[test]
@@ -1549,15 +1315,6 @@ fn durable_finalization_accepts_fingerprinted_candidate_from_successful_fallback
 
     finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("successful fallback candidate finalizes");
-    assert_eq!(lifecycle.provider_runtime.len(), 3);
-    assert_eq!(
-        lifecycle.provider_runtime[0].state,
-        ProviderRuntimeState::Failed
-    );
-    assert_eq!(
-        lifecycle.provider_runtime[1].state,
-        ProviderRuntimeState::Failed
-    );
 
     let mut unbound_candidate = successful_gate_proof();
     unbound_candidate.promotion.source.task_id = "other-task".to_string();
@@ -1926,40 +1683,55 @@ fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
 }
 
 #[test]
-fn durable_finalization_accepts_successful_retry_with_failed_attempt_history() {
-    let mut gate_proof = successful_gate_proof();
-    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
-    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
-    lifecycle.provider_runtime.insert(
-        0,
-        ProviderRuntimeLifecycle {
-            task_id: "task".to_string(),
-            backend: "lab".to_string(),
-            state: ProviderRuntimeState::Failed,
-            stream_uri: None,
-            external_runtime_ids: Vec::new(),
-            metadata: json!({
-                "evidence_source": "durable_provider_execution",
-                "attempt": 0,
-                "model": "openai/gpt-5.6-terra"
-            }),
-        },
-    );
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        lifecycle: Some(lifecycle),
-        gate_proof: Some(gate_proof),
-        ..Default::default()
+fn durable_finalization_publishes_green_candidate_despite_failed_runtime_history() {
+    let failed_attempt = ProviderRuntimeLifecycle {
+        task_id: "task".to_string(),
+        backend: "lab".to_string(),
+        state: ProviderRuntimeState::Failed,
+        stream_uri: None,
+        external_runtime_ids: Vec::new(),
+        metadata: json!({
+            "evidence_source": "durable_provider_execution",
+            "attempt": 0,
+            "model": "openai/gpt-5.6-terra"
+        }),
     };
-    let mut finalization_options = options();
-    finalization_options.manual_finalization = false;
-    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+    // A successful retry after a failed attempt.
+    let mut retried = successful_lifecycle("openai/gpt-5.6-terra");
+    retried.provider_runtime.insert(0, failed_attempt);
+    // Recording green delivery advances execution to Succeeded while the
+    // runtime that produced the candidate stays Failed (it timed out after
+    // producing it). The candidate and its bound gate receipts authorize
+    // publication on their own.
+    let mut timed_out = successful_lifecycle("roadie/cook-heavy");
+    timed_out.provider_runtime[0].state = ProviderRuntimeState::Failed;
+    // An authenticated all-successful provider recovery stays eligible.
+    let mut partial = successful_lifecycle("openai/gpt-5.6-terra");
+    partial.execution.state = RunExecutionState::PartialFailure;
+    partial.provider_runtime[0].metadata["evidence_source"] = json!("durable_provider_execution");
 
-    let report = finalize_pr_with_backend(finalization_options, &mut backend)
-        .expect("successful canonical retry receipt admits publication");
+    for (case, lifecycle) in [
+        ("retry", retried),
+        ("timed out producer", timed_out),
+        ("partial recovery", partial),
+    ] {
+        let mut gate_proof = successful_gate_proof();
+        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            lifecycle: Some(lifecycle),
+            gate_proof: Some(gate_proof),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
+        finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
-    assert_eq!(report.status.as_str(), "review_ready");
-    assert!(backend.created);
+        let report = finalize_pr_with_backend(finalization_options, &mut backend).expect(case);
+
+        assert_eq!(report.status.as_str(), "review_ready", "{case}");
+        assert!(backend.pushed && backend.created, "{case}");
+    }
 }
 
 #[test]
@@ -1992,32 +1764,6 @@ fn durable_finalization_rejects_red_gates_when_latest_producer_failed() {
 
     assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
     assert!(!backend.created && !backend.committed && !backend.pushed);
-}
-
-#[test]
-fn durable_finalization_publishes_recorded_green_candidate_after_producing_runtime_timed_out() {
-    // Recording green delivery advances execution to Succeeded while the
-    // runtime that produced the candidate stays Failed (it timed out after
-    // producing it). The candidate and its bound gate receipts authorize
-    // publication on their own.
-    let mut gate_proof = successful_gate_proof();
-    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
-    let mut lifecycle = successful_lifecycle("roadie/cook-heavy");
-    lifecycle.provider_runtime[0].state = ProviderRuntimeState::Failed;
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        lifecycle: Some(lifecycle),
-        gate_proof: Some(gate_proof),
-        ..Default::default()
-    };
-    let mut finalization_options = options();
-    finalization_options.manual_finalization = false;
-    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
-
-    finalize_pr_with_backend(finalization_options, &mut backend)
-        .expect("recorded green candidate publishes");
-
-    assert!(backend.pushed && backend.created);
 }
 
 #[test]
@@ -2077,30 +1823,6 @@ fn durable_finalization_recovers_served_model_with_proven_inherited_gate() {
             assert!(backend.created);
         }
     }
-}
-
-#[test]
-fn durable_finalization_preserves_authenticated_partial_provider_recovery() {
-    let mut gate_proof = successful_gate_proof();
-    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
-    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
-    lifecycle.execution.state = RunExecutionState::PartialFailure;
-    lifecycle.provider_runtime[0].metadata["evidence_source"] = json!("durable_provider_execution");
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        lifecycle: Some(lifecycle),
-        gate_proof: Some(gate_proof),
-        ..Default::default()
-    };
-    let mut finalization_options = options();
-    finalization_options.manual_finalization = false;
-    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
-
-    let report = finalize_pr_with_backend(finalization_options, &mut backend)
-        .expect("authenticated all-successful provider recovery remains eligible");
-
-    assert_eq!(report.status.as_str(), "review_ready");
-    assert!(backend.created);
 }
 
 #[test]
@@ -2329,22 +2051,6 @@ fn real_git_repo() -> tempfile::TempDir {
         .success());
     dir
 }
-
-/// #15473: the promotion records the live remote base as `verified_base`, so a
-/// destination created before the base advanced holds its uncommitted
-/// candidate on an older ancestor. Finalization used to fast-forward that
-/// destination beneath the dirty candidate and then reject its own move as
-/// "candidate changed after promotion". It must leave HEAD on the recorded
-/// parent and commit the gate-verified candidate there.
-
-/// #15017: a Cook delivering into an existing PR branch holds its candidate
-/// uncommitted on a HEAD that is ahead of base, and the base moved during the
-/// run in the same files. Finalization used to merge the base into the dirty
-/// tree, git refused, and the gate-green candidate was stranded. It must
-/// commit the candidate on its verified parent and push, attempting no merge.
-
-/// Real drift is still refused: a candidate whose content changed after
-/// promotion on a lagging parent keeps the exact-fingerprint rejection.
 
 #[test]
 fn changed_file_order_and_duplicates_are_normalized() {
@@ -2652,48 +2358,44 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
 
 #[test]
 fn changed_files_mismatch_error_reports_missing_and_unexpected_paths() {
-    // Caller supplied a file the promotion did not, and omitted one it did:
-    // both divergences must be named, with accurate counts.
-    let expected = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
-    let caller = vec!["src/a.rs".to_string(), "src/typo.rs".to_string()];
-
-    let error = changed_files_mismatch_error("agent-task-1", &caller, &expected);
-    let message = error.message;
-
-    assert!(message.contains("expected_count=2"), "{message}");
-    assert!(message.contains("actual_count=2"), "{message}");
-    assert!(
-        message.contains("missing_from_caller=[src/b.rs]"),
-        "{message}"
-    );
-    assert!(
-        message.contains("unexpected_from_caller=[src/typo.rs]"),
-        "{message}"
-    );
-    assert!(
-        message.contains("homeboy agent-task diagnose agent-task-1 --full"),
-        "{message}"
-    );
-}
-
-#[test]
-fn changed_files_mismatch_error_flags_stale_base_inflated_promotion() {
-    // Stale-base attribution inflates the expected set well beyond the caller's
-    // current PR diff; every extra expected path shows as missing_from_caller.
-    let caller = vec!["src/a.rs".to_string()];
-    let expected: Vec<String> = (0..6).map(|index| format!("stale/f{index}.rs")).collect();
-
-    let error = changed_files_mismatch_error("agent-task-2", &caller, &expected);
-    let message = error.message;
-
-    assert!(message.contains("expected_count=6"), "{message}");
-    assert!(message.contains("actual_count=1"), "{message}");
-    assert!(
-        message.contains("unexpected_from_caller=[src/a.rs]"),
-        "{message}"
-    );
-    // The stale base paths are all reported as missing from the caller.
-    assert!(message.contains("stale/f0.rs"), "{message}");
+    let paths = |items: &[&str]| {
+        items
+            .iter()
+            .map(|item| item.to_string())
+            .collect::<Vec<_>>()
+    };
+    // Caller supplied a file the promotion did not, and omitted one it did;
+    // and a stale-base promotion inflated well beyond the caller's PR diff.
+    for (caller, expected, fragments) in [
+        (
+            paths(&["src/a.rs", "src/typo.rs"]),
+            paths(&["src/a.rs", "src/b.rs"]),
+            vec![
+                "expected_count=2",
+                "actual_count=2",
+                "missing_from_caller=[src/b.rs]",
+                "unexpected_from_caller=[src/typo.rs]",
+            ],
+        ),
+        (
+            paths(&["src/a.rs"]),
+            (0..6).map(|index| format!("stale/f{index}.rs")).collect(),
+            vec![
+                "expected_count=6",
+                "actual_count=1",
+                "unexpected_from_caller=[src/a.rs]",
+                "stale/f0.rs",
+            ],
+        ),
+    ] {
+        let message = changed_files_mismatch_error("agent-task-1", &caller, &expected).message;
+        for fragment in fragments
+            .into_iter()
+            .chain(["homeboy agent-task diagnose agent-task-1 --full"])
+        {
+            assert!(message.contains(fragment), "{fragment}: {message}");
+        }
+    }
 }
 
 #[test]

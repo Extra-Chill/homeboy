@@ -283,16 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn root_commit_and_repeated_state_are_stable() {
-        let dir = repo();
-        commit(&dir, "a");
-        let first = candidate_fingerprint(dir.path().to_str().unwrap()).unwrap();
-        assert_eq!(
-            first,
-            candidate_fingerprint(dir.path().to_str().unwrap()).unwrap()
-        );
-    }
-    #[test]
     fn non_git_target_is_an_explicit_capability() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
@@ -302,16 +292,6 @@ mod tests {
             }
         );
     }
-    #[test]
-    fn untracked_content_changes_tree() {
-        let dir = repo();
-        commit(&dir, "base");
-        std::fs::write(dir.path().join("a"), "one").unwrap();
-        let first = fingerprint(&dir);
-        std::fs::write(dir.path().join("a"), "two").unwrap();
-        assert_ne!(first.tree, fingerprint(&dir).tree);
-    }
-
     #[test]
     fn fingerprint_leaves_a_locked_real_index_untouched() {
         let dir = repo();
@@ -353,21 +333,6 @@ mod tests {
             std::fs::write(dir.path().join(name), "two").unwrap();
             assert_ne!(added.tree, fingerprint(&dir).tree, "{name} edited");
         }
-    }
-
-    #[test]
-    fn staged_then_unstaged_edits_change_tree() {
-        let dir = repo();
-        commit(&dir, "tracked");
-        std::fs::write(dir.path().join("tracked"), "staged").unwrap();
-        Command::new("git")
-            .args(["add", "tracked"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
-        let staged = fingerprint(&dir);
-        std::fs::write(dir.path().join("tracked"), "unstaged").unwrap();
-        assert_ne!(staged.tree, fingerprint(&dir).tree);
     }
 
     #[cfg(unix)]

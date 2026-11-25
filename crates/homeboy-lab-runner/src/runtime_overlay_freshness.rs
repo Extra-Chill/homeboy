@@ -382,7 +382,6 @@ mod tests {
 
     use chrono::{Duration, Utc};
 
-    use homeboy_core::materialization_currency::{Currency, CurrencyEvidence};
     use homeboy_core::server::RunnerSettings;
 
     use super::{
@@ -468,6 +467,9 @@ mod tests {
             .expect("stale warning");
         assert!(warning.contains("STALE"));
         assert!(warning.contains("2 commit(s) behind"));
+        // Both durable and per-run escalation controls must be discoverable.
+        assert!(warning.contains(REQUIRE_FRESH_RUNTIME_OVERLAY_SETTING));
+        assert!(warning.contains(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV));
     }
 
     #[test]
@@ -532,28 +534,6 @@ mod tests {
         assert!(stale_runtime_overlay_warning("cli", "/local/dist", &provenance).is_none());
     }
 
-    #[test]
-    fn every_status_carries_the_shared_currency_verdict() {
-        assert_eq!(
-            RuntimeOverlayBuildStatus::Fresh.currency(),
-            Currency::Current
-        );
-        assert!(RuntimeOverlayBuildStatus::Stale.currency().is_stale());
-        for status in [
-            RuntimeOverlayBuildStatus::UnknownNoGit,
-            RuntimeOverlayBuildStatus::UnknownNoArtifacts,
-            RuntimeOverlayBuildStatus::UnknownProbeFailed,
-        ] {
-            assert!(
-                status.currency().is_unknown(),
-                "expected unknown currency for {status:?}"
-            );
-        }
-        // This module's verdict rests on filesystem timestamps, which the
-        // contract records as evidence that cannot prove content equality.
-        assert!(!CurrencyEvidence::BuildTimestamp.proves_content_equality());
-    }
-
     fn strict_settings() -> RunnerSettings {
         RunnerSettings {
             require_fresh_runtime_overlay: Some(true),
@@ -603,24 +583,6 @@ mod tests {
                 assert!(require_fresh_runtime_overlay(&strict_settings()));
             });
         }
-    }
-
-    /// The stale warning must name both durable and per-run controls, or the
-    /// escalation stays undiscoverable to the operator reading stderr.
-    #[test]
-    fn stale_warning_names_both_escalation_controls() {
-        let repo = tempfile::tempdir().expect("repo");
-        init_repo(repo.path());
-        commit_at(repo.path(), "a.txt", "a", &iso(-3));
-        let dist = write_dist(repo.path());
-        commit_at(repo.path(), "b.txt", "b", &iso(2));
-
-        let provenance = assess_runtime_overlay_build_freshness(&dist);
-        let warning = stale_runtime_overlay_warning("cli", "/local/dist", &provenance)
-            .expect("stale warning");
-
-        assert!(warning.contains(REQUIRE_FRESH_RUNTIME_OVERLAY_SETTING));
-        assert!(warning.contains(REQUIRE_FRESH_RUNTIME_OVERLAY_ENV));
     }
 
     fn temp_env_var<F: FnOnce()>(key: &str, value: Option<&str>, run: F) {

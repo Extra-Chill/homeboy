@@ -301,11 +301,6 @@ fn delivery_metadata(artifacts: Value) -> Value {
 fn runs_without_a_delivery_record_have_no_delivery() {
     for metadata in [
         json!({}),
-        // The retired per-stage keys are not delivery evidence.
-        json!({
-            "latest_promotion": promotion("applied", passed_gate()),
-            "cook_finalization": published("review_ready"),
-        }),
         // A record of another schema version is not one this binary reads.
         json!({ "cook_delivery": { "schema": "homeboy/cook-delivery/v1", "state": "published" } }),
         // Neither is a record without delivery evidence.

@@ -56,7 +56,6 @@ fn run_single_rig_bench_fails_fast_on_active_resource_lease() {
 
         assert_eq!(error.code, ErrorCode::RigResourceConflict);
         assert!(error.message.contains("studio-bfb"));
-        assert!(error.message.contains("studio"));
         assert!(error.message.contains("studio-runtime"));
         assert!(error.message.contains("bench"));
     });

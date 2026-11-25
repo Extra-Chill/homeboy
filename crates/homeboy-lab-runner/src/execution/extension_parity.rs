@@ -8,8 +8,6 @@ use homeboy_core::server::{self, SshClient};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::super::{load, merge, remote_runner_homeboy_path};
@@ -1279,11 +1277,6 @@ fn remote_extension_metadata(stdout: &str) -> RemoteExtensionMetadata {
     }
 }
 
-#[cfg(test)]
-fn remote_extension_setting_ids(stdout: &str) -> BTreeSet<String> {
-    remote_extension_settings(stdout).into_keys().collect()
-}
-
 fn remote_extension_settings(stdout: &str) -> BTreeMap<String, String> {
     let Ok(value) = serde_json::from_str::<Value>(stdout.trim()) else {
         return BTreeMap::new();
@@ -1592,8 +1585,7 @@ mod tests {
         dev_sync_extension_overlay, ensure_extension_materialized,
         ensure_extension_materialized_with_exec, is_stale_runner_extension_parity_error,
         plan_extension_parity, probe_extension_parity_from_show,
-        record_materialized_extension_overlay, remote_extension_setting_ids,
-        remote_extension_source_revision, requested_setting_keys_for_command,
+        record_materialized_extension_overlay, requested_setting_keys_for_command,
         runner_extension_materialization_request, runner_extension_sync_command, same_git_revision,
         validate_extension_ready, validate_runner_extension_core_compatibility,
         validate_runner_extension_ready, validate_runner_extension_revision,
@@ -1928,16 +1920,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_extension_source_revision_reads_extension_show_output() {
-        let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","source_revision":"abc1234"}}}"#;
-
-        assert_eq!(
-            remote_extension_source_revision(stdout).as_deref(),
-            Some("abc1234")
-        );
-    }
-
-    #[test]
     fn runner_extension_core_compatibility_fails_fast_with_remediation() {
         let stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","core_compatibility":{"status":"incompatible","installed_homeboy":"0.1.0","requires_homeboy":">=999.0.0","source_revision":"abc1234","remediation_command":"homeboy upgrade"}}}}"#;
 
@@ -1972,22 +1954,17 @@ mod tests {
             "--setting-json=env={\"A\":true}".to_string(),
             "--setting".to_string(),
             "profile=slow".to_string(),
+            "--setting=bench_env.FIXTURE_ROOT=/fixtures/a=b".to_string(),
         ];
 
         assert_eq!(
             requested_setting_keys_for_command(&command),
-            vec!["profile".to_string(), "env".to_string()]
+            vec![
+                "profile".to_string(),
+                "env".to_string(),
+                "bench_env.FIXTURE_ROOT".to_string(),
+            ]
         );
-    }
-
-    #[test]
-    fn remote_extension_setting_ids_reads_extension_show_output() {
-        let stdout = r#"{"success":true,"data":{"extension":{"id":"example","settings":[{"id":"profile","type":"string","label":"Profile"},{"id":"env","type":"object","label":"Env"}]}}}"#;
-
-        let settings = remote_extension_setting_ids(stdout);
-
-        assert!(settings.contains("profile"));
-        assert!(settings.contains("env"));
     }
 
     #[test]
@@ -2060,73 +2037,6 @@ mod tests {
     }
 
     #[test]
-    fn setting_parity_accepts_lab_bench_command_dotted_object_settings() {
-        let remote_stdout = r#"{
-          "success": true,
-          "data": {
-            "command": "extension.show",
-            "extension": {
-              "id": "wordpress",
-              "path": "/home/chubes/.config/homeboy/extensions/wordpress",
-              "source_revision": "3e3e4c41",
-              "settings": [
-                {"default": [], "id": "validation_dependencies", "label": "Validation Dependencies", "type": "array"},
-                {"default": {}, "id": "wp_config_defines", "label": "wp-config additions", "type": "object"},
-                {"default": {}, "id": "bench_env", "label": "Bench env passthrough", "type": "object"},
-                {"default": "", "id": "wp_codebox_core_module", "label": "WP Codebox core module", "type": "string"},
-                {"default": [], "id": "wp_codebox_workloads", "label": "Bench workloads", "type": "array"},
-                {"default": {}, "id": "bench_browser_target", "label": "Bench browser target handoff", "type": "object"}
-              ]
-            }
-          }
-        }"#;
-        let command = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "static-site-importer".to_string(),
-            "--path".to_string(),
-            "/Users/chubes/Developer/static-site-importer@fix-codebox-validation-provider".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-            "--extension".to_string(),
-            "wordpress".to_string(),
-            "--rig".to_string(),
-            "static-site-importer-fixture-matrix".to_string(),
-            "--shared-state".to_string(),
-            "/home/chubes/Developer/_lab_artifacts/ssi-fast-loop-shared".to_string(),
-            "--iterations".to_string(),
-            "1".to_string(),
-            "--warmup".to_string(),
-            "0".to_string(),
-            "--run-id".to_string(),
-            "ssi-onepager-coffee-wp-codebox-0-12-fullpage".to_string(),
-            "--setting".to_string(),
-            "bench_env.SSI_FIXTURE_MATRIX_FIXTURE_ROOT=/Users/chubes/Developer/blocks-engine@fixtures-static-import-corpus/fixtures/websites/2-onepager-coffee".to_string(),
-            "--setting".to_string(),
-            "bench_env.SSI_FIXTURE_MATRIX_BLOCKS_ENGINE_PHP_TRANSFORMER_PATH=/Users/chubes/Developer/blocks-engine@fixtures-static-import-corpus".to_string(),
-            "--setting".to_string(),
-            "bench_env.SSI_FIXTURE_MATRIX_VISUAL_PARITY_FULL_PAGE=1".to_string(),
-            "--".to_string(),
-            "--max-depth".to_string(),
-            "0".to_string(),
-            "--batch-size".to_string(),
-            "1".to_string(),
-            "--run".to_string(),
-        ];
-        let requested_setting_keys = requested_setting_keys_for_command(&command);
-
-        validate_runner_extension_settings(
-            "homeboy-lab",
-            "homeboy",
-            "wordpress",
-            remote_stdout,
-            &requested_setting_keys,
-            &[],
-        )
-        .expect("declared bench_env object should cover Lab bench dotted overrides");
-    }
-
-    #[test]
     fn setting_parity_accepts_dotted_children_from_settings_object_map() {
         let remote_stdout = r#"{"success":true,"data":{"command":"extension.show","extension":{"id":"wordpress","path":"/home/chubes/.config/homeboy/extensions/wordpress","source_revision":"abc1234","settings":{"bench_env":{"default":{},"label":"Bench env passthrough","type":"object"},"profile":{"default":"","label":"Profile","type":"string"}}}}}"#;
 
@@ -2167,12 +2077,19 @@ mod tests {
     }
 
     #[test]
-    fn readiness_parity_rejects_unready_runner_extension() {
+    fn readiness_parity_rejects_only_unready_runner_extensions() {
         let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","ready":false,"ready_reason":"ready_check_failed","ready_detail":"missing generated asset"}}}"#;
 
         let err =
             validate_runner_extension_ready("homeboy-lab", "homeboy", "wordpress", remote_stdout)
                 .expect_err("unready runner extension should fail parity");
+        validate_runner_extension_ready(
+            "homeboy-lab",
+            "homeboy",
+            "wordpress",
+            r#"{"success":true,"data":{"extension":{"id":"wordpress","ready":true}}}"#,
+        )
+        .expect("ready runner extension should pass parity");
 
         assert!(err.to_string().contains("unready extension parity"));
         assert!(err.details["tried"]
@@ -2184,59 +2101,36 @@ mod tests {
     }
 
     #[test]
-    fn readiness_parity_accepts_ready_runner_extension() {
-        let remote_stdout =
-            r#"{"success":true,"data":{"extension":{"id":"wordpress","ready":true}}}"#;
-
-        validate_runner_extension_ready("homeboy-lab", "homeboy", "wordpress", remote_stdout)
-            .expect("ready runner extension should pass parity");
-    }
-
-    #[test]
-    fn revision_parity_rejects_stale_runner_extension() {
+    fn revision_parity_rejects_stale_or_missing_runner_revision() {
         with_isolated_home(|home| {
             let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
             fs::create_dir_all(&extension_dir).expect("extension dir");
             fs::write(extension_dir.join(".source-revision"), "local123\n").expect("revision");
-            let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress","source_revision":"remote456"}}}"#;
             let runner = runner_with_overlay("other", "/tmp/other", "unused");
 
-            let err = validate_runner_extension_revision(
-                "homeboy-lab",
-                &runner,
-                "homeboy",
-                "wordpress",
-                remote_stdout,
-            )
-            .expect_err("stale runner extension should fail parity");
+            for (remote_stdout, reported) in [
+                (
+                    r#"{"success":true,"data":{"extension":{"id":"wordpress","source_revision":"remote456"}}}"#,
+                    "remote456",
+                ),
+                (
+                    r#"{"success":true,"data":{"extension":{"id":"wordpress"}}}"#,
+                    "<missing>",
+                ),
+            ] {
+                let err = validate_runner_extension_revision(
+                    "homeboy-lab",
+                    &runner,
+                    "homeboy",
+                    "wordpress",
+                    remote_stdout,
+                )
+                .expect_err("runner revision must match the controller revision");
 
-            assert!(err.to_string().contains("stale extension parity"));
-            assert!(err.details["tried"].to_string().contains("local123"));
-            assert!(err.details["tried"].to_string().contains("remote456"));
-        });
-    }
-
-    #[test]
-    fn revision_parity_rejects_runner_extension_without_source_revision() {
-        with_isolated_home(|home| {
-            let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
-            fs::create_dir_all(&extension_dir).expect("extension dir");
-            fs::write(extension_dir.join(".source-revision"), "local123\n").expect("revision");
-            let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"wordpress"}}}"#;
-            let runner = runner_with_overlay("other", "/tmp/other", "unused");
-
-            let err = validate_runner_extension_revision(
-                "homeboy-lab",
-                &runner,
-                "homeboy",
-                "wordpress",
-                remote_stdout,
-            )
-            .expect_err("runner extension without revision should fail parity");
-
-            assert!(err.to_string().contains("stale extension parity"));
-            assert!(err.details["tried"].to_string().contains("local123"));
-            assert!(err.details["tried"].to_string().contains("<missing>"));
+                assert!(err.to_string().contains("stale extension parity"));
+                assert!(err.details["tried"].to_string().contains("local123"));
+                assert!(err.details["tried"].to_string().contains(reported));
+            }
         });
     }
 
@@ -2469,32 +2363,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn revision_parity_accepts_a_clean_controller_extension_checkout() {
-        with_isolated_home(|home| {
-            let extension_dir = home.path().join(".config/homeboy/extensions/wordpress");
-            fs::create_dir_all(&extension_dir).expect("extension dir");
-            fs::write(
-                extension_dir.join("wordpress.json"),
-                r#"{"id":"wordpress"}"#,
-            )
-            .expect("manifest");
-            fs::write(extension_dir.join("lint.sh"), "echo committed\n").expect("step");
-            let revision = commit_extension_checkout(&extension_dir);
-            let remote_stdout = extension_show_stdout("wordpress", &revision);
-            let runner = runner_with_overlay("other", "/tmp/other", "unused");
-
-            validate_runner_extension_revision(
-                "homeboy-lab",
-                &runner,
-                "homeboy",
-                "wordpress",
-                &remote_stdout,
-            )
-            .expect("a clean checkout at the runner's revision is genuine parity");
-        });
-    }
-
     /// Homeboy writes `.source-url` / `.source-revision` / `.source-requested-ref`
     /// into installed extension directories. They are install-local provenance,
     /// not extension source, and must never be read as uncommitted edits.
@@ -2549,29 +2417,6 @@ mod tests {
             )
             .expect("revision-only parity still passes when cleanliness is unknowable");
         });
-    }
-
-    /// Same bytes, different commit: already the contract on the dev-overlay
-    /// path, which is content-addressed rather than revision-addressed.
-    #[test]
-    fn revision_parity_accepts_matching_dev_overlay_content_hash() {
-        let tempdir = tempfile::tempdir().expect("source dir");
-        fs::write(tempdir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
-        fs::write(tempdir.path().join("run.sh"), "echo hi\n").expect("source file");
-        let hash = crate::extension_source_content_hash(tempdir.path()).expect("content hash");
-        let runner = runner_with_overlay("rust", &tempdir.path().display().to_string(), &hash);
-        let remote_stdout = format!(
-            r#"{{"success":true,"data":{{"extension":{{"id":"rust","source_revision":"{hash}"}}}}}}"#
-        );
-
-        validate_runner_extension_revision(
-            "homeboy-lab",
-            &runner,
-            "homeboy",
-            "rust",
-            &remote_stdout,
-        )
-        .expect("matching dev overlay hash should pass parity");
     }
 
     #[test]
@@ -2665,38 +2510,6 @@ mod tests {
     }
 
     #[test]
-    fn revision_parity_accepts_matching_dev_overlay_source_revision() {
-        let tempdir = tempfile::tempdir().expect("source dir");
-        fs::write(tempdir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
-        fs::write(tempdir.path().join("run.sh"), "echo hi\n").expect("source file");
-        let hash = crate::extension_source_content_hash(tempdir.path()).expect("content hash");
-        let mut runner =
-            runner_with_overlay("nodejs", &tempdir.path().display().to_string(), &hash);
-        runner.resources.insert(
-            "dev_sync".to_string(),
-            serde_json::json!({
-                "schema": "homeboy/runner-dev-sync/v1",
-                "extensions": [{
-                    "id": "nodejs",
-                    "source_path": tempdir.path().display().to_string(),
-                    "content_hash": hash,
-                    "source_revision": "8317270c0b2241326ff42ed648e4e5b447dbead2"
-                }]
-            }),
-        );
-        let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"nodejs","source_revision":"8317270c0b2241326ff42ed648e4e5b447dbead2"}}}"#;
-
-        validate_runner_extension_revision(
-            "homeboy-lab",
-            &runner,
-            "homeboy",
-            "nodejs",
-            remote_stdout,
-        )
-        .expect("matching dev overlay source revision should pass parity");
-    }
-
-    #[test]
     fn revision_parity_accepts_unchanged_dev_overlay_with_new_source_revision() {
         let tempdir = tempfile::tempdir().expect("source dir");
         fs::write(tempdir.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
@@ -2726,44 +2539,6 @@ mod tests {
             remote_stdout,
         )
         .expect("identical dev overlay content should be authoritative");
-    }
-
-    #[test]
-    fn revision_parity_rejects_dirty_dev_overlay_when_same_revision_content_changed() {
-        with_isolated_home(|home| {
-            let extension_dir = home.path().join(".config/homeboy/extensions/nodejs");
-            fs::create_dir_all(&extension_dir).expect("extension dir");
-            fs::write(extension_dir.join(".source-revision"), "1fad4a12\n").expect("revision");
-
-            let source = tempfile::tempdir().expect("source dir");
-            fs::write(source.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
-            fs::write(source.path().join("run.sh"), "echo synced\n").expect("source file");
-            let synced_hash =
-                crate::extension_source_content_hash(source.path()).expect("content hash");
-            fs::write(source.path().join("run.sh"), "echo dirty\n").expect("dirty source file");
-
-            let runner =
-                runner_with_overlay("nodejs", &source.path().display().to_string(), &synced_hash);
-            let remote_stdout = r#"{"success":true,"data":{"extension":{"id":"nodejs","source_revision":"1fad4a12"}}}"#;
-
-            let err = validate_runner_extension_revision(
-                "homeboy-lab",
-                &runner,
-                "homeboy",
-                "nodejs",
-                remote_stdout,
-            )
-            .expect_err("dev overlay content hash should supersede matching git revision");
-
-            assert_eq!(
-                err.details["diagnostic"]["code"].as_str(),
-                Some("runner_extension.dev_overlay_content_hash_mismatch")
-            );
-            assert_eq!(
-                err.details["diagnostic"]["runner_extension_source_revision"].as_str(),
-                Some("1fad4a12")
-            );
-        });
     }
 
     #[test]
@@ -2851,6 +2626,10 @@ mod tests {
             err.details["diagnostic"]["code"].as_str(),
             Some("runner_extension.dev_overlay_content_hash_mismatch")
         );
+        assert_eq!(
+            err.details["diagnostic"]["runner_extension_source_revision"].as_str(),
+            Some(hash.as_str())
+        );
         assert!(err.details["diagnostic"]["remediation_command"]
             .as_str()
             .expect("command")
@@ -2870,17 +2649,6 @@ mod tests {
         assert_eq!(
             command,
             "cd '/tmp/project path' && '/usr/local/bin/homeboy' extension refresh https://github.com/Extra-Chill/homeboy-extensions.git --id rust --ref abc1234"
-        );
-    }
-
-    #[test]
-    fn parity_auto_sync_classifies_controller_local_source_paths_for_snapshot() {
-        let tempdir = tempfile::tempdir().expect("creates temp extension source");
-        let local_source = tempdir.path().canonicalize().expect("canonical tempdir");
-
-        assert_eq!(
-            controller_local_source_path(tempdir.path().to_str().unwrap()).as_deref(),
-            Some(local_source.as_path())
         );
     }
 

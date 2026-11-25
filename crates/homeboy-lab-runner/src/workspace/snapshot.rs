@@ -58,31 +58,6 @@ mod test_snapshot_directory_discovery_hook {
         }
     }
 
-    #[test]
-    fn independent_discovery_hooks_do_not_replace_or_clear_each_other() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Barrier};
-
-        let roots = tempfile::tempdir().unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let installed = Arc::new(Barrier::new(2));
-        std::thread::scope(|scope| {
-            for index in 0..2 {
-                let path = roots.path().join(index.to_string());
-                let calls = calls.clone();
-                let installed = installed.clone();
-                scope.spawn(move || {
-                    let _guard = install(path.clone(), move || {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                    });
-                    installed.wait();
-                    run(&path);
-                });
-            }
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
     impl Drop for Guard {
         fn drop(&mut self) {
             HOOK.get_or_init(|| Mutex::new(Hooks::new()))

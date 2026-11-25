@@ -101,44 +101,41 @@ pub struct WorkspaceContentManifestEntry {
 mod tests {
     use super::*;
 
+    /// Algorithm markers are recorded in workspace verification metadata and
+    /// compared across controller and runner versions, so each supported
+    /// policy keeps its versioned marker; the default stays the portable
+    /// policy, and an unknown policy has no algorithm.
     #[test]
-    fn portable_policy_marker_is_stable_and_platform_independent() {
-        assert_eq!(
-            workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_PORTABLE).as_deref(),
-            Some("homeboy-workspace-content-v2+portable-content-only")
-        );
-    }
-
-    #[test]
-    fn default_policy_is_portable_across_controller_and_runner_platforms() {
-        assert_eq!(
-            WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-            WORKSPACE_CONTENT_PERMISSION_PORTABLE
-        );
-        assert_eq!(
-            workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
-                .as_deref(),
-            Some("homeboy-workspace-content-v2+portable-content-only")
-        );
-    }
-
-    #[test]
-    fn unknown_policy_has_no_algorithm() {
-        assert_eq!(workspace_content_hash_algorithm("nonsense-policy"), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_policies_map_to_their_versioned_markers() {
-        assert_eq!(
-            workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE)
-                .as_deref(),
-            Some("homeboy-workspace-content-v2+unix-executable")
-        );
-        assert_eq!(
-            workspace_content_hash_algorithm(WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE)
-                .as_deref(),
-            Some("homeboy-workspace-content-v3+unix-owner-executable")
-        );
+    fn policies_map_to_their_versioned_markers() {
+        let mut cases = vec![
+            (
+                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                Some("homeboy-workspace-content-v2+portable-content-only"),
+            ),
+            (
+                WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+                Some("homeboy-workspace-content-v2+portable-content-only"),
+            ),
+            ("nonsense-policy", None),
+        ];
+        if cfg!(unix) {
+            cases.extend([
+                (
+                    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+                    Some("homeboy-workspace-content-v2+unix-executable"),
+                ),
+                (
+                    WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+                    Some("homeboy-workspace-content-v3+unix-owner-executable"),
+                ),
+            ]);
+        }
+        for (policy, marker) in cases {
+            assert_eq!(
+                workspace_content_hash_algorithm(policy).as_deref(),
+                marker,
+                "{policy}"
+            );
+        }
     }
 }

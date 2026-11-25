@@ -252,10 +252,8 @@ mod tests {
                 "claim": claim,
             })
         );
-    }
 
-    #[test]
-    fn authority_values_round_trip_and_binding_omits_absent_claim() {
+        // A binding without a claim decodes and re-encodes without one.
         let binding: WorkspaceClaimBinding = serde_json::from_value(json!({
             "workspace": { "schema": WORKSPACE_IDENTITY_SCHEMA, "kind": "managed-workspace", "locator": "repo@task" },
             "lifecycle_revision": 9,

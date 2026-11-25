@@ -268,12 +268,11 @@ mod tests {
     #[test]
     fn converts_rig_resource_declarations_to_lifecycle_records() {
         let resources = fixture_resources();
+        let mut options =
+            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active);
+        options.runner_id = Some("runner-abc".to_string());
 
-        let index = rig_resource_lifecycle_index(
-            "fixture-rig",
-            &resources,
-            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-        );
+        let index = rig_resource_lifecycle_index("fixture-rig", &resources, options);
 
         index.validate().expect("contract-valid lifecycle index");
         assert_eq!(index.resources.len(), 4);
@@ -286,25 +285,11 @@ mod tests {
         assert_eq!(index.resources[1].path, "/tmp/homeboy-rig");
         assert_eq!(index.resources[2].path, "tcp://localhost:9981");
         assert_eq!(index.resources[3].path, "process-pattern:homeboy fixture");
-        assert_eq!(index.resources[0].runner_id, None);
-        assert_eq!(
-            index.resources[0].cleanup_policy,
-            ResourceCleanupPolicy::Manual
-        );
-    }
-
-    #[test]
-    fn propagates_runner_id_to_resource_records() {
-        let resources = fixture_resources();
-
-        let mut options =
-            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active);
-        options.runner_id = Some("runner-abc".to_string());
-
-        let index = rig_resource_lifecycle_index("fixture-rig", &resources, options);
-
+        // Specs without retention declarations keep manual, ttl-less records.
         for record in &index.resources {
             assert_eq!(record.runner_id.as_deref(), Some("runner-abc"));
+            assert_eq!(record.cleanup_policy, ResourceCleanupPolicy::Manual);
+            assert_eq!(record.ttl, None, "{} must keep no ttl", record.kind);
         }
     }
 
@@ -354,111 +339,71 @@ mod tests {
         }
     }
 
-    /// Non-breaking guarantee: a spec that declares no `ttl`/`cleanup_policy`
-    /// produces byte-identical lifecycle records to the pre-retention behavior
-    /// (`manual`, no ttl) for every resource class.
     #[test]
-    fn specs_without_retention_declarations_keep_manual_records() {
-        let resources = fixture_resources();
-        assert!(resources.lifecycle.is_empty());
-        assert!(resources.lifecycle_by_class.is_empty());
+    fn declared_retention_resolves_per_class_over_defaults() {
+        let delete_after_ttl = Some(ResourceCleanupPolicy::DeleteAfterTtl);
+        // (default retention, ports override, expected port, expected other classes)
+        let cases = [
+            (
+                RigResourceRetentionSpec {
+                    ttl: Some("PT1H".to_string()),
+                    cleanup_policy: delete_after_ttl,
+                },
+                None,
+                (ResourceCleanupPolicy::DeleteAfterTtl, Some("PT1H")),
+                (ResourceCleanupPolicy::DeleteAfterTtl, Some("PT1H")),
+            ),
+            (
+                RigResourceRetentionSpec::default(),
+                Some(RigResourceRetentionSpec {
+                    ttl: Some("PT1H".to_string()),
+                    cleanup_policy: delete_after_ttl,
+                }),
+                (ResourceCleanupPolicy::DeleteAfterTtl, Some("PT1H")),
+                (ResourceCleanupPolicy::Manual, None),
+            ),
+            (
+                RigResourceRetentionSpec {
+                    ttl: Some("P1D".to_string()),
+                    cleanup_policy: None,
+                },
+                Some(RigResourceRetentionSpec {
+                    ttl: None,
+                    cleanup_policy: delete_after_ttl,
+                }),
+                (ResourceCleanupPolicy::DeleteAfterTtl, Some("P1D")),
+                (ResourceCleanupPolicy::Manual, Some("P1D")),
+            ),
+        ];
 
-        let records = rig_resource_lifecycle_records(
-            "fixture-rig",
-            &resources,
-            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-        );
+        for (default, ports, expected_port, expected_other) in cases {
+            let mut resources = RigResourcesSpec {
+                lifecycle: default,
+                ..fixture_resources()
+            };
+            if let Some(ports) = ports {
+                resources
+                    .lifecycle_by_class
+                    .insert(RIG_RESOURCE_CLASS_PORTS.to_string(), ports);
+            }
 
-        assert_eq!(records.len(), 4);
-        for record in &records {
-            assert_eq!(
-                record.cleanup_policy,
-                ResourceCleanupPolicy::Manual,
-                "{} must keep the historical manual policy",
-                record.kind
+            let index = rig_resource_lifecycle_index(
+                "fixture-rig",
+                &resources,
+                RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
             );
-            assert_eq!(record.ttl, None, "{} must keep no ttl", record.kind);
-        }
-    }
 
-    #[test]
-    fn applies_declared_retention_defaults_to_every_class() {
-        let resources = RigResourcesSpec {
-            lifecycle: RigResourceRetentionSpec {
-                ttl: Some("PT1H".to_string()),
-                cleanup_policy: Some(ResourceCleanupPolicy::DeleteAfterTtl),
-            },
-            ..fixture_resources()
-        };
-
-        let index = rig_resource_lifecycle_index(
-            "fixture-rig",
-            &resources,
-            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-        );
-
-        index.validate().expect("contract-valid lifecycle index");
-        for record in &index.resources {
-            assert_eq!(record.cleanup_policy, ResourceCleanupPolicy::DeleteAfterTtl);
-            assert_eq!(record.ttl.as_deref(), Some("PT1H"));
-        }
-    }
-
-    #[test]
-    fn per_class_retention_overrides_only_its_own_class() {
-        let mut resources = fixture_resources();
-        resources.lifecycle_by_class.insert(
-            RIG_RESOURCE_CLASS_PORTS.to_string(),
-            RigResourceRetentionSpec {
-                ttl: Some("PT1H".to_string()),
-                cleanup_policy: Some(ResourceCleanupPolicy::DeleteAfterTtl),
-            },
-        );
-
-        let index = rig_resource_lifecycle_index(
-            "fixture-rig",
-            &resources,
-            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-        );
-
-        index.validate().expect("contract-valid lifecycle index");
-        for record in &index.resources {
-            if record.kind == "rig_port" {
-                assert_eq!(record.cleanup_policy, ResourceCleanupPolicy::DeleteAfterTtl);
-                assert_eq!(record.ttl.as_deref(), Some("PT1H"));
-            } else {
-                assert_eq!(record.cleanup_policy, ResourceCleanupPolicy::Manual);
-                assert_eq!(record.ttl, None);
+            index.validate().expect("contract-valid lifecycle index");
+            for record in &index.resources {
+                let (policy, ttl) = if record.kind == "rig_port" {
+                    expected_port
+                } else {
+                    expected_other
+                };
+                assert_eq!(record.cleanup_policy, policy, "{}", record.kind);
+                assert_eq!(record.ttl.as_deref(), ttl, "{}", record.kind);
             }
         }
-    }
-
-    #[test]
-    fn per_class_retention_inherits_unset_fields_from_the_default() {
-        let mut resources = fixture_resources();
-        resources.lifecycle.ttl = Some("P1D".to_string());
-        resources.lifecycle_by_class.insert(
-            RIG_RESOURCE_CLASS_PORTS.to_string(),
-            RigResourceRetentionSpec {
-                ttl: None,
-                cleanup_policy: Some(ResourceCleanupPolicy::DeleteAfterTtl),
-            },
-        );
-
-        let index = rig_resource_lifecycle_index(
-            "fixture-rig",
-            &resources,
-            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-        );
-
-        index.validate().expect("contract-valid lifecycle index");
-        let port = index
-            .resources
-            .iter()
-            .find(|record| record.kind == "rig_port")
-            .expect("port record");
-        assert_eq!(port.cleanup_policy, ResourceCleanupPolicy::DeleteAfterTtl);
-        assert_eq!(port.ttl.as_deref(), Some("P1D"));
     }
 
     /// `delete_after_ttl` without a ttl is contract-invalid. Degrading to
@@ -532,116 +477,81 @@ mod tests {
         }
     }
 
-    #[test]
-    fn live_snapshot_handles_become_ttl_reapable_resources() {
-        let mut snapshots = std::collections::BTreeMap::new();
-        snapshots.insert(
-            "sandbox-7f3".to_string(),
-            snapshot_state("sandbox-7f3", Some("opaque://sandbox/7f3")),
-        );
-
-        let records = lifecycle_snapshot_lifecycle_records(
+    fn snapshot_records(
+        resources: &RigResourcesSpec,
+        snapshots: &[(&str, Option<&str>)],
+    ) -> Vec<ResourceLifecycleRecord> {
+        let snapshots: std::collections::BTreeMap<String, LifecycleSnapshotState> = snapshots
+            .iter()
+            .map(|(id, locator)| (id.to_string(), snapshot_state(id, *locator)))
+            .collect();
+        lifecycle_snapshot_lifecycle_records(
             "fixture-rig",
-            &RigResourcesSpec::default(),
+            resources,
             &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
             snapshots.iter(),
-        );
-
-        assert_eq!(records.len(), 1);
-        records[0].validate(0).expect("valid snapshot record");
-        assert_eq!(records[0].kind, "lifecycle_snapshot");
-        assert_eq!(records[0].owner, "homeboy.rig.lifecycle_snapshot");
-        assert_eq!(records[0].path, "opaque://sandbox/7f3");
-        assert_eq!(
-            records[0].cleanup_policy,
-            ResourceCleanupPolicy::DeleteAfterTtl
-        );
-        assert_eq!(records[0].ttl.as_deref(), Some("P1D"));
+        )
     }
 
     #[test]
-    fn snapshot_handles_without_a_locator_get_an_addressable_rig_uri() {
-        let mut snapshots = std::collections::BTreeMap::new();
-        snapshots.insert("capture".to_string(), snapshot_state("capture", None));
-
-        let records = lifecycle_snapshot_lifecycle_records(
-            "fixture-rig",
+    fn live_snapshot_handles_become_ttl_reapable_resources() {
+        let records = snapshot_records(
             &RigResourcesSpec::default(),
-            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-            snapshots.iter(),
+            &[
+                ("capture", None),
+                ("sandbox-7f3", Some("opaque://sandbox/7f3")),
+            ],
         );
 
-        records[0].validate(0).expect("valid snapshot record");
+        assert_eq!(records.len(), 2);
+        for record in &records {
+            record.validate(0).expect("valid snapshot record");
+            assert_eq!(record.kind, "lifecycle_snapshot");
+            assert_eq!(record.owner, "homeboy.rig.lifecycle_snapshot");
+            assert_eq!(record.cleanup_policy, ResourceCleanupPolicy::DeleteAfterTtl);
+            assert_eq!(record.ttl.as_deref(), Some("P1D"));
+        }
+        // Handles without a locator get an addressable rig URI.
         assert_eq!(
             records[0].path,
             "rig://fixture-rig/lifecycle-snapshot/capture"
         );
+        assert_eq!(records[1].path, "opaque://sandbox/7f3");
     }
 
+    /// The TTL-reap posture is a default, not a policy homeboy imposes.
     #[test]
     fn declared_snapshot_retention_overrides_the_ttl_reap_default() {
-        let mut resources = RigResourcesSpec::default();
-        resources.lifecycle_by_class.insert(
-            crate::spec::RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS.to_string(),
-            RigResourceRetentionSpec {
-                ttl: Some("PT30M".to_string()),
-                cleanup_policy: Some(ResourceCleanupPolicy::DeleteAfterTtl),
-            },
-        );
-        let mut snapshots = std::collections::BTreeMap::new();
-        snapshots.insert("capture".to_string(), snapshot_state("capture", None));
+        for (declared, expected_policy, expected_ttl) in [
+            (
+                RigResourceRetentionSpec {
+                    ttl: Some("PT30M".to_string()),
+                    cleanup_policy: Some(ResourceCleanupPolicy::DeleteAfterTtl),
+                },
+                ResourceCleanupPolicy::DeleteAfterTtl,
+                Some("PT30M"),
+            ),
+            (
+                RigResourceRetentionSpec {
+                    ttl: None,
+                    cleanup_policy: Some(ResourceCleanupPolicy::Preserve),
+                },
+                ResourceCleanupPolicy::Preserve,
+                None,
+            ),
+        ] {
+            let mut resources = RigResourcesSpec::default();
+            resources.lifecycle_by_class.insert(
+                crate::spec::RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS.to_string(),
+                declared,
+            );
 
-        let records = lifecycle_snapshot_lifecycle_records(
-            "fixture-rig",
-            &resources,
-            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-            snapshots.iter(),
-        );
+            let records = snapshot_records(&resources, &[("capture", None)]);
 
-        assert_eq!(records[0].ttl.as_deref(), Some("PT30M"));
-    }
-
-    /// A rig that declares `preserve` for snapshot handles keeps them: the
-    /// TTL-reap posture is a default, not a policy homeboy imposes.
-    #[test]
-    fn declared_snapshot_policy_can_opt_out_of_reaping() {
-        let mut resources = RigResourcesSpec::default();
-        resources.lifecycle_by_class.insert(
-            crate::spec::RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS.to_string(),
-            RigResourceRetentionSpec {
-                ttl: None,
-                cleanup_policy: Some(ResourceCleanupPolicy::Preserve),
-            },
-        );
-        let mut snapshots = std::collections::BTreeMap::new();
-        snapshots.insert("capture".to_string(), snapshot_state("capture", None));
-
-        let records = lifecycle_snapshot_lifecycle_records(
-            "fixture-rig",
-            &resources,
-            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-            snapshots.iter(),
-        );
-
-        records[0].validate(0).expect("valid snapshot record");
-        assert_eq!(records[0].cleanup_policy, ResourceCleanupPolicy::Preserve);
-        assert_eq!(records[0].ttl, None);
-    }
-
-    /// Non-breaking guarantee: a rig with no lifecycle steps holds no handles,
-    /// so the emitted index is byte-identical to the pre-lifecycle behavior.
-    #[test]
-    fn rigs_without_snapshot_handles_emit_no_snapshot_records() {
-        let empty: std::collections::BTreeMap<String, LifecycleSnapshotState> =
-            std::collections::BTreeMap::new();
-        let records = lifecycle_snapshot_lifecycle_records(
-            "fixture-rig",
-            &fixture_resources(),
-            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
-            empty.iter(),
-        );
-
-        assert!(records.is_empty());
+            records[0].validate(0).expect("valid snapshot record");
+            assert_eq!(records[0].cleanup_policy, expected_policy);
+            assert_eq!(records[0].ttl.as_deref(), expected_ttl);
+        }
     }
 
     #[test]

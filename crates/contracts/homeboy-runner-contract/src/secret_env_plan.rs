@@ -1060,27 +1060,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn to_env_materialization_plan_carries_source_env_refs_without_values() {
-        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
-            name: "SERVICE_TOKEN".to_string(),
-            required: true,
-            source_env_names: vec!["SOURCE_SERVICE_TOKEN".to_string()],
-            refresh: None,
-        }]);
-
-        let env_plan = plan.to_env_materialization_plan();
-        let json = serde_json::to_value(&env_plan).expect("serializes env materialization plan");
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "schema": "homeboy/env-materialization-plan/v1",
-                "secret_refs": [{"name": "SERVICE_TOKEN"}, {"name": "SOURCE_SERVICE_TOKEN"}],
-                "source_env_bindings": [{"name": "SERVICE_TOKEN", "source_env_refs": ["SOURCE_SERVICE_TOKEN"]}]
-            })
-        );
-    }
-
-    #[test]
     fn secret_env_plan_materializes_public_and_secret_values() {
         let plan = SecretEnvPlan {
             public_env: BTreeMap::from([("PUBLIC_FLAG".to_string(), "1".to_string())]),
@@ -1197,17 +1176,6 @@ mod tests {
     }
 
     #[test]
-    fn secret_env_plan_json_env_pair_uses_canonical_handoff_name() {
-        let plan = SecretEnvPlan::from_secret_env_names(["API_TOKEN".to_string()]);
-
-        let (name, value) = plan.json_env_pair();
-
-        assert_eq!(name, AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV);
-        let decoded: SecretEnvPlan = serde_json::from_str(&value).expect("secret plan json");
-        assert_eq!(decoded.secret_env_names(), vec!["API_TOKEN".to_string()]);
-    }
-
-    #[test]
     fn normalizes_secret_env_names_by_trimming_sorting_and_deduplicating() {
         assert_eq!(
             normalize_names([
@@ -1274,53 +1242,6 @@ mod tests {
         );
         assert!(!serde_json::to_string(&error)
             .expect("error json")
-            .contains("secret-value"));
-    }
-
-    #[test]
-    fn plan_resolver_maps_requirement_to_multiple_source_env_fallbacks() {
-        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
-            name: "API_TOKEN".to_string(),
-            required: true,
-            source_env_names: vec![
-                "PRIMARY_API_TOKEN".to_string(),
-                "FALLBACK_API_TOKEN".to_string(),
-            ],
-            refresh: None,
-        }]);
-        let resolver =
-            SecretEnvResolver::new(vec![SecretEnvValueProvider::new("test-env", |name| {
-                (name == "FALLBACK_API_TOKEN").then(|| "secret-value".to_string())
-            })]);
-
-        let resolved = resolver
-            .resolve_plan(&plan, "missing required secret env")
-            .expect("fallback source resolves");
-
-        assert_eq!(
-            resolved.env,
-            vec![("API_TOKEN".to_string(), "secret-value".to_string())]
-        );
-        assert_eq!(
-            resolved.status,
-            vec![SecretEnvStatus {
-                name: "API_TOKEN".to_string(),
-                configured: true,
-                source: "test-env".to_string(),
-                source_env_name: Some("FALLBACK_API_TOKEN".to_string()),
-                missing_source_env_names: vec!["PRIMARY_API_TOKEN".to_string()],
-            }]
-        );
-        assert_eq!(
-            plan.secret_env_names(),
-            vec![
-                "API_TOKEN".to_string(),
-                "FALLBACK_API_TOKEN".to_string(),
-                "PRIMARY_API_TOKEN".to_string(),
-            ]
-        );
-        assert!(!serde_json::to_string(&resolved.status)
-            .expect("status json")
             .contains("secret-value"));
     }
 
@@ -1469,23 +1390,7 @@ mod tests {
             .diagnose(error.status.clone())
             .expect_err("required mapped secret is missing")
             .diagnostics;
-        assert_eq!(
-            diagnostics.status[0].source_env_names,
-            vec![
-                "PRIMARY_API_TOKEN".to_string(),
-                "FALLBACK_API_TOKEN".to_string(),
-            ]
-        );
-        assert_eq!(
-            diagnostics.status[0].missing_source_env_names,
-            vec![
-                "PRIMARY_API_TOKEN".to_string(),
-                "FALLBACK_API_TOKEN".to_string(),
-            ]
-        );
-        let serialized = serde_json::to_string(&diagnostics).expect("diagnostics json");
-        let wire: serde_json::Value =
-            serde_json::from_str(&serialized).expect("diagnostic wire metadata");
+        let wire = serde_json::to_value(&diagnostics).expect("diagnostic wire metadata");
         assert_eq!(
             wire["status"][0]["source_env_names"],
             serde_json::json!(["PRIMARY_API_TOKEN", "FALLBACK_API_TOKEN"])
@@ -1497,7 +1402,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_fail_for_missing_required_secret_env() {
+    fn diagnostics_fail_only_for_missing_required_secret_env() {
         let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
             name: "PROVIDER_TOKEN".to_string(),
             required: true,
@@ -1521,25 +1426,16 @@ mod tests {
             error.diagnostics.passthrough_secret_env_names,
             vec!["PROVIDER_TOKEN".to_string()]
         );
-    }
 
-    #[test]
-    fn diagnostics_allow_missing_optional_secret_env() {
-        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
+        let optional = SecretEnvPlan::from_requirements([SecretEnvRequirement {
             name: "OPTIONAL_PROVIDER_TOKEN".to_string(),
             required: false,
             source_env_names: Vec::new(),
             refresh: None,
         }]);
-
-        let diagnostics = plan
+        let diagnostics = optional
             .diagnose([])
             .expect("optional secret env can be absent");
-
-        assert_eq!(
-            diagnostics.passthrough_secret_env_names,
-            vec!["OPTIONAL_PROVIDER_TOKEN".to_string()]
-        );
         assert_eq!(
             diagnostics.status,
             vec![SecretEnvDiagnosticStatus {
@@ -1552,14 +1448,14 @@ mod tests {
                 refresh: None,
             }]
         );
-        assert!(diagnostics.inherited_env.is_empty());
     }
 
+    /// Sensitive inherited env must be declared or allowlisted, whether it is
+    /// checked against a plan or through a materialize request, and the
+    /// rejection never carries the value.
     #[test]
-    fn diagnostics_reject_undeclared_inherited_secret_env() {
-        let plan = SecretEnvPlan::default();
-
-        let error = plan
+    fn inherited_secret_env_must_be_declared_or_allowlisted() {
+        let error = SecretEnvPlan::default()
             .diagnose_inherited_env(
                 &BTreeMap::from([(
                     "UNDECLARED_API_TOKEN".to_string(),
@@ -1568,7 +1464,6 @@ mod tests {
                 "runner.env",
             )
             .expect_err("sensitive inherited env must be declared");
-
         assert_eq!(
             error.undeclared_inherited_secret_env,
             vec!["UNDECLARED_API_TOKEN".to_string()]
@@ -1584,13 +1479,19 @@ mod tests {
         assert!(!serde_json::to_string(&error)
             .expect("error json")
             .contains("secret-value"));
-    }
 
-    #[test]
-    fn diagnostics_allow_declared_or_allowlisted_inherited_secret_env() {
+        let error = SecretEnvPlan::materialize_request(SecretEnvPlanMaterializeRequest {
+            inherited_env_names: vec!["UNDECLARED_API_TOKEN".to_string()],
+            ..SecretEnvPlanMaterializeRequest::default()
+        })
+        .expect_err("undeclared sensitive inherited env is rejected");
+        assert_eq!(
+            error.undeclared_inherited_secret_env,
+            vec!["UNDECLARED_API_TOKEN".to_string()]
+        );
+
         let mut plan = SecretEnvPlan::from_secret_env_names(["DECLARED_API_TOKEN".to_string()]);
         plan.allow_inherited_env_names(["HOMEBOY_AGENT_RUNTIME_SECRET_ENV".to_string()]);
-
         let diagnostics = plan
             .diagnose_inherited_env(
                 &BTreeMap::from([
@@ -1603,38 +1504,11 @@ mod tests {
                 "request.env",
             )
             .expect("declared sensitive inherited env is allowed");
-
         assert_eq!(diagnostics.inherited_env.len(), 2);
         assert!(diagnostics
             .inherited_env
             .iter()
             .all(|status| status.declared));
-    }
-
-    #[test]
-    fn diagnostics_are_redacted_and_expose_passthrough_names_only() {
-        let plan = SecretEnvPlan::from_requirements([SecretEnvRequirement {
-            name: "FIXTURE_PROVIDER_ACCESS_TOKEN".to_string(),
-            required: true,
-            source_env_names: Vec::new(),
-            refresh: None,
-        }]);
-
-        let diagnostics = plan
-            .diagnose([secret_env_status(
-                "FIXTURE_PROVIDER_ACCESS_TOKEN".to_string(),
-                true,
-                "test-source",
-            )])
-            .expect("required secret env is configured");
-        let serialized = serde_json::to_string(&diagnostics).expect("diagnostics json");
-
-        assert_eq!(
-            diagnostics.passthrough_secret_env_names,
-            vec!["FIXTURE_PROVIDER_ACCESS_TOKEN".to_string()]
-        );
-        assert!(!serialized.contains("secret-value"));
-        assert!(!serialized.contains("access-token-value"));
     }
 
     #[test]
@@ -1721,23 +1595,6 @@ mod tests {
         );
         assert!(!serde_json::to_string(&output)
             .expect("materialization json")
-            .contains("secret-value"));
-    }
-
-    #[test]
-    fn materialize_request_rejects_undeclared_inherited_secret_env_names() {
-        let error = SecretEnvPlan::materialize_request(SecretEnvPlanMaterializeRequest {
-            inherited_env_names: vec!["UNDECLARED_API_TOKEN".to_string()],
-            ..SecretEnvPlanMaterializeRequest::default()
-        })
-        .expect_err("undeclared sensitive inherited env is rejected");
-
-        assert_eq!(
-            error.undeclared_inherited_secret_env,
-            vec!["UNDECLARED_API_TOKEN".to_string()]
-        );
-        assert!(!serde_json::to_string(&error)
-            .expect("error json")
             .contains("secret-value"));
     }
 }

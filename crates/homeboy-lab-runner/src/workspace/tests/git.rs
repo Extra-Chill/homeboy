@@ -1158,22 +1158,6 @@ fn git_materialization_restores_workspace_owner_after_root_run() {
 }
 
 #[test]
-fn git_materialization_fetches_extra_refs_before_checkout() {
-    let command = materialize_git_command(
-        "/srv/homeboy/_lab_workspaces/homeboy-abc",
-        "https://github.com/Extra-Chill/homeboy.git",
-        "abc123",
-        None,
-        None,
-        &["refs/pull/5530/head".to_string()],
-        false,
-    );
-
-    assert!(command.contains("fetch origin refs/pull/5530/head"));
-    assert!(command.contains("checkout --detach abc123"));
-}
-
-#[test]
 fn git_materialization_fetches_extra_refs_before_changed_since_sha() {
     let command = materialize_git_command(
         "/srv/homeboy/_lab_workspaces/homeboy-abc",
@@ -1254,40 +1238,33 @@ fn git_bundle_materialization_failure_before_install_leaves_destination_absent()
 }
 
 #[test]
-fn git_materialization_refuses_dirty_remote_workspace_by_default() {
-    let command = materialize_git_command(
-        "/srv/homeboy/_lab_workspaces/homeboy-abc",
-        "https://github.com/Extra-Chill/homeboy.git",
-        "abc123",
-        None,
-        None,
-        &[],
-        false,
-    );
+fn git_materialization_dirty_guard_refuses_by_default_and_warns_on_override() {
+    for allow_dirty in [false, true] {
+        let command = materialize_git_command(
+            "/srv/homeboy/_lab_workspaces/homeboy-abc",
+            "https://github.com/Extra-Chill/homeboy.git",
+            "abc123",
+            None,
+            None,
+            &[],
+            allow_dirty,
+        );
 
-    assert!(command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"));
-    assert!(command.contains("exit 97"));
-    assert!(command.contains("Pass --allow-dirty-lab-workspace"));
-    assert!(!command.contains(".homeboy"));
-    assert!(command.contains("git -C \"$dest\" reset --hard"));
-}
-
-#[test]
-fn git_materialization_override_is_noisy_but_allows_reset() {
-    let command = materialize_git_command(
-        "/srv/homeboy/_lab_workspaces/homeboy-abc",
-        "https://github.com/Extra-Chill/homeboy.git",
-        "abc123",
-        None,
-        None,
-        &[],
-        true,
-    );
-
-    assert!(command.contains("Homeboy Lab warning: --allow-dirty-lab-workspace"));
-    assert!(!command.contains("Homeboy Lab refused"));
-    assert!(!command.contains("exit 97"));
-    assert!(command.contains("git -C \"$dest\" reset --hard"));
+        assert_eq!(
+            command.contains("Homeboy Lab refused to overwrite a dirty runner workspace"),
+            !allow_dirty
+        );
+        assert_eq!(command.contains("exit 97"), !allow_dirty);
+        assert_eq!(
+            command.contains("Pass --allow-dirty-lab-workspace"),
+            !allow_dirty
+        );
+        assert_eq!(
+            command.contains("Homeboy Lab warning: --allow-dirty-lab-workspace"),
+            allow_dirty
+        );
+        assert!(command.contains("git -C \"$dest\" reset --hard"));
+    }
 }
 
 #[test]
@@ -1972,24 +1949,8 @@ fn assert_hung_promisor_transport_stopped(cancel: bool, batched: bool) {
 
 #[cfg(unix)]
 #[test]
-fn promisor_configured_transport_deadline_reaps_hung_descendant() {
-    assert_hung_promisor_transport_stopped(false, false);
-}
-
-#[cfg(unix)]
-#[test]
-fn promisor_configured_transport_cancellation_reaps_hung_descendant() {
-    assert_hung_promisor_transport_stopped(true, false);
-}
-
-#[cfg(unix)]
-#[test]
-fn promisor_configured_transport_batch_deadline_reaps_hung_descendant() {
-    assert_hung_promisor_transport_stopped(false, true);
-}
-
-#[cfg(unix)]
-#[test]
-fn promisor_configured_transport_batch_cancellation_reaps_hung_descendant() {
-    assert_hung_promisor_transport_stopped(true, true);
+fn promisor_configured_transport_deadline_or_cancellation_reaps_hung_descendant() {
+    for (cancel, batched) in [(false, false), (true, false), (false, true), (true, true)] {
+        assert_hung_promisor_transport_stopped(cancel, batched);
+    }
 }

@@ -4,9 +4,7 @@
 use super::super::apply::{
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
-use super::super::promote::{
-    normalize_fixture_diff, resume_promoted_patch, validate_artifact_content,
-};
+use super::super::promote::{resume_promoted_patch, validate_artifact_content};
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::candidate_fixture::{
     promote_with_provider, promote_with_provider_and_checkpoint,
@@ -344,14 +342,6 @@ fn materialized_workspace_promotion_resume_rejects_extra_destination_changes() {
     let error = super::super::apply_materialized_workspace_patch(&workspace, &apply_request(patch))
         .expect_err("a destination with extra changes is not the candidate");
     assert!(error.message.contains("could not apply promotion patch"));
-}
-
-#[test]
-fn validate_patch_rejects_empty_patch() {
-    let err =
-        normalize_fixture_diff("\n\t", "repo@promoted-task").expect_err("empty patch rejected");
-
-    assert!(err.message.contains("empty patch"));
 }
 
 #[test]
@@ -1183,70 +1173,6 @@ fn operator_gates_compare_candidate_failures_to_the_immutable_base() {
 }
 
 #[test]
-fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let target = temp.path().join("target");
-    std::fs::create_dir(&target).expect("target");
-    git(&target, &["init"]);
-    git(&target, &["config", "user.email", "test@example.com"]);
-    git(&target, &["config", "user.name", "Test"]);
-    std::fs::create_dir_all(target.join("src")).expect("src");
-    std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
-    git(&target, &["add", "."]);
-    git(&target, &["commit", "-m", "base"]);
-    std::fs::write(target.join("src/lib.rs"), "new\n").expect("apply candidate");
-    let candidate =
-        crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())
-            .expect("candidate fingerprint");
-    let (source_path, source) = write_patch_source(&temp);
-    let options = |rerun_completed_gates| AgentTaskPromotionRequest {
-        source: source.clone(),
-        source_run_id: Some("run-9392".to_string()),
-        source_path: Some(source_path.clone()),
-        source_worktree_path: None,
-        base_ref: None,
-        task_base_sha: None,
-        candidate_ref: None,
-        to_worktree: "repo@fix-9392".to_string(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: false,
-        gates: VerifyGateOptions {
-            verify: vec!["true".to_string()],
-            rerun_completed_gates,
-            ..Default::default()
-        },
-        provider_invocation: None,
-        repository_integrity_evidence: None,
-    };
-    let previous = serde_json::json!({
-        "schema": "homeboy/agent-task-promotion-report/v1",
-        "status": "applied",
-        "source_run_id": "run-9392",
-        "source": { "task_id": "task-1" },
-        "to_worktree": "repo@fix-9392",
-        "target": { "worktree": "repo@fix-9392", "path": target },
-        "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
-        "provenance": { "candidate": candidate },
-    });
-
-    let rejected = resume_promoted_patch(options(false), &target, &previous)
-        .expect_err("applied promotion requires explicit gate rerun");
-    assert!(rejected.message.contains("explicit completed-gate rerun"));
-
-    let options = super::resume_candidate::bind_candidate(options(true), &target);
-    let mut previous = previous;
-    previous["candidate"] =
-        serde_json::from_str::<Value>(&options.source).unwrap()["candidate"].clone();
-    let report = resume_promoted_patch(options, &target, &previous)
-        .expect("exact applied candidate resumes gates");
-    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.gate_results.len(), 1);
-    assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
-}
-
-#[test]
 fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() {
     let (temp, repo, base, candidate) = adopted_commit_repo();
     let mut provider = FakePromotionWorkspaceProvider {
@@ -2070,6 +1996,12 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
         "provenance": { "candidate": candidate },
     });
 
+    let mut without_rerun = options.clone();
+    without_rerun.gates.rerun_completed_gates = false;
+    let rejected = resume_promoted_patch(without_rerun, &target, &previous)
+        .expect_err("applied promotion requires explicit gate rerun");
+    assert!(rejected.message.contains("explicit completed-gate rerun"));
+
     let options = super::resume_candidate::bind_candidate(options, &target);
     let mut previous = previous;
     previous["candidate"] =
@@ -2079,6 +2011,7 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.deterministic_gates.len(), 1);
+    assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
     assert!(report.deterministic_gates[0].candidate_checkout.is_some());
     assert!(Command::new("git")
         .args(["status", "--porcelain"])

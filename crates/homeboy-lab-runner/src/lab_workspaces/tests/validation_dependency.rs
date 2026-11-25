@@ -14,7 +14,7 @@ fn dependency_output() -> RunnerValidationDependencySyncOutput {
 }
 
 #[test]
-fn maps_dependency_local_path_to_materialized_remote_path() {
+fn maps_dependency_to_materialized_remote_path_with_identity_metadata() {
     let entry = workspace_mapping_entry_for_validation_dependency(&dependency_output());
 
     // The controller-local checkout path must remap to the runner-side
@@ -22,12 +22,8 @@ fn maps_dependency_local_path_to_materialized_remote_path() {
     // instead of controller-local ones (#3292).
     assert_eq!(entry.local_path(), "/Users/dev/Developer/shared-runtime");
     assert_eq!(entry.remote_path(), "/srv/_lab_workspaces/shared-runtime");
-}
 
-#[test]
-fn preserves_dependency_role_and_identity_metadata() {
-    let entry = workspace_mapping_entry_for_validation_dependency(&dependency_output());
-
+    // Role and identity metadata survive the remap for freshness evidence.
     let value = serde_json::to_value(&entry).expect("serialize mapping entry");
     assert_eq!(value["role"], "validation_dependency");
     assert_eq!(value["snapshot_identity"], "shared-runtime");

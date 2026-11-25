@@ -4,6 +4,64 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.24] - 2026-11-25
+
+### Changed
+- prune workspace snapshot, snapshots, types and util tests file by file
+- prune and fold low-value tests in lab-runner slice 1/12
+- prune and fold redundant agent-task gate and lifecycle tests
+
+## [0.497.23] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in http_api, observation store and rig suites
+
+## [0.497.22] - 2026-11-25
+
+### Changed
+- prune and fold staging-controller and lab-workspace tests
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 9/12)
+- prune lab offload and preparation tests (6/12)
+- prune and fold redundant tests in lab-runner slice 10/12
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 7/12)
+
+## [0.497.21] - 2026-11-25
+
+### Changed
+- prune agent_task_service and control-plane tests file by file
+
+## [0.497.20] - 2026-11-25
+
+### Changed
+- prune and fold homeboy-lab-runner connection tests file by file
+- prune homeboy-agents agent_task tests file-by-file (9/15)
+- prune agent_task_provider tests file-by-file (8/15)
+- prune homeboy-agents scratch and orchestration tests file by file
+- prune redundant tests in homeboy-lab-runner slice 3/12
+
+## [0.497.19] - 2026-11-25
+
+### Changed
+- prune agent_task_service tests file-by-file (13/15)
+- prune and fold low-value homeboy-agents scheduler and cook tests (wave 1 follow-up)
+- prune and fold low-value tests in agent-task lifecycle, notify and promotion suites (6/15)
+- prune and fold redundant contract tests (contracts 2/2)
+- prune and fold homeboy-rig tests file-by-file (homeboy-rig 1/1)
+- prune and fold homeboy-agents finalization and gate tests (2/15)
+- prune homeboy-agents agent_task_service cook tests file-by-file (11/15)
+- prune cook_tests file-by-file (homeboy-agents 12/15)
+
+### Fixed
+- Cook status/diagnose report a run with gates still running as candidate_recoverable, inviting a duplicate regate
+
+## [0.497.18] - 2026-11-25
+
+### Changed
+- prune and fold low-value agent-task promotion, prompt and provider tests (7/15)
+- prune and fold homeboy-fuzz tests file by file
+- prune redundant lifecycle tests and stale history comments
+- prune agent_task_lifecycle status/submit tests file-by-file
+
 ## [0.497.17] - 2026-11-25
 
 ### Changed

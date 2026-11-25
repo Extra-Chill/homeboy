@@ -189,26 +189,20 @@ mod tests {
     }
 
     #[test]
-    fn apply_back_strategy_parses_known_contract_value() {
-        let apply_back = AgentTaskRuntimeApplyBack {
-            strategy: Some(AgentTaskApplyBackStrategy::MutationArtifacts.to_string()),
-            ..AgentTaskRuntimeApplyBack::default()
-        };
-
-        assert_eq!(
-            apply_back.strategy(),
-            Some(AgentTaskApplyBackStrategy::MutationArtifacts)
-        );
-    }
-
-    #[test]
-    fn apply_back_strategy_keeps_unknown_strings_non_breaking() {
-        let apply_back = AgentTaskRuntimeApplyBack {
-            strategy: Some("provider_owned_strategy".to_string()),
-            ..AgentTaskRuntimeApplyBack::default()
-        };
-
-        assert_eq!(apply_back.strategy(), None);
+    fn apply_back_strategy_parses_known_values_and_ignores_unknown_ones() {
+        for (strategy, expected) in [
+            (
+                "mutation_artifacts",
+                Some(AgentTaskApplyBackStrategy::MutationArtifacts),
+            ),
+            ("provider_owned_strategy", None),
+        ] {
+            let apply_back = AgentTaskRuntimeApplyBack {
+                strategy: Some(strategy.to_string()),
+                ..AgentTaskRuntimeApplyBack::default()
+            };
+            assert_eq!(apply_back.strategy(), expected);
+        }
     }
 }
 

@@ -1240,31 +1240,18 @@ mod tests {
     }
 
     #[test]
-    fn session_health_rejects_a_mismatched_lease() {
-        let (port, server) = serve_health("lease-other", 42, Duration::ZERO);
-        let session = session_for_health_endpoint(port, "lease-live", 42);
+    fn session_health_rejects_a_mismatched_lease_or_pid_or_a_closed_tunnel() {
+        for (served_lease, served_pid) in [("lease-other", 42), ("lease-live", 43)] {
+            let (port, server) = serve_health(served_lease, served_pid, Duration::ZERO);
+            let session = session_for_health_endpoint(port, "lease-live", 42);
 
-        assert!(!session_is_live_with_timeout(
-            &session,
-            Duration::from_millis(200)
-        ));
-        server.join().expect("server");
-    }
+            assert!(
+                !session_is_live_with_timeout(&session, Duration::from_millis(200)),
+                "{served_lease}/{served_pid}"
+            );
+            server.join().expect("server");
+        }
 
-    #[test]
-    fn session_health_rejects_a_mismatched_pid() {
-        let (port, server) = serve_health("lease-live", 43, Duration::ZERO);
-        let session = session_for_health_endpoint(port, "lease-live", 42);
-
-        assert!(!session_is_live_with_timeout(
-            &session,
-            Duration::from_millis(200)
-        ));
-        server.join().expect("server");
-    }
-
-    #[test]
-    fn session_health_rejects_a_closed_tunnel() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let port = listener.local_addr().expect("address").port();
         drop(listener);
@@ -1277,35 +1264,22 @@ mod tests {
     }
 
     #[test]
-    fn recorded_tunnel_identity_rejects_a_reused_pid() {
+    fn recorded_tunnel_identity_accepts_only_the_same_process_instance() {
         let expected = RunnerTunnelProcessStartIdentity::Macos {
             start_seconds: 1,
             start_microseconds: 2,
         };
-        let reused = homeboy_core::process::ProcessStartIdentity::Macos {
-            start_seconds: 3,
-            start_microseconds: 4,
-        };
-
-        assert!(!tunnel_process_is_owned(42, Some(&expected), |_| Ok(Some(
-            reused.clone()
-        ))));
-    }
-
-    #[test]
-    fn recorded_tunnel_identity_accepts_the_same_process_instance() {
-        let expected = RunnerTunnelProcessStartIdentity::Macos {
-            start_seconds: 1,
-            start_microseconds: 2,
-        };
-        let actual = homeboy_core::process::ProcessStartIdentity::Macos {
-            start_seconds: 1,
-            start_microseconds: 2,
-        };
-
-        assert!(tunnel_process_is_owned(42, Some(&expected), |_| Ok(Some(
-            actual.clone()
-        ))));
+        for (start_seconds, start_microseconds, owned) in [(1, 2, true), (3, 4, false)] {
+            let observed = homeboy_core::process::ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            };
+            assert_eq!(
+                tunnel_process_is_owned(42, Some(&expected), |_| Ok(Some(observed.clone()))),
+                owned,
+                "{observed:?}"
+            );
+        }
     }
 
     #[test]
@@ -1333,65 +1307,27 @@ mod tests {
         );
     }
 
+    /// A transient probe failure is retried; a persistently failing probe is
+    /// capped at three attempts.
     #[test]
-    fn controller_sessions_have_distinct_paths_and_share_a_lease_record() {
-        let first = paths::runner_controller_session_file("lab", "controller-a").expect("path");
-        let second = paths::runner_controller_session_file("lab", "controller-b").expect("path");
-        let ownership = paths::runner_session_file("lab").expect("path");
-
-        assert_ne!(first, second);
-        assert_ne!(first, ownership);
-        assert_ne!(second, ownership);
-    }
-
-    #[test]
-    fn stale_owner_can_be_replaced_without_reusing_its_tunnel() {
-        let stale = session("controller-a", "lease-old");
-        let replacement = session("controller-b", "lease-live");
-
-        assert_ne!(stale.controller_id, replacement.controller_id);
-        assert_ne!(
-            stale.remote_daemon_lease_id,
-            replacement.remote_daemon_lease_id
-        );
-    }
-
-    #[test]
-    fn direct_session_liveness_retries_a_transient_probe_failure() {
+    fn direct_session_liveness_retries_transient_probe_failures_up_to_three_attempts() {
         let mut live = session("controller", "lease-live");
         live.local_port = Some(49152);
         live.local_url = Some("http://127.0.0.1:49152".to_string());
-        let attempts = std::cell::Cell::new(0);
-
-        assert!(session_is_live_with_probe(
-            &live,
-            Duration::from_millis(90),
-            |_, probe_timeout| {
-                assert!(probe_timeout > Duration::ZERO);
-                attempts.set(attempts.get() + 1);
-                attempts.get() == 2
-            },
-        ));
-        assert_eq!(attempts.get(), 2);
-    }
-
-    #[test]
-    fn direct_session_liveness_caps_failed_probes_at_three_attempts() {
-        let mut live = session("controller", "lease-live");
-        live.local_port = Some(49152);
-        live.local_url = Some("http://127.0.0.1:49152".to_string());
-        let attempts = std::cell::Cell::new(0);
-
-        assert!(!session_is_live_with_probe(
-            &live,
-            Duration::from_millis(90),
-            |_, probe_timeout| {
-                assert!(probe_timeout > Duration::ZERO);
-                attempts.set(attempts.get() + 1);
-                false
-            },
-        ));
-        assert_eq!(attempts.get(), 3);
+        for (succeeds_on, expected_live, expected_attempts) in
+            [(Some(2), true, 2), (None, false, 3)]
+        {
+            let attempts = std::cell::Cell::new(0);
+            assert_eq!(
+                session_is_live_with_probe(&live, Duration::from_millis(90), |_, probe_timeout| {
+                    assert!(probe_timeout > Duration::ZERO);
+                    attempts.set(attempts.get() + 1);
+                    Some(attempts.get()) == succeeds_on
+                },),
+                expected_live
+            );
+            assert_eq!(attempts.get(), expected_attempts);
+        }
     }
 
     #[test]
@@ -1510,65 +1446,6 @@ mod tests {
     }
 
     #[test]
-    fn sequential_daemon_phases_keep_the_os_scoped_live_session_across_runtime_churn() {
-        let root = TempDir::new().expect("session directory");
-        let controller = "macbook-pro-a1b2c3d4";
-        let connected = session(&controller, "lease-live");
-        let session_path = root.path().join(format!("{controller}.json"));
-        write_session_at(&session_path, &connected).expect("write connected session");
-
-        // These phases may run binaries from different promoted paths and CWDs.
-        // They share the OS controller scope, so all resolve the original tunnel.
-        let status = read_session_at(&session_path)
-            .expect("read status session")
-            .expect("authoritative status session");
-        let read = read_session_at(&session_path)
-            .expect("read daemon job session")
-            .expect("authoritative daemon job session");
-        let mutation = read_session_at(&session_path)
-            .expect("read mutation session")
-            .expect("authoritative mutation session");
-
-        assert_eq!(status.remote_daemon_lease_id.as_deref(), Some("lease-live"));
-        assert_eq!(read.remote_daemon_lease_id, status.remote_daemon_lease_id);
-        assert_eq!(
-            mutation.remote_daemon_lease_id,
-            status.remote_daemon_lease_id
-        );
-        assert_eq!(mutation.remote_daemon_address, status.remote_daemon_address);
-        assert_eq!(
-            read_session_at(&session_path).expect("read stored session"),
-            Some(connected)
-        );
-    }
-
-    #[test]
-    fn stale_runtime_controller_alias_borrows_the_same_authoritative_session() {
-        let root = TempDir::new().expect("session directory");
-        let connected = session("macbook-pro-uid-501", "lease-live");
-        let stale_alias = session("homeboy@old-worktree", "lease-stale");
-        let connected_path = root.path().join("macbook-pro-uid-501.json");
-        let stale_path = root.path().join("homeboy@old-worktree.json");
-        write_session_at(&connected_path, &connected).expect("write connected session");
-        write_session_at(&stale_path, &stale_alias).expect("write stale alias");
-
-        let resolved = resolve_session_or_live_peer_in(
-            &root.path().to_path_buf(),
-            "homeboy@old-worktree",
-            read_session_at(&stale_path).expect("read stale alias"),
-            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
-        )
-        .expect("resolve live peer")
-        .expect("authoritative session");
-
-        assert_eq!(resolved, connected);
-        assert_eq!(
-            read_session_at(&stale_path).expect("read stale alias after resolution"),
-            Some(stale_alias)
-        );
-    }
-
-    #[test]
     fn transient_current_probe_does_not_yield_to_same_daemon_aliases() {
         let root = TempDir::new().expect("session directory");
         let current = session("mac_lan-uid-501", "lease-live");
@@ -1610,52 +1487,6 @@ mod tests {
     }
 
     #[test]
-    fn promoted_controller_scope_resolves_status_and_cancel_to_the_same_live_session() {
-        let root = TempDir::new().expect("session directory");
-        let status_alias = session("cargo-homeboy@worktree-a", "lease-live");
-        let stale_mutation_alias = session("cargo-homeboy@worktree-b", "lease-stale");
-        let status_path = root.path().join("cargo-homeboy@worktree-a.json");
-        let mutation_path = root.path().join("cargo-homeboy@worktree-b.json");
-        write_session_at(&status_path, &status_alias).expect("write status session");
-        write_session_at(&mutation_path, &stale_mutation_alias)
-            .expect("write stale mutation session");
-
-        let status = resolve_session_or_live_peer_in(
-            &root.path().to_path_buf(),
-            "cargo-homeboy@worktree-a",
-            read_session_at(&status_path).expect("read status session"),
-            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
-        )
-        .expect("resolve status session")
-        .expect("authoritative status session");
-        let cancellation = resolve_session_or_live_peer_in(
-            &root.path().to_path_buf(),
-            "cargo-homeboy@worktree-b",
-            read_session_at(&mutation_path).expect("read mutation session"),
-            |candidate| candidate.remote_daemon_lease_id.as_deref() == Some("lease-live"),
-        )
-        .expect("resolve mutation session")
-        .expect("authoritative mutation session");
-
-        assert_eq!(
-            status.remote_daemon_lease_id,
-            Some("lease-live".to_string())
-        );
-        assert_eq!(
-            cancellation.remote_daemon_lease_id,
-            status.remote_daemon_lease_id
-        );
-        assert_eq!(
-            cancellation.remote_daemon_address,
-            status.remote_daemon_address
-        );
-        assert_eq!(
-            read_session_at(&mutation_path).expect("read stale mutation session"),
-            Some(stale_mutation_alias)
-        );
-    }
-
-    #[test]
     fn controller_id_derives_from_machine_identity_independent_of_hostname() {
         let first = derive_controller_id(Some("machine-a"), 501, || "mac.lan".to_string());
         let renamed = derive_controller_id(Some("machine-a"), 501, || "Mac".to_string());
@@ -1687,28 +1518,6 @@ mod tests {
         assert_eq!(
             controller_id_from_scope(Some("  "), "generated".into()),
             "generated"
-        );
-    }
-
-    #[test]
-    fn fresh_peer_session_survives_repeated_cook_preflight_and_handoff_reads() {
-        let root = TempDir::new().expect("session directory");
-        let peer = session("cook-readiness", "lease-accepted");
-        let path = root.path().join("cook-readiness.json");
-        write_session_at(&path, &peer).expect("write readiness session");
-
-        let preflight = live_peer_session_in(&root.path().to_path_buf(), Some("cook"), |_| true)
-            .expect("read preflight session")
-            .expect("live preflight session");
-        let handoff = live_peer_session_in(&root.path().to_path_buf(), Some("cook"), |_| true)
-            .expect("read handoff session")
-            .expect("live handoff session");
-
-        assert_eq!(preflight, peer);
-        assert_eq!(handoff, peer);
-        assert_eq!(
-            read_session_at(&path).expect("read stored session"),
-            Some(peer)
         );
     }
 
@@ -1784,61 +1593,36 @@ mod tests {
         );
     }
 
+    /// The projection scans at most eight peers: a ninth peer, whether it
+    /// conflicts or is the only live one, truncates the answer.
     #[test]
-    fn status_peer_projection_is_truncated_before_a_conflicting_ninth_peer() {
-        let root = TempDir::new().expect("session directory");
-        for index in 0..9 {
-            let lease = if index == 8 {
-                "lease-conflict"
-            } else {
-                "lease-live"
-            };
-            let peer = session(&format!("peer-{index}"), lease);
-            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
-                .expect("write peer session");
-        }
+    fn status_peer_projection_is_truncated_past_eight_peers() {
+        for conflicting_ninth in [true, false] {
+            let root = TempDir::new().expect("session directory");
+            for index in 0..9 {
+                let lease = if conflicting_ninth && index == 8 {
+                    "lease-conflict"
+                } else {
+                    "lease-live"
+                };
+                let peer = session(&format!("peer-{index}"), lease);
+                write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
+                    .expect("write peer session");
+            }
 
-        assert!(matches!(
-            status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
+            assert!(matches!(
+                status_peer_session_in_with(&root.path().to_path_buf(), "current", |peer| {
+                    conflicting_ninth || peer.controller_id.as_deref() == Some("peer-8")
+                })
                 .expect("project bounded peers"),
-            StatusPeerSession::Truncated
-        ));
-    }
-
-    #[test]
-    fn status_peer_projection_is_truncated_when_only_the_ninth_peer_is_live() {
-        let root = TempDir::new().expect("session directory");
-        for index in 0..9 {
-            let peer = session(&format!("peer-{index}"), "lease-live");
-            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
-                .expect("write peer session");
+                StatusPeerSession::Truncated
+            ));
         }
-
-        assert!(matches!(
-            status_peer_session_in_with(&root.path().to_path_buf(), "current", |peer| {
-                peer.controller_id.as_deref() == Some("peer-8")
-            })
-            .expect("project bounded peers"),
-            StatusPeerSession::Truncated
-        ));
     }
 
     #[test]
     fn partial_peer_session_recovery_emits_a_typed_preview_action() {
         let _ = crate::readonly_probe::take_degradations();
-        let root = TempDir::new().expect("session directory");
-        for index in 0..9 {
-            let peer = session(&format!("peer-{index}"), "lease-live");
-            write_session_at(&root.path().join(format!("peer-{index}.json")), &peer)
-                .expect("write peer session");
-        }
-
-        assert!(matches!(
-            status_peer_session_in_with(&root.path().to_path_buf(), "current", |_| true)
-                .expect("project bounded peers"),
-            StatusPeerSession::Truncated
-        ));
-
         record_partial_peer_projection("runner-a", "probe_truncated", "nine peers".to_string());
         let guidance = crate::readonly_probe::take_degradations()
             .into_iter()

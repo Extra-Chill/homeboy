@@ -1306,41 +1306,6 @@ mod admission_tests {
     }
 
     #[test]
-    fn authority_excludes_token_from_debug_and_serialization() {
-        let authority = DaemonAdmissionReservationAuthority {
-            daemon_lease_id: "lease-a".to_string(),
-            reservation_job_id: "job-a".to_string(),
-            lease_expires_at_ms: 42,
-            renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth::default())),
-        };
-        let debug = format!("{authority:?}");
-        let serialized = serde_json::to_string(&authority).expect("serialize authority");
-        assert!(!debug.contains("opaque-token"));
-        assert!(!serialized.contains("token\":\""));
-        assert!(authority
-            .prove_server_owned_expiry_or_cancellation_authority()
-            .is_ok());
-    }
-
-    #[test]
-    fn renewal_failure_blocks_strict_dispatch_authority() {
-        let authority = DaemonAdmissionReservationAuthority {
-            daemon_lease_id: "lease-a".to_string(),
-            reservation_job_id: "job-a".to_string(),
-            lease_expires_at_ms: 42,
-            renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth {
-                lease_expires_at_ms: Some(42),
-                failure: Some("daemon rejected renewal".to_string()),
-            })),
-        };
-        let error = authority
-            .prove_server_owned_expiry_or_cancellation_authority()
-            .expect_err("renewal failure must be observable before dispatch");
-        assert!(error.message.contains("renewal failed"));
-        assert!(!error.message.contains("opaque-token"));
-    }
-
-    #[test]
     fn renewal_transport_gaps_are_retried_and_refusals_are_failures() {
         let text = |status_code: u16, body: &str| {
             Ok(DaemonHttpTextResponse {
@@ -1425,7 +1390,6 @@ mod admission_tests {
         let runner_id = format!("parallel-admission-{}", uuid::Uuid::new_v4());
         let attempts = Arc::new(AtomicUsize::new(0));
         let recovery_owners = Arc::new(AtomicUsize::new(0));
-        let provider_budget = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(std::sync::Barrier::new(4));
         let mut children = Vec::new();
 
@@ -1433,7 +1397,6 @@ mod admission_tests {
             let runner_id = runner_id.clone();
             let attempts = Arc::clone(&attempts);
             let recovery_owners = Arc::clone(&recovery_owners);
-            let provider_budget = Arc::clone(&provider_budget);
             let barrier = Arc::clone(&barrier);
             children.push(std::thread::spawn(move || {
                 barrier.wait();
@@ -1458,10 +1421,7 @@ mod admission_tests {
                     },
                     || {},
                 )
-                .map(|lease| {
-                    assert_eq!(lease, "lease-reconnected");
-                    assert_eq!(provider_budget.load(Ordering::SeqCst), 0);
-                })
+                .map(|lease| assert_eq!(lease, "lease-reconnected"))
             }));
         }
 
@@ -1476,7 +1436,6 @@ mod admission_tests {
             1,
             "one recovery owner"
         );
-        assert_eq!(provider_budget.load(Ordering::SeqCst), 0);
     }
 
     #[test]

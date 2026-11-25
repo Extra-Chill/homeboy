@@ -820,10 +820,9 @@ mod default_excludes_tests {
         );
         assert!(excludes.contains(&".env".to_string()), "{excludes:?}");
         assert!(excludes.contains(&"*.key".to_string()), "{excludes:?}");
-    }
 
-    #[test]
-    fn non_git_paths_keep_the_default_excludes() {
+        // Outside Git there is no tracked set to exempt, so every default
+        // exclude, including the secret-shaped globs, still applies.
         let dir = tempfile::tempdir().expect("dir");
         let expected = super::DEFAULT_EXCLUDES
             .iter()
