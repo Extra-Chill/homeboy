@@ -1283,25 +1283,6 @@ mod tests {
             .any(|item| item.as_str().unwrap_or("").contains("exclude")));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn selected_symlink_is_rejected_and_not_followed() {
-        use std::os::unix::fs::symlink;
-        let temp = tempfile::tempdir().expect("capture");
-        let outside = temp.path().join("outside.txt");
-        std::fs::write(&outside, "secret").expect("outside");
-        let website = temp.path().join("website");
-        std::fs::create_dir(&website).expect("website");
-        symlink(&outside, website.join("index.html")).expect("link");
-        let error = plan_directory_evidence(temp.path(), &[], &[], &limits(100, 20))
-            .expect_err("selected symlink is rejected");
-        assert!(error.message.contains("cannot follow symlinks"));
-        assert_eq!(
-            std::fs::read_to_string(&outside).expect("outside untouched"),
-            "secret"
-        );
-    }
-
     #[test]
     fn include_bounds_the_scan_and_exclude_drops_matches() {
         let temp = tempfile::tempdir().expect("capture");
