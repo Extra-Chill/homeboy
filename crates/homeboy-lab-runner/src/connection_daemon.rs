@@ -990,7 +990,7 @@ fn daemon_freshness_report(
         DaemonFreshnessReport {
             fresh: mismatch.is_none(),
             stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::LabContractVersionMismatch),
-            // A legacy version response has no daemon-owned job count, so it cannot
+            // A version-only response has no daemon-owned job count, so it cannot
             // authorize replacement while the typed job endpoint is unavailable.
             restartable: false,
             lease_id: daemon_lease_id_from_body(&body).map(ToString::to_string),
@@ -1178,19 +1178,16 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_health_rejects_lease_mismatch() {
-        assert!(!health_identity_matches(
-            &report("lease-other", 7331),
-            &daemon()
-        ));
-    }
-
-    #[test]
-    fn tunnel_health_rejects_pid_mismatch() {
-        assert!(!health_identity_matches(
-            &report("lease-live", 7332),
-            &daemon()
-        ));
+    fn tunnel_health_rejects_lease_or_pid_drift() {
+        let mut pidless = report("lease-live", 7331);
+        pidless.pid = None;
+        for report in [
+            report("lease-other", 7331),
+            report("lease-live", 7332),
+            pidless,
+        ] {
+            assert!(!health_identity_matches(&report, &daemon()));
+        }
     }
 
     #[test]
@@ -1261,13 +1258,6 @@ mod tests {
             Duration::from_secs(2),
         ));
         server.join().expect("server");
-    }
-
-    #[test]
-    fn tunnel_health_requires_pid() {
-        let mut report = report("lease-live", 7331);
-        report.pid = None;
-        assert!(!health_identity_matches(&report, &daemon()));
     }
 
     #[test]

@@ -196,7 +196,7 @@ pub struct RunnerExecOptions {
     /// run or artifact already retains on the runner (for example, hydrating a
     /// retained matrix result). It reads through the runner's current daemon
     /// session and must never rotate, disconnect, or rewrite that daemon. When
-    /// set, a stale admission daemon no longer blocks the read
+    /// set, a stale admission daemon does not block the read
     /// (Extra-Chill/homeboy#9420).
     pub read_only_artifact_access: bool,
 }
