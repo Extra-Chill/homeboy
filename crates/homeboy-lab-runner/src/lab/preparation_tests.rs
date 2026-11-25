@@ -17,72 +17,24 @@ use homeboy_core::{Error, ErrorCode};
 use super::super::session::{RunnerStaleDaemonWarning, RunnerStaleRuntimePath};
 
 #[test]
-fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::DirectSsh,
+fn unreachable_runner_falls_back_for_default_and_errors_for_explicit_selection() {
+    let prepare = |source| {
+        prepare_lab_runner_for_offload_with(
+            &selection(source),
+            |runner_id| Ok(status_report(runner_id, false, None)),
+            |runner_id| Ok((ssh_failure_connect_report(runner_id), 20)),
+        )
     };
 
-    let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: false,
-                state: super::super::RunnerSessionState::Disconnected,
-                session: None,
-                stale_daemon: None,
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
-        },
-        |runner_id| {
-            Ok((
-                RunnerConnectReport {
-                    runner_id: runner_id.to_string(),
-                    mode: None,
-                    role: None,
-                    connected: false,
-                    recorded: None,
-                    local_url: None,
-                    broker_url: None,
-                    controller_id: None,
-                    remote_daemon_address: None,
-                    tunnel_pid: None,
-                    remote_daemon_pid: None,
-                    connection_warning: None,
-                    homeboy_version: None,
-                    homeboy_build_identity: None,
-                    session_path: Some("/tmp/lab.json".to_string()),
-                    failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
-                    failure_message: Some("SSH connectivity check failed".to_string()),
-                    failure_evidence: None,
-                    binary_convergence: None,
-                },
-                20,
-            ))
-        },
-    )
-    .expect("prepared");
-
     assert_eq!(
-        prepared,
+        prepare(LabRunnerSelectionSource::Default).expect("prepared"),
         LabRunnerPreparation::FallBackLocal {
             reason: "SSH connectivity check failed".to_string()
         }
     );
+    let err =
+        prepare(LabRunnerSelectionSource::Explicit).expect_err("explicit runner should error");
+    assert!(err.message.contains("could not connect runner"));
 }
 
 #[test]
@@ -146,10 +98,6 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         repair_plan: Vec::new(),
     });
     stale_projection.active_job_state = RunnerActiveJobState::NotQueried;
-    assert_eq!(
-        stale_projection.active_job_state,
-        RunnerActiveJobState::NotQueried
-    );
     let mut connect = connected_direct_connect_report("lab");
     connect.local_url = Some(format!("http://{address}"));
     connect.remote_daemon_pid = Some(1467759);
@@ -199,43 +147,32 @@ fn non_loopback_transport_rejects_missing_tunnel_pid() {
 }
 
 #[test]
-fn mixed_tunnel_evidence_is_rejected_before_endpoint_probing() {
-    let mut status = unreachable_health_status("lab", false);
-    let session = status.session.as_mut().expect("session");
-    session.tunnel_pid = Some(std::process::id());
-    session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
-    session.remote_daemon_pid = Some(1467759);
-    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
-    status.daemon_freshness = Some(fresh_daemon_freshness());
-    let mut connect = connected_direct_connect_report("lab");
-    connect.local_url = session.local_url.clone();
-    connect.remote_daemon_pid = session.remote_daemon_pid;
-    connect.tunnel_pid = None;
+fn mixed_or_differing_tunnel_evidence_is_rejected_before_endpoint_probing() {
+    for (connect_tunnel_pid, loopback) in [
+        (None, true),
+        (Some(std::process::id().saturating_add(1)), false),
+    ] {
+        let mut status = unreachable_health_status("lab", false);
+        let session = status.session.as_mut().expect("session");
+        session.tunnel_pid = Some(std::process::id());
+        session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
+        session.remote_daemon_pid = Some(1467759);
+        session.remote_daemon_lease_id = Some("lease-fresh".to_string());
+        status.daemon_freshness = Some(fresh_daemon_freshness());
+        let mut connect = connected_direct_connect_report("lab");
+        connect.local_url = session.local_url.clone();
+        connect.remote_daemon_pid = session.remote_daemon_pid;
+        connect.tunnel_pid = connect_tunnel_pid;
 
-    let error = authoritative_status_for_preflight_with_transport(status, Some(&connect), true)
-        .expect_err("mixed tunnel evidence cannot establish ownership");
+        let error =
+            authoritative_status_for_preflight_with_transport(status, Some(&connect), loopback)
+                .expect_err("mixed tunnel evidence cannot establish ownership");
 
-    assert!(error.message.contains("tunnel evidence is mixed"));
-}
-
-#[test]
-fn differing_tunnel_pids_are_rejected_before_identity_verification() {
-    let mut status = unreachable_health_status("lab", false);
-    let session = status.session.as_mut().expect("session");
-    session.tunnel_pid = Some(std::process::id());
-    session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
-    session.remote_daemon_pid = Some(1467759);
-    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
-    status.daemon_freshness = Some(fresh_daemon_freshness());
-    let mut connect = connected_direct_connect_report("lab");
-    connect.local_url = session.local_url.clone();
-    connect.remote_daemon_pid = session.remote_daemon_pid;
-    connect.tunnel_pid = Some(std::process::id().saturating_add(1));
-
-    let error = authoritative_status_for_preflight_with_transport(status, Some(&connect), false)
-        .expect_err("different tunnel PIDs cannot establish ownership");
-
-    assert!(error.message.contains("tunnel evidence is mixed"));
+        assert!(
+            error.message.contains("tunnel evidence is mixed"),
+            "{connect_tunnel_pid:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -457,78 +394,15 @@ fn stale_disconnected_projection_rejects_reused_tunnel_identity_before_health() 
 }
 
 #[test]
-fn stale_disconnected_projection_rejects_mismatched_typed_health() {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-
-    let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
-    let address = listener.local_addr().expect("daemon address");
-    let daemon = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("health request");
-        let mut request = [0; 4096];
-        let length = stream.read(&mut request).expect("read request");
-        assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /health HTTP/1.1"));
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"freshness\":{\"fresh\":true,\"stale_reason_code\":null,\"restartable\":false,\"lease_id\":\"lease-other\",\"pid\":1467759,\"recovery_evidence\":null,\"ownership_evidence\":null,\"daemon_version\":null,\"daemon_build_identity\":null,\"runtime_paths\":null,\"active_jobs\":0,\"termination_evidence\":null,\"repair_plan\":[]},\"pid\":1467759}")
-            .expect("health response");
-    });
-    let mut status = connected_direct_status("lab", None);
-    status.connected = false;
-    status.state = super::super::RunnerSessionState::Disconnected;
-    status.session = Some(connected_direct_session(
-        "lab",
-        Some(&format!("http://{address}")),
-    ));
-    let session = status.session.as_mut().expect("session");
-    session.local_port = Some(address.port());
-    session.tunnel_pid = Some(std::process::id());
-    session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
-    session.remote_daemon_pid = Some(1467759);
-    session.remote_daemon_lease_id = Some("lease-fresh".to_string());
-    status.daemon_freshness = Some(DaemonFreshnessReport {
-        fresh: true,
-        stale_reason_code: None,
-        restartable: false,
-        lease_id: Some("lease-fresh".to_string()),
-        pid: Some(1467759),
-        recovery_evidence: None,
-        ownership_evidence: None,
-        daemon_version: None,
-        daemon_build_identity: None,
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    });
-    let mut connect = connected_direct_connect_report("lab");
-    connect.local_url = Some(format!("http://{address}"));
-    connect.tunnel_pid = Some(std::process::id());
-    connect.remote_daemon_pid = Some(1467759);
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-
-    let error = preflight_lab_runner_availability_from_status_with_transport(
-        &selection,
-        |_| Ok(status.clone()),
-        Some(1),
-        Some(&connect),
-        false,
-    )
-    .expect_err("mismatched health is rejected");
-
-    daemon.join().expect("daemon");
-    assert!(error.message.contains("health did not match"));
-}
-
-#[test]
-fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
+fn stale_disconnected_projection_rejects_mismatched_or_omitted_health_coordinates() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
     for (coordinate, health) in [
+        (
+            "mismatched lease",
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-other","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+        ),
         (
             "lease",
             r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":null,"pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
@@ -564,32 +438,13 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
         session.tunnel_process_start_identity = Some(current_process_tunnel_identity());
         session.remote_daemon_pid = Some(1467759);
         session.remote_daemon_lease_id = Some("lease-fresh".to_string());
-        status.daemon_freshness = Some(DaemonFreshnessReport {
-            fresh: true,
-            stale_reason_code: None,
-            restartable: false,
-            lease_id: Some("lease-fresh".to_string()),
-            pid: Some(1467759),
-            recovery_evidence: None,
-            ownership_evidence: None,
-            daemon_version: None,
-            daemon_build_identity: None,
-            runtime_paths: None,
-            active_jobs: 0,
-            termination_evidence: None,
-            repair_plan: Vec::new(),
-        });
+        status.daemon_freshness = Some(fresh_daemon_freshness());
         let mut connect = connected_direct_connect_report("lab");
         connect.local_url = Some(format!("http://{address}"));
         connect.tunnel_pid = Some(std::process::id());
         connect.remote_daemon_pid = Some(1467759);
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::DirectSsh,
-        };
         let error = preflight_lab_runner_availability_from_status_with_transport(
-            &selection,
+            &selection(LabRunnerSelectionSource::Explicit),
             |_| Ok(status.clone()),
             Some(1),
             Some(&connect),
@@ -605,60 +460,37 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
 }
 
 #[test]
-fn true_disconnected_projection_is_not_authorized_without_matching_connect_evidence() {
-    let status = unreachable_health_status("lab", false);
-
-    let admitted = authoritative_status_for_preflight_with_transport(status, None, false)
-        .expect("ordinary status");
-
+fn disconnected_projection_is_only_authorized_by_matching_connect_evidence() {
+    let admitted = authoritative_status_for_preflight_with_transport(
+        unreachable_health_status("lab", false),
+        None,
+        false,
+    )
+    .expect("ordinary status");
     assert!(!admitted.connected);
-}
 
-#[test]
-fn stale_disconnected_projection_rejects_mismatched_connect_evidence() {
-    let status = unreachable_health_status("lab", false);
-    let connect = connected_direct_connect_report("lab");
-
-    let error = authoritative_status_for_preflight_with_transport(status, Some(&connect), false)
-        .expect_err("different endpoint evidence is not admitted");
-
+    let error = authoritative_status_for_preflight_with_transport(
+        unreachable_health_status("lab", false),
+        Some(&connected_direct_connect_report("lab")),
+        false,
+    )
+    .expect_err("different endpoint evidence is not admitted");
     assert!(error.message.contains("did not converge"));
 }
 
 #[test]
 fn lab_runner_preparation_uses_already_connected_runner() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-
     let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
+        &selection(LabRunnerSelectionSource::Explicit),
         |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: Some(connected_direct_session(
+            Ok(status_report(
+                runner_id,
+                true,
+                Some(connected_direct_session(
                     runner_id,
                     Some("http://127.0.0.1:1234"),
                 )),
-                stale_daemon: None,
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
+            ))
         },
         |_| panic!("connected runner should not reconnect"),
     )
@@ -668,84 +500,20 @@ fn lab_runner_preparation_uses_already_connected_runner() {
 }
 
 #[test]
-fn lab_runner_preparation_falls_back_for_stale_default_daemon_version_without_reconnecting() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-
-    let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: Some(connected_direct_session(
-                    runner_id,
-                    Some("http://127.0.0.1:1234"),
-                )),
-                stale_daemon: Some(stale_daemon_warning(runner_id)),
-                configured_job_binary_build_identity: None,
-                daemon_freshness: Some(restartable_daemon_freshness()),
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
-        },
-        |_| panic!("stale daemon drift must not rotate a shared tunnel during handoff"),
-    )
-    .expect("prepared");
-
-    assert!(matches!(
-        prepared,
-        LabRunnerPreparation::FallBackLocal { .. }
-    ));
-}
-
-#[test]
 fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-
     let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
+        &selection(LabRunnerSelectionSource::Default),
         |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: Some(connected_direct_session(
+            let mut status = status_report(
+                runner_id,
+                true,
+                Some(connected_direct_session(
                     runner_id,
                     Some("http://127.0.0.1:1234"),
                 )),
-                stale_daemon: Some(stale_runtime_path_warning(runner_id)),
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
+            );
+            status.stale_daemon = Some(stale_runtime_path_warning(runner_id));
+            Ok(status)
         },
         |_| panic!("stale runtime daemon should not dispatch or reconnect automatically"),
     )
@@ -760,126 +528,59 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
 }
 
 #[test]
-fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-
-    let err = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: Some(connected_direct_session(
-                    runner_id,
-                    Some("http://127.0.0.1:1234"),
-                )),
-                stale_daemon: Some(stale_daemon_warning(runner_id)),
-                configured_job_binary_build_identity: None,
-                daemon_freshness: Some(restartable_daemon_freshness()),
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
-        },
-        |_| panic!("stale daemon drift must not reconnect during handoff"),
-    )
-    .expect_err("explicit stale daemon should require an explicit refresh");
-
-    assert!(err.message.contains("connected but is not ready"));
-    // A stale report whose ownership proof is incomplete takes the terminal
-    // ownership-blocker branch, which replaces the stale-daemon branch rather
-    // than adding to it: no severity line, no version drift pair, and no
-    // refresh command, because none of them are authorized without that proof.
-    assert!(err
-        .message
-        .contains("typed ownership evidence is insufficient"));
-    assert!(!err.message.contains("daemon is stale"));
-    assert!(!err
-        .message
-        .contains("homeboy runner doctor lab --scope lab-offload"));
-    assert!(err
-        .details
-        .get("tried")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .all(|suggestion| suggestion
-            .as_str()
-            .is_none_or(|value| !value.contains("homeboy runner doctor lab --scope lab-offload"))));
-    assert!(err
-        .details
-        .get(homeboy_core::error::ACTIONS_DETAILS_KEY)
-        .is_none());
-}
-
-#[test]
-fn lab_preparation_does_not_offer_an_unavailable_reconciliation_plan() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-    let mut freshness = restartable_daemon_freshness();
-    freshness.stale_reason_code = Some(DaemonStaleReasonCode::LeaseCorrupt);
-    freshness.recovery_evidence = Some(DaemonRecoveryEvidence::Unavailable);
-    freshness.ownership_evidence = Some("ambiguous remote daemon candidates".to_string());
-    freshness.repair_plan = vec![DaemonRepairStep::text(
+fn explicit_stale_daemon_without_ownership_proof_offers_no_unauthorized_repair() {
+    let mut ambiguous = restartable_daemon_freshness();
+    ambiguous.stale_reason_code = Some(DaemonStaleReasonCode::LeaseCorrupt);
+    ambiguous.recovery_evidence = Some(DaemonRecoveryEvidence::Unavailable);
+    ambiguous.ownership_evidence = Some("ambiguous remote daemon candidates".to_string());
+    ambiguous.repair_plan = vec![DaemonRepairStep::text(
         "runner_connect",
         "homeboy runner connect lab",
     )];
 
-    let error = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: Some(connected_direct_session(
+    for freshness in [restartable_daemon_freshness(), ambiguous] {
+        let err = prepare_lab_runner_for_offload_with(
+            &selection(LabRunnerSelectionSource::Explicit),
+            |runner_id| {
+                let mut status = status_report(
                     runner_id,
-                    Some("http://127.0.0.1:1234"),
-                )),
-                stale_daemon: Some(stale_daemon_warning(runner_id)),
-                configured_job_binary_build_identity: None,
-                daemon_freshness: Some(freshness.clone()),
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
-        },
-        |_| panic!("terminal ownership evidence must not reconnect"),
-    )
-    .expect_err("ambiguous remote lease ownership must block explicit offload");
+                    true,
+                    Some(connected_direct_session(
+                        runner_id,
+                        Some("http://127.0.0.1:1234"),
+                    )),
+                );
+                status.stale_daemon = Some(stale_daemon_warning(runner_id));
+                status.daemon_freshness = Some(freshness.clone());
+                Ok(status)
+            },
+            |_| panic!("stale daemon drift must not reconnect during handoff"),
+        )
+        .expect_err("explicit stale daemon should require an explicit refresh");
 
-    let rendered = format!(
-        "{} {}",
-        error.message,
-        serde_json::to_string(&error.details).expect("serialize error details")
-    );
-    assert!(rendered.contains("typed ownership evidence is insufficient"));
-    assert!(rendered.contains("ambiguous remote daemon candidates"));
-    assert!(!rendered.contains("runner_connect"));
+        // Incomplete ownership proof takes the terminal ownership-blocker
+        // branch: no stale-daemon line, refresh/doctor command, or repair
+        // plan step is authorized without that proof.
+        let rendered = format!(
+            "{} {}",
+            err.message,
+            serde_json::to_string(&err.details).expect("serialize error details")
+        );
+        assert!(err.message.contains("connected but is not ready"));
+        assert!(err
+            .message
+            .contains("typed ownership evidence is insufficient"));
+        if let Some(evidence) = &freshness.ownership_evidence {
+            assert!(rendered.contains(evidence.as_str()));
+        }
+        assert!(!err.message.contains("daemon is stale"));
+        assert!(!rendered.contains("homeboy runner doctor lab --scope lab-offload"));
+        assert!(!rendered.contains("runner_connect"));
+        assert!(err
+            .details
+            .get(homeboy_core::error::ACTIONS_DETAILS_KEY)
+            .is_none());
+    }
 }
 
 #[test]
@@ -889,11 +590,7 @@ fn concurrent_stale_handoffs_preserve_the_shared_tunnel() {
         Arc, Barrier,
     };
 
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
+    let selection = selection(LabRunnerSelectionSource::Default);
     let barrier = Arc::new(Barrier::new(5));
     let reconnects = Arc::new(AtomicUsize::new(0));
     let handoffs: Vec<_> = (0..5)
@@ -906,29 +603,17 @@ fn concurrent_stale_handoffs_preserve_the_shared_tunnel() {
                 prepare_lab_runner_for_offload_with(
                     &selection,
                     |runner_id| {
-                        Ok(RunnerStatusReport {
-                            runner_id: runner_id.to_string(),
-                            connected: true,
-                            state: super::super::RunnerSessionState::Connected,
-                            session: Some(connected_direct_session(
+                        let mut status = status_report(
+                            runner_id,
+                            true,
+                            Some(connected_direct_session(
                                 runner_id,
                                 Some("http://127.0.0.1:63378"),
                             )),
-                            stale_daemon: Some(stale_daemon_warning(runner_id)),
-                            configured_job_binary_build_identity: None,
-                            daemon_freshness: Some(restartable_daemon_freshness()),
-                            active_jobs: Vec::new(),
-                            active_runner_jobs: Vec::new(),
-                            active_job_count: 0,
-                            stale_runner_jobs: Vec::new(),
-                            stale_runner_job_count: 0,
-                            active_job_state: RunnerActiveJobState::Available,
-                            active_job_source: None,
-                            active_job_error: None,
-                            active_job_recovery_evidence: None,
-                            recent_observation_failure: None,
-                            session_path: "/tmp/lab.json".to_string(),
-                        })
+                        );
+                        status.stale_daemon = Some(stale_daemon_warning(runner_id));
+                        status.daemon_freshness = Some(restartable_daemon_freshness());
+                        Ok(status)
                     },
                     |_| {
                         reconnects.fetch_add(1, Ordering::SeqCst);
@@ -1024,27 +709,14 @@ fn compatible_reconnect_wait_reuses_the_owner_session_without_a_second_tunnel() 
                     .map(drop)
                 },
                 || {
-                    let session = connected_direct_session("lab", Some("http://127.0.0.1:63378"));
-                    Ok(RunnerStatusReport {
-                        runner_id: "lab".to_string(),
-                        connected: true,
-                        state: super::super::RunnerSessionState::Connected,
-                        session: Some(session),
-                        stale_daemon: None,
-                        configured_job_binary_build_identity: None,
-                        daemon_freshness: None,
-                        active_jobs: Vec::new(),
-                        active_runner_jobs: Vec::new(),
-                        active_job_count: 0,
-                        stale_runner_jobs: Vec::new(),
-                        stale_runner_job_count: 0,
-                        active_job_state: RunnerActiveJobState::Available,
-                        active_job_source: None,
-                        active_job_error: None,
-                        active_job_recovery_evidence: None,
-                        recent_observation_failure: None,
-                        session_path: "/tmp/lab.json".to_string(),
-                    })
+                    Ok(status_report(
+                        "lab",
+                        true,
+                        Some(connected_direct_session(
+                            "lab",
+                            Some("http://127.0.0.1:63378"),
+                        )),
+                    ))
                 },
                 || {
                     contender_connects.fetch_add(1, Ordering::SeqCst);
@@ -1095,85 +767,30 @@ fn compatible_reconnect_wait_preserves_timeout_diagnostics_without_connecting() 
 }
 
 #[test]
-fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_daemon_url() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::DirectSsh,
+fn direct_session_without_daemon_url_falls_back_for_default_and_errors_for_explicit() {
+    let prepare = |source| {
+        prepare_lab_runner_for_offload_with(
+            &selection(source),
+            |runner_id| {
+                Ok(status_report(
+                    runner_id,
+                    true,
+                    Some(connected_direct_session(runner_id, None)),
+                ))
+            },
+            |_| panic!("stale connected session should not reconnect during preflight"),
+        )
     };
 
-    let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: Some(connected_direct_session(runner_id, None)),
-                stale_daemon: None,
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
-        },
-        |_| panic!("stale connected session should not reconnect during automatic preflight"),
-    )
-    .expect("prepared");
-
     assert_eq!(
-        prepared,
+        prepare(LabRunnerSelectionSource::Default).expect("prepared"),
         LabRunnerPreparation::FallBackLocal {
             reason: "direct SSH runner `lab` has no local daemon URL; reconnect it with `homeboy runner connect lab`".to_string()
         }
     );
-}
 
-#[test]
-fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-
-    let err = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: Some(connected_direct_session(runner_id, None)),
-                stale_daemon: None,
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
-        },
-        |_| panic!("stale connected session should fail before reconnect"),
-    )
-    .expect_err("explicit stale session should error");
-
+    let err = prepare(LabRunnerSelectionSource::Explicit)
+        .expect_err("explicit stale session should error");
     assert!(err.message.contains("connected but is not ready"));
     assert!(err.message.contains("no local daemon URL"));
     assert!(err
@@ -1189,36 +806,9 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
 
 #[test]
 fn lab_runner_preparation_falls_back_when_connected_status_has_no_session() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-
     let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: true,
-                state: super::super::RunnerSessionState::Connected,
-                session: None,
-                stale_daemon: None,
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
-        },
+        &selection(LabRunnerSelectionSource::Default),
+        |runner_id| Ok(status_report(runner_id, true, None)),
         |_| panic!("an incomplete connected status must not reconnect during preflight"),
     )
     .expect("automatic placement should fall back");
@@ -1233,61 +823,13 @@ fn lab_runner_preparation_falls_back_when_connected_status_has_no_session() {
 
 #[test]
 fn lab_runner_preparation_connects_disconnected_runner() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::DirectSsh,
-    };
-
     let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
+        &selection(LabRunnerSelectionSource::Explicit),
+        |runner_id| Ok(status_report(runner_id, false, None)),
         |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: false,
-                state: super::super::RunnerSessionState::Disconnected,
-                session: None,
-                stale_daemon: None,
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
-        },
-        |runner_id| {
-            Ok((
-                RunnerConnectReport {
-                    runner_id: runner_id.to_string(),
-                    mode: Some(RunnerTunnelMode::DirectSsh),
-                    role: Some(super::super::RunnerSessionRole::Controller),
-                    connected: true,
-                    recorded: None,
-                    local_url: Some("http://127.0.0.1:1234".to_string()),
-                    broker_url: None,
-                    controller_id: None,
-                    remote_daemon_address: Some("127.0.0.1:5678".to_string()),
-                    tunnel_pid: None,
-                    remote_daemon_pid: Some(42),
-                    connection_warning: None,
-                    homeboy_version: Some("homeboy 0.0.0".to_string()),
-                    homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
-                    session_path: Some("/tmp/lab.json".to_string()),
-                    failure_evidence: None,
-                    binary_convergence: None,
-                    failure_kind: None,
-                    failure_message: None,
-                },
-                0,
-            ))
+            let mut report = connected_direct_connect_report(runner_id);
+            report.local_url = Some("http://127.0.0.1:1234".to_string());
+            Ok((report, 0))
         },
     )
     .expect("prepared");
@@ -1295,68 +837,60 @@ fn lab_runner_preparation_connects_disconnected_runner() {
     assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
 }
 
-#[test]
-fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
-    let selection = LabRunnerSelection {
+fn selection(source: LabRunnerSelectionSource) -> LabRunnerSelection {
+    LabRunnerSelection {
         runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
+        source,
         mode: RunnerTunnelMode::DirectSsh,
-    };
+    }
+}
 
-    let err = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(RunnerStatusReport {
-                runner_id: runner_id.to_string(),
-                connected: false,
-                state: super::super::RunnerSessionState::Disconnected,
-                session: None,
-                stale_daemon: None,
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_jobs: Vec::new(),
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::NotQueried,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                recent_observation_failure: None,
-                session_path: "/tmp/lab.json".to_string(),
-            })
+fn status_report(
+    runner_id: &str,
+    connected: bool,
+    session: Option<super::super::RunnerSession>,
+) -> RunnerStatusReport {
+    RunnerStatusReport {
+        runner_id: runner_id.to_string(),
+        connected,
+        state: if connected {
+            super::super::RunnerSessionState::Connected
+        } else {
+            super::super::RunnerSessionState::Disconnected
         },
-        |runner_id| {
-            Ok((
-                RunnerConnectReport {
-                    runner_id: runner_id.to_string(),
-                    mode: None,
-                    role: None,
-                    connected: false,
-                    recorded: None,
-                    local_url: None,
-                    broker_url: None,
-                    controller_id: None,
-                    remote_daemon_address: None,
-                    tunnel_pid: None,
-                    remote_daemon_pid: None,
-                    connection_warning: None,
-                    homeboy_version: None,
-                    homeboy_build_identity: None,
-                    session_path: Some("/tmp/lab.json".to_string()),
-                    failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
-                    failure_message: Some("SSH connectivity check failed".to_string()),
-                    failure_evidence: None,
-                    binary_convergence: None,
-                },
-                20,
-            ))
-        },
-    )
-    .expect_err("explicit runner should error");
+        session,
+        stale_daemon: None,
+        configured_job_binary_build_identity: None,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_jobs: Vec::new(),
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::NotQueried,
+        active_job_source: None,
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        recent_observation_failure: None,
+        session_path: "/tmp/lab.json".to_string(),
+    }
+}
 
-    assert!(err.message.contains("could not connect runner"));
+fn ssh_failure_connect_report(runner_id: &str) -> RunnerConnectReport {
+    RunnerConnectReport {
+        mode: None,
+        role: None,
+        connected: false,
+        local_url: None,
+        remote_daemon_address: None,
+        remote_daemon_pid: None,
+        homeboy_version: None,
+        homeboy_build_identity: None,
+        session_path: Some("/tmp/lab.json".to_string()),
+        failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
+        failure_message: Some("SSH connectivity check failed".to_string()),
+        ..connected_direct_connect_report(runner_id)
+    }
 }
 
 fn connected_direct_session(
