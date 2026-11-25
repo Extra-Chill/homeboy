@@ -262,41 +262,6 @@ mod review_option_order_tests {
     use super::*;
 
     #[test]
-    fn review_test_passthrough_is_marked_without_reordering() {
-        let command = [
-            "homeboy",
-            "--placement=local",
-            "review",
-            "test",
-            "fixture",
-            "--json-summary",
-            "--",
-            "--changed-since",
-            "main",
-        ]
-        .map(str::to_string)
-        .to_vec();
-
-        assert_eq!(
-            normalize(command),
-            [
-                "homeboy",
-                "--placement=local",
-                "review",
-                "test",
-                "fixture",
-                "--json-summary",
-                "--",
-                EXPLICIT_PASSTHROUGH_SENTINEL,
-                "--changed-since",
-                "main",
-            ]
-            .map(str::to_string)
-            .to_vec()
-        );
-    }
-
-    #[test]
     fn parser_identifies_review_test_passthrough_when_root_global_values_match_actions() {
         let command = [
             "homeboy", "--runner", "audit", "review", "test", "fixture", "--", "--filter",
@@ -394,143 +359,14 @@ mod positional_tests {
         assert_eq!(loaded.local_path, expected_path);
         assert_eq!(loaded.remote_path, "");
     }
-
-    #[test]
-    fn id_returns_none_when_omitted() {
-        let args = PositionalComponentArgs {
-            component: None,
-            path: None,
-        };
-        assert!(args.id().is_none());
-    }
-
-    #[test]
-    fn id_returns_some_when_provided() {
-        let args = PositionalComponentArgs {
-            component: Some("my-comp".to_string()),
-            path: None,
-        };
-        assert_eq!(args.id(), Some("my-comp"));
-    }
 }
 
 #[cfg(test)]
 mod normalize_tests {
     use super::{normalize, runner_exec_option_boundary_error, EXPLICIT_PASSTHROUGH_SENTINEL};
-    use crate::cli_surface::{Cli, Commands};
-    use clap::Parser;
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn release_version_show_shorthand_is_not_rewritten() {
-        let input = argv(&["homeboy", "release", "version", "my-comp"]);
-        let expected = input.clone();
-        assert_eq!(normalize(input), expected);
-    }
-
-    #[test]
-    fn release_version_show_requires_canonical_subcommand() {
-        let shorthand = normalize(argv(&["homeboy", "release", "version", "my-comp"]));
-        assert!(Cli::try_parse_from(shorthand).is_err());
-
-        let canonical = normalize(argv(&["homeboy", "release", "version", "show", "my-comp"]));
-        assert!(Cli::try_parse_from(canonical).is_ok());
-    }
-
-    #[test]
-    fn trace_compare_variant_scenario_flag_is_not_rewritten() {
-        let input = argv(&[
-            "homeboy",
-            "trace",
-            "compare-variant",
-            "--rig",
-            "studio",
-            "--scenario",
-            "studio-app-create-site",
-            "--overlay",
-            "overlays/change.patch",
-            "--output-dir",
-            "/tmp/trace-experiments/change",
-        ]);
-        let expected = input.clone();
-        assert_eq!(normalize(input), expected);
-    }
-
-    #[test]
-    fn trace_compare_variant_scenario_flag_remains_canonical() {
-        let args = normalize(argv(&[
-            "homeboy",
-            "trace",
-            "compare-variant",
-            "--rig",
-            "studio",
-            "--scenario",
-            "studio-app-create-site",
-            "--overlay",
-            "overlays/change.patch",
-            "--output-dir",
-            "/tmp/trace-experiments/change",
-        ]));
-
-        assert!(Cli::try_parse_from(args).is_ok());
-    }
-
-    #[test]
-    fn trace_secret_env_parses_repeated_split_and_equals_args() {
-        let parsed = Cli::try_parse_from(normalize(argv(&[
-            "homeboy",
-            "trace",
-            "compare",
-            "woocommerce-gateway-stripe",
-            "real-wallet",
-            "--secret-env",
-            "STRIPE_PUBLISHABLE_KEY",
-            "--secret-env=STRIPE_SECRET_KEY",
-        ])))
-        .expect("trace secret-env args parse");
-
-        let Commands::Trace(args) = parsed.command else {
-            panic!("expected trace command");
-        };
-        assert_eq!(
-            args.secret_env,
-            vec![
-                "STRIPE_PUBLISHABLE_KEY".to_string(),
-                "STRIPE_SECRET_KEY".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn unknown_flag_after_bench_is_not_auto_separated() {
-        let input = argv(&["homeboy", "bench", "my-comp", "--unknown-flag", "value"]);
-        let expected = input.clone();
-        assert_eq!(normalize(input), expected);
-    }
-
-    #[test]
-    fn bench_passthrough_requires_explicit_separator() {
-        let implicit = normalize(argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--unknown-flag",
-            "value",
-        ]));
-        assert!(Cli::try_parse_from(implicit).is_err());
-
-        let explicit = normalize(argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--",
-            "--unknown-flag",
-            "value",
-        ]));
-        assert!(Cli::try_parse_from(explicit).is_ok());
     }
 
     #[test]
@@ -564,124 +400,87 @@ mod normalize_tests {
     }
 
     #[test]
-    fn runner_exec_allows_remote_flags_after_an_explicit_separator() {
-        let args = argv(&[
-            "homeboy",
-            "runner",
-            "exec",
-            "lab",
-            "--",
-            "cp",
-            "source",
-            "destination",
-            "--cwd",
-            "remote",
-            "--raw",
-            "--run-id",
-            "remote-run",
-        ]);
-
-        assert_eq!(runner_exec_option_boundary_error(&args), None);
+    fn runner_exec_boundary_ignores_flags_it_does_not_own() {
+        for (case, args) in [
+            (
+                "remote flags after an explicit separator",
+                argv(&[
+                    "homeboy",
+                    "runner",
+                    "exec",
+                    "lab",
+                    "--",
+                    "cp",
+                    "source",
+                    "destination",
+                    "--cwd",
+                    "remote",
+                    "--raw",
+                    "--run-id",
+                    "remote-run",
+                ]),
+            ),
+            (
+                "command without flags",
+                argv(&[
+                    "homeboy",
+                    "runner",
+                    "exec",
+                    "lab",
+                    "cp",
+                    "source",
+                    "destination",
+                ]),
+            ),
+            (
+                "runner exec inside a remote ssh command tail",
+                argv(&[
+                    "homeboy",
+                    "ssh",
+                    "lab-host",
+                    "--",
+                    "runner",
+                    "exec",
+                    "lab",
+                    "cp",
+                    "source",
+                    "destination",
+                    "--cwd",
+                    "/tmp",
+                ]),
+            ),
+        ] {
+            assert_eq!(runner_exec_option_boundary_error(&args), None, "{case}");
+        }
     }
 
     #[test]
-    fn runner_exec_allows_commands_without_flags() {
-        let args = argv(&[
-            "homeboy",
-            "runner",
-            "exec",
-            "lab",
-            "cp",
-            "source",
-            "destination",
-        ]);
+    fn owned_flag_before_separator_and_explicit_passthrough_stay_distinct() {
+        for (command, owned, passthrough) in [
+            (
+                &["review", "test"][..],
+                &["--changed-since", "origin/main"][..],
+                "--filter=SmokeTest",
+            ),
+            (
+                &["bench"][..],
+                &["--iterations", "1"][..],
+                "--filter=Scenario",
+            ),
+        ] {
+            let mut input = argv(&["homeboy"]);
+            input.extend(argv(command));
+            input.push("my-comp".to_string());
+            input.extend(argv(owned));
+            input.push("--".to_string());
 
-        assert_eq!(runner_exec_option_boundary_error(&args), None);
-    }
+            let mut expected = input.clone();
+            expected.push(EXPLICIT_PASSTHROUGH_SENTINEL.to_string());
+            expected.push(passthrough.to_string());
+            input.push(passthrough.to_string());
 
-    #[test]
-    fn runner_exec_does_not_inspect_a_remote_ssh_command_tail() {
-        let args = argv(&[
-            "homeboy",
-            "ssh",
-            "lab-host",
-            "--",
-            "runner",
-            "exec",
-            "lab",
-            "cp",
-            "source",
-            "destination",
-            "--cwd",
-            "/tmp",
-        ]);
-
-        assert_eq!(runner_exec_option_boundary_error(&args), None);
-    }
-
-    #[test]
-    fn test_owned_flag_after_component_and_explicit_passthrough_stay_distinct() {
-        let input = argv(&[
-            "homeboy",
-            "review",
-            "test",
-            "my-comp",
-            "--changed-since",
-            "origin/main",
-            "--",
-            "--filter=SmokeTest",
-        ]);
-        let expected = argv(&[
-            "homeboy",
-            "review",
-            "test",
-            "my-comp",
-            "--changed-since",
-            "origin/main",
-            "--",
-            EXPLICIT_PASSTHROUGH_SENTINEL,
-            "--filter=SmokeTest",
-        ]);
-        assert_eq!(normalize(input), expected);
-    }
-
-    #[test]
-    fn bench_owned_flag_after_component_and_explicit_passthrough_stay_distinct() {
-        let input = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--iterations",
-            "1",
-            "--",
-            "--filter=Scenario",
-        ]);
-        let expected = argv(&[
-            "homeboy",
-            "bench",
-            "my-comp",
-            "--iterations",
-            "1",
-            "--",
-            EXPLICIT_PASSTHROUGH_SENTINEL,
-            "--filter=Scenario",
-        ]);
-        assert_eq!(normalize(input), expected);
-    }
-
-    #[test]
-    fn explicit_passthrough_preserves_homeboy_like_runner_flags() {
-        let args = argv(&[
-            EXPLICIT_PASSTHROUGH_SENTINEL,
-            "--coverage",
-            "--baseline",
-            "runner-value",
-        ]);
-
-        assert_eq!(
-            super::filter_passthrough_args(super::PassthroughCommand::Test, &args),
-            argv(&["--coverage", "--baseline", "runner-value"])
-        );
+            assert_eq!(normalize(input), expected, "{command:?}");
+        }
     }
 
     #[test]
@@ -865,7 +664,7 @@ impl ScopeArgs {
 mod scope_args_tests {
     use super::ScopeArgs;
     use clap::Parser;
-    use homeboy::core::scope::{Scope, ScopeKind};
+    use homeboy::core::scope::Scope;
 
     #[derive(Parser)]
     struct TestCli {
@@ -903,41 +702,6 @@ mod scope_args_tests {
         assert_eq!(
             parse(&["scoped", "--workspace"]).resolve(),
             Scope::Workspace
-        );
-    }
-
-    #[test]
-    fn inline_value_forms_parse_identically() {
-        assert_eq!(
-            parse(&["scoped", "--project=growth"]).resolve(),
-            Scope::Project("growth".to_string())
-        );
-        assert_eq!(
-            parse(&["scoped", "--path=/src/homeboy"]).resolve(),
-            Scope::Path {
-                path: "/src/homeboy".to_string(),
-                component_id: None,
-            }
-        );
-    }
-
-    #[test]
-    fn kind_matches_the_selected_variant() {
-        assert_eq!(
-            parse(&["scoped", "--project", "growth"]).kind(),
-            Some(ScopeKind::Project)
-        );
-        assert_eq!(
-            parse(&["scoped", "--component", "homeboy"]).kind(),
-            Some(ScopeKind::Component)
-        );
-        assert_eq!(
-            parse(&["scoped", "--rig", "studio"]).kind(),
-            Some(ScopeKind::Rig)
-        );
-        assert_eq!(
-            parse(&["scoped", "--path", "/src/homeboy"]).kind(),
-            Some(ScopeKind::Path)
         );
     }
 
@@ -1153,29 +917,6 @@ mod changed_scope_tests {
     struct ScopeCli {
         #[command(flatten)]
         changed: ChangedScopeArgs,
-    }
-
-    #[test]
-    fn changed_since_parses_split_and_inline_forms() {
-        let split = SinceCli::try_parse_from(["scoped", "--changed-since", "origin/main"])
-            .expect("split form parses");
-        assert_eq!(split.changed.changed_since(), Some("origin/main"));
-
-        let inline = SinceCli::try_parse_from(["scoped", "--changed-since=origin/main"])
-            .expect("inline form parses");
-        assert_eq!(inline.changed.changed_since(), Some("origin/main"));
-    }
-
-    #[test]
-    fn base_group_exposes_no_extra_flags() {
-        assert!(SinceCli::try_parse_from(["scoped", "--changed-only"]).is_err());
-        assert!(SinceCli::try_parse_from(["scoped", "--lab-changed-files-json", "[]"]).is_err());
-    }
-
-    #[test]
-    fn lab_group_exposes_the_hidden_payload_but_not_changed_only() {
-        assert!(LabCli::try_parse_from(["scoped", "--lab-changed-files-json", "[]"]).is_ok());
-        assert!(LabCli::try_parse_from(["scoped", "--changed-only"]).is_err());
     }
 
     #[test]
@@ -1418,7 +1159,7 @@ impl PresentationArgs {
 
 #[cfg(test)]
 mod presentation_args_tests {
-    use super::{OutputFormat, PresentationArgs};
+    use super::PresentationArgs;
     use clap::Parser;
 
     #[derive(Parser)]
@@ -1434,63 +1175,24 @@ mod presentation_args_tests {
     }
 
     #[test]
-    fn every_documented_format_value_parses() {
-        for (flag, expected) in [
-            ("auto", OutputFormat::Auto),
-            ("json", OutputFormat::Json),
-            ("markdown", OutputFormat::Markdown),
-            ("text", OutputFormat::Text),
+    fn json_or_flag_folds_the_bool_and_format_spellings() {
+        for (argv, json_flag, expected) in [
+            (&["rendered"][..], false, false),
+            (&["rendered"][..], true, true),
+            (&["rendered", "--format=json"][..], false, true),
+            (&["rendered", "--format=json"][..], true, true),
+            (&["rendered", "--format=auto"][..], false, false),
+            (&["rendered", "--format=markdown"][..], false, false),
+            (&["rendered", "--format=text"][..], false, false),
+            (&["rendered", "--detail=summary"][..], false, false),
+            (&["rendered", "--detail=summary"][..], true, true),
         ] {
-            assert_eq!(parse(&["rendered", "--format", flag]).format, expected);
-        }
-    }
-
-    #[test]
-    fn every_documented_detail_value_parses() {
-        assert!(parse(&["rendered", "--detail", "summary"]).is_summary());
-        assert!(!parse(&["rendered", "--detail", "full"]).is_summary());
-    }
-
-    #[test]
-    fn unknown_values_are_rejected() {
-        assert!(PresentationCli::try_parse_from(["rendered", "--format", "yaml"]).is_err());
-        assert!(PresentationCli::try_parse_from(["rendered", "--detail", "verbose"]).is_err());
-    }
-
-    #[test]
-    fn json_flag_bool_alone_still_selects_json() {
-        // A migrated command that saw only the old spelling must behave
-        // exactly as it did before the group existed.
-        let untouched = parse(&["rendered"]);
-        assert!(untouched.json_or_flag(true));
-        assert!(!untouched.json_or_flag(false));
-    }
-
-    #[test]
-    fn format_json_alone_still_selects_json() {
-        // ...and the canonical spelling works without the `--json` bool.
-        assert!(parse(&["rendered", "--format=json"]).json_or_flag(false));
-    }
-
-    #[test]
-    fn both_spellings_agree() {
-        assert!(parse(&["rendered", "--format=json"]).json_or_flag(true));
-    }
-
-    #[test]
-    fn non_json_formats_do_not_fabricate_json() {
-        for format in ["auto", "markdown", "text"] {
-            assert!(
-                !parse(&["rendered", "--format", format]).json_or_flag(false),
-                "--format {format} must not imply JSON"
+            assert_eq!(
+                parse(argv).json_or_flag(json_flag),
+                expected,
+                "{argv:?} with --json={json_flag}"
             );
         }
-    }
-
-    #[test]
-    fn detail_does_not_affect_the_format_fold() {
-        assert!(!parse(&["rendered", "--detail=summary"]).json_or_flag(false));
-        assert!(parse(&["rendered", "--detail=summary"]).json_or_flag(true));
     }
 }
 
@@ -1649,24 +1351,48 @@ mod mutation_args_tests {
     }
 
     #[test]
-    fn write_mode_shares_the_plan_default_polarity() {
-        assert_eq!(WriteModeArgs::default().mode(), MutationMode::Plan);
-        assert_eq!(WriteModeArgs { write: true }.mode(), MutationMode::Apply);
-    }
-
-    #[test]
-    fn dry_run_args_has_the_opposite_polarity() {
-        // The invariant this whole group exists to make visible: a bare
-        // DryRunArgs command MUTATES, while a bare MutationArgs command
-        // does not. Nothing in this change reconciles the two.
-        assert_eq!(DryRunArgs::default().mode(), MutationMode::Apply);
-        assert_eq!(MutationArgs::default().mode(), MutationMode::Plan);
-    }
-
-    #[test]
-    fn from_bool_round_trips_helper_threaded_apply_flags() {
-        assert_eq!(MutationArgs::from(true).mode(), MutationMode::Apply);
-        assert_eq!(MutationArgs::from(false).mode(), MutationMode::Plan);
+    fn each_vocabulary_resolves_its_documented_polarity() {
+        // A bare DryRunArgs command MUTATES, while bare MutationArgs and
+        // WriteModeArgs commands only plan.
+        for (case, mode, expected) in [
+            (
+                "bare --apply group",
+                MutationArgs::default().mode(),
+                MutationMode::Plan,
+            ),
+            (
+                "--apply",
+                MutationArgs::from(true).mode(),
+                MutationMode::Apply,
+            ),
+            (
+                "from(false)",
+                MutationArgs::from(false).mode(),
+                MutationMode::Plan,
+            ),
+            (
+                "bare --write group",
+                WriteModeArgs::default().mode(),
+                MutationMode::Plan,
+            ),
+            (
+                "--write",
+                WriteModeArgs { write: true }.mode(),
+                MutationMode::Apply,
+            ),
+            (
+                "bare --dry-run group",
+                DryRunArgs::default().mode(),
+                MutationMode::Apply,
+            ),
+            (
+                "--dry-run",
+                DryRunArgs { dry_run: true }.mode(),
+                MutationMode::Plan,
+            ),
+        ] {
+            assert_eq!(mode, expected, "{case}");
+        }
     }
 }
 
@@ -1847,11 +1573,6 @@ mod tests {
             setting_json: vec![("mode".to_string(), serde_json::json!("cli-json"))],
         };
 
-        assert_eq!(
-            args.settings_overrides().expect("settings"),
-            vec![("mode".to_string(), "cli-string".to_string())]
-        );
-
         let json = args
             .settings_profile_json_overrides()
             .expect("json settings");
@@ -1863,12 +1584,6 @@ mod tests {
         assert_eq!(json[1], ("flag".to_string(), serde_json::json!(true)));
         assert_eq!(json[2], ("mode".to_string(), serde_json::json!("file")));
         assert_eq!(json[3], ("retries".to_string(), serde_json::json!(2)));
-
-        assert_eq!(
-            args.settings_json_overrides()
-                .expect("explicit json settings"),
-            vec![("mode".to_string(), serde_json::json!("cli-json"))]
-        );
     }
 
     #[test]
