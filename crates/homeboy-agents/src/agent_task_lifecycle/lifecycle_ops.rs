@@ -283,64 +283,98 @@ pub fn prepare_unmaterialized_cook_admission(
     let store = AgentTaskLifecycleStore::from_environment()?;
     let cook_id = sanitize_run_id(cook_id);
     store.with_store_lock(|| {
-        let resolved = resolve_run_id_in_store(&store, &cook_id)?;
-        if resolved != cook_id {
-            return Err(Error::validation_invalid_argument(
-                "run_id",
-                "detached Cook id already resolves to an existing Cook attempt",
-                Some(cook_id.clone()),
-                None,
-            ));
-        }
-        if let Ok(existing) = store.read_record(&cook_id) {
-            if existing.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
-                return Err(Error::validation_invalid_argument(
-                    "run_id",
-                    "detached Cook id collides with an existing non-handoff run",
-                    Some(cook_id.clone()),
-                    None,
-                ));
-            }
-            if existing.metadata["unmaterialized_cook_admission"]["binding"] != binding {
-                return Err(Error::validation_invalid_argument(
-                    "run_id",
-                    "Cook id is already bound to a different unmaterialized admission request",
-                    Some(cook_id.clone()),
-                    None,
-                ));
-            }
+        if let Some(existing) =
+            require_unmaterialized_cook_id(&store, &cook_id, |a| a["binding"] == binding)?
+        {
             return Ok(existing);
         }
-
-        let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
-        let mut submission_metadata = serde_json::Map::new();
-        submission_metadata.insert(
-            "detached_cook_handoff".to_string(),
-            json!({
-                "admission_state": "unmaterialized",
-                "cook_id": cook_id,
-            }),
-        );
-        submission_metadata.insert(
-            "unmaterialized_cook_admission".to_string(),
-            unmaterialized_admission_value(
-                &cook_id,
-                binding.clone(),
-                "preparing_inputs",
-                requested_state,
-                reason,
-            ),
-        );
-        submit_plan_with_runtime_admission_in_store(
+        submit_unmaterialized_cook_root(
             &store,
-            &plan,
-            Some(&cook_id),
-            execution_runner_id(),
-            Some(submission_metadata),
+            &cook_id,
+            binding,
+            "preparing_inputs",
+            requested_state,
+            reason,
+            serde_json::Map::new(),
             None,
-            |_| Ok(homeboy_core::controller_runtime::current()),
         )
     })
+}
+
+/// Shared Cook-id ownership checks for unmaterialized admission: the id must
+/// not alias a published attempt, an existing row must be a detached handoff
+/// parent, and its admission must satisfy `admission_matches`.
+fn require_unmaterialized_cook_id(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    admission_matches: impl Fn(&Value) -> bool,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let invalid = |problem: &str| {
+        Err(Error::validation_invalid_argument(
+            "run_id",
+            problem,
+            Some(cook_id.to_string()),
+            None,
+        ))
+    };
+    if resolve_run_id_in_store(store, cook_id)? != cook_id {
+        return invalid("detached Cook id already resolves to an existing Cook attempt");
+    }
+    let Ok(record) = store.read_record(cook_id) else {
+        return Ok(None);
+    };
+    if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
+        return invalid("detached Cook id collides with an existing non-handoff run");
+    }
+    if !admission_matches(&record.metadata["unmaterialized_cook_admission"]) {
+        return Err(unmaterialized_binding_conflict(cook_id));
+    }
+    Ok(Some(record))
+}
+
+fn unmaterialized_binding_conflict(cook_id: &str) -> Error {
+    Error::validation_invalid_argument(
+        "run_id",
+        "Cook id is already bound to a different unmaterialized admission request",
+        Some(cook_id.to_string()),
+        None,
+    )
+}
+
+/// Submit a fresh detached handoff root that carries its unmaterialized
+/// admission binding in the first durable write.
+#[allow(clippy::too_many_arguments)]
+fn submit_unmaterialized_cook_root(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    binding: Value,
+    state: &str,
+    requested_state: &str,
+    reason: &str,
+    mut metadata: serde_json::Map<String, Value>,
+    caller_workspace: Option<Value>,
+) -> Result<AgentTaskRunRecord> {
+    let mut plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+    if let Some(workspace) = caller_workspace {
+        plan.metadata["caller_workspace"] = workspace;
+    }
+    metadata.insert(
+        "detached_cook_handoff".to_string(),
+        json!({ "admission_state": "unmaterialized", "cook_id": cook_id }),
+    );
+    metadata.insert(
+        "unmaterialized_cook_admission".to_string(),
+        unmaterialized_admission_value(cook_id, binding, state, requested_state, reason),
+    );
+    submit_plan_with_runtime_admission_in_store(
+        store,
+        &plan,
+        Some(cook_id),
+        execution_runner_id(),
+        Some(metadata),
+        None,
+        |_| Ok(homeboy_core::controller_runtime::current()),
+    )
 }
 
 fn validate_unmaterialized_admission_input(binding: &Value, state: &str) -> Result<()> {
@@ -442,36 +476,20 @@ fn record_unmaterialized_cook_admission_locked(
     reason: &str,
     metadata: serde_json::Map<String, Value>,
 ) -> Result<AgentTaskRunRecord> {
-    const SCHEMA: &str = "homeboy/unmaterialized-cook-admission/v1";
     validate_unmaterialized_admission_input(&binding, state)?;
 
     let cook_id = sanitize_run_id(cook_id);
     if lifecycle_store.read_record(&cook_id).is_err() {
-        let mut plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
-        plan.metadata["caller_workspace"] = binding
-            .get("caller_workspace")
-            .cloned()
-            .unwrap_or(Value::Null);
-        let mut submission_metadata = metadata;
-        submission_metadata.insert(
-            "detached_cook_handoff".to_string(),
-            json!({
-                "admission_state": "unmaterialized",
-                "cook_id": cook_id,
-            }),
-        );
-        submission_metadata.insert(
-            "unmaterialized_cook_admission".to_string(),
-            unmaterialized_admission_value(&cook_id, binding, state, state, reason),
-        );
-        let record = submit_plan_with_runtime_admission_in_store(
+        let caller_workspace = binding.get("caller_workspace").cloned().unwrap_or_default();
+        let record = submit_unmaterialized_cook_root(
             lifecycle_store,
-            &plan,
-            Some(&cook_id),
-            execution_runner_id(),
-            Some(submission_metadata),
-            None,
-            |_| Ok(homeboy_core::controller_runtime::current()),
+            &cook_id,
+            binding,
+            state,
+            state,
+            reason,
+            metadata,
+            Some(caller_workspace),
         )?;
         return record_cook_progress_in_store(
             lifecycle_store,
@@ -500,18 +518,8 @@ fn record_unmaterialized_cook_admission_locked(
                 record.metadata["caller_workspace"] = workspace.clone();
             }
         }
-        record.metadata["unmaterialized_cook_admission"] = json!({
-            "schema": SCHEMA,
-            "state": state,
-            "reason": reason,
-            "binding": binding_for_write,
-            "commands": {
-                "status": format!("homeboy agent-task status {cook_id}"),
-                "watch": format!("homeboy agent-task status {cook_id} --watch"),
-                "cancel": format!("homeboy agent-task cancel {cook_id}"),
-                "resume": format!("homeboy agent-task recover {cook_id}"),
-            },
-        });
+        record.metadata["unmaterialized_cook_admission"] =
+            unmaterialized_admission_value(&cook_id, binding_for_write, &state, &state, &reason);
         // Unlike the short pre-spawn lease, this admission is daemon-owned and
         // remains live until cancellation, exhaustion, or materialization.
         record.metadata["detached_cook_handoff"]["admission_state"] = json!("unmaterialized");
@@ -524,12 +532,7 @@ fn record_unmaterialized_cook_admission_locked(
     let Some(record) = record else {
         let existing = lifecycle_store.read_record(&cook_id)?;
         if existing.metadata["unmaterialized_cook_admission"]["binding"] != binding {
-            return Err(Error::validation_invalid_argument(
-                "run_id",
-                "Cook id is already bound to a different unmaterialized admission request",
-                Some(cook_id),
-                None,
-            ));
+            return Err(unmaterialized_binding_conflict(&cook_id));
         }
         return Ok(existing);
     };
@@ -546,39 +549,10 @@ pub fn precheck_unmaterialized_cook_admission(
     let store = AgentTaskLifecycleStore::from_environment()?;
     let cook_id = sanitize_run_id(cook_id);
     store.with_store_lock(|| {
-        let resolved = resolve_run_id_in_store(&store, &cook_id)?;
-        if resolved != cook_id {
-            return Err(Error::validation_invalid_argument(
-                "run_id",
-                "Cook id already resolves to an existing Cook attempt",
-                Some(cook_id.clone()),
-                None,
-            ));
-        }
-        let Ok(record) = store.read_record(&cook_id) else {
-            return Ok(None);
-        };
-        if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
-            return Err(Error::validation_invalid_argument(
-                "run_id",
-                "Cook id collides with an existing non-handoff run",
-                Some(cook_id.clone()),
-                None,
-            ));
-        }
-        let admission = &record.metadata["unmaterialized_cook_admission"];
-        if !admission.is_object() {
-            return Ok(None);
-        }
-        if admission["binding"]["request_ref"].as_str() != Some(request_ref) {
-            return Err(Error::validation_invalid_argument(
-                "run_id",
-                "Cook id is already bound to a different unmaterialized admission request",
-                Some(cook_id.clone()),
-                None,
-            ));
-        }
-        Ok(Some(record))
+        let record = require_unmaterialized_cook_id(&store, &cook_id, |a| {
+            !a.is_object() || a["binding"]["request_ref"].as_str() == Some(request_ref)
+        })?;
+        Ok(record.filter(is_unmaterialized_cook_admission))
     })
 }
 
