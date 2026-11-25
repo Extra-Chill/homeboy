@@ -1,14 +1,15 @@
+use super::failure_fingerprint;
+#[cfg(unix)]
 use super::{
-    failure_fingerprint, run_gate_command_with_timeout, AgentTaskGateEnvironmentPolicy,
-    AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
+    run_gate_command_with_timeout, AgentTaskGateEnvironmentPolicy, AgentTaskGateRevealPolicy,
+    AgentTaskGateStatus, AgentTaskGateVisibility,
 };
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
-use std::time::Duration;
 #[cfg(unix)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[test]
 fn javascript_run_totals_and_failure_durations_are_normalized() {
@@ -33,17 +34,6 @@ fn javascript_run_totals_and_failure_durations_are_normalized() {
             vec!["test:keeps hero fluid"],
         );
     }
-}
-
-#[test]
-fn matching_baseline_failure_is_distinct_from_a_new_failure() {
-    let baseline = failure_fingerprint(1, "test alpha ... FAILED\n", "", &[]);
-    let matching_candidate = failure_fingerprint(1, "test alpha ... FAILED\n", "", &[]);
-    let regressed_candidate =
-        failure_fingerprint(1, "test alpha ... FAILED\ntest beta ... FAILED\n", "", &[]);
-
-    assert_eq!(baseline, matching_candidate);
-    assert_ne!(baseline, regressed_candidate);
 }
 
 #[test]
@@ -112,7 +102,7 @@ const FOUR_FAILURES: &[&str] = &[
 ];
 
 #[test]
-fn same_cargo_failure_from_different_workspaces_has_equal_fingerprints() {
+fn cargo_failure_fingerprint_ignores_workspace_but_not_an_extra_failing_test() {
     let (base_out, base_err) = cargo_failure_output(
         "/home/chubes/Developer/_lab_workspaces/abc123",
         "/tmp/.homeboy-test-tmp/run.RdkCCB/.tmpdIljrU",
@@ -122,46 +112,31 @@ fn same_cargo_failure_from_different_workspaces_has_equal_fingerprints() {
         "0f3a9b2c4d5e6f70",
         FOUR_FAILURES,
     );
-    let (cand_out, cand_err) = cargo_failure_output(
-        "/home/other/work/_lab_workspaces/zz-999",
-        "/tmp/.homeboy-test-tmp/run.Xy12ab/.tmpQQ99zz",
-        42,
-        "7.01s",
-        12,
-        "1234567890abcdef",
-        FOUR_FAILURES,
-    );
-    assert_eq!(
-        failure_fingerprint(101, &base_out, &base_err, &[]),
-        failure_fingerprint(101, &cand_out, &cand_err, &[])
-    );
-}
+    let candidate = |failing: &[&str]| {
+        cargo_failure_output(
+            "/home/other/work/_lab_workspaces/zz-999",
+            "/tmp/.homeboy-test-tmp/run.Xy12ab/.tmpQQ99zz",
+            42,
+            "7.01s",
+            12,
+            "1234567890abcdef",
+            failing,
+        )
+    };
+    let baseline = failure_fingerprint(101, &base_out, &base_err, &[]);
 
-#[test]
-fn extra_failing_test_changes_the_fingerprint() {
-    let (base_out, base_err) = cargo_failure_output(
-        "/home/chubes/Developer/_lab_workspaces/abc123",
-        "/tmp/.homeboy-test-tmp/run.RdkCCB/.tmpdIljrU",
-        1175443,
-        "113.75s",
-        1889,
-        "0f3a9b2c4d5e6f70",
-        FOUR_FAILURES,
+    let (same_out, same_err) = candidate(FOUR_FAILURES);
+    assert_eq!(
+        baseline,
+        failure_fingerprint(101, &same_out, &same_err, &[])
     );
+
     let mut five = FOUR_FAILURES.to_vec();
     five.push("agent_task_gate::tests::epsilon");
-    let (cand_out, cand_err) = cargo_failure_output(
-        "/home/other/work/_lab_workspaces/zz-999",
-        "/tmp/.homeboy-test-tmp/run.Xy12ab/.tmpQQ99zz",
-        42,
-        "7.01s",
-        12,
-        "1234567890abcdef",
-        &five,
-    );
+    let (extra_out, extra_err) = candidate(&five);
     assert_ne!(
-        failure_fingerprint(101, &base_out, &base_err, &[]),
-        failure_fingerprint(101, &cand_out, &cand_err, &[])
+        baseline,
+        failure_fingerprint(101, &extra_out, &extra_err, &[])
     );
 }
 
@@ -187,23 +162,6 @@ fn same_clippy_error_from_different_workspaces_has_equal_fingerprints() {
 }
 
 #[test]
-fn same_failure_with_different_exit_code_has_different_fingerprint() {
-    let (out, err) = cargo_failure_output(
-        "/home/chubes/Developer/_lab_workspaces/abc123",
-        "/tmp/.homeboy-test-tmp/run.RdkCCB/.tmpdIljrU",
-        1175443,
-        "113.75s",
-        1889,
-        "0f3a9b2c4d5e6f70",
-        FOUR_FAILURES,
-    );
-    assert_ne!(
-        failure_fingerprint(101, &out, &err, &[]),
-        failure_fingerprint(1, &out, &err, &[])
-    );
-}
-
-#[test]
 fn normalization_masks_volatile_tokens() {
     let line = super::normalize_failure_record(
             "thread 'x' (1175443) panicked at /home/a/_lab_workspaces/id/src/lib.rs:3:1 in 2m 03s (target/debug/deps/foo-0f3a9b2c4d5e6f70)",
@@ -214,27 +172,6 @@ fn normalization_masks_volatile_tokens() {
         "thread 'x' panicked at src/lib.rs:3:1 in <duration> (target/debug/deps/foo-<hash>)"
     );
     assert!(super::normalize_failure_record("   Compiling foo v1.2.3").is_none());
-}
-
-#[test]
-fn bounded_baseline_gate_is_cancelled() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let report = run_gate_command_with_timeout(
-        temp.path(),
-        1,
-        "sleep 1",
-        AgentTaskGateVisibility::Visible,
-        AgentTaskGateRevealPolicy::FullEvidence,
-        temp.path(),
-        Duration::from_millis(20),
-        &AgentTaskGateEnvironmentPolicy::default(),
-        &[],
-    )
-    .expect("bounded gate report");
-
-    assert_eq!(report.status, AgentTaskGateStatus::Failed);
-    assert_eq!(report.exit_code, 124);
-    assert!(report.stderr.contains("was cancelled"));
 }
 
 #[cfg(unix)]
@@ -258,7 +195,9 @@ fn bounded_baseline_gate_reaps_background_descendants_before_reader_join() {
     )
     .expect("bounded gate report");
 
+    assert_eq!(report.status, AgentTaskGateStatus::Failed);
     assert_eq!(report.exit_code, 124);
+    assert!(report.stderr.contains("was cancelled"));
     let descendant_pid = std::fs::read_to_string(pid_file)
         .expect("descendant pid")
         .trim()

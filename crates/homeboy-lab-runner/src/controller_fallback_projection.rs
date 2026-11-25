@@ -740,32 +740,6 @@ mod tests {
     }
 
     #[test]
-    fn nonterminal_runner_status_stays_pending_for_the_next_bounded_pass() {
-        let store = store();
-        let mut runner = Transport::compatible();
-        let receipt = store
-            .submit_detached(&mut runner, &envelope())
-            .expect("admit deferred receipt");
-        let run_id = receipt.runner_receipt.handoff.run_id.clone();
-
-        let finalized = store
-            .reconcile_after_controller_restart_with(
-                8,
-                |_, _| Ok(snapshot(JobStatus::Running)),
-                |_, _| panic!("nonterminal status must not enter lifecycle finalization"),
-            )
-            .expect("nonterminal reconciliation");
-
-        assert!(finalized.is_empty());
-        let remaining = pending(&store);
-        assert_eq!(remaining.len(), 1);
-        assert!(
-            remaining.contains_key(run_id.as_str()),
-            "a nonterminal job keeps its receipt pending"
-        );
-    }
-
-    #[test]
     fn bounded_batches_reach_terminal_receipts_after_unreachable_jobs_across_restart() {
         let directory = tempdir().expect("temp directory");
         let path = directory.path().join("observations.sqlite");

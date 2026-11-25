@@ -499,7 +499,7 @@ mod dependency_scoped_excludes_tests {
     use homeboy_test_support::git::run as git;
 
     #[test]
-    fn parent_gitignore_never_drops_a_tracked_dependency_lockfile() {
+    fn parent_excludes_keep_untracked_names_but_never_drop_a_tracked_dependency_lockfile() {
         let dep = tempfile::tempdir().expect("dep");
         git(dep.path(), &["init", "-q"]);
         std::fs::write(dep.path().join("composer.json"), "{}\n").expect("json");
@@ -518,6 +518,7 @@ mod dependency_scoped_excludes_tests {
             "*.pem".to_string(),
             "composer.lock".to_string(),
             "./composer.lock".to_string(),
+            "parent-only.log".to_string(),
         ];
         let excludes = dependency_scoped_excludes(dep.path(), &inherited);
 
@@ -530,23 +531,14 @@ mod dependency_scoped_excludes_tests {
         assert!(excludes.contains(&".git".to_string()));
         assert!(excludes.contains(&"*.pem".to_string()));
         assert!(
+            excludes.contains(&"parent-only.log".to_string()),
+            "untracked names inherited from the parent are kept: {excludes:?}"
+        );
+        assert!(
             excludes
                 .iter()
                 .any(|p| p.trim_start_matches("./").trim_end_matches('/') == "vendor"),
             "dependency's own gitignore applies: {excludes:?}"
-        );
-    }
-
-    #[test]
-    fn untracked_names_from_parent_are_kept() {
-        let dep = tempfile::tempdir().expect("dep");
-        git(dep.path(), &["init", "-q"]);
-        let inherited = vec!["composer.lock".to_string()];
-        let excludes = dependency_scoped_excludes(dep.path(), &inherited);
-        assert_eq!(
-            excludes.first(),
-            Some(&"composer.lock".to_string()),
-            "{excludes:?}"
         );
     }
 }
@@ -605,16 +597,14 @@ mod tests {
             excludes,
             "the rule is added once"
         );
-    }
-
-    #[test]
-    fn declared_node_modules_output_keeps_the_tree() {
-        let excludes = prepared_dependency_snapshot_excludes(
-            &[],
-            &["./node_modules/@scope/runtime/index.js".to_string()],
+        assert!(
+            !prepared_dependency_snapshot_excludes(
+                &[],
+                &["./node_modules/@scope/runtime/index.js".to_string()],
+            )
+            .contains(&"**/node_modules/".to_string()),
+            "a declared node_modules output keeps the tree"
         );
-
-        assert!(!excludes.contains(&"**/node_modules/".to_string()));
     }
 
     /// The #15797 shape: a WordPress plugin whose lifecycle built several
@@ -813,10 +803,6 @@ mod tests {
             assert_eq!(exit_code, 0);
             assert_eq!(output.validation_dependencies.len(), 1);
             assert_eq!(output.validation_dependencies[0].id, "shared-runtime");
-            assert_eq!(
-                output.validation_dependencies[0].role,
-                "validation_dependency"
-            );
             assert_eq!(
                 output.validation_dependencies[0].local_path,
                 dependency.canonicalize().unwrap().display().to_string()

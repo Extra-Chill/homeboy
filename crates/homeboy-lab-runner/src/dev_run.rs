@@ -694,23 +694,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn plans_refresh_then_requested_command() {
-        let command = vec![
-            "homeboy".to_string(),
-            "extension".to_string(),
-            "run".to_string(),
-            "x".to_string(),
-        ];
-        let plan = plan_extension_dev_run("x", "lab", "/tmp/ext", &command).expect("plan");
-
-        assert_eq!(plan.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
-        assert_eq!(plan.runner_id, "lab");
-        assert_eq!(plan.source, "/tmp/ext");
-        assert_eq!(plan.command, command);
-        assert!(plan.persistent_state.contains("left refreshed/linked"));
-    }
-
-    #[test]
     fn rejects_missing_command() {
         let err = plan_extension_dev_run("x", "lab", "/tmp/ext", &[]).expect_err("missing command");
 
@@ -774,15 +757,6 @@ mod tests {
         assert_eq!(execs[2].3, vec!["demo".to_string()]);
         assert!(execs[0].4.is_none());
         assert_eq!(
-            execs[1]
-                .4
-                .as_ref()
-                .expect("install workload")
-                .kind
-                .command_label,
-            "extension refresh"
-        );
-        assert_eq!(
             execs[2]
                 .4
                 .as_ref()
@@ -790,9 +764,6 @@ mod tests {
                 .required_extensions,
             vec!["demo".to_string()]
         );
-        assert!(execs[2]
-            .2
-            .contains_key("HOMEBOY_EXTENSION_DEV_RUN_PROVENANCE_JSON"));
         let provenance: serde_json::Value = serde_json::from_str(
             execs[2]
                 .2

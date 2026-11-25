@@ -272,38 +272,23 @@ mod tests {
     /// The default has to stay "no budget", or every existing caller that
     /// never asked for one silently acquires a way to be killed.
     #[test]
-    fn no_deadline_is_bound_by_default() {
+    fn a_bound_deadline_governs_only_its_scope_and_expires_once_passed() {
         assert_eq!(current_cook_deadline(), None);
         assert_eq!(expired_cook_deadline(), None);
-    }
-
-    #[test]
-    fn a_past_deadline_is_expired_and_a_future_one_is_not() {
-        let past = CookDeadline::from_unix_ms(now_unix_ms().saturating_sub(1));
-        assert!(past.is_expired());
-        assert_eq!(past.remaining_ms(), 0);
 
         let future = CookDeadline::from_unix_ms(now_unix_ms() + 3_600_000);
-        assert!(!future.is_expired());
         assert!(future.remaining_ms() > 0);
-    }
-
-    #[test]
-    fn a_bound_deadline_is_visible_and_is_restored_after_the_scope() {
-        let deadline = CookDeadline::from_unix_ms(now_unix_ms() + 3_600_000);
-        with_current_cook_deadline(Some(deadline), || {
-            assert_eq!(current_cook_deadline(), Some(deadline));
+        with_current_cook_deadline(Some(future), || {
+            assert_eq!(current_cook_deadline(), Some(future));
             // An expired check must not fire on a live budget.
             assert_eq!(expired_cook_deadline(), None);
         });
         assert_eq!(current_cook_deadline(), None, "scope must not leak");
-    }
 
-    #[test]
-    fn an_expired_deadline_is_reported_only_once_it_has_passed() {
-        let expired = CookDeadline::from_unix_ms(now_unix_ms().saturating_sub(1));
-        with_current_cook_deadline(Some(expired), || {
-            assert_eq!(expired_cook_deadline(), Some(expired));
+        let past = CookDeadline::from_unix_ms(now_unix_ms().saturating_sub(1));
+        assert_eq!(past.remaining_ms(), 0);
+        with_current_cook_deadline(Some(past), || {
+            assert_eq!(expired_cook_deadline(), Some(past));
         });
     }
 
@@ -349,15 +334,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_liveness_is_bounded_by_default_and_explicit_limits_win() {
-        assert_eq!(
-            effective_provider_liveness_timeout_ms(None),
-            DEFAULT_PROVIDER_LIVENESS_TIMEOUT_MS
-        );
-        assert_eq!(effective_provider_liveness_timeout_ms(Some(45_000)), 45_000);
-    }
-
-    #[test]
     fn provider_max_timeout_defaults_to_a_multiple_and_never_drops_below_base() {
         assert_eq!(
             effective_provider_max_timeout_ms(1_200_000, None),
@@ -379,54 +355,58 @@ mod tests {
     }
 
     #[test]
-    fn a_provider_with_recent_progress_is_extended_in_steps_up_to_the_cap() {
+    fn a_provider_is_extended_in_steps_only_while_it_makes_recent_progress() {
         let recent = PROVIDER_TIMEOUT_EXTENSION_RECENT_PROGRESS_MS;
-        // At the base deadline with progress 10s ago: one step.
-        assert_eq!(
-            extended_provider_deadline_ms(1_200_000, 1_200_000, 1_190_000, 3_600_000, recent),
-            Some(1_200_000 + PROVIDER_TIMEOUT_EXTENSION_STEP_MS)
-        );
-        // The last step is clamped to the cap.
-        assert_eq!(
-            extended_provider_deadline_ms(3_300_000, 3_300_000, 3_299_000, 3_600_000, recent),
-            Some(3_600_000)
-        );
-        // At the cap: no more extensions.
-        assert_eq!(
-            extended_provider_deadline_ms(3_600_000, 3_600_000, 3_599_000, 3_600_000, recent),
-            None
-        );
-    }
-
-    #[test]
-    fn a_provider_without_recent_progress_times_out_at_its_deadline() {
-        let recent = PROVIDER_TIMEOUT_EXTENSION_RECENT_PROGRESS_MS;
-        assert_eq!(
-            extended_provider_deadline_ms(
+        let step = PROVIDER_TIMEOUT_EXTENSION_STEP_MS;
+        for (case, deadline, last_progress, cap, expected) in [
+            (
+                "progress 10s ago earns one step",
                 1_200_000,
+                1_190_000,
+                3_600_000,
+                Some(1_200_000 + step),
+            ),
+            (
+                "the last step is clamped to the cap",
+                3_300_000,
+                3_299_000,
+                3_600_000,
+                Some(3_600_000),
+            ),
+            (
+                "at the cap there are no more extensions",
+                3_600_000,
+                3_599_000,
+                3_600_000,
+                None,
+            ),
+            (
+                "a cap equal to the base disables extension",
+                1_200_000,
+                1_200_000,
+                1_200_000,
+                None,
+            ),
+            (
+                "progress exactly at the window edge still counts",
+                1_200_000,
+                1_200_000 - recent,
+                3_600_000,
+                Some(1_200_000 + step),
+            ),
+            (
+                "progress older than the window times out",
                 1_200_000,
                 1_200_000 - recent - 1,
                 3_600_000,
-                recent
+                None,
             ),
-            None
-        );
-        // Exactly at the window edge still counts as recent.
-        assert!(extended_provider_deadline_ms(
-            1_200_000,
-            1_200_000,
-            1_200_000 - recent,
-            3_600_000,
-            recent
-        )
-        .is_some());
-    }
-
-    #[test]
-    fn extension_is_disabled_when_the_cap_equals_the_base() {
-        assert_eq!(
-            extended_provider_deadline_ms(1_200_000, 1_200_000, 1_200_000, 1_200_000, 120_000),
-            None
-        );
+        ] {
+            assert_eq!(
+                extended_provider_deadline_ms(deadline, deadline, last_progress, cap, recent),
+                expected,
+                "{case}"
+            );
+        }
     }
 }

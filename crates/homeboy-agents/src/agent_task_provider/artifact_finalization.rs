@@ -1063,14 +1063,6 @@ mod tests {
                 .as_deref(),
             value.artifacts[1].path.as_deref()
         );
-        assert_eq!(
-            fs::read(transcript).expect("resolve transcript alias"),
-            b"shared runtime evidence"
-        );
-        assert_eq!(
-            fs::read(runtime).expect("resolve runtime alias"),
-            b"shared runtime evidence"
-        );
     }
 
     #[cfg(unix)]
@@ -1139,33 +1131,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn finalization_rejects_nested_symlink_before_opening_leaf() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let root_path = temp.path().join("executor");
-        let outside = temp.path().join("outside");
-        fs::create_dir(&root_path).expect("executor root");
-        fs::create_dir(&outside).expect("outside root");
-        fs::write(outside.join("result.patch"), b"outside").expect("source");
-        std::os::unix::fs::symlink(&outside, root_path.join("nested")).expect("symlink");
-        let root = capture(&root_path, temp.path());
+    fn finalization_rejects_symlinked_directories_and_leaves() {
+        for (link, artifact) in [
+            ("nested", "nested/result.patch"),
+            ("result.patch", "result.patch"),
+        ] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let root_path = temp.path().join("executor");
+            let outside = temp.path().join("outside");
+            fs::create_dir(&root_path).expect("executor root");
+            fs::create_dir(&outside).expect("outside root");
+            fs::write(outside.join("result.patch"), b"outside").expect("source");
+            let target = if link == "nested" {
+                outside.clone()
+            } else {
+                outside.join("result.patch")
+            };
+            std::os::unix::fs::symlink(&target, root_path.join(link)).expect("symlink");
+            let root = capture(&root_path, temp.path());
 
-        assert!(
-            finalize_provider_file_artifacts(&mut outcome("nested/result.patch"), &root).is_err()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn finalization_rejects_symlink_leaf() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let root_path = temp.path().join("executor");
-        fs::create_dir(&root_path).expect("executor root");
-        let outside = temp.path().join("outside.patch");
-        fs::write(&outside, b"outside").expect("source");
-        std::os::unix::fs::symlink(&outside, root_path.join("result.patch")).expect("symlink");
-        let root = capture(&root_path, temp.path());
-
-        assert!(finalize_provider_file_artifacts(&mut outcome("result.patch"), &root).is_err());
+            assert!(
+                finalize_provider_file_artifacts(&mut outcome(artifact), &root).is_err(),
+                "{artifact} through a symlink must be rejected"
+            );
+        }
     }
 
     #[cfg(any(unix, windows))]

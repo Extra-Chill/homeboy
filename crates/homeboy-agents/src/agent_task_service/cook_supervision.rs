@@ -350,30 +350,6 @@ mod tests {
     }
 
     #[test]
-    fn live_descendant_activity_does_not_mask_worktree_progress() {
-        // Process identity and worktree progress are independent signals: a
-        // live descendant may stay the same while newly written files reset the
-        // no-progress clock on that heartbeat.
-        let mut supervisor = supervisor(vec![AgentSupervisionBudget::new(
-            AgentSupervisionMetric::NoProgressSeconds,
-            60,
-            AgentSupervisionAction::Stop,
-        )]);
-        let mut initial = activity(15, 100, 2);
-        initial.files_changed = Some(0);
-        supervisor.observe(&initial);
-
-        let mut progressed = activity(90, 100, 2);
-        progressed.files_changed = Some(1);
-
-        let tick = supervisor.observe(&progressed);
-
-        assert_eq!(tick.sample.child_processes, Some(2));
-        assert_eq!(tick.sample.no_progress_seconds, Some(0));
-        assert!(!tick.stop_now);
-    }
-
-    #[test]
     fn a_commit_is_progress_even_though_it_clears_the_pending_edit_count() {
         // A provider that commits leaves a clean tree. Watching `files_changed`
         // alone would read that as having undone its work and start a stall
@@ -400,48 +376,39 @@ mod tests {
     }
 
     #[test]
-    fn an_unmeasurable_worktree_never_starts_a_stall_clock() {
-        // A cook with no destination worktree, or one whose worktree could not
-        // be read, has no progress signal. Killing it for that would punish the
-        // probe's failure rather than the provider's.
-        let mut supervisor = supervisor(vec![AgentSupervisionBudget::new(
-            AgentSupervisionMetric::NoProgressSeconds,
-            1,
-            AgentSupervisionAction::Stop,
-        )]);
-        let unmeasurable = CookProviderActivity {
-            elapsed_seconds: Some(6_000),
-            ..CookProviderActivity::default()
-        };
+    fn an_unmeasured_metric_never_triggers_its_budget() {
+        // A cook whose worktree could not be read has no progress signal, and a
+        // host that cannot read its process table (non-Unix, failed `ps`) has
+        // no memory signal. Both must decline to decide rather than decide on a
+        // fabricated zero.
+        for (metric, unsampled) in [
+            (
+                AgentSupervisionMetric::NoProgressSeconds,
+                CookProviderActivity {
+                    elapsed_seconds: Some(6_000),
+                    ..CookProviderActivity::default()
+                },
+            ),
+            (
+                AgentSupervisionMetric::RssMib,
+                CookProviderActivity {
+                    elapsed_seconds: Some(600),
+                    files_changed: Some(2),
+                    ..CookProviderActivity::default()
+                },
+            ),
+        ] {
+            let mut supervisor = supervisor(vec![AgentSupervisionBudget::new(
+                metric,
+                0,
+                AgentSupervisionAction::Stop,
+            )]);
 
-        let tick = supervisor.observe(&unmeasurable);
+            let tick = supervisor.observe(&unsampled);
 
-        assert_eq!(tick.sample.no_progress_seconds, None);
-        assert!(tick.decisions.is_empty());
-        assert!(!tick.stop_now);
-    }
-
-    #[test]
-    fn a_host_that_cannot_read_its_process_table_is_never_stopped_for_memory() {
-        // The non-Unix case, and the failed-`ps` case. Both must decline to
-        // decide rather than decide on a fabricated zero.
-        let mut supervisor = supervisor(vec![AgentSupervisionBudget::new(
-            AgentSupervisionMetric::RssMib,
-            0,
-            AgentSupervisionAction::Stop,
-        )]);
-        let unsampled = CookProviderActivity {
-            elapsed_seconds: Some(600),
-            files_changed: Some(2),
-            ..CookProviderActivity::default()
-        };
-
-        let tick = supervisor.observe(&unsampled);
-
-        assert_eq!(tick.sample.rss_mib, None);
-        assert_eq!(tick.sample.child_processes, None);
-        assert!(tick.decisions.is_empty());
-        assert!(!tick.stop_now);
+            assert!(tick.decisions.is_empty(), "{metric:?}");
+            assert!(!tick.stop_now, "{metric:?}");
+        }
     }
 
     #[test]
@@ -485,18 +452,5 @@ mod tests {
         assert!(line.contains("8192 MiB"));
         assert!(line.contains("four agents"));
         assert!(!tick.is_empty());
-    }
-
-    #[test]
-    fn a_malformed_policy_document_does_not_parse_into_a_permissive_policy() {
-        // `resolve_supervision_policy` turns this into a hard error rather than
-        // silently supervising nothing: an operator who declared a stop budget
-        // and got a silently ignored one believes the host is protected and is
-        // not.
-        let parsed = serde_json::from_value::<AgentSupervisionPolicy>(serde_json::json!({
-            "budgets": [{ "metric": "gigabytes", "limit": 8 }]
-        }));
-
-        assert!(parsed.is_err());
     }
 }

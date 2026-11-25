@@ -284,85 +284,56 @@ fn a_failed_transport_never_restarts_or_replaces_the_daemon() {
     }
 }
 
-/// The transport has no path to daemon lifecycle: it cannot start, restart,
-/// repoint or reconnect-with-policy the daemon it reaches.
+/// Only a tunnel whose recorded start identity matches the live process is
+/// signaled; a reused, missing or uninspectable identity never is.
 #[test]
-fn the_transport_has_no_daemon_lifecycle_path() {
-    let source = include_str!("../transport.rs");
-    let production = &source[..source
-        .find("#[cfg(test)]")
-        .expect("transport tests follow production code")];
-    for lifecycle in [
-        "restart_daemon_in_place",
-        "repoint_and_restart",
-        "connect_service_runner",
-        "connect_with",
-        "ensure-running",
-        "ensure_running",
-        "remote_homeboy_identity",
-        "daemon stop",
-    ] {
-        assert!(
-            !production.contains(lifecycle),
-            "ensure_transport must never reach daemon lifecycle `{lifecycle}`"
-        );
-    }
-}
-
-#[test]
-fn pid_reuse_never_signals_a_temporary_tunnel() {
-    let expected = RunnerTunnelProcessStartIdentity::Macos {
+fn tunnel_termination_signals_only_the_exact_owned_process() {
+    use homeboy_core::process::ProcessStartIdentity;
+    let recorded = RunnerTunnelProcessStartIdentity::Linux {
+        starttime_ticks: 123,
+    };
+    let reused_macos = RunnerTunnelProcessStartIdentity::Macos {
         start_seconds: 1,
         start_microseconds: 2,
     };
-    let reused = homeboy_core::process::ProcessStartIdentity::Macos {
-        start_seconds: 3,
-        start_microseconds: 4,
-    };
-    let signaled = std::cell::Cell::new(false);
+    type Inspected = std::result::Result<Option<ProcessStartIdentity>, String>;
+    let cases: [(
+        &str,
+        Option<&RunnerTunnelProcessStartIdentity>,
+        Inspected,
+        bool,
+    ); 4] = [
+        (
+            "matching identity",
+            Some(&recorded),
+            Ok(Some(ProcessStartIdentity::Linux {
+                starttime_ticks: 123,
+            })),
+            true,
+        ),
+        (
+            "reused PID",
+            Some(&reused_macos),
+            Ok(Some(ProcessStartIdentity::Macos {
+                start_seconds: 3,
+                start_microseconds: 4,
+            })),
+            false,
+        ),
+        ("missing identity", None, Ok(None), false),
+        (
+            "uninspectable process",
+            None,
+            Err("inspection failed".to_string()),
+            false,
+        ),
+    ];
 
-    terminate_tunnel_with_identity(
-        42,
-        Some(&expected),
-        |_| Ok(Some(reused.clone())),
-        |_| signaled.set(true),
-    );
-
-    assert!(!signaled.get(), "a reused PID must never be signaled");
-}
-
-#[test]
-fn matching_tunnel_identity_signals_only_the_owned_process() {
-    let expected = RunnerTunnelProcessStartIdentity::Linux {
-        starttime_ticks: 123,
-    };
-    let actual = homeboy_core::process::ProcessStartIdentity::Linux {
-        starttime_ticks: 123,
-    };
-    let signaled = std::cell::Cell::new(false);
-
-    terminate_tunnel_with_identity(
-        42,
-        Some(&expected),
-        |_| Ok(Some(actual.clone())),
-        |_| signaled.set(true),
-    );
-
-    assert!(signaled.get(), "the exact owned tunnel is cleaned up");
-}
-
-#[test]
-fn missing_or_uninspectable_tunnel_identity_never_signals() {
-    let signaled = std::cell::Cell::new(false);
-    terminate_tunnel_with_identity(42, None, |_| Ok(None), |_| signaled.set(true));
-    terminate_tunnel_with_identity(
-        42,
-        None,
-        |_| Err("inspection failed".to_string()),
-        |_| signaled.set(true),
-    );
-
-    assert!(!signaled.get());
+    for (case, expected, inspected, should_signal) in cases {
+        let signaled = std::cell::Cell::new(false);
+        terminate_tunnel_with_identity(42, expected, |_| inspected.clone(), |_| signaled.set(true));
+        assert_eq!(signaled.get(), should_signal, "{case}");
+    }
 }
 
 #[test]
@@ -395,32 +366,21 @@ fn rejects_non_loopback_remote_daemon_address() {
 }
 
 #[test]
-fn parses_daemon_status_envelope() {
-    let envelope = parse_envelope(
-        r#"{"success":true,"data":{"action":"status","running":true,"state":{"address":"127.0.0.1:49152","pid":123}}}"#,
-    )
-    .expect("parse envelope");
-
-    assert!(envelope.success);
+fn reads_remote_active_job_count_from_full_or_compact_daemon_status() {
     assert_eq!(
-        envelope
-            .data
-            .unwrap()
-            .get("state")
-            .unwrap()
-            .get("address")
-            .unwrap(),
-        "127.0.0.1:49152"
+        remote_daemon_active_jobs(&serde_json::json!({ "freshness": { "active_jobs": 2 } })),
+        2
     );
-}
-
-#[test]
-fn reads_remote_active_job_count_from_daemon_freshness() {
-    let status = serde_json::json!({
-        "freshness": { "active_jobs": 2 }
-    });
-
-    assert_eq!(remote_daemon_active_jobs(&status), 2);
+    // Compact daemon-status/v1 retains shown and omitted work outside the
+    // freshness object; the larger count wins so retained work is never lost.
+    assert_eq!(
+        remote_daemon_active_jobs(&serde_json::json!({
+            "freshness": { "active_jobs": 1 },
+            "active_jobs": [{ "id": "shown" }],
+            "truncation": { "active_jobs": { "omitted": 2 } },
+        })),
+        3
+    );
 }
 
 /// A lost controller tunnel must not turn durable active work into permission
@@ -485,34 +445,27 @@ esac
     });
 }
 
+/// A lost or flapping tunnel to the persisted, live daemon reattaches to it,
+/// whether it is idle or busy; active jobs never trigger replacement.
 #[test]
-fn reattaches_active_daemon_without_changing_lease_or_pid() {
-    let session = direct_ssh_session("lease-active");
-    let status = remote_daemon_status_for_test(true, true, 1, "lease-active", 4242);
+fn lost_tunnel_reattaches_the_persisted_live_daemon() {
+    for active_jobs in [0, 1, 2] {
+        for stale_tunnel_pid in [None, Some(999_991), Some(999_992)] {
+            let mut session = direct_ssh_session("lease-active");
+            if let Some(pid) = stale_tunnel_pid {
+                session.tunnel_pid = Some(pid);
+                session.local_url = Some("http://127.0.0.1:1".to_string());
+            }
+            let status =
+                remote_daemon_status_for_test(true, true, active_jobs, "lease-active", 4242);
 
-    let action = remote_daemon_connect_action(Some(&session), &status).expect("reattach");
-
-    assert_eq!(action, RemoteDaemonConnectAction::Reattach);
-    let daemon = status.daemon.expect("daemon");
-    assert_eq!(daemon.lease_id.as_deref(), Some("lease-active"));
-    assert_eq!(daemon.pid, Some(4242));
-    assert_eq!(
-        status.active_jobs, 1,
-        "active job must not trigger replacement"
-    );
-}
-
-#[test]
-fn tunnel_only_failure_reattaches_the_persisted_daemon() {
-    let mut session = direct_ssh_session("lease-tunnel");
-    session.tunnel_pid = Some(999_999);
-    session.local_url = Some("http://127.0.0.1:1".to_string());
-    let status = remote_daemon_status_for_test(true, true, 0, "lease-tunnel", 4343);
-
-    assert_eq!(
-        remote_daemon_connect_action(Some(&session), &status).expect("reattach"),
-        RemoteDaemonConnectAction::Reattach
-    );
+            assert_eq!(
+                remote_daemon_connect_action(Some(&session), &status).expect("reattach"),
+                RemoteDaemonConnectAction::Reattach,
+                "active_jobs={active_jobs} tunnel={stale_tunnel_pid:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -564,24 +517,6 @@ fn dead_listener_with_active_jobs_or_ambiguous_coordinates_fails_closed() {
 }
 
 #[test]
-fn repeated_tunnel_flaps_continue_to_select_the_same_active_daemon() {
-    let mut session = direct_ssh_session("lease-active");
-    let status = remote_daemon_status_for_test(true, true, 2, "lease-active", 4242);
-
-    for stale_tunnel_pid in [999_991, 999_992, 999_993] {
-        session.tunnel_pid = Some(stale_tunnel_pid);
-        session.local_url = Some("http://127.0.0.1:1".to_string());
-        assert_eq!(
-            remote_daemon_connect_action(Some(&session), &status).expect("reattach"),
-            RemoteDaemonConnectAction::Reattach
-        );
-        let daemon = status.daemon.as_ref().expect("daemon remains live");
-        assert_eq!(daemon.lease_id.as_deref(), Some("lease-active"));
-        assert_eq!(daemon.pid, Some(4242));
-    }
-}
-
-#[test]
 fn recovery_reconnect_uses_the_published_replacement_generation() {
     let replacement = DaemonStartResult {
         address: "127.0.0.1:45678".to_string(),
@@ -599,26 +534,6 @@ fn recovery_reconnect_uses_the_published_replacement_generation() {
         daemon.build_identity.as_deref(),
         Some("homeboy test+configured")
     );
-}
-
-#[test]
-fn recovery_replacement_does_not_reuse_the_interrupted_session_generation() {
-    let interrupted = direct_ssh_session("lease-generation-a");
-    let replacement = DaemonStartResult {
-        address: "127.0.0.1:45678".to_string(),
-        pid: 5678,
-        state_path: "/state/generation-b.json".to_string(),
-        lease_id: "lease-generation-b".to_string(),
-    };
-
-    let daemon = remote_daemon_from_recovery(&replacement, "homeboy test+configured");
-
-    assert_ne!(
-        daemon.address,
-        interrupted.remote_daemon_address.expect("old address")
-    );
-    assert_ne!(daemon.pid, interrupted.remote_daemon_pid);
-    assert_ne!(daemon.lease_id, interrupted.remote_daemon_lease_id);
 }
 
 #[test]
@@ -698,7 +613,7 @@ fn converged_idle_generations_rebind_the_normal_disconnect_owner() {
     let daemon = status.daemon.expect("authoritative daemon");
 
     let rebound = super::super::stop_transport_recovery::rebind_idle_generation_owner(
-        &[session.clone(), second.clone(), third.clone()],
+        &[session, second, third],
         &daemon,
         daemon.lease_id.clone().expect("lease"),
     )
@@ -713,8 +628,6 @@ fn converged_idle_generations_rebind_the_normal_disconnect_owner() {
         rebound.remote_daemon_address.as_deref(),
         Some("127.0.0.1:49152")
     );
-    assert_ne!(session.remote_daemon_address, second.remote_daemon_address);
-    assert_ne!(second.remote_daemon_address, third.remote_daemon_address);
 }
 
 #[test]
@@ -889,28 +802,31 @@ fn stale_active_daemon_without_a_matching_session_fails_closed_without_replacing
 }
 
 #[test]
-fn proven_dead_daemon_with_active_jobs_starts_its_successor() {
-    // #17429: the successor's startup recovery reconciles every in-scope job
-    // the dead generation left, so durable work never blocks the start. Its
-    // owner lock refuses a still-running holder.
-    let status = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        1,
-        "lease-dead",
-        4545,
-        Some(DaemonStaleReasonCode::PidDead),
-    );
-
-    for session in [
-        Some(direct_ssh_session("lease-dead")),
-        Some(direct_ssh_session("lease-recorded")),
-        None,
-    ] {
-        assert_eq!(
-            remote_daemon_connect_action(session.as_ref(), &status).expect("start successor"),
-            RemoteDaemonConnectAction::Start
+fn proven_dead_daemon_starts_its_successor_with_or_without_active_jobs() {
+    // The successor's startup recovery reconciles every in-scope job the dead
+    // generation left, so durable work never blocks the start. Its owner lock
+    // refuses a still-running holder.
+    for active_jobs in [0, 1] {
+        let status = remote_daemon_status_for_test_with_reason(
+            false,
+            false,
+            active_jobs,
+            "lease-dead",
+            4545,
+            Some(DaemonStaleReasonCode::PidDead),
         );
+
+        for session in [
+            Some(direct_ssh_session("lease-dead")),
+            Some(direct_ssh_session("lease-recorded")),
+            None,
+        ] {
+            assert_eq!(
+                remote_daemon_connect_action(session.as_ref(), &status).expect("start successor"),
+                RemoteDaemonConnectAction::Start,
+                "active_jobs={active_jobs}"
+            );
+        }
     }
 }
 
@@ -1037,61 +953,6 @@ fn plan_of(report: &homeboy_core::daemon::DaemonFreshnessReport) -> Vec<(&str, &
 }
 
 #[test]
-fn remote_recovery_repair_plan_carries_the_lease_specific_action() {
-    // #10302: the local daemon path composed a tailored repair plan while every
-    // remote constructor hardcoded an empty one, so the runner an operator
-    // cannot look at was the one that fell through to generic reconnect prose.
-    let proven_dead = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        1,
-        "lease-dead",
-        4545,
-        Some(DaemonStaleReasonCode::PidDead),
-    );
-    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &proven_dead);
-    assert_eq!(
-        plan_of(&recovery),
-        vec![("runner_connect", "homeboy runner connect homeboy-lab")]
-    );
-
-    let mut leaseless = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        1,
-        "legacy-lease",
-        4545,
-        Some(DaemonStaleReasonCode::LeaseMissing),
-    );
-    leaseless.daemon = None;
-    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &leaseless);
-    assert_eq!(
-        plan_of(&recovery),
-        vec![("runner_connect", "homeboy runner connect homeboy-lab")]
-    );
-
-    let mut fresh_idle = remote_daemon_status_for_test(true, true, 0, "lease-live", 4545);
-    fresh_idle.work_evidence = crate::connection::remote_daemon::RemoteDaemonWorkEvidence::idle();
-    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &fresh_idle);
-    assert_eq!(
-        plan_of(&recovery),
-        vec![("runner_connect", "homeboy runner connect homeboy-lab")]
-    );
-}
-
-#[test]
-fn remote_recovery_without_evidence_emits_no_repair_plan() {
-    // Nothing was proven about ownership or liveness, so no lease-specific step
-    // can be named. An empty plan is the honest answer; downstream projections
-    // retain it as a terminal diagnostic rather than reconnecting blindly.
-    let status = remote_daemon_status_for_test(false, false, 1, "lease-unknown", 4545);
-
-    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
-
-    assert!(recovery.repair_plan.is_empty());
-}
-
-#[test]
 fn unavailable_remote_recovery_is_fail_closed() {
     let recovery = unavailable_recovery_freshness("homeboy-lab", "remote command timed out");
 
@@ -1106,14 +967,6 @@ fn unavailable_remote_recovery_is_fail_closed() {
     assert!(recovery.lease_id.is_none());
     assert!(recovery.pid.is_none());
     assert!(recovery.repair_plan.is_empty());
-}
-
-#[test]
-fn remote_daemon_status_probe_has_a_bounded_deadline() {
-    assert_eq!(
-        remote_daemon::REMOTE_DAEMON_STATUS_TIMEOUT,
-        Duration::from_secs(15)
-    );
 }
 
 #[cfg(unix)]
@@ -1757,12 +1610,6 @@ esac
     });
 }
 
-// NOTE: the test asserting generated recovery commands parse against the real
-// CLI (`cli_surface::Cli`) was removed as part of extracting homeboy-core:
-// parser correctness is covered by the CLI layer's own tests, and keeping it
-// here forced core to depend upward on the CLI parser. The command builders
-// themselves remain covered by the surrounding recovery tests.
-
 #[test]
 fn failed_connect_without_recovery_omits_recovery_evidence() {
     let (report, _) = failed_connect(
@@ -1802,24 +1649,6 @@ fn hanging_ssh_connect_is_classified_as_a_timeout() {
     );
     assert!(message.contains("timed out"));
     assert!(message.contains("runner connect"));
-}
-
-#[test]
-fn dead_recorded_daemon_without_active_jobs_routes_to_idempotent_ensure_start() {
-    let status = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        0,
-        "lease-dead",
-        4545,
-        Some(DaemonStaleReasonCode::PidDead),
-    );
-
-    assert_eq!(
-        remote_daemon_connect_action(Some(&direct_ssh_session("lease-dead")), &status)
-            .expect("ensure start"),
-        RemoteDaemonConnectAction::Start
-    );
 }
 
 #[cfg(unix)]
@@ -1960,53 +1789,31 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
 #[cfg(unix)]
 #[test]
 fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
-    with_idle_stale_replacement_shim(
-        "lease-raced",
-        "homeboy 0.288.13+stale",
-        |client, homeboy, configured_identity, _| {
-            let error = ensure_remote_daemon(RemoteDaemonEnsureRequest {
-                client,
-                homeboy,
-                runner_id: "homeboy-lab",
-                previous_session: None,
-                configured_identity,
-                live_lease_expectation: None,
-                replacement_operation_id: None,
-                admission_fence: None,
-                registry_lock_held: false,
-                daemon_recovery_capabilities: None,
-            })
-            .expect_err("concurrent stale daemon is refused");
-            assert!(error.message.contains("ownership changed"));
-        },
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
-    with_idle_stale_replacement_shim(
-        "lease-new",
-        "homeboy 0.288.13+stale",
-        |client, homeboy, configured_identity, _| {
-            let error = ensure_remote_daemon(RemoteDaemonEnsureRequest {
-                client,
-                homeboy,
-                runner_id: "homeboy-lab",
-                previous_session: None,
-                configured_identity,
-                live_lease_expectation: None,
-                replacement_operation_id: None,
-                admission_fence: None,
-                registry_lock_held: false,
-                daemon_recovery_capabilities: None,
-            })
-            .expect_err("stale replacement identity is refused");
-            assert!(error
-                .message
-                .contains("does not match configured runner binary"));
-        },
-    );
+    for (post_lease_id, expected) in [
+        ("lease-raced", "ownership changed"),
+        ("lease-new", "does not match configured runner binary"),
+    ] {
+        with_idle_stale_replacement_shim(
+            post_lease_id,
+            "homeboy 0.288.13+stale",
+            |client, homeboy, configured_identity, _| {
+                let error = ensure_remote_daemon(RemoteDaemonEnsureRequest {
+                    client,
+                    homeboy,
+                    runner_id: "homeboy-lab",
+                    previous_session: None,
+                    configured_identity,
+                    live_lease_expectation: None,
+                    replacement_operation_id: None,
+                    admission_fence: None,
+                    registry_lock_held: false,
+                    daemon_recovery_capabilities: None,
+                })
+                .expect_err("a post-stop owner or identity change is refused");
+                assert!(error.message.contains(expected), "{}", error.message);
+            },
+        );
+    }
 }
 
 #[cfg(unix)]

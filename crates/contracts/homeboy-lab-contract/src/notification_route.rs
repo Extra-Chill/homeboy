@@ -364,6 +364,45 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    /// Run `operation` with the route environment pair set exactly as given,
+    /// restoring the previous values afterwards.
+    fn with_route_env<T>(
+        transport: Option<&str>,
+        route: Option<&str>,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let _lock = env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = [
+            (
+                NOTIFICATION_TRANSPORT_ENV,
+                std::env::var(NOTIFICATION_TRANSPORT_ENV).ok(),
+            ),
+            (
+                NOTIFICATION_ROUTE_ENV,
+                std::env::var(NOTIFICATION_ROUTE_ENV).ok(),
+            ),
+        ];
+        for (name, value) in [
+            (NOTIFICATION_TRANSPORT_ENV, transport),
+            (NOTIFICATION_ROUTE_ENV, route),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let result = operation();
+        for (name, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        result
+    }
+
     #[test]
     fn route_round_trips_through_metadata() {
         let route = NotificationRoute::new("extension", "opaque/thread 42").expect("route");
@@ -397,12 +436,25 @@ mod tests {
         );
     }
 
+    /// Malformed and credential-bearing routes are rejected before they can be
+    /// stored or propagated to a child environment, and the error never echoes
+    /// the destination.
     #[test]
-    fn malformed_route_is_rejected() {
-        assert!(NotificationRoute::new("bad transport", "route").is_err());
-        assert!(NotificationRoute::new("extension", "").is_err());
-        assert!(NotificationRoute::new("extension", "line\nbreak").is_err());
-        assert!(NotificationRoute::new("extension", "token=credential").is_err());
+    fn invalid_routes_are_rejected_without_echoing_the_destination() {
+        for (transport, destination) in [
+            ("bad transport", "route"),
+            ("extension", ""),
+            ("extension", "line\nbreak"),
+            ("extension", "token=credential"),
+            ("extension", "https://example.invalid/hook?token=secret"),
+            ("extension", "https://user:pass@example.invalid/hook"),
+            ("extension", "channel?authorization=Bearer%20abc"),
+        ] {
+            assert!(
+                NotificationRoute::new(transport, destination).is_err(),
+                "{transport:?} {destination:?} must be rejected"
+            );
+        }
         let error = NotificationRoute::new("extension", "opaque\ndestination").unwrap_err();
         assert!(error.details.get("id").is_none());
         assert!(!error.details.to_string().contains("destination"));
@@ -439,28 +491,32 @@ mod tests {
             },
         );
         assert_eq!(observed.unwrap().route, "parent-route");
-    }
 
-    #[test]
-    fn capture_without_a_bound_route_leaves_workers_unrouted() {
+        // Capturing with no bound route leaves workers unrouted.
         let propagated = capture();
-        assert!(propagated.route().is_none());
         let observed = std::thread::spawn(move || propagated.bind(current))
             .join()
             .unwrap();
         assert!(observed.is_none());
     }
 
+    /// The producer and consumer halves are the same mechanism: what
+    /// `child_env` writes is exactly what a child's `from_cli_or_env` reads,
+    /// and an absent route emits neither variable.
     #[test]
-    fn child_env_carries_a_bound_route_as_both_variables() {
-        let route = NotificationRoute::new("extension", "opaque/thread 42").expect("route");
-        assert_eq!(
-            child_env(Some(&route)),
-            vec![
-                (NOTIFICATION_TRANSPORT_ENV, "extension".to_string()),
-                (NOTIFICATION_ROUTE_ENV, "opaque/thread 42".to_string()),
-            ]
+    fn child_env_round_trips_through_the_environment_reader() {
+        assert!(child_env(None).is_empty());
+        let route = NotificationRoute::new("extension", "opaque-destination").expect("route");
+        let environment: std::collections::HashMap<_, _> =
+            child_env(Some(&route)).into_iter().collect();
+        let resolved = with_route_env(
+            environment
+                .get(NOTIFICATION_TRANSPORT_ENV)
+                .map(String::as_str),
+            environment.get(NOTIFICATION_ROUTE_ENV).map(String::as_str),
+            || from_cli_or_env(None, None).unwrap(),
         );
+        assert_eq!(resolved, NotificationRouteContext::Route(route));
     }
 
     #[test]
@@ -486,7 +542,9 @@ mod tests {
 
     #[test]
     fn propagated_resolution_requires_the_same_transport() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let old_resolution = std::env::var(NOTIFICATION_RESOLUTION_ENV).ok();
         let route = NotificationRoute::new("generic.completed", "opaque-destination").unwrap();
         let mut resolution = NotificationRouteResolution::new("resolver");
@@ -509,179 +567,61 @@ mod tests {
         }
     }
 
-    /// `child_env` only ever receives a fully resolved route, so an absent
-    /// route must leave both variables alone rather than emit one of them.
+    /// Explicit argv outranks the environment; a transport alone is valid
+    /// context (so a caller can consult that transport's route resolver); a
+    /// route without its owning transport is rejected from either source.
     #[test]
-    fn child_env_without_a_route_sets_neither_variable() {
-        assert!(child_env(None).is_empty());
-    }
-
-    /// The producer and consumer halves are the same mechanism: what
-    /// `child_env` writes is exactly what a child's `from_cli_or_env` reads.
-    #[test]
-    fn child_env_round_trips_through_the_environment_reader() {
-        let _lock = env_lock().lock().unwrap();
-        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
-        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
-        let route = NotificationRoute::new("extension", "opaque-destination").expect("route");
-        for (name, value) in child_env(Some(&route)) {
-            std::env::set_var(name, value);
-        }
-        assert_eq!(
-            from_cli_or_env(None, None).unwrap(),
-            NotificationRouteContext::Route(route)
+    fn cli_or_env_context_resolution() {
+        let route = |transport: &str, route: &str| {
+            Some(NotificationRouteContext::Route(
+                NotificationRoute::new(transport, route).unwrap(),
+            ))
+        };
+        let transport_only =
+            |transport: &str| Some(NotificationRouteContext::TransportOnly(transport.into()));
+        type Case<'a> = (
+            (Option<&'a str>, Option<&'a str>),
+            (Option<&'a str>, Option<&'a str>),
+            Option<NotificationRouteContext>,
         );
-        match old_transport {
-            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
-        }
-        match old_route {
-            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
-        }
-    }
-
-    /// Precedence: explicit argv outranks a conflicting propagated environment.
-    #[test]
-    fn propagated_environment_loses_to_explicit_argv() {
-        let _lock = env_lock().lock().unwrap();
-        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
-        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
-        let propagated =
-            NotificationRoute::new("propagated.transport", "propagated-route").expect("route");
-        for (name, value) in child_env(Some(&propagated)) {
-            std::env::set_var(name, value);
-        }
-        let resolved = from_cli_or_env(Some("argv.transport"), Some("argv-route"))
-            .unwrap()
-            .into_route()
-            .expect("explicit route resolves");
-        assert_eq!(resolved.transport, "argv.transport");
-        assert_eq!(resolved.route, "argv-route");
-        match old_transport {
-            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
-        }
-        match old_route {
-            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
-        }
-    }
-
-    /// The credential-syntax guard applies to anything that could be
-    /// propagated, so a secret-bearing destination can never reach a child env.
-    #[test]
-    fn credential_bearing_routes_cannot_be_propagated() {
-        for destination in [
-            "https://example.invalid/hook?token=secret",
-            "https://user:pass@example.invalid/hook",
-            "channel?authorization=Bearer%20abc",
-        ] {
-            assert!(
-                NotificationRoute::new("extension", destination).is_err(),
-                "{destination} must be rejected before it can reach a child environment"
+        let cases: Vec<Case> = vec![
+            (
+                (Some("cli.transport"), Some("cli-route")),
+                (Some("env.transport"), Some("env-route")),
+                route("cli.transport", "cli-route"),
+            ),
+            (
+                (None, None),
+                (Some("env.transport"), Some("env-route")),
+                route("env.transport", "env-route"),
+            ),
+            (
+                (Some("chosen.transport"), None),
+                (None, None),
+                transport_only("chosen.transport"),
+            ),
+            (
+                (None, None),
+                (Some("env.transport"), None),
+                transport_only("env.transport"),
+            ),
+            (
+                (None, None),
+                (None, None),
+                Some(NotificationRouteContext::None),
+            ),
+            ((Some("bad transport"), None), (None, None), None),
+            ((None, Some("cli-route")), (None, None), None),
+            ((None, None), (None, Some("env-route")), None),
+        ];
+        for ((cli_transport, cli_route), (env_transport, env_route), expected) in cases {
+            let resolved = with_route_env(env_transport, env_route, || {
+                from_cli_or_env(cli_transport, cli_route).ok()
+            });
+            assert_eq!(
+                resolved, expected,
+                "cli=({cli_transport:?}, {cli_route:?}) env=({env_transport:?}, {env_route:?})"
             );
-        }
-    }
-
-    #[test]
-    fn cli_context_wins_over_environment_context() {
-        let _lock = env_lock().lock().unwrap();
-        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
-        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
-        std::env::set_var(NOTIFICATION_TRANSPORT_ENV, "env.transport");
-        std::env::set_var(NOTIFICATION_ROUTE_ENV, "env-route");
-        let route = from_cli_or_env(Some("cli.transport"), Some("cli-route")).unwrap();
-        assert_eq!(route.into_route().unwrap().transport, "cli.transport");
-        match old_transport {
-            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
-        }
-        match old_route {
-            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
-        }
-    }
-
-    #[test]
-    fn environment_context_is_used_without_cli_context() {
-        let _lock = env_lock().lock().unwrap();
-        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
-        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
-        std::env::set_var(NOTIFICATION_TRANSPORT_ENV, "env.transport");
-        std::env::set_var(NOTIFICATION_ROUTE_ENV, "env-route");
-        let route = from_cli_or_env(None, None).unwrap().into_route().unwrap();
-        assert_eq!(route.transport, "env.transport");
-        assert_eq!(route.route, "env-route");
-        match old_transport {
-            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
-        }
-        match old_route {
-            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
-        }
-    }
-
-    /// A transport alone is valid CLI context: it carries enough identity for
-    /// a caller (`resolve_from_cli_or_env_with_evidence`) to go consult that
-    /// transport's declared route resolver, rather than being rejected here.
-    #[test]
-    fn transport_only_cli_context_is_valid() {
-        assert_eq!(
-            from_cli_or_env(Some("chosen.transport"), None).unwrap(),
-            NotificationRouteContext::TransportOnly("chosen.transport".to_string())
-        );
-    }
-
-    /// The same transport-only acceptance applies when the identity travels
-    /// through the environment instead of argv.
-    #[test]
-    fn transport_only_environment_context_is_valid() {
-        let _lock = env_lock().lock().unwrap();
-        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
-        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
-        std::env::remove_var(NOTIFICATION_ROUTE_ENV);
-        std::env::set_var(NOTIFICATION_TRANSPORT_ENV, "env.transport");
-        assert_eq!(
-            from_cli_or_env(None, None).unwrap(),
-            NotificationRouteContext::TransportOnly("env.transport".to_string())
-        );
-        match old_transport {
-            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
-        }
-        match old_route {
-            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
-        }
-    }
-
-    /// A malformed transport id is still rejected even with no route present.
-    #[test]
-    fn transport_only_still_validates_the_transport_id() {
-        assert!(from_cli_or_env(Some("bad transport"), None).is_err());
-    }
-
-    /// A route is meaningless without the transport that owns it, whether the
-    /// route arrives through argv or through the environment.
-    #[test]
-    fn route_without_transport_is_still_rejected() {
-        assert!(from_cli_or_env(None, Some("cli-route")).is_err());
-
-        let _lock = env_lock().lock().unwrap();
-        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
-        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
-        std::env::remove_var(NOTIFICATION_TRANSPORT_ENV);
-        std::env::set_var(NOTIFICATION_ROUTE_ENV, "env-route");
-        assert!(from_cli_or_env(None, None).is_err());
-        match old_transport {
-            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
-        }
-        match old_route {
-            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
-            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
         }
     }
 }

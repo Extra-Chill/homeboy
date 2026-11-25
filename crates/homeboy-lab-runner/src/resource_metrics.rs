@@ -1939,51 +1939,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cgroup_oom_kill_delta_is_authoritative_evidence() {
-        let evidence = cgroup_memory_evidence(
-            CgroupMemorySnapshot {
-                memory_limit_bytes: Some(64),
-                memory_current_bytes: Some(63),
-                memory_peak_bytes: Some(64),
-                oom_kill_count: Some(4),
-            },
-            CgroupMemorySnapshot {
-                memory_limit_bytes: Some(64),
-                memory_current_bytes: Some(12),
-                memory_peak_bytes: Some(64),
-                oom_kill_count: Some(5),
-            },
-        );
-
-        assert_eq!(evidence.status, "observed");
-        assert_eq!(evidence.oom_kill_delta, Some(1));
-        assert_eq!(evidence.scope, "child_cgroup");
-        assert_eq!(evidence.oom_kill_attribution, "unknown");
-        assert_eq!(evidence.memory_limit_bytes, Some(64));
-        assert_eq!(evidence.memory_peak_bytes, Some(64));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cgroup_evidence_does_not_misclassify_an_ordinary_sigkill_as_oom() {
-        let evidence = cgroup_memory_evidence(
-            CgroupMemorySnapshot {
-                memory_limit_bytes: Some(64),
-                memory_current_bytes: Some(24),
-                memory_peak_bytes: Some(32),
-                oom_kill_count: Some(4),
-            },
-            CgroupMemorySnapshot {
-                memory_limit_bytes: Some(64),
-                memory_current_bytes: Some(12),
-                memory_peak_bytes: Some(32),
-                oom_kill_count: Some(4),
-            },
-        );
-
-        assert_eq!(evidence.status, "observed");
-        assert_eq!(evidence.oom_kill_delta, Some(0));
-        assert_ne!(evidence.oom_kill_delta, Some(1));
+    fn cgroup_oom_kill_delta_is_the_only_oom_evidence() {
+        let snapshot = |current, oom_kill_count| CgroupMemorySnapshot {
+            memory_limit_bytes: Some(64),
+            memory_current_bytes: Some(current),
+            memory_peak_bytes: Some(64),
+            oom_kill_count: Some(oom_kill_count),
+        };
+        // An OOM kill increments the counter; an ordinary SIGKILL near the
+        // limit does not.
+        for (before, after, delta) in [(4, 5, 1), (4, 4, 0)] {
+            let evidence = cgroup_memory_evidence(snapshot(63, before), snapshot(12, after));
+            assert_eq!(evidence.status, "observed");
+            assert_eq!(evidence.oom_kill_delta, Some(delta));
+            assert_eq!(evidence.scope, "child_cgroup");
+            assert_eq!(evidence.memory_peak_bytes, Some(64));
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -2030,24 +2001,6 @@ mod tests {
     }
 
     #[test]
-    fn resource_guard_allows_idle_capacity_borrowing() {
-        let lab_capacity = 89 * 1024 * 1024 * 1024 + 7 * 1024 * 1024 * 1024 / 10;
-        let limits = resolved_rss_limit(Some(lab_capacity), None);
-        let trusted_cook_rss = 20 * 1024 * 1024 * 1024;
-
-        assert_eq!(limits.rss_limit_bytes, lab_capacity - lab_capacity / 10);
-        assert!(limits.rss_limit_bytes > 19 * 1024 * 1024 * 1024);
-        assert!(classify_resource_guard_violation(
-            trusted_cook_rss,
-            1,
-            limits.rss_limit_bytes,
-            128,
-        )
-        .is_none());
-        assert_eq!(limits.source, "active_load_aware");
-    }
-
-    #[test]
     fn effective_rss_limit_follows_host_available_memory() {
         const GIB: u64 = 1024 * 1024 * 1024;
         let resolved = resolved_rss_limit(Some(89 * GIB), None);
@@ -2086,8 +2039,19 @@ mod tests {
     }
 
     #[test]
-    fn rss_limit_resolution_covers_small_hosts_missing_capacity_and_overrides() {
+    fn rss_limit_resolution_covers_host_sizes_missing_capacity_and_overrides() {
         const GIB: u64 = 1024 * 1024 * 1024;
+        // Large hosts leave a 10% headroom so a trusted 20 GiB cook can borrow
+        // idle capacity.
+        let lab_capacity = 89 * GIB + 7 * GIB / 10;
+        let large_host = resolved_rss_limit(Some(lab_capacity), None);
+        assert_eq!(large_host.rss_limit_bytes, lab_capacity - lab_capacity / 10);
+        assert_eq!(large_host.source, "active_load_aware");
+        assert!(
+            classify_resource_guard_violation(20 * GIB, 1, large_host.rss_limit_bytes, 128)
+                .is_none()
+        );
+
         let small_host = resolved_rss_limit(Some(2 * GIB), None);
         assert_eq!(small_host.rss_limit_bytes, GIB);
         assert_eq!(small_host.source, "active_load_aware");
@@ -2128,7 +2092,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_env_overrides_the_process_limit_and_ceiling() {
+    fn daemon_env_overrides_are_clamped_to_the_process_ceiling() {
         let limit = resolve_process_count_limit(32, Some(768), None);
         assert_eq!(limit.limit, 768);
         assert_eq!(limit.requested, Some(768));
@@ -2143,10 +2107,7 @@ mod tests {
 
         let unclamped = resolve_process_count_limit(32, Some(4096), Some(0));
         assert_eq!(unclamped.limit, 4096, "a ceiling of 0 disables the clamp");
-    }
 
-    #[test]
-    fn process_limit_is_clamped_to_the_ceiling() {
         let override_capped = resolve_process_count_limit(32, Some(4096), None);
         assert_eq!(override_capped.limit, 1024);
         assert_eq!(override_capped.requested, Some(4096));

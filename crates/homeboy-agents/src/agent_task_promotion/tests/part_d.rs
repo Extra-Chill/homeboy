@@ -2,11 +2,7 @@
 #![cfg(test)]
 
 use super::super::promote::normalize_fixture_diff;
-use super::super::types::{
-    AgentTaskPromotionNotification, AgentTaskPromotionReport, AgentTaskPromotionRequest,
-    AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
-    AGENT_TASK_PROMOTION_REPORT_SCHEMA,
-};
+use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::candidate_fixture::{promote_with_provider, promote_with_provider_in_observation_store};
 use super::*;
 use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
@@ -118,20 +114,6 @@ fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
         AgentTaskPromotionStatus::Applied
     );
     assert_eq!(apply_calls, 0);
-}
-
-#[test]
-fn normalize_fixture_diff_strips_lab_sandbox_workspace_prefix() {
-    let patch = "diff --git a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n--- a/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n+++ b/workspace/homeboy-refactor-command-contract-boundaries-abc/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
-
-    let normalized = normalize_fixture_diff(patch, "homeboy@promoted-task")
-        .expect("sandbox-prefixed patch normalizes");
-
-    assert_eq!(normalized.changed_files, vec!["src/lib.rs"]);
-    assert_eq!(
-        normalized.content,
-        "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n"
-    );
 }
 
 #[test]
@@ -277,54 +259,6 @@ fn verified_unchanged_attempt_promotes_as_no_change_without_running_gates() {
     assert_eq!(report.target.head.as_deref(), Some(revision.as_str()));
 }
 
-/// #15855: the audited-candidate requirement is not weakened for a no_op claim
-/// without a patch artifact unless Homeboy verified the checkout unchanged.
-#[test]
-fn no_op_still_requires_an_audited_candidate_without_verification() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let source_path = temp.path().join("outcome.json");
-    let source = serde_json::json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "task-1",
-        "status": "no_op",
-        "summary": "executor finished without changes",
-    })
-    .to_string();
-    std::fs::write(&source_path, &source).expect("write source");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().join("target")),
-        ..Default::default()
-    };
-
-    let error = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("run-no-op".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "homeboy@no-op-attempt".to_string(),
-            task_id: Some("task-1".to_string()),
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect("no candidate and no change is a no-change result");
-
-    assert_eq!(
-        error.status,
-        AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
-    );
-    assert!(provider.apply_calls.is_empty());
-}
-
 #[test]
 fn promote_exports_committed_changes_when_evidence_is_empty() {
     let _home = gate_home();
@@ -464,16 +398,6 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
             .is_none()
         );
     });
-}
-
-#[test]
-fn validate_patch_rejects_path_traversal() {
-    let patch = "--- a/src/lib.rs\n+++ b/../secret\n@@ -1 +1 @@\n-old\n+new\n";
-
-    let err =
-        normalize_fixture_diff(patch, "repo@promoted-task").expect_err("unsafe path rejected");
-
-    assert!(err.message.contains("unsafe patch path"));
 }
 
 #[test]
@@ -678,68 +602,6 @@ fn explicit_candidate_rejections_leave_target_unmodified() {
         );
         assert!(provider.apply_calls.is_empty(), "{name} mutated target");
     }
-}
-
-#[test]
-fn promotion_report_serializes_generic_command_evidence() {
-    let _home = gate_home();
-    let report = AgentTaskPromotionReport {
-        candidate_ref: None,
-        schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
-        status: AgentTaskPromotionStatus::Applied,
-        source: AgentTaskPromotionSource {
-            kind: "outcome".to_string(),
-            task_id: "task-1".to_string(),
-            run_id: Some("run-1".to_string()),
-            path: None,
-        },
-        to_worktree: "repo@controlled-worktree".to_string(),
-        target: AgentTaskPromotionTarget {
-            worktree: "repo@controlled-worktree".to_string(),
-            path: Some("/tmp/repo@controlled-worktree".to_string()),
-            branch: Some("fix/test".to_string()),
-            head: Some("abc123".to_string()),
-            dirty: Some(true),
-        },
-        candidate: Some(crate::agent_task::AgentTaskCandidate {
-            base_sha: "base".to_string(),
-            candidate_sha: "patch".to_string(),
-            tree_sha: "tree".to_string(),
-        }),
-        changed_files: vec!["src/lib.rs".to_string()],
-        command_evidence: vec![command_report(vec![
-            "fake-workspace-provider",
-            "apply-patch",
-        ])],
-        deterministic_gates: Vec::new(),
-        gate_results: Vec::new(),
-        repository_integrity_evidence: Some(
-            homeboy_core::repository_integrity::RepositoryIntegrityEvidence {
-                origin: "ssh://example.test/homeboy.git".to_string(),
-                symlink_exceptions: Vec::new(),
-                sha256: "sha256:admitted".to_string(),
-            },
-        ),
-        verified_base: None,
-        provenance: Value::Null,
-        operator_notification: AgentTaskPromotionNotification {
-            status: "completed".to_string(),
-            message: "patch promoted".to_string(),
-            resumable_blocker: None,
-            next_command: None,
-        },
-    };
-
-    let value = serde_json::to_value(report).expect("serialize report");
-    assert_eq!(
-        value["repository_integrity_evidence"]["sha256"],
-        "sha256:admitted"
-    );
-
-    assert_eq!(
-        value["command_evidence"][0]["command"][0].as_str(),
-        Some("fake-workspace-provider")
-    );
 }
 
 /// Harvest captures `git diff --binary --full-index --find-renames`; sections

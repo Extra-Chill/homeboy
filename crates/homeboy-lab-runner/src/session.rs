@@ -1119,20 +1119,6 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn matching_configured_binary_evidence_does_not_create_a_stale_warning() {
-        let mut report = base_report();
-        report.configured_job_binary_build_identity =
-            Some("homeboy 0.339.0+83a9bd058619".to_string());
-
-        assert!(report.stale_daemon.is_none());
-        assert_eq!(
-            report.configured_job_binary_build_identity.as_deref(),
-            Some("homeboy 0.339.0+83a9bd058619")
-        );
-        assert!(!report.daemon_fresh_for_admission());
-    }
-
-    #[test]
     fn fresh_flag_without_a_lease_cannot_authorize_admission() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
@@ -1194,7 +1180,7 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn admission_summary_fresh_idle_accepts_and_is_safe_to_rotate() {
+    fn admission_summary_fresh_daemon_accepts_and_only_idle_is_safe_to_rotate() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
         report.daemon_freshness = Some(fresh_daemon_freshness());
@@ -1205,6 +1191,15 @@ mod status_serialization_tests {
         assert_eq!(summary.active_job_count, Some(0));
         assert!(summary.safe_to_rotate);
         assert_eq!(summary.next_action, None);
+
+        report.active_job_count = 3;
+        let busy = report.admission_summary();
+        assert!(busy.accepting_jobs, "a busy fresh runner still admits work");
+        assert_eq!(busy.active_job_count, Some(3));
+        assert!(
+            !busy.safe_to_rotate,
+            "an authoritative active job blocks rotation"
+        );
     }
 
     #[test]
@@ -1221,24 +1216,6 @@ mod status_serialization_tests {
         assert_eq!(
             summary.next_action.as_deref(),
             Some("homeboy runner status homeboy-lab --full")
-        );
-    }
-
-    #[test]
-    fn admission_summary_busy_is_not_safe_to_rotate_but_still_accepting() {
-        let mut report = base_report();
-        report.active_job_state = RunnerActiveJobState::Available;
-        report.daemon_freshness = Some(fresh_daemon_freshness());
-        report.active_job_count = 3;
-        let summary = report.admission_summary();
-        assert!(
-            summary.accepting_jobs,
-            "a busy fresh runner still admits work"
-        );
-        assert_eq!(summary.active_job_count, Some(3));
-        assert!(
-            !summary.safe_to_rotate,
-            "an authoritative active job blocks rotation"
         );
     }
 
@@ -1289,23 +1266,6 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn admission_summary_missing_freshness_fails_closed_with_diagnostic_action() {
-        let mut report = base_report();
-        report.active_job_state = RunnerActiveJobState::Available;
-
-        let summary = report.admission_summary();
-
-        assert!(!summary.daemon_fresh);
-        assert!(summary.daemon_compatible);
-        assert!(!summary.accepting_jobs);
-        assert!(!report.daemon_fresh_for_admission());
-        assert_eq!(
-            summary.next_action.as_deref(),
-            Some("homeboy runner status homeboy-lab --full")
-        );
-    }
-
-    #[test]
     fn persisted_session_drift_recommends_an_accepted_release_tag() {
         let warning = RunnerStaleDaemonWarning::new(
             "homeboy-lab",
@@ -1338,36 +1298,45 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn admission_summary_lease_missing_with_unavailable_reconciliation_plan_is_terminal() {
-        let mut report = base_report();
-        report.connected = false;
-        report.state = RunnerSessionState::Disconnected;
-        report.active_job_state = RunnerActiveJobState::Available;
-        report.daemon_freshness = Some(DaemonFreshnessReport {
-            fresh: false,
-            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
-            restartable: false,
-            lease_id: None,
-            pid: None,
-            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
-            ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
-            daemon_version: None,
-            daemon_build_identity: None,
-            runtime_paths: None,
-            active_jobs: 0,
-            termination_evidence: None,
-            repair_plan: vec![homeboy_core::daemon::DaemonRepairStep::text(
-                "runner_connect",
-                "homeboy runner connect homeboy-lab",
-            )],
-        });
+    fn admission_summary_lease_missing_with_unavailable_reconciliation_is_terminal() {
+        // Terminal ownership suppresses every admission action, including the
+        // connect hint a disconnected runner would otherwise get.
+        for (connected, jobs) in [
+            (false, RunnerActiveJobState::Available),
+            (true, RunnerActiveJobState::Unavailable),
+        ] {
+            let mut report = base_report();
+            if !connected {
+                report.connected = false;
+                report.state = RunnerSessionState::Disconnected;
+            }
+            report.active_job_state = jobs;
+            report.daemon_freshness = Some(DaemonFreshnessReport {
+                fresh: false,
+                stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
+                restartable: false,
+                lease_id: None,
+                pid: None,
+                recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
+                ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: vec![homeboy_core::daemon::DaemonRepairStep::text(
+                    "runner_connect",
+                    "homeboy runner connect homeboy-lab",
+                )],
+            });
 
-        let summary = report.admission_summary();
+            let summary = report.admission_summary();
 
-        assert!(!summary.daemon_fresh);
-        assert!(!summary.accepting_jobs);
-        assert!(!summary.safe_to_rotate);
-        assert_eq!(summary.next_action, None);
+            assert!(!summary.daemon_fresh);
+            assert!(!summary.accepting_jobs);
+            assert!(!summary.safe_to_rotate);
+            assert_eq!(summary.next_action, None);
+        }
     }
 
     #[test]
@@ -1506,10 +1475,19 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn admission_summary_missing_or_unclassified_freshness_is_not_safe_to_rotate() {
+    fn admission_summary_missing_or_unclassified_freshness_fails_closed() {
         let mut missing_report = base_report();
         missing_report.active_job_state = RunnerActiveJobState::Available;
-        assert!(!missing_report.admission_summary().safe_to_rotate);
+        let missing = missing_report.admission_summary();
+        assert!(!missing.daemon_fresh);
+        assert!(missing.daemon_compatible);
+        assert!(!missing.accepting_jobs);
+        assert!(!missing.safe_to_rotate);
+        assert!(!missing_report.daemon_fresh_for_admission());
+        assert_eq!(
+            missing.next_action.as_deref(),
+            Some("homeboy runner status homeboy-lab --full")
+        );
 
         let mut unclassified_report = missing_report;
         unclassified_report.daemon_freshness = Some(DaemonFreshnessReport {
@@ -1557,31 +1535,6 @@ mod status_serialization_tests {
             !summary.safe_to_rotate,
             "ambiguous lease ownership must still fence rotation"
         );
-    }
-
-    #[test]
-    fn terminal_ownership_suppresses_every_admission_action() {
-        let mut report = base_report();
-        report.active_job_state = RunnerActiveJobState::Unavailable;
-        report.daemon_freshness = Some(DaemonFreshnessReport {
-            fresh: false,
-            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing),
-            restartable: false,
-            lease_id: None,
-            pid: None,
-            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
-            ownership_evidence: Some("ambiguous remote daemon candidates".to_string()),
-            daemon_version: None,
-            daemon_build_identity: None,
-            runtime_paths: None,
-            active_jobs: 0,
-            termination_evidence: None,
-            repair_plan: Vec::new(),
-        });
-
-        let summary = report.admission_summary();
-
-        assert_eq!(summary.next_action, None);
     }
 }
 

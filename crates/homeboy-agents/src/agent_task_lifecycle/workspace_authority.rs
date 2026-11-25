@@ -651,8 +651,16 @@ mod tests {
                 remote_workspace: "/runner/_lab_workspaces/workspace-1".to_string(),
             };
             persist_workspace_terminal_authority(receipt.clone()).expect("persist receipt");
-            persist_workspace_terminal_authority(receipt)
+            persist_workspace_terminal_authority(receipt.clone())
                 .expect("terminal progression is idempotent");
+            assert!(
+                persist_workspace_terminal_authority(WorkspaceTerminalAuthorityReceipt {
+                    runner_job_id: "job-2".to_string(),
+                    ..receipt
+                })
+                .is_err(),
+                "a conflicting receipt for the same run is rejected"
+            );
 
             assert!(resolve_retained_workspace("run-1")
                 .expect("discover from run id after record compaction")
@@ -694,6 +702,12 @@ mod tests {
                 "/runner/_lab_workspaces/workspace-1",
             )
             .expect("pending cleanup authority"));
+            assert!(!workspace_terminal_authority_release_is_pending(
+                "run-1",
+                "other-runner",
+                "/runner/_lab_workspaces/workspace-1",
+            )
+            .expect("pending is bound to the exact runner"));
             abort_workspace_terminal_authority_release(
                 "run-1",
                 "lab-runner",
@@ -714,6 +728,12 @@ mod tests {
                 "/runner/_lab_workspaces/workspace-1",
             )
             .expect("remove after workspace cleanup");
+            begin_workspace_terminal_authority_release(
+                "run-1",
+                "lab-runner",
+                "/runner/_lab_workspaces/workspace-1",
+            )
+            .expect("completed release is idempotent");
             assert!(resolve_workspace_terminal_authority(
                 "run-1",
                 "lab-runner",
@@ -785,23 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn receipt_is_one_held_record_keyed_by_run_id_and_conflicts_are_rejected() {
-        let (_dir, authority) = isolated_store();
-        authority.persist(receipt("job-1")).expect("persist");
-        authority.persist(receipt("job-1")).expect("idempotent");
-        assert!(authority.persist(receipt("job-2")).is_err());
-
-        let record = authority
-            .open()
-            .unwrap()
-            .coordination_record(NAMESPACE, "run-1")
-            .unwrap()
-            .expect("record keyed by run id");
-        assert_eq!(record.state, STATE_HELD);
-        assert_eq!(record.revision, 1);
-    }
-
-    #[test]
     fn concurrent_begin_release_transitions_exactly_once() {
         const CALLERS: usize = 6;
         let (_dir, authority) = isolated_store();
@@ -842,47 +845,6 @@ mod tests {
             .expect("pending record");
         assert_eq!(record.state, STATE_RELEASE_PENDING);
         assert_eq!(record.revision, 2);
-    }
-
-    #[test]
-    fn release_state_survives_reopen_and_removal_deletes_the_record() {
-        let (_dir, authority) = isolated_store();
-        authority.persist(receipt("job-1")).expect("persist");
-        authority
-            .begin_release("run-1", "runner-1", "/runner/workspace")
-            .expect("begin");
-
-        // A fresh handle over the same database observes the pending state.
-        let reopened = authority.clone();
-        assert!(reopened
-            .release_is_pending("run-1", "runner-1", "/runner/workspace")
-            .unwrap());
-        assert!(!reopened
-            .release_is_pending("run-1", "other-runner", "/runner/workspace")
-            .unwrap());
-
-        reopened
-            .remove_authority("run-1", "runner-1", "/runner/workspace")
-            .expect("remove");
-        assert!(reopened
-            .open()
-            .unwrap()
-            .coordination_record(NAMESPACE, "run-1")
-            .unwrap()
-            .is_none());
-        reopened
-            .begin_release("run-1", "runner-1", "/runner/workspace")
-            .expect("completed release is idempotent");
-        reopened
-            .persist(receipt("job-1"))
-            .expect("late projection is suppressed");
-        assert!(reopened
-            .open()
-            .unwrap()
-            .coordination_record(NAMESPACE, "run-1")
-            .unwrap()
-            .is_none());
-        assert!(reopened.resolve_retained_workspace("run-1").is_err());
     }
 
     #[test]

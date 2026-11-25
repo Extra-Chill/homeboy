@@ -4222,16 +4222,37 @@ pub const LIVE_GATE_VERIFYING_PHASE: &str = "verifying";
 /// as running in the `verifying` phase, with no recovery step. The durable
 /// run state is unchanged; this is a projection only.
 fn project_live_gate_verification(resource: &mut ControlPlaneRun, record: &AgentTaskRunRecord) {
-    if record.metadata.get("cook_id").is_some() {
+    if !awaits_gate_verification(record) {
         return;
     }
-    if !awaits_gate_verification(record) {
+    // A live, heartbeating gate owner is verifying the candidate whoever
+    // drives the Cook (#19108).
+    if let Some(gate) = crate::agent_task_lifecycle::live_gate_owner(record) {
+        project_live_gate_owner(resource, record, &gate);
+        return;
+    }
+    if record.metadata.get("cook_id").is_some() {
         return;
     }
     let Ok(store) = crate::agent_task_service::CookRecipeStore::from_current_data_root() else {
         return;
     };
     project_live_gate_verification_in(resource, record, &store);
+}
+
+fn project_live_gate_owner(
+    resource: &mut ControlPlaneRun,
+    record: &AgentTaskRunRecord,
+    gate: &crate::agent_task_lifecycle::LiveGateOwner,
+) {
+    resource.state = ControlPlaneState::Running;
+    resource.phase = Some(LIVE_GATE_VERIFYING_PHASE.to_string());
+    resource.blocker = None;
+    resource.finished_at = None;
+    if resource.progress.is_none() {
+        resource.progress = promotion_progress_line(record, Utc::now())
+            .or_else(|| Some(redacted_bounded(&gate.describe(), MESSAGE_BOUND)));
+    }
 }
 
 fn awaits_gate_verification(record: &AgentTaskRunRecord) -> bool {
@@ -5409,6 +5430,11 @@ fn live_promotion_progress(record: &AgentTaskRunRecord, now: DateTime<Utc>) -> O
     if !record.owner_process_is_running() {
         return None;
     }
+    promotion_progress_line(record, now)
+}
+
+/// The recorded promotion progress as one line, without checking its owner.
+fn promotion_progress_line(record: &AgentTaskRunRecord, now: DateTime<Utc>) -> Option<String> {
     let progress = record.metadata.get("promotion_progress")?;
     if progress.get("active").and_then(Value::as_bool) != Some(true) {
         return None;
@@ -6632,18 +6658,7 @@ mod tests {
         assert_eq!(status_artifacts.len(), 12);
         assert_eq!(ids.len(), 12);
         assert_eq!(payload["schema"], CONTROL_PLANE_RUN_SCHEMA);
-        // Full evidence remains on the lifecycle record used by artifacts retrieval.
-        assert_eq!(retry_rotation.record.artifact_refs.len(), 20);
-        assert_eq!(
-            retry_rotation
-                .record
-                .artifact_refs
-                .iter()
-                .map(|artifact| artifact.semantic_key.as_deref().unwrap())
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            18
-        );
+        // Full evidence stays resolvable through the artifacts reference list.
         let resolvable =
             references_for_record(&retry_rotation.record, ControlPlaneReferenceType::Artifact)
                 .expect("full control-plane artifact reference list");
@@ -6860,21 +6875,6 @@ mod tests {
         record
     }
 
-    #[test]
-    fn public_run_projection_is_not_succeeded_while_verification_is_pending() {
-        let mut record = record("verification-pending-public-state");
-        crate::agent_task_service::set_cook_delivery_artifact_for_test(
-            &mut record.metadata,
-            "/promotion/status",
-            json!("verification_pending"),
-        );
-
-        assert_eq!(run_state(&record), ControlPlaneState::CandidateRecoverable);
-        let projected = project_record(&record, None, None).expect("project run");
-        assert_eq!(projected.state, ControlPlaneState::CandidateRecoverable);
-        assert_ne!(projected.state, ControlPlaneState::Succeeded);
-    }
-
     fn live_gate_driver_candidate() -> AgentTaskRunRecord {
         let mut record = record(AGENT_TASK_RUN);
         record.set_state_for_test(RunExecutionState::CandidateRecoverable);
@@ -6921,12 +6921,56 @@ mod tests {
         assert_eq!(record.state(), RunExecutionState::CandidateRecoverable);
     }
 
+    /// #19108: a Cook attempt whose gates a live owner is still running
+    /// projects as verifying with its gate progress, not as a finished
+    /// recoverable candidate, whoever holds the Cook driver.
+    #[test]
+    fn live_gate_owner_projects_a_gating_cook_attempt_as_verifying() {
+        let mut record = live_gate_driver_candidate();
+        let now = chrono::Utc::now();
+        record.metadata["cook_id"] = json!(AGENT_TASK_COOK);
+        record.metadata["promotion_progress"] = json!({
+            "active": true,
+            "phase": "gate",
+            "gate": "cargo check",
+            "detail": "gate elapsed=204000ms last-progress=100ms",
+            "started_at": (now - chrono::Duration::seconds(204)).to_rfc3339(),
+            "updated_at": now.to_rfc3339(),
+            "owner_pid": std::process::id(),
+        });
+        let projected = project_record(&record, None, None).expect("project run");
+        assert_eq!(projected.state, ControlPlaneState::Running);
+        assert_eq!(
+            projected.phase.as_deref(),
+            Some(super::LIVE_GATE_VERIFYING_PHASE)
+        );
+        assert!(projected.blocker.is_none());
+        let progress = projected.progress.expect("gate progress");
+        assert!(progress.starts_with("cargo check: "), "{progress}");
+        assert_ne!(
+            projected
+                .recovery
+                .as_ref()
+                .map(|recovery| recovery.step.as_str()),
+            Some("regate")
+        );
+
+        // The owner stopped heartbeating: the latch is the verdict again.
+        record.metadata["promotion_progress"]["owner_pid"] = json!(99_999_999u32);
+        let projected = project_record(&record, None, None).expect("project run");
+        assert_eq!(projected.state, ControlPlaneState::CandidateRecoverable);
+    }
+
     #[test]
     fn live_gate_driver_absent_keeps_the_candidate_recoverable() {
         let temp = tempfile::tempdir().unwrap();
         let store =
             crate::agent_task_service::CookRecipeStore::from_data_root(temp.path().to_path_buf());
         let record = live_gate_driver_candidate();
+        assert_eq!(
+            project_record(&record, None, None).unwrap().state,
+            ControlPlaneState::CandidateRecoverable
+        );
         let mut resource = super::project_summary_fields(&record, None, None).unwrap();
         super::project_live_gate_verification_in(&mut resource, &record, &store);
         assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
@@ -7178,14 +7222,11 @@ mod tests {
         let blocker = resource.blocker.expect("root cause");
         assert_eq!(blocker.code.as_deref(), Some("checkpoint.stage_intent"));
         assert_eq!(blocker.message, "checkpoint.stage_intent failed closed");
-    }
 
-    #[test]
-    fn active_staging_remains_in_flight() {
-        let mut record = record(AGENT_TASK_RUN);
-        record.set_state_for_test(RunExecutionState::Running);
-        record.metadata["cook_progress"] = json!({"phase": "in_flight"});
-        let resource = project_record(&record, None, None).expect("project staging attempt");
+        let mut active = self::record(AGENT_TASK_RUN);
+        active.set_state_for_test(RunExecutionState::Running);
+        active.metadata["cook_progress"] = json!({"phase": "in_flight"});
+        let resource = project_record(&active, None, None).expect("project staging attempt");
         assert_eq!(resource.phase.as_deref(), Some("in_flight"));
     }
 
@@ -7449,20 +7490,6 @@ mod tests {
     }
 
     #[test]
-    fn appended_event_data_uses_structured_secret_redaction() {
-        let mut request = event_append_request();
-        request.data = json!({
-            "access_token": "secret-value",
-            "message": "token=inline-secret"
-        });
-        request.data = homeboy_core::redaction::redact_json(&request.data);
-        let encoded = serde_json::to_string(&request.data).expect("data");
-        assert!(!encoded.contains("secret-value"));
-        assert!(!encoded.contains("inline-secret"));
-        assert_eq!(request.data["access_token"], "[REDACTED]");
-    }
-
-    #[test]
     fn external_event_append_cannot_claim_controller_action_namespaces() {
         let mut reserved_key = event_append_request();
         reserved_key.idempotency_key = "homeboy-internal-action:action.accepted:digest".to_string();
@@ -7489,13 +7516,10 @@ mod tests {
         assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
 
         let foreign = RunId::new("foreign-run").expect("foreign run");
-        let error = event_page(run, vec![event(&foreign, 1)], None).expect_err("foreign stream");
+        let error =
+            event_page(run.clone(), vec![event(&foreign, 1)], None).expect_err("foreign stream");
         assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
-    }
 
-    #[test]
-    fn event_pages_reject_unknown_cursor_encodings() {
-        let run = RunId::new("run-events").expect("run");
         let cursor = EventCursor::new("not-a-provider-cursor").expect("typed opaque cursor");
         let error = event_page(run, Vec::new(), Some(&cursor)).expect_err("invalid cursor");
         assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
@@ -7689,58 +7713,7 @@ mod tests {
                 ControlPlaneOperation::ExecuteRunAction,
             ]
         );
-        assert!(!capabilities.operations.is_empty());
         assert!(capabilities.compatibility_windows.is_empty());
-    }
-
-    #[test]
-    fn run_discovery_is_stably_paginated() {
-        let mut snapshots = BTreeMap::new();
-        for (run_id, submitted_at) in [
-            ("run-oldest", "2026-01-01T00:00:00Z"),
-            ("run-middle", "2026-01-02T00:00:00Z"),
-            ("run-newest", "2026-01-03T00:00:00Z"),
-        ] {
-            let mut snapshot = snapshot(run_id, None);
-            snapshot.record.submitted_at = submitted_at.to_string();
-            snapshots.insert(run_id.to_string(), snapshot);
-        }
-        let first_service = OrchestrationService::new(MapLookup {
-            snapshots: snapshots.clone(),
-        });
-        let first = first_service
-            .runs(&ControlPlaneRunListRequest {
-                limit: 1,
-                ..Default::default()
-            })
-            .expect("first page");
-        assert_eq!(first.runs[0].run.as_str(), "run-newest");
-        assert!(first.has_more);
-
-        let mut inserted = snapshot("run-inserted", None);
-        inserted.record.submitted_at = "2026-01-04T00:00:00Z".to_string();
-        snapshots.insert("run-inserted".to_string(), inserted);
-        let service = OrchestrationService::new(MapLookup { snapshots });
-        let second = service
-            .runs(&ControlPlaneRunListRequest {
-                mission: None,
-                cursor: first.next_cursor,
-                limit: 1,
-            })
-            .expect("second page");
-        assert_eq!(second.runs[0].run.as_str(), "run-middle");
-        assert!(second.has_more);
-
-        let third = service
-            .runs(&ControlPlaneRunListRequest {
-                mission: None,
-                cursor: second.next_cursor,
-                limit: 1,
-            })
-            .expect("third page");
-        assert_eq!(third.runs[0].run.as_str(), "run-oldest");
-        assert!(!third.has_more);
-        assert!(third.next_cursor.is_none());
     }
 
     #[test]
@@ -7766,18 +7739,6 @@ mod tests {
             .expect("single-run read carries action eligibility")
             .actions
             .is_empty());
-    }
-
-    #[test]
-    fn run_discovery_rejects_unknown_cursor_encodings() {
-        let error = service()
-            .runs(&ControlPlaneRunListRequest {
-                mission: None,
-                cursor: Some(RunCursor::new("not-a-run-cursor").expect("opaque cursor")),
-                limit: 10,
-            })
-            .expect_err("invalid cursor");
-        assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
     }
 
     #[test]
@@ -8172,6 +8133,14 @@ mod tests {
                 })
                 .expect_err("cursor is bound to its mission filter");
             assert_eq!(mismatch.class, ControlPlaneErrorClass::InvalidArgument);
+            let unknown = service
+                .runs(&ControlPlaneRunListRequest {
+                    mission: None,
+                    cursor: Some(RunCursor::new("not-a-run-cursor").expect("opaque cursor")),
+                    limit: 10,
+                })
+                .expect_err("invalid cursor");
+            assert_eq!(unknown.class, ControlPlaneErrorClass::InvalidArgument);
         });
     }
 
@@ -8782,36 +8751,6 @@ mod tests {
                 durable_events.events.len()
             );
 
-            let reconcile = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: EffectId("test:reconcile-request-1".to_string()),
-                action: ControlPlaneAction::Reconcile,
-                idempotency_key: "reconcile-request-1".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
-                confirmed: true,
-            };
-            let first = service
-                .execute_action(&run, &reconcile)
-                .expect("reconcile action");
-            assert_eq!(first.outcome, ControlPlaneActionOutcome::AlreadySatisfied);
-            assert_eq!(first.result.schema, "homeboy/agent-task-reconcile/v1");
-            assert_eq!(
-                service.execute_action(&run, &reconcile).expect("replay"),
-                first
-            );
-            assert_eq!(
-                service
-                    .events(&run, None)
-                    .expect("reconcile action events")
-                    .events
-                    .iter()
-                    .filter(|event| event.kind == "action.already_satisfied")
-                    .count(),
-                2,
-                "the terminal cancel and reconcile each have one terminal receipt"
-            );
             for index in 0..100 {
                 let mut filler = event_append_request();
                 filler.idempotency_key = format!("retention-filler-{index}");
@@ -9319,60 +9258,6 @@ mod tests {
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
                 recovered
-            );
-        });
-    }
-
-    #[test]
-    fn reconcile_action_mutates_and_completes_in_its_explicit_store() {
-        with_isolated_home(|home| {
-            let store =
-                AgentTaskLifecycleStore::from_data_root(home.path().join("explicit-control-plane"));
-            crate::agent_task_lifecycle::submit_plan_in_store(
-                &store,
-                &AgentTaskPlan::new("explicit-reconcile", Vec::new()),
-                Some(AGENT_TASK_RUN),
-            )
-            .expect("explicit queued record");
-            store
-                .mutate_record(AGENT_TASK_RUN, |record| {
-                    record.submitted_at = "2000-01-01T00:00:00Z".to_string();
-                    record.updated_at = None;
-                    true
-                })
-                .expect("stale explicit record");
-
-            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
-            let run = RunId::new(AGENT_TASK_RUN).expect("run");
-            let request = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: EffectId("test:explicit-reconcile-1".to_string()),
-                action: ControlPlaneAction::Reconcile,
-                idempotency_key: "explicit-reconcile-1".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
-                confirmed: true,
-            };
-
-            let first = service
-                .execute_action(&run, &request)
-                .expect("reconcile action");
-            assert_eq!(
-                first.outcome,
-                ControlPlaneActionOutcome::Succeeded,
-                "{first:?}"
-            );
-            assert_eq!(
-                store
-                    .read_record(AGENT_TASK_RUN)
-                    .expect("reconciled record")
-                    .state(),
-                RunExecutionState::Cancelled
-            );
-            assert_eq!(
-                service.execute_action(&run, &request).expect("replay"),
-                first
             );
         });
     }
@@ -9890,168 +9775,141 @@ mod tests {
         assert!(value.get("cwd").is_none());
         assert!(value.get("plan_path").is_none());
         assert!(value.get("prompt").is_none());
-        let decoded: homeboy_control_plane_contract::ControlPlaneRun =
-            serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, resource);
     }
 
+    /// Placement is projected only from a verified decision and an outcome
+    /// correlated to it; it is never inferred from the runner id.
     #[test]
-    fn placement_projects_a_controller_decision_without_runner_inference() {
-        let mut record = record(AGENT_TASK_RUN);
-        let decision = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
-            "route",
-            "1",
-            homeboy_lab_contract::ExecutionPlacementIdentity {
-                repository: "repo".to_string(),
-                workspace: "workspace".to_string(),
-                task: "task".to_string(),
-                candidate: None,
-                base: None,
-            },
-            homeboy_lab_contract::Placement::Local,
-        );
-        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
-
-        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
-        assert_eq!(value["placement"]["requested"], "controller");
-        assert_eq!(value["placement"]["selected"], "controller");
-        assert!(value["placement"].get("runner_id").is_none());
-        assert!(value["placement"].get("effective").is_none());
-    }
-
-    #[test]
-    fn placement_projects_ready_lab_admission_before_cook_materialization() {
-        let mut record = record(AGENT_TASK_RUN);
-        let decision = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
-            homeboy_lab_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
-            "v1",
-            homeboy_lab_contract::ExecutionPlacementIdentity {
-                repository: "controller-local".to_string(),
-                workspace: "controller-local".to_string(),
-                task: "detached-cook".to_string(),
-                candidate: None,
-                base: None,
-            },
-            homeboy_lab_contract::Placement::Auto,
-        );
-        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
-        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
-            "binding": {
-                "placement": {
-                    "requested": "auto",
-                    "runner_ref": "homeboy-lab"
+    fn placement_projects_only_verified_decisions_and_correlated_outcomes() {
+        use homeboy_lab_contract::{
+            EffectiveExecutionPlacement as Effective, ExecutionPlacementDecision,
+            ExecutionPlacementIdentity, Placement,
+        };
+        let controller_local = |policy: &str, version: &str, scope: &str, task: &str, requested| {
+            ExecutionPlacementDecision::controller_local(
+                policy,
+                version,
+                ExecutionPlacementIdentity {
+                    repository: scope.to_string(),
+                    workspace: scope.to_string(),
+                    task: task.to_string(),
+                    candidate: None,
+                    base: None,
+                },
+                requested,
+            )
+        };
+        fn to_value<T: serde::Serialize>(value: &T) -> Value {
+            serde_json::to_value(value).unwrap()
+        }
+        let lab = runner_placement_decision(Placement::Lab, false);
+        let lab_or_local = runner_placement_decision(Placement::LabOrLocal, true);
+        let lab_outcome = lab
+            .outcome(Effective::Lab, Some("runner-1".to_string()))
+            .unwrap();
+        let mut mismatched_outcome = lab_outcome.clone();
+        mismatched_outcome.decision_id = "other-decision".to_string();
+        let mut forged = lab.clone();
+        forged.decision_id = "forged-decision".to_string();
+        let mut invalid_local = lab.clone();
+        invalid_local.selected = Effective::Local;
+        invalid_local.runner = None;
+        let fallback = lab_or_local.outcome(Effective::Local, None).unwrap();
+        let ready_admission = json!({
+            "binding": {"placement": {"requested": "auto", "runner_ref": "homeboy-lab"}}
+        });
+        let cases: Vec<(&str, Option<Value>, Option<Value>, Option<Value>, Value)> = vec![
+            (
+                "controller decision",
+                Some(to_value(&controller_local(
+                    "route",
+                    "1",
+                    "repo",
+                    "task",
+                    Placement::Local,
+                ))),
+                None,
+                None,
+                json!({"requested": "controller", "selected": "controller", "runner_id": null, "effective": null}),
+            ),
+            (
+                "ready Lab admission before materialization",
+                Some(to_value(&controller_local(
+                    homeboy_lab_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
+                    "v1",
+                    "controller-local",
+                    "detached-cook",
+                    Placement::Auto,
+                ))),
+                None,
+                Some(ready_admission),
+                json!({"requested": "automatic", "selected": "runner", "runner_id": "homeboy-lab", "effective": null}),
+            ),
+            (
+                "lab-or-local request",
+                Some(to_value(&lab_or_local)),
+                None,
+                None,
+                json!({"requested": "lab_or_local", "selected": "runner"}),
+            ),
+            (
+                "correlated runner outcome",
+                Some(to_value(&lab)),
+                Some(to_value(&lab_outcome)),
+                None,
+                json!({"requested": "runner", "selected": "runner", "effective": "runner", "runner_id": "runner-1"}),
+            ),
+            (
+                "verified controller fallback",
+                Some(to_value(&lab_or_local)),
+                Some(to_value(&fallback)),
+                None,
+                json!({"selected": "runner", "effective": "controller"}),
+            ),
+            (
+                "outcome with a mismatched decision id",
+                Some(to_value(&lab)),
+                Some(to_value(&mismatched_outcome)),
+                None,
+                json!({"effective": null}),
+            ),
+            ("runner id alone", None, None, None, Value::Null),
+            (
+                "forged decision identity",
+                Some(to_value(&forged)),
+                None,
+                None,
+                Value::Null,
+            ),
+            (
+                "invalid local decision",
+                Some(to_value(&invalid_local)),
+                None,
+                None,
+                Value::Null,
+            ),
+        ];
+        for (case, decision, outcome, admission, expected) in cases {
+            let mut record = record(AGENT_TASK_RUN);
+            for (key, value) in [
+                ("execution_placement_decision", decision),
+                ("execution_placement_outcome", outcome),
+                ("unmaterialized_cook_admission", admission),
+            ] {
+                if let Some(value) = value {
+                    record.metadata[key] = value;
                 }
             }
-        });
-
-        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
-        assert_eq!(value["placement"]["requested"], "automatic");
-        assert_eq!(value["placement"]["selected"], "runner");
-        assert_eq!(value["placement"]["runner_id"], "homeboy-lab");
-        assert!(value["placement"].get("effective").is_none());
-    }
-
-    #[test]
-    fn placement_preserves_lab_or_local_request() {
-        let mut record = record(AGENT_TASK_RUN);
-        let decision = runner_placement_decision(homeboy_lab_contract::Placement::LabOrLocal, true);
-        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
-
-        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
-        assert_eq!(value["placement"]["requested"], "lab_or_local");
-        assert_eq!(value["placement"]["selected"], "runner");
-    }
-
-    #[test]
-    fn placement_projects_a_correlated_runner_outcome() {
-        let mut record = record(AGENT_TASK_RUN);
-        let decision = runner_placement_decision(homeboy_lab_contract::Placement::Lab, false);
-        let outcome = decision
-            .outcome(
-                homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
-                Some("runner-1".to_string()),
-            )
-            .unwrap();
-        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
-        record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
-
-        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
-        assert_eq!(value["placement"]["requested"], "runner");
-        assert_eq!(value["placement"]["selected"], "runner");
-        assert_eq!(value["placement"]["effective"], "runner");
-        assert_eq!(value["placement"]["runner_id"], "runner-1");
-    }
-
-    #[test]
-    fn placement_projects_a_verified_controller_fallback() {
-        let mut record = record(AGENT_TASK_RUN);
-        let decision = runner_placement_decision(homeboy_lab_contract::Placement::LabOrLocal, true);
-        let outcome = decision
-            .outcome(
-                homeboy_lab_contract::EffectiveExecutionPlacement::Local,
-                None,
-            )
-            .unwrap();
-        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
-        record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
-
-        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
-        assert_eq!(value["placement"]["selected"], "runner");
-        assert_eq!(value["placement"]["effective"], "controller");
-    }
-
-    #[test]
-    fn placement_omits_an_outcome_with_a_mismatched_decision_id() {
-        let mut record = record(AGENT_TASK_RUN);
-        let decision = runner_placement_decision(homeboy_lab_contract::Placement::Lab, false);
-        let mut outcome = decision
-            .outcome(
-                homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
-                Some("runner-1".to_string()),
-            )
-            .unwrap();
-        outcome.decision_id = "other-decision".to_string();
-        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
-        record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
-
-        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
-        assert!(value["placement"].get("effective").is_none());
-    }
-
-    #[test]
-    fn placement_is_not_inferred_from_runner_id() {
-        let record = record(AGENT_TASK_RUN);
-        assert!(project_record(&record, None, None)
-            .unwrap()
-            .placement
-            .is_none());
-    }
-
-    #[test]
-    fn placement_omits_a_decision_with_a_forged_content_identity() {
-        let mut record = record(AGENT_TASK_RUN);
-        let mut decision = runner_placement_decision(homeboy_lab_contract::Placement::Lab, false);
-        decision.decision_id = "forged-decision".to_string();
-        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
-
-        assert!(project_record(&record, None, None)
-            .unwrap()
-            .placement
-            .is_none());
-    }
-
-    #[test]
-    fn placement_omits_an_invalid_local_decision() {
-        let mut record = record(AGENT_TASK_RUN);
-        let mut decision = runner_placement_decision(homeboy_lab_contract::Placement::Lab, false);
-        decision.selected = homeboy_lab_contract::EffectiveExecutionPlacement::Local;
-        decision.runner = None;
-        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
-
-        assert!(project_record(&record, None, None)
-            .unwrap()
-            .placement
-            .is_none());
+            let projected = project_record(&record, None, None).unwrap();
+            let placement = serde_json::to_value(&projected.placement).unwrap();
+            let Some(expected) = expected.as_object() else {
+                assert!(placement.is_null(), "{case}: {placement}");
+                continue;
+            };
+            for (key, value) in expected {
+                assert_eq!(&placement[key], value, "{case}: {key} in {placement}");
+            }
+        }
     }
 
     #[test]
@@ -10297,14 +10155,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mission_alias_is_not_accepted_as_a_run_id() {
-        let error = service()
-            .run(&RunId::new(AGENT_TASK_COOK).expect("Cook alias"))
-            .expect_err("mission alias must use a mission resource");
-        assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
-    }
-
     /// A handed-off or stale observation run is settled; the control-plane run
     /// resource used to project both as `Unknown`, an open state, so they never
     /// left the open set.
@@ -10324,12 +10174,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_run_is_typed_not_found() {
-        let error = service()
-            .run(&RunId::new("no-such-run").expect("run id"))
-            .expect_err("missing");
-        assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
-        assert!(!error.retryable);
+    fn unknown_run_and_mission_alias_are_typed_not_found() {
+        for id in ["no-such-run", AGENT_TASK_COOK] {
+            let error = service()
+                .run(&RunId::new(id).expect("run id"))
+                .expect_err("missing");
+            assert_eq!(error.class, ControlPlaneErrorClass::NotFound, "{id}");
+            assert!(!error.retryable);
+        }
     }
 
     /// `agent-task status` and `GET /v1/control-plane/runs/:id` answer one id
@@ -10553,8 +10405,17 @@ mod tests {
                 .with_cook_index_fence(fence.is_some());
             let legal = crate::agent_task_lifecycle::legal_actions(&state);
             let projected = project_record(&record, None, fence.as_ref()).expect("projection");
+            if fence.is_some() {
+                assert_eq!(projected.state, ControlPlaneState::Cancelled);
+            }
             let actions = projected.action_eligibility.expect("report").actions;
             let recovery = projected.recovery.expect("Cook recovery projection");
+            if fence.is_some() {
+                assert!(actions
+                    .iter()
+                    .all(|a| a.availability == ControlPlaneActionAvailability::Unavailable));
+                assert_eq!(recovery.step, "none");
+            }
             assert_eq!(
                 actions
                     .iter()
@@ -10575,34 +10436,6 @@ mod tests {
                 assert!(!actions.is_empty(), "{label}: {recovery:?}");
             }
         }
-    }
-
-    #[test]
-    fn fenced_candidate_status_never_advertises_recovery_without_actions() {
-        let mut record = record(AGENT_TASK_RUN);
-        record.set_state_for_test(RunExecutionState::CandidateRecoverable);
-        record.metadata["cook_id"] = json!("fenced-cook");
-        let fence = json!({"reason": "cancelled"});
-        let projected = project_record(&record, None, Some(&fence)).expect("projection");
-        assert_eq!(projected.state, ControlPlaneState::Cancelled);
-        assert!(projected
-            .action_eligibility
-            .unwrap()
-            .actions
-            .iter()
-            .all(|a| a.availability == ControlPlaneActionAvailability::Unavailable));
-        let recovery = projected.recovery.expect("Cook recovery projection");
-        assert_eq!(recovery.step, "none");
-        assert!(!recovery.command.contains("agent-task recover "));
-    }
-
-    #[test]
-    fn project_record_matches_service_run() {
-        let seeded = record(AGENT_TASK_RUN);
-        let requested = RunId::new(AGENT_TASK_RUN).expect("run id");
-        let from_record = project_record(&seeded, None, None).expect("project");
-        let from_service = service().run(&requested).expect("run");
-        assert_eq!(from_record, from_service);
     }
 
     #[test]

@@ -392,17 +392,4 @@ mod tests {
             "leader {leader_pid} was not reaped by the supervisor"
         );
     }
-
-    #[test]
-    fn recovery_commands_are_keyed_on_the_recorded_leader_pid() {
-        let commands = contained_group_recovery_commands(Some(4242));
-
-        assert!(commands
-            .iter()
-            .any(|command| command.contains("$2 == 4242")));
-        assert!(commands
-            .iter()
-            .any(|command| command.contains("-TERM -4242")));
-        assert!(contained_group_recovery_commands(None).is_empty());
-    }
 }

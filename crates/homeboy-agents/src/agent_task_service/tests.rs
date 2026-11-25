@@ -724,60 +724,6 @@ fn execution_step_deterministic_failure_and_cancellation_terminalize_without_suc
     });
 }
 
-#[test]
-fn public_admission_capacity_wait_keeps_cook_pending_resource_admission() {
-    with_isolated_home(|home| {
-        let store = test_lifecycle_store();
-        let subject = "pressure-wait";
-        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
-            &store,
-            subject,
-            admission_binding(home.path(), subject, None),
-            "queued",
-            "test",
-        )
-        .unwrap();
-        struct PressureTransport;
-        impl ExecutionStepTransport for PressureTransport {
-            fn admission(&self, _: Vec<String>, _: Option<String>) -> homeboy_core::Result<i32> {
-                let mut error = homeboy_core::Error::invalid_argument(
-                    "admission",
-                    "runner capacity unavailable",
-                );
-                error.details["execution_step_disposition"] =
-                    serde_json::json!("runner_ineligible");
-                Err(error)
-            }
-        }
-        let intent = current_intent(&store, subject);
-        let error = execute_counted(
-            &intent.intent_id,
-            &Arc::new(AtomicUsize::new(0)),
-            &PressureTransport,
-        )
-        .unwrap_err();
-        let mut delivery = terminal_delivery(&intent);
-        delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
-        delivery.error = Some(serde_json::json!({
-            "message": error.message,
-            "details": error.details,
-            "retryable": error.retryable,
-        }));
-        let receipt = consume_execution_terminal_in_store(&store, &delivery).unwrap();
-        assert_eq!(receipt["disposition"], "runner_wait");
-        let record = store.read_record(subject).unwrap();
-        assert_eq!(record.state(), RunExecutionState::Queued);
-        assert_eq!(
-            record.metadata["execution_scheduling"]["recovery_failures"],
-            0
-        );
-        assert_eq!(current_intent(&store, subject).epoch, intent.epoch + 1);
-        assert!(serde_json::to_string(&record.metadata)
-            .unwrap()
-            .contains("runner_ineligible"));
-    });
-}
-
 /// The core preflight refusal for a pinned, connected runner whose daemon
 /// freshness probe has not produced readiness evidence. A split-placement
 /// Cook now waits in pending admission instead (#17832), so the fixture uses
@@ -1466,65 +1412,8 @@ fn cook_usage_reads_scheduler_rotation_metadata_and_decrements_budget() {
 }
 
 #[test]
-fn terminal_executor_uses_durable_execution_when_outcome_executor_is_absent() {
-    let mut plan = test_plan();
-    plan.tasks[0].executor.model = Some("openai/gpt-5.6-terra".to_string());
-    let aggregate = aggregate_with_outcome(serde_json::json!({}));
-    let follow_up = plan.tasks[0].executor.clone();
-    let durable = serde_json::json!([{
-        "task_id": "service-task",
-        "attempt": 1,
-        "backend": "test",
-        "model": "openai/gpt-5.6-terra",
-        "state": "succeeded"
-    }]);
-
-    assert_eq!(
-        terminal_executor_matches(&aggregate, &plan, Some(&durable), &follow_up),
-        Some(true)
-    );
-}
-
-#[test]
-fn terminal_executor_preserves_normalized_outcome_identity() {
-    let mut plan = test_plan();
-    plan.tasks[0].executor.model = Some("normalized-model".to_string());
-    let aggregate = aggregate_with_outcome(serde_json::json!({
-        "executor": {
-            "backend": "test",
-            "selector": "service",
-            "model": "normalized-model"
-        }
-    }));
-
-    assert_eq!(
-        terminal_executor_matches(&aggregate, &plan, None, &plan.tasks[0].executor),
-        Some(true)
-    );
-
-    let conflicting = serde_json::json!([{
-        "task_id": "service-task",
-        "attempt": 1,
-        "backend": "other",
-        "model": "normalized-model",
-        "state": "succeeded"
-    }]);
-    assert_eq!(
-        terminal_executor_matches(
-            &aggregate,
-            &plan,
-            Some(&conflicting),
-            &plan.tasks[0].executor
-        ),
-        None
-    );
-}
-
-#[test]
-fn terminal_executor_uses_rotated_terminal_identity_not_initial_plan() {
-    let mut plan = test_plan();
-    plan.tasks[0].executor.model = Some("initial-model".to_string());
-    let aggregate = aggregate_with_outcome(serde_json::json!({
+fn terminal_executor_matches_the_authoritative_terminal_identity() {
+    let rotated_outcome = serde_json::json!({
         "provider_rotation": {
             "attempts": [{
                 "attempt": 1,
@@ -1536,72 +1425,89 @@ fn terminal_executor_uses_rotated_terminal_identity_not_initial_plan() {
                 "summary": null
             }]
         }
-    }));
-    let durable = serde_json::json!([{
-        "task_id": "service-task",
-        "attempt": 1,
-        "backend": "rotated",
-        "model": "terminal-model",
-        "state": "succeeded"
-    }]);
-    let mut follow_up = plan.tasks[0].executor.clone();
-    follow_up.backend = "rotated".to_string();
-    follow_up.selector = Some("terminal-selector".to_string());
-    follow_up.model = Some("terminal-model".to_string());
-
-    assert_eq!(
-        terminal_executor_matches(&aggregate, &plan, Some(&durable), &follow_up),
-        Some(true)
-    );
-    assert_eq!(
-        terminal_executor_matches(&aggregate, &plan, Some(&durable), &plan.tasks[0].executor),
-        Some(false)
-    );
-}
-
-#[test]
-fn terminal_executor_rejects_conflicting_or_unavailable_authority() {
+    });
+    let durable = |backend: &str, model: &str| {
+        serde_json::json!([{
+            "task_id": "service-task",
+            "attempt": 1,
+            "backend": backend,
+            "model": model,
+            "state": "succeeded"
+        }])
+    };
     let mut plan = test_plan();
     plan.tasks[0].executor.model = Some("initial-model".to_string());
-    let aggregate = aggregate_with_outcome(serde_json::json!({
-        "provider_rotation": {
-            "attempts": [{
-                "attempt": 1,
-                "rotation_index": 0,
-                "backend": "rotated",
-                "selector": "terminal-selector",
-                "model": "terminal-model",
-                "status": "succeeded",
-                "summary": null
-            }]
-        }
-    }));
-    let conflicting = serde_json::json!([{
-        "task_id": "service-task",
-        "attempt": 1,
-        "backend": "other",
-        "model": "terminal-model",
-        "state": "succeeded"
-    }]);
+    let initial = plan.tasks[0].executor.clone();
+    let mut rotated = initial.clone();
+    rotated.backend = "rotated".to_string();
+    rotated.selector = Some("terminal-selector".to_string());
+    rotated.model = Some("terminal-model".to_string());
+    let normalized = serde_json::json!({
+        "executor": { "backend": "test", "selector": "service", "model": "initial-model" }
+    });
 
-    assert_eq!(
-        terminal_executor_matches(
-            &aggregate,
-            &plan,
-            Some(&conflicting),
-            &plan.tasks[0].executor
+    for (case, outcome, durable, follow_up, expected) in [
+        (
+            "durable execution stands in for an absent outcome executor",
+            serde_json::json!({}),
+            Some(durable("test", "initial-model")),
+            &initial,
+            Some(true),
         ),
-        None
-    );
-    assert_eq!(
-        terminal_executor_matches(
-            &aggregate_with_outcome(serde_json::json!({})),
-            &plan,
+        (
+            "normalized outcome identity",
+            normalized.clone(),
             None,
-            &plan.tasks[0].executor,
+            &initial,
+            Some(true),
         ),
-        None
-    );
+        (
+            "rotated terminal identity, not the initial plan",
+            rotated_outcome.clone(),
+            Some(durable("rotated", "terminal-model")),
+            &rotated,
+            Some(true),
+        ),
+        (
+            "initial plan executor after rotation",
+            rotated_outcome.clone(),
+            Some(durable("rotated", "terminal-model")),
+            &initial,
+            Some(false),
+        ),
+        (
+            "durable execution conflicts with the outcome",
+            rotated_outcome,
+            Some(durable("other", "terminal-model")),
+            &initial,
+            None,
+        ),
+        (
+            "durable execution conflicts with a normalized outcome",
+            normalized,
+            Some(durable("other", "initial-model")),
+            &initial,
+            None,
+        ),
+        (
+            "no authority at all",
+            serde_json::json!({}),
+            None,
+            &initial,
+            None,
+        ),
+    ] {
+        assert_eq!(
+            terminal_executor_matches(
+                &aggregate_with_outcome(outcome),
+                &plan,
+                durable.as_ref(),
+                follow_up
+            ),
+            expected,
+            "{case}"
+        );
+    }
 }
 
 #[test]
@@ -1675,64 +1581,46 @@ fn cook_budget_preflight_rejects_unfunded_attempts_and_form_remediation() {
 }
 
 #[test]
-fn cook_retry_intent_derives_single_provider_and_gate_remediation_budgets() {
-    let resolved = resolve_cook_budget(2, 0, None, None).expect("derived budget");
-
-    assert_eq!(resolved.requested_attempts, 2);
-    assert_eq!(resolved.provider_executions, 2);
-    assert_eq!(resolved.same_provider_remediations, 1);
-    assert_eq!(resolved.provider_rotations, 0);
-
-    let explicit = resolve_cook_budget(2, 0, Some(2), Some(1))
-        .expect("compatible explicit caller retains its budget");
-    assert_eq!(explicit, resolved);
-}
-
-#[test]
-fn cook_retry_intent_adds_configured_rotation_allowance() {
-    let resolved = resolve_cook_budget(2, 2, None, None).expect("derived rotation budget");
-
-    assert_eq!(resolved.provider_executions, 4);
-    assert_eq!(resolved.same_provider_remediations, 1);
-    assert_eq!(resolved.provider_rotations, 2);
-}
-
-#[test]
-fn cook_retry_intent_rejects_execution_caps_that_remove_configured_fallbacks() {
-    let error =
-        resolve_cook_budget(1, 2, Some(1), None).expect_err("configured fallbacks must be funded");
-    assert_eq!(error.details["field"], "max-provider-executions");
-    assert!(error.message.contains("2 configured provider rotation(s)"));
-}
-
-#[test]
-fn cook_retry_intent_rejects_underfunded_configured_rotation_with_correction() {
-    let error = resolve_cook_budget(2, 1, Some(2), Some(1))
-        .expect_err("rotation requires its own provider execution allowance");
-
-    assert_eq!(error.details["field"], "max-provider-executions");
-    assert!(
-        error
-            .message
-            .contains("--max-provider-executions 3 --max-same-provider-retries 1"),
-        "{}",
-        error.message
+fn cook_retry_intent_derives_funded_budgets_and_rejects_underfunded_caps() {
+    let derived = resolve_cook_budget(2, 0, None, None).expect("derived budget");
+    assert_eq!(derived.requested_attempts, 2);
+    assert_eq!(derived.provider_executions, 2);
+    assert_eq!(derived.same_provider_remediations, 1);
+    assert_eq!(derived.provider_rotations, 0);
+    assert_eq!(
+        resolve_cook_budget(2, 0, Some(2), Some(1)).expect("compatible explicit budget"),
+        derived
     );
-}
 
-#[test]
-fn cook_retry_intent_rejects_explicitly_disabled_gate_remediation() {
-    let error = resolve_cook_budget(2, 0, None, Some(0))
-        .expect_err("a gate remediation slot cannot be disabled when Cook may retry");
+    let rotation = resolve_cook_budget(2, 2, None, None).expect("derived rotation budget");
+    assert_eq!(rotation.provider_executions, 4);
+    assert_eq!(rotation.same_provider_remediations, 1);
+    assert_eq!(rotation.provider_rotations, 2);
 
-    assert_eq!(error.details["field"], "max-same-provider-retries");
-    assert!(
-        error
-            .message
-            .contains("--max-provider-executions 2 --max-same-provider-retries 1"),
-        "{}",
-        error.message
-    );
+    for (case, (attempts, rotations, executions, retries), field, message) in [
+        (
+            "execution cap removes configured fallbacks",
+            (1, 2, Some(1), None),
+            "max-provider-executions",
+            "2 configured provider rotation(s)",
+        ),
+        (
+            "rotation needs its own execution allowance",
+            (2, 1, Some(2), Some(1)),
+            "max-provider-executions",
+            "--max-provider-executions 3 --max-same-provider-retries 1",
+        ),
+        (
+            "gate remediation slot explicitly disabled",
+            (2, 0, None, Some(0)),
+            "max-same-provider-retries",
+            "--max-provider-executions 2 --max-same-provider-retries 1",
+        ),
+    ] {
+        let error = resolve_cook_budget(attempts, rotations, executions, retries).expect_err(case);
+        assert_eq!(error.details["field"], field, "{case}");
+        assert!(error.message.contains(message), "{case}: {}", error.message);
+    }
 }
 
 #[test]
@@ -2850,27 +2738,6 @@ fn discovery_active_reads_runner_backed_record_without_reconciliation() {
 }
 
 #[test]
-fn liveness_uses_fixed_wire_labels_and_reconcilability() {
-    for (liveness, label, expected) in [
-        (AgentTaskLiveness::Active, "active", false),
-        (AgentTaskLiveness::Stale, "stale", true),
-        (AgentTaskLiveness::Suspect, "suspect", true),
-        (AgentTaskLiveness::Unreconciled, "unreconciled", true),
-    ] {
-        assert_eq!(
-            liveness.is_reconcilable(),
-            expected,
-            "{liveness:?} reconcilability"
-        );
-        assert_eq!(liveness.as_str(), label);
-        assert_eq!(
-            serde_json::to_value(liveness).expect("serialize liveness"),
-            serde_json::json!(label)
-        );
-    }
-}
-
-#[test]
 fn discovery_active_classifies_liveness_and_source() {
     with_isolated_home(|_| {
         // A queued run without a live owner or submission lease is stale.
@@ -2929,51 +2796,49 @@ fn discovery_active_classifies_liveness_and_source() {
 }
 
 #[test]
-fn reconcile_dry_run_reports_but_does_not_cancel_stale_runs() {
+fn reconcile_previews_then_cancels_a_running_record_whose_owner_is_dead() {
+    // #9718: a `running` record whose owner pid is present but dead (and whose
+    // heartbeat is not yet age-stale) must classify Stale, so
+    // `agent-task reconcile --all --apply` terminalizes it without a manual
+    // `cancel`. A preview reports it without writing.
     with_isolated_home(|_| {
-        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-reconcile-dry"))
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-dead-owner"))
             .expect("submitted");
-        agent_task_lifecycle::rewrite_record_for_test("run-reconcile-dry", |record| {
+        agent_task_lifecycle::rewrite_record_for_test("run-dead-owner", |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
             record.tasks[0].set_state_for_test(ControlPlaneState::Running);
-            record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
+            record.metadata = serde_json::json!({ "runner_pid": i32::MAX as u32 });
         })
-        .expect("stale record stored");
+        .expect("dead-owner record stored");
 
-        let report = reconcile_stale_active_runs(true).expect("dry run reconciled");
-        assert!(report.dry_run);
-        assert_eq!(report.reconciled, 0);
-        assert_eq!(report.considered, 1);
-        assert_eq!(report.runs[0].action, "would-reconcile");
+        let report = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active listed");
+        let ghost = report
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run-dead-owner")
+            .expect("ghost listed");
+        assert_eq!(ghost.liveness, Some(AgentTaskLiveness::Stale));
 
-        // Record must remain running after a dry run.
-        let record = lifecycle_status("run-reconcile-dry").expect("status");
-        assert_eq!(record.state(), RunExecutionState::Running);
-    });
-}
+        let preview = reconcile_stale_active_runs(true).expect("dry run reconciled");
+        assert!(preview.dry_run);
+        assert_eq!(preview.reconciled, 0);
+        assert_eq!(preview.considered, 1);
+        assert_eq!(preview.runs[0].action, "would-reconcile");
+        assert_eq!(
+            lifecycle_status("run-dead-owner").expect("status").state(),
+            RunExecutionState::Running
+        );
 
-#[test]
-fn reconcile_cancels_stale_running_record_without_manual_edit() {
-    with_isolated_home(|_| {
-        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-reconcile-live"))
-            .expect("submitted");
-        agent_task_lifecycle::rewrite_record_for_test("run-reconcile-live", |record| {
-            agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
-            record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
-        })
-        .expect("stale record stored");
+        let applied = reconcile_stale_active_runs(false).expect("reconciled");
+        assert!(!applied.dry_run);
+        assert_eq!(applied.reconciled, 1);
+        assert_eq!(applied.failed, 0);
+        assert_eq!(applied.runs[0].action, "reconciled");
+        assert_eq!(
+            lifecycle_status("run-dead-owner").expect("status").state(),
+            RunExecutionState::Cancelled
+        );
 
-        let report = reconcile_stale_active_runs(false).expect("reconciled");
-        assert!(!report.dry_run);
-        assert_eq!(report.reconciled, 1);
-        assert_eq!(report.failed, 0);
-        assert_eq!(report.runs[0].action, "reconciled");
-
-        let record = lifecycle_status("run-reconcile-live").expect("status");
-        assert_eq!(record.state(), RunExecutionState::Cancelled);
-
-        // A genuinely-active run reconcile pass leaves nothing to do.
         let empty = reconcile_stale_active_runs(false).expect("nothing to reconcile");
         assert_eq!(empty.considered, 0);
         assert_eq!(empty.reconciled, 0);
@@ -3546,34 +3411,43 @@ fn upgrade_admission_inspects_an_ambiguous_removed_runner_record_locally() {
 }
 
 #[test]
-fn upgrade_admission_keeps_configured_disconnected_runner_ownership() {
-    with_isolated_home(|_| {
-        let cook_id = "configured-offline-cook-run";
-        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+fn upgrade_admission_keeps_disconnected_or_unknown_runner_ownership() {
+    for (cook_id, fixture) in [
+        (
+            "configured-offline-cook-run",
             RunnerAuthorityFixture::configured_disconnected(),
-        ));
-        record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
+        ),
+        (
+            "unknown-offline-cook-run",
+            RunnerAuthorityFixture::unknown(),
+        ),
+    ] {
+        with_isolated_home(|_| {
+            let _runner =
+                agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(fixture));
+            record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
 
-        let (records, health) =
-            agent_task_lifecycle::read_all_records_with_health().expect("records");
-        let admission =
-            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
-        assert_eq!(admission.blockers.len(), 1);
-        assert_eq!(admission.blockers[0].owner, "runner_session");
-        assert_eq!(
-            admission.blockers[0].action,
-            "homeboy runner reconcile fixture-lab"
-        );
-        let report = reconcile_run(cook_id, false).expect("configured runner remains fail-closed");
-        assert_eq!(report.reconciled, 0);
-        assert_eq!(report.runs[0].action, "no-op");
-        assert_eq!(
-            lifecycle_status(cook_id)
-                .expect("remote record retained")
-                .state(),
-            RunExecutionState::Running
-        );
-    });
+            let (records, health) =
+                agent_task_lifecycle::read_all_records_with_health().expect("records");
+            let admission =
+                controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+            assert_eq!(admission.blockers.len(), 1, "{cook_id}");
+            assert_eq!(admission.blockers[0].owner, "runner_session");
+            assert_eq!(
+                admission.blockers[0].action,
+                "homeboy runner reconcile fixture-lab"
+            );
+            let report = reconcile_run(cook_id, false).expect("runner remains fail-closed");
+            assert_eq!(report.reconciled, 0, "{cook_id}");
+            assert_eq!(report.runs[0].action, "no-op");
+            assert_eq!(
+                lifecycle_status(cook_id)
+                    .expect("remote record retained")
+                    .state(),
+                RunExecutionState::Running
+            );
+        });
+    }
 }
 
 #[test]
@@ -4050,89 +3924,48 @@ fn idle_runner_evidence_does_not_reclaim_live_or_ambiguous_queued_records() {
 }
 
 #[test]
-fn upgrade_admission_keeps_provider_unavailable_runner_ownership() {
-    with_isolated_home(|_| {
-        let cook_id = "unknown-offline-cook-run";
-        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
-            RunnerAuthorityFixture::unknown(),
-        ));
-        record_stale_accepted_lab_handoff(cook_id, "fixture-lab");
+fn scoped_reconcile_rejects_an_unproven_parent_child_link() {
+    for (cook_id, child_cook_id, indexed, message) in [
+        (
+            "cook-reconcile-parent",
+            Some("other-cook"),
+            true,
+            "does not belong",
+        ),
+        (
+            "cook-reconcile-unindexed",
+            None,
+            false,
+            "no Cook index authority",
+        ),
+    ] {
+        with_isolated_home(|_| {
+            let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("parent");
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id))
+                .expect("attempt");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["detached_cook_handoff"]["attempt_run_id"] =
+                    serde_json::json!(&attempt_id);
+            })
+            .expect("link parent");
+            agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
+                record.metadata["cook_id"] = serde_json::json!(child_cook_id.unwrap_or(cook_id));
+            })
+            .expect("write child Cook identity");
+            if indexed {
+                index_cook_attempt(cook_id, &attempt_id);
+            }
 
-        let (records, health) =
-            agent_task_lifecycle::read_all_records_with_health().expect("records");
-        let admission =
-            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
-        assert_eq!(admission.blockers.len(), 1);
-        assert_eq!(admission.blockers[0].owner, "runner_session");
-        assert_eq!(
-            admission.blockers[0].action,
-            "homeboy runner reconcile fixture-lab"
-        );
-        let report = reconcile_run(cook_id, false).expect("unknown runner remains fail-closed");
-        assert_eq!(report.reconciled, 0);
-        assert_eq!(report.runs[0].action, "no-op");
-        assert_eq!(
-            lifecycle_status(cook_id)
-                .expect("remote record retained")
-                .state(),
-            RunExecutionState::Running
-        );
-    });
-}
-
-#[test]
-fn scoped_reconcile_rejects_a_parent_child_link_with_disagreeing_cook_identity() {
-    with_isolated_home(|_| {
-        let cook_id = "cook-reconcile-parent";
-        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
-        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
-            &test_lifecycle_store(),
-            cook_id,
-        )
-        .expect("parent");
-        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
-        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
-            record.metadata["detached_cook_handoff"]["attempt_run_id"] =
-                serde_json::json!(&attempt_id);
-        })
-        .expect("link parent");
-        agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
-            record.metadata["cook_id"] = serde_json::json!("other-cook");
-        })
-        .expect("write disagreement");
-        index_cook_attempt(cook_id, &attempt_id);
-
-        let error = reconcile_run(cook_id, true).expect_err("reject mismatched child identity");
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.message.contains("does not belong"));
-    });
-}
-
-#[test]
-fn scoped_reconcile_rejects_a_parent_child_link_without_cook_index_authority() {
-    with_isolated_home(|_| {
-        let cook_id = "cook-reconcile-unindexed";
-        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
-        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
-            &test_lifecycle_store(),
-            cook_id,
-        )
-        .expect("parent");
-        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
-        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
-            record.metadata["detached_cook_handoff"]["attempt_run_id"] =
-                serde_json::json!(&attempt_id);
-        })
-        .expect("link parent");
-        agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
-            record.metadata["cook_id"] = serde_json::json!(cook_id);
-        })
-        .expect("write matching Cook identity");
-
-        let error = reconcile_run(cook_id, true).expect_err("reject unindexed child link");
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.message.contains("no Cook index authority"));
-    });
+            let error = reconcile_run(cook_id, true).expect_err("reject unproven child link");
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert!(error.message.contains(message), "{}", error.message);
+        });
+    }
 }
 
 #[test]
@@ -4252,45 +4085,6 @@ fn scoped_reconcile_is_a_no_op_when_the_owner_becomes_live_after_preview() {
 }
 
 #[test]
-fn dead_owner_process_run_is_classified_stale_and_reconciled() {
-    // Regression for #9718: a `running` record whose owner process is dead but
-    // whose `runner_pid` is merely PRESENT (and heartbeat not yet age-stale)
-    // was classified Active by discovery and so was never terminalized by
-    // `agent-task reconcile --all --apply`. It must now classify Stale and reconcile to
-    // Cancelled without a manual `cancel`.
-    with_isolated_home(|_| {
-        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-dead-owner"))
-            .expect("submitted");
-        agent_task_lifecycle::rewrite_record_for_test("run-dead-owner", |record| {
-            agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
-            // Fresh update timestamp + a present-but-dead owner pid, and NO
-            // runner job (local controller-owned run). A very large PID is not
-            // a live process on this host.
-            record.metadata = serde_json::json!({
-                "runner_pid": i32::MAX as u32,
-            });
-        })
-        .expect("dead-owner record stored");
-
-        let report = discover_runs(AgentTaskDiscoveryFilter::Active).expect("active listed");
-        let ghost = report
-            .runs
-            .iter()
-            .find(|run| run.run_id == "run-dead-owner")
-            .expect("ghost listed");
-        assert_eq!(ghost.liveness, Some(AgentTaskLiveness::Stale));
-
-        let reconciled = reconcile_stale_active_runs(false).expect("reconciled");
-        assert_eq!(reconciled.reconciled, 1);
-        assert_eq!(reconciled.failed, 0);
-
-        let record = lifecycle_status("run-dead-owner").expect("status");
-        assert_eq!(record.state(), RunExecutionState::Cancelled);
-    });
-}
-
-#[test]
 fn concurrent_provider_children_do_not_replace_controller_liveness() {
     with_isolated_home(|_| {
         let mut child_a = std::process::Command::new("sleep")
@@ -4373,43 +4167,29 @@ fn concurrent_provider_children_do_not_replace_controller_liveness() {
 }
 
 #[test]
-fn discovery_limit_caps_list_and_reports_total() {
+fn discovery_rejects_invalid_pagination_and_timestamp_options() {
     with_isolated_home(|_| {
-        for run_id in ["run-cap-a", "run-cap-b", "run-cap-c"] {
-            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        for (options, message) in [
+            (
+                AgentTaskDiscoveryOptions {
+                    limit: Some(0),
+                    ..Default::default()
+                },
+                "greater than zero",
+            ),
+            (
+                AgentTaskDiscoveryOptions {
+                    submitted_after: Some("yesterday".to_string()),
+                    ..Default::default()
+                },
+                "RFC3339",
+            ),
+        ] {
+            let error = discover_runs_with_options(AgentTaskDiscoveryFilter::All, options)
+                .expect_err("invalid discovery option is rejected");
+            assert_eq!(error.code.as_str(), "validation.invalid_argument");
+            assert!(error.message.contains(message), "{}", error.message);
         }
-
-        let report = discover_runs_with_options(
-            AgentTaskDiscoveryFilter::All,
-            AgentTaskDiscoveryOptions {
-                limit: Some(2),
-                ..Default::default()
-            },
-        )
-        .expect("listed with limit");
-
-        assert_eq!(report.count, 2);
-        assert_eq!(report.total, 3);
-        assert_eq!(report.limit, Some(2));
-        assert!(report.truncated);
-        assert_eq!(report.runs.len(), 2);
-    });
-}
-
-#[test]
-fn discovery_rejects_zero_limit_to_preserve_pagination_progress() {
-    with_isolated_home(|_| {
-        let error = discover_runs_with_options(
-            AgentTaskDiscoveryFilter::Active,
-            AgentTaskDiscoveryOptions {
-                limit: Some(0),
-                ..Default::default()
-            },
-        )
-        .expect_err("zero limit is invalid");
-
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.message.contains("greater than zero"));
     });
 }
 
@@ -4568,6 +4348,7 @@ fn discovery_998_record_history_and_active_pages_do_not_repeat_or_lose_records()
 
         assert_eq!(first.total, 998);
         assert_eq!(first.count, 20);
+        assert_eq!(first.limit, Some(20));
         assert_eq!(first.next_cursor, Some(20));
         assert!(first.truncated);
         assert_eq!(second.total, 998);
@@ -4790,70 +4571,51 @@ fn upgrade_admission_ignores_terminal_records_with_stale_owner_metadata() {
 }
 
 #[test]
-fn upgrade_admission_ignores_a_runner_owned_attempt_of_a_terminal_cook() {
-    with_isolated_home(|_| {
-        for run_id in ["terminal-cook", "terminal-cook-attempt-1"] {
-            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
-        }
-        agent_task_lifecycle::rewrite_record_for_test("terminal-cook", |record| {
-            agent_task_lifecycle::set_run_state(record, RunExecutionState::Succeeded);
-        })
-        .expect("terminal cook stored");
-        // The attempt is stranded in `running` on a runner whose daemon
-        // restarted: runner reconcile retires generations without touching it
-        // and the durable reconciler leaves runner-owned records alone.
-        agent_task_lifecycle::rewrite_record_for_test("terminal-cook-attempt-1", |record| {
-            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
-            record.updated_at = None;
-            record.metadata["cook_id"] = serde_json::json!("terminal-cook");
-            record.metadata["runner_id"] = serde_json::json!("lab");
-            record.metadata["runner_job_id"] = serde_json::json!("old-job");
-        })
-        .expect("stranded attempt stored");
+fn upgrade_admission_ignores_a_stranded_runner_attempt_only_when_its_cook_is_terminal() {
+    // A runner daemon restart can strand an attempt in `running`: runner
+    // reconcile retires generations without touching it and the durable
+    // reconciler leaves runner-owned records alone. A terminal Cook is
+    // authoritative over its attempts; a live Cook proves nothing about them.
+    for cook_terminal in [true, false] {
+        with_isolated_home(|_| {
+            let (cook_id, attempt_id) = ("stranded-cook", "stranded-cook-attempt-1");
+            for run_id in [cook_id, attempt_id] {
+                agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id))
+                    .expect("submitted");
+            }
+            if cook_terminal {
+                agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                    agent_task_lifecycle::set_run_state(record, RunExecutionState::Succeeded);
+                })
+                .expect("terminal cook stored");
+            }
+            agent_task_lifecycle::rewrite_record_for_test(attempt_id, |record| {
+                record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+                record.updated_at = None;
+                record.metadata["cook_id"] = serde_json::json!(cook_id);
+                record.metadata["runner_id"] = serde_json::json!("lab");
+                record.metadata["runner_job_id"] = serde_json::json!("old-job");
+            })
+            .expect("stranded attempt stored");
 
-        let (records, health) =
-            agent_task_lifecycle::read_all_records_with_health().expect("records");
-        let admission =
-            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
-
-        assert!(
-            admission.allows_controller_replacement(),
-            "a terminal Cook is authoritative over its own attempts: {:?}",
-            admission.blockers
-        );
-        assert!(admission.blockers.is_empty());
-    });
-}
-
-#[test]
-fn upgrade_admission_still_blocks_an_attempt_whose_cook_is_not_terminal() {
-    with_isolated_home(|_| {
-        for run_id in ["live-cook", "live-cook-attempt-1"] {
-            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
-        }
-        agent_task_lifecycle::rewrite_record_for_test("live-cook-attempt-1", |record| {
-            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
-            record.updated_at = None;
-            record.metadata["cook_id"] = serde_json::json!("live-cook");
-            record.metadata["runner_id"] = serde_json::json!("lab");
-            record.metadata["runner_job_id"] = serde_json::json!("old-job");
-        })
-        .expect("attempt stored");
-
-        let (records, health) =
-            agent_task_lifecycle::read_all_records_with_health().expect("records");
-        let admission =
-            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
-
-        assert!(
-            admission
+            let (records, health) =
+                agent_task_lifecycle::read_all_records_with_health().expect("records");
+            let admission =
+                controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+            let blocks_attempt = admission
                 .blockers
                 .iter()
-                .any(|blocker| blocker.run_id == "live-cook-attempt-1"),
-            "a non-terminal Cook proves nothing about its attempt: {:?}",
-            admission.blockers
-        );
-    });
+                .any(|blocker| blocker.run_id == attempt_id);
+            assert_eq!(
+                blocks_attempt, !cook_terminal,
+                "cook terminal: {cook_terminal}; blockers: {:?}",
+                admission.blockers
+            );
+            if cook_terminal {
+                assert!(admission.allows_controller_replacement());
+            }
+        });
+    }
 }
 
 #[test]
@@ -5078,26 +4840,6 @@ fn upgrade_admission_classifies_a_proven_dead_controller_owner_as_stale() {
         assert_eq!(admission.stale, 1);
         assert!(admission.blockers.is_empty());
         assert!(admission.allows_controller_replacement());
-    });
-}
-
-#[test]
-fn discovery_rejects_invalid_submitted_after_timestamps() {
-    with_isolated_home(|_| {
-        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-invalid-timestamp-filter"))
-            .expect("submitted");
-
-        let error = discover_runs_with_options(
-            AgentTaskDiscoveryFilter::All,
-            AgentTaskDiscoveryOptions {
-                submitted_after: Some("yesterday".to_string()),
-                ..Default::default()
-            },
-        )
-        .expect_err("invalid timestamp is rejected");
-
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.message.contains("RFC3339"));
     });
 }
 

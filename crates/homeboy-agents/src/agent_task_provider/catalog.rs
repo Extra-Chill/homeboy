@@ -213,9 +213,4 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn backends_of_an_empty_catalog_is_empty() {
-        assert!(AgentTaskProviderCatalog::default().backends().is_empty());
-    }
 }

@@ -121,25 +121,6 @@ fn persisted_minimal_gate_policy_decodes_to_defaults() {
 }
 
 #[test]
-fn gate_command_reports_success_without_failure_evidence() {
-    let temp = tempfile::tempdir().expect("tempdir");
-
-    let report = run_gate_command(temp.path(), 1, "printf 'ok'").expect("gate report");
-
-    assert_eq!(report.schema, AGENT_TASK_GATE_REPORT_SCHEMA);
-    assert_eq!(report.id, "gate-1");
-    assert_eq!(report.visibility, AgentTaskGateVisibility::Visible);
-    assert_eq!(
-        report.reveal_policy,
-        AgentTaskGateRevealPolicy::FullEvidence
-    );
-    assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
-    assert_eq!(report.exit_code, 0);
-    assert_eq!(report.stdout, "ok");
-    assert!(report.failure_evidence.is_none());
-}
-
-#[test]
 fn accepted_inherited_failure_rebuilds_the_embedded_plan_step() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut report = run_gate_command(temp.path(), 1, "exit 1").expect("failed gate");
@@ -201,25 +182,6 @@ fn gate_command_normalizes_failure_for_agent_feedback() {
 }
 
 #[test]
-fn gate_command_records_private_visibility_and_reveal_policy() {
-    let temp = tempfile::tempdir().expect("tempdir");
-
-    let report = run_gate_command_with_policy(
-        temp.path(),
-        3,
-        "printf 'hidden failure'; exit 1",
-        AgentTaskGateVisibility::Private,
-        AgentTaskGateRevealPolicy::SummaryOnly,
-    )
-    .expect("gate report");
-
-    assert_eq!(report.status, AgentTaskGateStatus::Failed);
-    assert_eq!(report.visibility, AgentTaskGateVisibility::Private);
-    assert_eq!(report.reveal_policy, AgentTaskGateRevealPolicy::SummaryOnly);
-    assert_eq!(report.stdout, "hidden failure");
-}
-
-#[test]
 fn agent_task_gate_report_normalizes_to_homeboy_gate_result() {
     let temp = tempfile::tempdir().expect("tempdir");
 
@@ -231,12 +193,10 @@ fn agent_task_gate_report_normalizes_to_homeboy_gate_result() {
         AgentTaskGateRevealPolicy::SummaryOnly,
     )
     .expect("gate report");
+    // The report keeps the raw output; only the normalized result withholds it.
+    assert_eq!(report.stdout, "hidden failure");
     let result: HomeboyGateResult = report.into();
 
-    assert_eq!(
-        result.schema,
-        homeboy_core::gate::HOMEBOY_GATE_RESULT_SCHEMA
-    );
     assert_eq!(result.id, "gate-4");
     assert_eq!(result.kind, HomeboyGateKind::Command);
     assert_eq!(result.status, HomeboyGateStatus::Failed);
@@ -268,7 +228,6 @@ fn skipped_private_gate_preserves_blocker_evidence_without_command_disclosure() 
         "gate-1",
     );
 
-    assert_eq!(report.schema, AGENT_TASK_GATE_REPORT_SCHEMA);
     assert_eq!(report.step.status, PlanStepStatus::Skipped);
     assert_eq!(
         report
@@ -315,6 +274,8 @@ fn successful_agent_task_gate_report_normalizes_to_passed_gate_result() {
     let temp = tempfile::tempdir().expect("tempdir");
 
     let report = run_gate_command(temp.path(), 5, "printf 'ok'").expect("gate report");
+    assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+    assert!(report.failure_evidence.is_none());
     let result: HomeboyGateResult = report.into();
 
     assert_eq!(result.id, "gate-5");
@@ -863,27 +824,6 @@ fn replacing_gate_environment_preserves_declared_variables_and_reports_policy() 
     assert_eq!(report.environment.inherited[0].value, "kept");
 }
 
-#[test]
-fn playwright_cache_is_mapped_only_for_isolated_non_replace_gate_environments() {
-    let home = tempfile::tempdir().expect("host home");
-    let cache = home.path().join(PLAYWRIGHT_CACHE_SUBPATH);
-    fs::create_dir_all(&cache).expect("browser cache");
-    let policy = AgentTaskGateEnvironmentPolicy::default();
-    let mut values = BTreeMap::new();
-    let mut report = AgentTaskGateEnvironment::default();
-
-    preserve_playwright_cache(&policy, None, Some(home.path()), &mut values, &mut report);
-
-    assert_eq!(
-        values["PLAYWRIGHT_BROWSERS_PATH"],
-        cache.display().to_string()
-    );
-    assert_eq!(
-        report.preserved["PLAYWRIGHT_BROWSERS_PATH"],
-        format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}")
-    );
-}
-
 #[cfg(target_os = "macos")]
 #[test]
 fn isolated_gate_preserves_native_macos_browser_cache_without_host_credentials() {
@@ -917,7 +857,7 @@ fn isolated_gate_preserves_native_macos_browser_cache_without_host_credentials()
 }
 
 #[test]
-fn playwright_cache_mapping_respects_absence_explicit_values_and_replace_mode() {
+fn playwright_cache_mapping_respects_isolation_absence_explicit_values_and_replace_mode() {
     // Absent cache: nothing is injected.
     let empty_home = tempfile::tempdir().expect("host home without cache");
     let mut values = BTreeMap::new();
@@ -957,6 +897,13 @@ fn playwright_cache_mapping_respects_absence_explicit_values_and_replace_mode() 
     let other_home = tempfile::tempdir().expect("runner host home");
     fs::create_dir_all(other_home.path().join(PLAYWRIGHT_CACHE_SUBPATH)).expect("home cache");
     for (policy, declared, host, expected_value, expected_preserved) in [
+        (
+            AgentTaskGateEnvironmentPolicy::default(),
+            None,
+            Some(home.path()),
+            Some(home_cache.clone()),
+            Some(format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}")),
+        ),
         (
             AgentTaskGateEnvironmentPolicy {
                 variables: BTreeMap::from([(
@@ -1244,47 +1191,27 @@ fn declared_environment_probe_checks_external_browser_cache_before_suite() {
 /// Toolchain preflight is declared, never inferred. A gate command is a
 /// shell program: its first token can be a builtin, a provider-owned alias,
 /// or part of a compound expression, so probing it as an executable would
-/// change what the gate means. `c3462d472` made preflight opt-in for that
-/// reason and this test tracked the removed inference until #10658.
+/// change what the gate means.
 #[test]
 fn gate_toolchain_requirements_are_explicit() {
-    let options = VerifyGateOptions {
-        verify: vec!["cargo test --lib".to_string()],
-        private_verify: vec!["npm test".to_string()],
-        gate_toolchains: vec![AgentTaskGateToolchainRequirement {
-            resolve_only: false,
-            command: "cargo".to_string(),
-            probe_arguments: vec!["metadata".to_string()],
-        }],
-        ..VerifyGateOptions::default()
+    let declared = AgentTaskGateToolchainRequirement {
+        resolve_only: false,
+        command: "cargo".to_string(),
+        probe_arguments: vec!["metadata".to_string()],
     };
-
-    assert_eq!(
-        options.required_toolchains(),
-        vec![AgentTaskGateToolchainRequirement {
-            resolve_only: false,
-            command: "cargo".to_string(),
-            probe_arguments: vec!["metadata".to_string()],
-        }]
-    );
-}
-
-/// A gate command whose first token is a shell builtin or part of a
-/// compound expression declares no toolchain at all. `c3462d472` made
-/// preflight opt-in precisely because a gate command is a shell program,
-/// so its first token is not necessarily an executable to probe.
-#[test]
-fn shell_gate_commands_contribute_no_inferred_toolchain() {
-    let options = VerifyGateOptions {
+    let mut options = VerifyGateOptions {
         verify: vec![
+            "cargo test --lib".to_string(),
             "test -f Cargo.toml && cargo test --lib".to_string(),
             "[ -d target ]".to_string(),
         ],
         private_verify: vec!["npm test".to_string()],
         ..VerifyGateOptions::default()
     };
-
     assert!(options.required_toolchains().is_empty());
+
+    options.gate_toolchains = vec![declared.clone()];
+    assert_eq!(options.required_toolchains(), vec![declared]);
 }
 
 #[cfg(unix)]

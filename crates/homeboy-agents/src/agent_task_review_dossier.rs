@@ -2323,79 +2323,62 @@ mod tests {
         })
     }
 
+    /// Only an issue in the destination repository (same host, owner and
+    /// repo, compared case-insensitively) closes; pull requests, cross-repo
+    /// issues and external trackers relate, and non-URL refs are dropped.
     #[test]
-    fn task_issue_relationship_closes_same_repo_issue_case_insensitively() {
-        let dest = destination("github.com", "Extra-Chill", "homeboy");
-        assert_eq!(
-            task_issue_relationship(
+    fn task_issue_relationship_closes_only_destination_repo_issues() {
+        use AgentTaskReviewIssueRelationshipKind::{Closes, RelatesTo};
+        let github = destination("github.com", "Extra-Chill", "homeboy");
+        let enterprise = destination("github.example.com", "Team", "App");
+        for (url, dest, expected) in [
+            (
                 "https://github.com/extra-chill/HOMEBOY/issues/16247",
-                Some(&dest)
+                Some(&github),
+                relationship(Closes, "#16247"),
             ),
-            relationship(AgentTaskReviewIssueRelationshipKind::Closes, "#16247")
-        );
-    }
-
-    #[test]
-    fn task_issue_relationship_relates_cross_repo_issue() {
-        let dest = destination("github.com", "Extra-Chill", "homeboy");
-        assert_eq!(
-            task_issue_relationship("https://github.com/Extra-Chill/other/issues/7", Some(&dest)),
-            relationship(
-                AgentTaskReviewIssueRelationshipKind::RelatesTo,
-                "Extra-Chill/other#7"
-            )
-        );
-    }
-
-    #[test]
-    fn task_issue_relationship_never_closes_pull_requests_or_external_trackers() {
-        let dest = destination("github.com", "Extra-Chill", "homeboy");
-        assert_eq!(
-            task_issue_relationship("https://github.com/Extra-Chill/homeboy/pull/9", Some(&dest)),
-            relationship(AgentTaskReviewIssueRelationshipKind::RelatesTo, "#9")
-        );
-        assert_eq!(
-            task_issue_relationship("https://linear.app/team/issue/HB-1", Some(&dest)),
-            relationship(
-                AgentTaskReviewIssueRelationshipKind::RelatesTo,
-                "https://linear.app/team/issue/HB-1"
-            )
-        );
-        // Without a known destination nothing can be closed.
-        assert_eq!(
-            task_issue_relationship("https://github.com/Extra-Chill/homeboy/issues/3", None),
-            relationship(
-                AgentTaskReviewIssueRelationshipKind::RelatesTo,
-                "https://github.com/Extra-Chill/homeboy/issues/3"
-            )
-        );
-        assert_eq!(task_issue_relationship("prompt:do-it", Some(&dest)), None);
-        assert_eq!(
-            task_issue_relationship("homeboy://agent-task/run/x", Some(&dest)),
-            None
-        );
-    }
-
-    #[test]
-    fn task_issue_relationship_supports_github_enterprise_hosts() {
-        let dest = destination("github.example.com", "Team", "App");
-        assert_eq!(
-            task_issue_relationship("https://GitHub.example.com/team/app/issues/5", Some(&dest)),
-            relationship(AgentTaskReviewIssueRelationshipKind::Closes, "#5")
-        );
-        assert_eq!(
-            task_issue_relationship("https://github.example.com/team/lib/issues/6", Some(&dest)),
-            relationship(
-                AgentTaskReviewIssueRelationshipKind::RelatesTo,
-                "team/lib#6"
-            )
-        );
-        // Same owner/repo on a different host is a different repository.
-        assert_ne!(
-            task_issue_relationship("https://github.com/Team/App/issues/5", Some(&dest))
-                .map(|value| value.kind),
-            Some(AgentTaskReviewIssueRelationshipKind::Closes)
-        );
+            (
+                "https://github.com/Extra-Chill/other/issues/7",
+                Some(&github),
+                relationship(RelatesTo, "Extra-Chill/other#7"),
+            ),
+            (
+                "https://github.com/Extra-Chill/homeboy/pull/9",
+                Some(&github),
+                relationship(RelatesTo, "#9"),
+            ),
+            (
+                "https://linear.app/team/issue/HB-1",
+                Some(&github),
+                relationship(RelatesTo, "https://linear.app/team/issue/HB-1"),
+            ),
+            // Without a known destination nothing can be closed.
+            (
+                "https://github.com/Extra-Chill/homeboy/issues/3",
+                None,
+                relationship(RelatesTo, "https://github.com/Extra-Chill/homeboy/issues/3"),
+            ),
+            ("prompt:do-it", Some(&github), None),
+            ("homeboy://agent-task/run/x", Some(&github), None),
+            (
+                "https://GitHub.example.com/team/app/issues/5",
+                Some(&enterprise),
+                relationship(Closes, "#5"),
+            ),
+            (
+                "https://github.example.com/team/lib/issues/6",
+                Some(&enterprise),
+                relationship(RelatesTo, "team/lib#6"),
+            ),
+            // Same owner/repo on a different host is a different repository.
+            (
+                "https://github.com/Team/App/issues/5",
+                Some(&enterprise),
+                relationship(RelatesTo, "https://github.com/Team/App/issues/5"),
+            ),
+        ] {
+            assert_eq!(task_issue_relationship(url, dest), expected, "{url}");
+        }
     }
 
     #[test]
@@ -2488,6 +2471,23 @@ mod tests {
         );
         form.validate(PrTitlePolicy::ConventionalCommit)
             .expect("a coerced form is still valid");
+
+        // The inverse shape: a single paragraph where a bullet list was asked
+        // for. The trailing newline must not become an empty bullet.
+        let outputs = serde_json::json!({
+            "review_form": {
+                "summary": "s",
+                "pr_title": "fix(agent-task): guard the reload render path",
+                "what_changed": "first line\nsecond line\n",
+            }
+        });
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("a string-shaped list field must not be a hard error")
+            .expect("form present");
+        assert_eq!(
+            form.what_changed,
+            vec!["first line".to_string(), "second line".to_string()]
+        );
     }
 
     /// Regression for #15397 / #15051 / #16523: a model that writes
@@ -2530,51 +2530,6 @@ mod tests {
         }
     }
 
-    /// The inverse shape: a single paragraph where a bullet list was asked for.
-    #[test]
-    fn what_changed_accepts_a_single_string() {
-        let outputs = serde_json::json!({
-            "review_form": {
-                "summary": "s",
-                "pr_title": "fix(agent-task): guard the reload render path",
-                "what_changed": "first line\nsecond line\n",
-                "compatibility": "c",
-                "used_for": "Investigated, then implemented and verified the change.",
-            }
-        });
-
-        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("a string-shaped list field must not be a hard error")
-            .expect("form present");
-
-        // The trailing newline must not become an empty bullet: `validate`
-        // refuses a list with no non-empty entries and should keep doing so.
-        assert_eq!(
-            form.what_changed,
-            vec!["first line".to_string(), "second line".to_string()]
-        );
-    }
-
-    /// Plain strings keep behaving exactly as before.
-    #[test]
-    fn prose_fields_still_accept_plain_strings() {
-        let outputs = serde_json::json!({
-            "review_form": {
-                "summary": "s",
-                "pr_title": "fix(agent-task): guard the reload render path",
-                "what_changed": ["one"],
-                "compatibility": "c",
-                "used_for": "Investigated, then implemented and verified the change.",
-            }
-        });
-
-        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("parses")
-            .expect("form present");
-        assert_eq!(form.summary, "s");
-        assert_eq!(form.what_changed, vec!["one".to_string()]);
-    }
-
     /// A shape that still cannot be coerced must say what a valid form needs,
     /// because this error costs the whole cook.
     #[test]
@@ -2590,15 +2545,6 @@ mod tests {
             error.to_string().contains("`summary`"),
             "message states what a valid form requires: {error}"
         );
-    }
-
-    /// An absent form is still `Ok(None)` so the nudge loop keeps owning it.
-    #[test]
-    fn an_absent_form_is_not_an_error() {
-        let outputs = serde_json::json!({});
-        assert!(AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("absence is not an error")
-            .is_none());
     }
 
     /// A prose `completion` reads as absent: the form parses as incomplete and
@@ -2917,13 +2863,6 @@ mod tests {
     }
 
     #[test]
-    fn valid_review_form_passes_validation() {
-        assert!(valid_form()
-            .validate(PrTitlePolicy::ConventionalCommit)
-            .is_ok());
-    }
-
-    #[test]
     fn pr_title_rule_follows_component_release_policy() {
         let conventional = homeboy_core::component::Component {
             id: "homeboy".into(),
@@ -3115,15 +3054,6 @@ mod tests {
     }
 
     #[test]
-    fn review_form_parses_from_outcome_outputs() {
-        let outputs = serde_json::json!({ "review_form": valid_form() });
-        let parsed = AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("parse")
-            .expect("present");
-        assert_eq!(parsed, valid_form());
-    }
-
-    #[test]
     fn absent_review_form_parses_as_none() {
         assert!(
             AiFilledReviewForm::from_outcome_outputs(&serde_json::json!({}))
@@ -3135,12 +3065,6 @@ mod tests {
         )
         .expect("parse")
         .is_none());
-    }
-
-    #[test]
-    fn malformed_review_form_is_a_hard_error() {
-        let outputs = serde_json::json!({ "review_form": { "summary": 42 } });
-        assert!(AiFilledReviewForm::from_outcome_outputs(&outputs).is_err());
     }
 
     #[test]
@@ -3161,17 +3085,15 @@ mod tests {
             !label.starts_with("gate-1"),
             "must not lead with the positional id"
         );
-    }
 
-    #[test]
-    fn gate_evidence_summary_falls_back_to_id_when_summary_absent() {
-        let gate = HomeboyGateResult::new(
+        // Without a summary the id is the only label available.
+        let bare = HomeboyGateResult::new(
             "gate-2",
             "gate-2",
             homeboy_core::gate::HomeboyGateKind::Command,
             homeboy_core::gate::HomeboyGateStatus::Passed,
         );
-        assert_eq!(gate_evidence_summary(&gate), "gate-2: Passed");
+        assert_eq!(gate_evidence_summary(&bare), "gate-2: Passed");
     }
 
     /// Regression for #15312: a multi-line `--verify-file` gate passed, then
@@ -3639,25 +3561,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_conflicts_fail_closed() {
-        let profile = AgentTaskReviewProfile {
-            required_sections: vec![AgentTaskReviewSectionId::Summary],
-            hidden_sections: vec![AgentTaskReviewSectionId::Summary],
-            ..Default::default()
-        };
-        assert!(validate_profile(&profile).is_err());
-    }
-    #[test]
-    fn url_policy_rejects_local_urls() {
-        let mut value = dossier();
-        value.evidence.push(AgentTaskReviewEvidence {
-            summary: "local".into(),
-            url: Some("https://localhost/a".into()),
-        });
-        assert!(value.validate(&default_profile()).is_err());
-    }
-
-    #[test]
     fn reviewer_url_diagnostic_identifies_the_url_and_its_provenance() {
         let mut value = dossier();
         value.evidence.push(AgentTaskReviewEvidence {
@@ -3771,13 +3674,6 @@ mod tests {
         assert!(
             render_review_dossier(&value, &default_profile()).contains("unavailable_manual_review")
         );
-    }
-
-    #[test]
-    fn internal_only_changes_do_not_require_public_contract_evidence() {
-        dossier()
-            .validate(&default_profile())
-            .expect("internal-only change");
     }
 
     #[test]

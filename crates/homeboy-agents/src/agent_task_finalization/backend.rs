@@ -1137,58 +1137,36 @@ mod pr_head_repository_tests {
     use serde_json::json;
 
     #[test]
-    fn resolves_owner_and_name_from_the_real_gh_payload() {
-        // Verified against `gh pr view 911 -R Extra-Chill/extrachill-events
-        // --json headRepository,headRepositoryOwner,isCrossRepository`.
-        let value = json!({
-            "headRepository": {"id": "R_kgDOP30Kgg", "name": "extrachill-events"},
-            "headRepositoryOwner": {"id": "O_kgDODalOjg", "login": "Extra-Chill"},
-            "isCrossRepository": false,
-        });
-        assert_eq!(
-            pr_head_repository_from_json(&value),
-            "Extra-Chill/extrachill-events"
-        );
-    }
-
-    #[test]
-    fn a_fork_head_carries_the_forks_owner_login() {
-        let value = json!({
-            "headRepository": {"id": "R_fork", "name": "extrachill-events"},
-            "headRepositoryOwner": {"id": "O_fork", "login": "some-contributor"},
-            "isCrossRepository": true,
-        });
-        // Same repository name, different owner: this must not collapse to
-        // the base repository's `owner/name` slug.
-        assert_eq!(
-            pr_head_repository_from_json(&value),
-            "some-contributor/extrachill-events"
-        );
-        assert_ne!(
-            pr_head_repository_from_json(&value),
-            "Extra-Chill/extrachill-events"
-        );
-    }
-
-    #[test]
-    fn missing_owner_fails_closed_to_an_empty_string() {
-        let value = json!({
-            "headRepository": {"id": "R_kgDOP30Kgg", "name": "extrachill-events"},
-        });
-        assert_eq!(pr_head_repository_from_json(&value), "");
-    }
-
-    #[test]
-    fn missing_repository_name_also_fails_closed() {
-        let value = json!({
-            "headRepositoryOwner": {"id": "O_kgDODalOjg", "login": "Extra-Chill"},
-        });
-        assert_eq!(pr_head_repository_from_json(&value), "");
-    }
-
-    #[test]
-    fn a_wholly_absent_payload_fails_closed() {
-        assert_eq!(pr_head_repository_from_json(&json!({})), "");
+    fn head_repository_comes_from_the_gh_payload_and_fails_closed() {
+        let owner = json!({"id": "O_kgDODalOjg", "login": "Extra-Chill"});
+        let name = json!({"id": "R_kgDOP30Kgg", "name": "extrachill-events"});
+        for (payload, expected) in [
+            // Verified against `gh pr view 911 -R Extra-Chill/extrachill-events
+            // --json headRepository,headRepositoryOwner,isCrossRepository`.
+            (
+                json!({"headRepository": name, "headRepositoryOwner": owner, "isCrossRepository": false}),
+                "Extra-Chill/extrachill-events",
+            ),
+            // A fork head with the same repository name keeps the fork owner
+            // rather than collapsing to the base repository's slug.
+            (
+                json!({
+                    "headRepository": {"id": "R_fork", "name": "extrachill-events"},
+                    "headRepositoryOwner": {"id": "O_fork", "login": "some-contributor"},
+                    "isCrossRepository": true,
+                }),
+                "some-contributor/extrachill-events",
+            ),
+            (json!({"headRepository": name}), ""),
+            (json!({"headRepositoryOwner": owner}), ""),
+            (json!({}), ""),
+        ] {
+            assert_eq!(
+                pr_head_repository_from_json(&payload),
+                expected,
+                "{payload}"
+            );
+        }
     }
 }
 
@@ -1611,35 +1589,53 @@ mod remote_base_tests {
     }
 
     #[test]
-    fn pushed_branch_without_upstream_tracks_verified_remote_head() {
+    fn pushed_branch_tracks_verified_remote_head_whatever_the_prior_upstream() {
         // A single-branch clone's fetch refspec covers only its default
-        // branch; the published branch still gets an upstream.
-        for refspec in [None, Some("+refs/heads/main:refs/remotes/origin/main")] {
+        // branch; the published branch still gets an upstream. A stale base
+        // upstream is replaced; an already-correct upstream is preserved.
+        for setup in ["none", "single-branch", "stale-base", "already-correct"] {
             let (repo, _origin) = publication_repo();
-            if let Some(refspec) = refspec {
-                git(repo.path(), &["config", "remote.origin.fetch", refspec]);
+            let path = repo.path().to_str().unwrap().to_string();
+            match setup {
+                "single-branch" => git(
+                    repo.path(),
+                    &[
+                        "config",
+                        "remote.origin.fetch",
+                        "+refs/heads/main:refs/remotes/origin/main",
+                    ],
+                ),
+                "stale-base" => git(
+                    repo.path(),
+                    &["branch", "--set-upstream-to", "origin/main", "feature"],
+                ),
+                "already-correct" => {
+                    git(repo.path(), &["push", "-u", "origin", "feature"]);
+                    std::fs::write(repo.path().join("second.txt"), "second").unwrap();
+                    git(repo.path(), &["add", "second.txt"]);
+                    git(repo.path(), &["commit", "-m", "second feature commit"]);
+                }
+                _ => {}
             }
-            let commit_sha =
-                git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
+            let commit_sha = git_output(&path, &["rev-parse", "HEAD"]).unwrap();
 
             let tracking = RealAgentTaskPrFinalizationBackend
-                .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
+                .push_branch(&path, &commit_sha, "feature")
                 .expect("branch published");
 
             assert_eq!(
                 upstream(repo.path()).unwrap(),
-                "refs/remotes/origin/feature"
+                "refs/remotes/origin/feature",
+                "{setup}"
             );
             assert_eq!(tracking.local_branch, "feature");
             assert_eq!(tracking.remote, "origin");
             assert_eq!(tracking.upstream_ref, "refs/remotes/origin/feature");
+            assert_eq!(tracking.verified_remote_sha, commit_sha, "{setup}");
             assert_eq!(
-                tracking.verified_remote_sha,
-                git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap()
-            );
-            assert_eq!(
-                git_output(repo.path().to_str().unwrap(), &["rev-parse", "@{upstream}"]).unwrap(),
-                tracking.verified_remote_sha
+                git_output(&path, &["rev-parse", "@{upstream}"]).unwrap(),
+                commit_sha,
+                "{setup}"
             );
         }
     }
@@ -1678,78 +1674,6 @@ mod remote_base_tests {
         assert_eq!(
             backend.publication_base_behind_by(path, "main", &verified, &verified),
             Some(0)
-        );
-    }
-
-    #[test]
-    fn pushed_branch_replaces_stale_base_upstream_after_verification() {
-        let (repo, _origin) = publication_repo();
-        let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
-        git(
-            repo.path(),
-            &["branch", "--set-upstream-to", "origin/main", "feature"],
-        );
-
-        RealAgentTaskPrFinalizationBackend
-            .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
-            .expect("branch published");
-
-        assert_eq!(
-            upstream(repo.path()).unwrap(),
-            "refs/remotes/origin/feature"
-        );
-        assert_eq!(
-            git_output(repo.path().to_str().unwrap(), &["rev-parse", "@{upstream}"]).unwrap(),
-            git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap()
-        );
-    }
-
-    #[test]
-    fn pushed_branch_preserves_already_correct_upstream() {
-        let (repo, _origin) = publication_repo();
-        git(repo.path(), &["push", "-u", "origin", "feature"]);
-        std::fs::write(repo.path().join("second.txt"), "second").unwrap();
-        git(repo.path(), &["add", "second.txt"]);
-        git(repo.path(), &["commit", "-m", "second feature commit"]);
-        let remote = git_output(
-            repo.path().to_str().unwrap(),
-            &["config", "branch.feature.remote"],
-        )
-        .unwrap();
-        let merge = git_output(
-            repo.path().to_str().unwrap(),
-            &["config", "branch.feature.merge"],
-        )
-        .unwrap();
-        let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
-
-        RealAgentTaskPrFinalizationBackend
-            .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
-            .expect("branch published");
-
-        assert_eq!(
-            upstream(repo.path()).unwrap(),
-            "refs/remotes/origin/feature"
-        );
-        assert_eq!(
-            git_output(repo.path().to_str().unwrap(), &["rev-parse", "@{upstream}"]).unwrap(),
-            git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap()
-        );
-        assert_eq!(
-            git_output(
-                repo.path().to_str().unwrap(),
-                &["config", "branch.feature.remote"]
-            )
-            .unwrap(),
-            remote
-        );
-        assert_eq!(
-            git_output(
-                repo.path().to_str().unwrap(),
-                &["config", "branch.feature.merge"]
-            )
-            .unwrap(),
-            merge
         );
     }
 
@@ -1893,20 +1817,6 @@ mod remote_base_tests {
     }
 
     #[test]
-    fn resolve_verified_base_rejects_malformed_and_unresolvable_snapshots() {
-        let repo = repo();
-        for snapshot in ["not-a-sha", &"f".repeat(40)] {
-            let error = RealAgentTaskPrFinalizationBackend
-                .resolve_verified_base(repo.path().to_str().unwrap(), snapshot)
-                .expect_err("invalid snapshot is rejected");
-            assert_eq!(
-                error.code,
-                homeboy_core::ErrorCode::ValidationInvalidArgument
-            );
-        }
-    }
-
-    #[test]
     fn resolve_verified_base_rematerializes_only_the_persisted_snapshot() {
         let repo = repo();
         let remote = tempfile::tempdir().unwrap();
@@ -1953,13 +1863,15 @@ mod remote_base_tests {
         )
         .is_ok());
 
-        let unavailable = "f".repeat(40);
-        let error = RealAgentTaskPrFinalizationBackend
-            .resolve_verified_base(clone.path().to_str().unwrap(), &unavailable)
-            .expect_err("unavailable exact snapshot is rejected");
-        assert_eq!(
-            error.code,
-            homeboy_core::ErrorCode::ValidationInvalidArgument
-        );
+        for snapshot in ["not-a-sha", &"f".repeat(40)] {
+            let error = RealAgentTaskPrFinalizationBackend
+                .resolve_verified_base(clone.path().to_str().unwrap(), snapshot)
+                .expect_err("malformed or unavailable snapshot is rejected");
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument,
+                "{snapshot}"
+            );
+        }
     }
 }
