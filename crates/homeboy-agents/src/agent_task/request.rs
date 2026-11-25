@@ -298,28 +298,3 @@ pub struct AgentTaskComponentContract {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-
-#[cfg(test)]
-impl AgentTaskRequest {
-    pub(crate) fn redacted(&self) -> Self {
-        let policy = homeboy_core::redaction::RedactionPolicy::default();
-        let mut redacted = self.clone();
-        redacted.instructions = policy.redact_string(&redacted.instructions);
-        redacted.inputs = policy.redact_json(&redacted.inputs);
-        redacted.executor.config = policy.redact_json(&redacted.executor.config);
-        redacted.workspace.materialization =
-            policy.redact_json(&redacted.workspace.materialization);
-        redacted.artifact_declarations = redacted
-            .artifact_declarations
-            .into_iter()
-            .map(|declaration| declaration.redacted_with(&policy))
-            .collect();
-        redacted.runtime_tools = redacted
-            .runtime_tools
-            .into_iter()
-            .map(|tool| tool.redacted())
-            .collect();
-        redacted.metadata = policy.redact_json(&redacted.metadata);
-        redacted
-    }
-}
