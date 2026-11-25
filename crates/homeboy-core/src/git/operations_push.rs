@@ -271,38 +271,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_https_host_parses_github_com_and_enterprise() {
-        assert_eq!(
-            github_https_host("https://github.com/owner/repo.git").as_deref(),
-            Some("github.com")
-        );
-        assert_eq!(
-            github_https_host("https://github.a8c.com/owner/repo").as_deref(),
-            Some("github.a8c.com")
-        );
-    }
-
-    #[test]
-    fn github_https_host_rejects_ssh_and_non_github() {
-        assert_eq!(github_https_host("git@github.com:owner/repo.git"), None);
-        assert_eq!(github_https_host("https://example.com/owner/repo"), None);
-    }
-
-    #[test]
-    fn token_push_injects_token_for_enterprise_https_remote() {
-        let url =
-            resolve_push_remote_url(Some("https://github.a8c.com/owner/repo.git"), Some("tok"))
-                .expect("enterprise https remote should be accepted");
-        assert_eq!(
-            url.as_deref(),
-            Some("https://x-access-token:tok@github.a8c.com/owner/repo.git")
-        );
-    }
-
-    #[test]
-    fn token_push_rejects_ssh_remote() {
-        assert!(
-            resolve_push_remote_url(Some("git@github.com:owner/repo.git"), Some("tok")).is_err()
-        );
+    fn token_push_injects_the_token_only_into_github_https_remotes() {
+        for (remote, injected) in [
+            (
+                "https://github.com/owner/repo.git",
+                Some("https://x-access-token:tok@github.com/owner/repo.git"),
+            ),
+            (
+                "https://github.a8c.com/owner/repo.git",
+                Some("https://x-access-token:tok@github.a8c.com/owner/repo.git"),
+            ),
+            ("git@github.com:owner/repo.git", None),
+            ("https://example.com/owner/repo", None),
+        ] {
+            let resolved = resolve_push_remote_url(Some(remote), Some("tok"));
+            match injected {
+                Some(url) => assert_eq!(resolved.unwrap().as_deref(), Some(url), "{remote}"),
+                None => assert!(resolved.is_err(), "{remote}"),
+            }
+        }
     }
 }

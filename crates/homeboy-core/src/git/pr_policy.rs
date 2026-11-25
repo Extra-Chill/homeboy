@@ -586,60 +586,38 @@ mod tests {
     }
 
     #[test]
-    fn ci_gate_allows_terminal_green() {
-        let mut decision = PrPolicyDecision {
-            mode: "merge".into(),
-            allowed: true,
-            safe: true,
-            reason: "safe".into(),
-            report: "## Policy\n\nSafe".into(),
-            changed_file_count: 0,
-            files: Vec::new(),
-            ci_state: None,
-            ci_summary: None,
-            ci_next_action: None,
-            merged: None,
-        };
+    fn ci_gate_allows_only_terminal_green_checks() {
+        for (ci_state, next_action, allowed) in [
+            ("terminal_green", "merge_ready", true),
+            ("stale", "wait", false),
+            ("pending", "wait", false),
+        ] {
+            let mut decision = PrPolicyDecision {
+                mode: "merge".into(),
+                allowed: true,
+                safe: true,
+                reason: "safe".into(),
+                report: "## Policy\n\nSafe".into(),
+                changed_file_count: 0,
+                files: Vec::new(),
+                ci_state: None,
+                ci_summary: None,
+                ci_next_action: None,
+                merged: None,
+            };
 
-        apply_ci_gate(
-            &mut decision,
-            "terminal_green",
-            "1 reported check(s): 1 passed, 0 failed/unknown, 0 queued, 0 running, 0 pending, 0 skipped",
-            "merge_ready",
-        );
+            apply_ci_gate(&mut decision, ci_state, "ci summary", next_action);
 
-        assert!(decision.allowed);
-        assert_eq!(decision.ci_state.as_deref(), Some("terminal_green"));
-        assert_eq!(decision.ci_next_action.as_deref(), Some("merge_ready"));
-        assert!(decision.report.contains("CI status: `terminal_green`"));
-    }
-
-    #[test]
-    fn ci_gate_blocks_stale_or_pending_checks_before_merge() {
-        let mut decision = PrPolicyDecision {
-            mode: "merge".into(),
-            allowed: true,
-            safe: true,
-            reason: "safe".into(),
-            report: "## Policy\n\nSafe".into(),
-            changed_file_count: 0,
-            files: Vec::new(),
-            ci_state: None,
-            ci_summary: None,
-            ci_next_action: None,
-            merged: None,
-        };
-
-        apply_ci_gate(
-            &mut decision,
-            "stale",
-            "1 reported check(s): 0 passed, 0 failed/unknown, 0 queued, 0 running, 1 pending, 0 skipped",
-            "wait",
-        );
-
-        assert!(!decision.allowed);
-        assert!(!decision.safe);
-        assert!(decision.reason.contains("stale"));
-        assert_eq!(decision.ci_state.as_deref(), Some("stale"));
+            assert_eq!(decision.allowed, allowed, "{ci_state}");
+            assert_eq!(decision.safe, allowed, "{ci_state}");
+            assert_eq!(decision.ci_state.as_deref(), Some(ci_state));
+            assert_eq!(decision.ci_next_action.as_deref(), Some(next_action));
+            assert!(decision
+                .report
+                .contains(&format!("CI status: `{ci_state}`")));
+            if !allowed {
+                assert!(decision.reason.contains(ci_state), "{}", decision.reason);
+            }
+        }
     }
 }

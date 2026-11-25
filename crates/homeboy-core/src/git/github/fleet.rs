@@ -278,23 +278,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_pr_fleet_ref_accepts_number() {
+    fn parse_pr_fleet_ref_accepts_numbers_and_same_repo_urls_only() {
         assert_eq!(parse_pr_fleet_ref("42", "owner", "repo").unwrap(), 42);
-    }
-
-    #[test]
-    fn parse_pr_fleet_ref_accepts_matching_url() {
         assert_eq!(
             parse_pr_fleet_ref("https://github.com/owner/repo/pull/42", "owner", "repo").unwrap(),
             42
         );
-    }
-
-    #[test]
-    fn parse_pr_fleet_ref_rejects_wrong_repo_url() {
         let error = parse_pr_fleet_ref("https://github.com/other/repo/pull/42", "owner", "repo")
             .unwrap_err();
-
         assert!(error.contains("expected owner/repo"));
     }
 
@@ -304,97 +295,58 @@ mod tests {
             {"status":"COMPLETED","conclusion":"SUCCESS"},
             {"status":"COMPLETED","conclusion":"FAILURE"},
             {"status":"IN_PROGRESS","conclusion":""},
-            {"status":"COMPLETED","conclusion":"BOGUS"}
-        ]);
-        let rollup = summarize_check_rollup(checks.as_array().unwrap());
-
-        assert_eq!(rollup.total, 4);
-        assert_eq!(rollup.passed, 1);
-        assert_eq!(rollup.failed, 1);
-        assert_eq!(rollup.pending, 1);
-        assert_eq!(rollup.unknown, 1);
-        assert_eq!(rollup.skipped, 0);
-    }
-
-    #[test]
-    fn summarize_check_rollup_counts_skipped_separately_from_passed() {
-        // Regression guard for the standardized SKIPPED handling: a skipped
-        // check must land in its own bucket, not inflate the passed count the
-        // way the previous fleet-only classifier did.
-        let checks = serde_json::json!([
-            {"status":"COMPLETED","conclusion":"SUCCESS"},
+            {"status":"COMPLETED","conclusion":"BOGUS"},
             {"status":"COMPLETED","conclusion":"SKIPPED"}
         ]);
         let rollup = summarize_check_rollup(checks.as_array().unwrap());
 
-        assert_eq!(rollup.total, 2);
-        assert_eq!(rollup.passed, 1);
-        assert_eq!(rollup.skipped, 1);
-        assert_eq!(rollup.failed, 0);
-        assert_eq!(rollup.pending, 0);
-        assert_eq!(rollup.unknown, 0);
+        assert_eq!(
+            (
+                rollup.total,
+                rollup.passed,
+                rollup.failed,
+                rollup.pending,
+                rollup.unknown,
+                rollup.skipped
+            ),
+            (5, 1, 1, 1, 1, 1)
+        );
     }
 
     #[test]
-    fn pr_fleet_item_requires_clean_green_before_merge() {
-        let view = GithubPrView {
-            component_id: "homeboy".into(),
-            owner: "Extra-Chill".into(),
-            repo: "homeboy".into(),
-            number: 42,
-            url: "https://github.com/Extra-Chill/homeboy/pull/42".into(),
-            title: Some("Ready".into()),
-            body: None,
-            state: "OPEN".into(),
-            draft: false,
-            author: None,
-            base: "main".into(),
-            head: "feature".into(),
-            head_repository: None,
-            head_sha: Some("abc".into()),
-            merged_at: None,
-            review_decision: None,
-            merge_state: Some("CLEAN".into()),
-            ci_state: "terminal_green".into(),
-            ci_summary: "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending".into(),
-            ci_next_action: "merge_ready".into(),
-        };
+    fn pr_fleet_item_merges_only_clean_green_prs() {
+        for (merge_state, mergeable, stale_base, action) in [
+            ("CLEAN", true, false, "merge"),
+            ("BEHIND", false, true, "update_branch"),
+        ] {
+            let view = GithubPrView {
+                component_id: "homeboy".into(),
+                owner: "Extra-Chill".into(),
+                repo: "homeboy".into(),
+                number: 42,
+                url: "https://github.com/Extra-Chill/homeboy/pull/42".into(),
+                title: None,
+                body: None,
+                state: "OPEN".into(),
+                draft: false,
+                author: None,
+                base: "main".into(),
+                head: "feature".into(),
+                head_repository: None,
+                head_sha: Some("abc".into()),
+                merged_at: None,
+                review_decision: None,
+                merge_state: Some(merge_state.into()),
+                ci_state: "terminal_green".into(),
+                ci_summary: "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending".into(),
+                ci_next_action: "merge_ready".into(),
+            };
 
-        let item = pr_fleet_item("42", &view, GithubPrCheckRollup::default());
+            let item = pr_fleet_item("42", &view, GithubPrCheckRollup::default());
 
-        assert!(item.mergeable);
-        assert_eq!(item.required_action, "merge");
-    }
-
-    #[test]
-    fn pr_fleet_item_reports_stale_base_action() {
-        let view = GithubPrView {
-            component_id: "homeboy".into(),
-            owner: "Extra-Chill".into(),
-            repo: "homeboy".into(),
-            number: 42,
-            url: "https://github.com/Extra-Chill/homeboy/pull/42".into(),
-            title: Some("Stale base".into()),
-            body: None,
-            state: "OPEN".into(),
-            draft: false,
-            author: None,
-            base: "main".into(),
-            head: "feature".into(),
-            head_repository: None,
-            head_sha: Some("abc".into()),
-            merged_at: None,
-            review_decision: None,
-            merge_state: Some("BEHIND".into()),
-            ci_state: "terminal_green".into(),
-            ci_summary: "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending".into(),
-            ci_next_action: "merge_ready".into(),
-        };
-
-        let item = pr_fleet_item("42", &view, GithubPrCheckRollup::default());
-
-        assert!(!item.mergeable);
-        assert!(item.stale_base);
-        assert_eq!(item.required_action, "update_branch");
+            assert_eq!(item.mergeable, mergeable, "{merge_state}");
+            assert_eq!(item.stale_base, stale_base, "{merge_state}");
+            assert_eq!(item.required_action, action, "{merge_state}");
+        }
     }
 }
