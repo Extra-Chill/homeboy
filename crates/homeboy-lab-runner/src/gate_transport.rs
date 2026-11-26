@@ -390,27 +390,28 @@ fn terminal_envelope_diagnostic(value: &serde_json::Value, stdout_bytes: usize) 
     diagnostic.to_string()
 }
 
-/// Secret identity names the admitted component's test capability declares.
+/// Secret identity names the admitted component's and the gate-tested
+/// components' test capabilities declare.
 ///
 /// A Lab gate runs `homeboy review test <component>` on the runner, where the
 /// extension child requires its declared `test.secret_env` (for example a test
 /// database). Declaring the names on the exec lets the runner resolve them from
 /// its own runner-deferred `secret_env` refs; no controller value crosses
-/// (#15824). Only names the component's test extension declares are requested,
-/// so unrelated runner secrets never reach a gate. An unresolvable component or
-/// declaration yields no names and the gate reports its own error, as before.
-fn admitted_component_test_secret_env_names(
+/// (#15824). On a monorepo the gate may test a nested component other than the
+/// admitted one, so its declarations are included too (#19187). Only names a
+/// relevant component's test extension declares are requested, so unrelated
+/// runner secrets never reach a gate. An unresolvable component or declaration
+/// yields no names and the gate reports its own error, as before.
+fn gate_test_secret_env_names(
     admitted_component_id: Option<&str>,
     cwd: &Path,
+    gate_argv: &[String],
 ) -> Vec<String> {
-    let Ok(component) = homeboy_core::component::resolve_effective(
+    homeboy_agents::agent_task_gate::gate_test_secret_env_names(
         admitted_component_id,
-        Some(&cwd.to_string_lossy()),
-        None,
-    ) else {
-        return Vec::new();
-    };
-    homeboy_core::extension::test::declared_secret_env_names(&component).unwrap_or_default()
+        cwd,
+        [gate_argv],
+    )
 }
 
 fn lab_gate_exec_options(
@@ -884,9 +885,10 @@ fn execute_owned(
     }
     crate::lab::offload::materialize_lab_at_files_on_runner(&request.runner_id, &at_files)?;
     command = crate::lab_args::remap_lab_at_file_args(&command, &at_files);
-    let secret_env_names = admitted_component_test_secret_env_names(
+    let secret_env_names = gate_test_secret_env_names(
         request.environment.admitted_component_id.as_deref(),
         cwd,
+        &request.argv,
     );
     let mut options = lab_gate_exec_options(command, run_id, secret_env_names);
     if let Some((root, _)) = &input_store {
@@ -1571,11 +1573,67 @@ mod secret_env_tests {
     #[test]
     fn unresolvable_admitted_component_declares_no_secret_names() {
         let dir = tempfile::tempdir().expect("cwd");
-        assert!(admitted_component_test_secret_env_names(
+        assert!(gate_test_secret_env_names(
             Some("homeboy-15824-no-such-component"),
-            dir.path()
+            dir.path(),
+            &[]
         )
         .is_empty());
+    }
+
+    /// #19187: a gate on an admitted monorepo root that tests a nested
+    /// component requests that component's declared test secret names.
+    #[test]
+    fn gate_exec_carries_tested_subcomponent_secret_names() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let names = ["WP_CODEBOX_DB_HOST", "WP_CODEBOX_DB_PASSWORD"];
+            let extension = home
+                .path()
+                .join(".config/homeboy/extensions/secret-wp-fixture");
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(
+                extension.join("secret-wp-fixture.json"),
+                serde_json::json!({
+                    "name": "Secret WP fixture",
+                    "version": "1.0.0",
+                    "test": {
+                        "extension_script": "test.sh",
+                        "secret_env": {names[0]: names[0], names[1]: names[1]},
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            homeboy_test_support::write_executable(
+                extension.join("test.sh"),
+                "#!/bin/sh\nexit 0\n",
+                0o755,
+            )
+            .unwrap();
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(
+                root.path().join("homeboy.json"),
+                r#"{"id":"mono-root-19187"}"#,
+            )
+            .unwrap();
+            let events = root.path().join("plugins/mono-events-19187");
+            std::fs::create_dir_all(&events).unwrap();
+            std::fs::write(
+                events.join("homeboy.json"),
+                r#"{"id":"mono-events-19187","extensions":{"secret-wp-fixture":{}}}"#,
+            )
+            .unwrap();
+
+            let argv = homeboy_agents::agent_task_gate::legacy_gate_argv(
+                "homeboy review test mono-events-19187",
+            );
+            let options = lab_gate_exec_options(
+                vec!["homeboy".to_string()],
+                "run",
+                gate_test_secret_env_names(Some("mono-root-19187"), root.path(), &argv),
+            );
+            assert_eq!(options.secret_env_names, names);
+        });
     }
 }
 

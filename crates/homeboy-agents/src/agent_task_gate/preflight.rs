@@ -170,7 +170,13 @@ pub(super) fn preflight_gate_toolchains_local(
     if prepare_runner_cache && !requirements.is_empty() {
         selected_environment.configure_rust_cache(cwd)?;
     }
-    selected_environment.configure_component_inputs(cwd)?;
+    // Probes run the gate commands they front, so carry those gates' secrets.
+    let gate_argvs: Vec<Vec<String>> = requirements
+        .iter()
+        .flat_map(|requirement| &requirement.probe_arguments)
+        .map(|probe| legacy_gate_argv(probe))
+        .collect();
+    selected_environment.configure_component_inputs(cwd, &gate_argvs)?;
     // The deadline covers declared probe execution. Controller scheduling before
     // the first child starts cannot make an otherwise successful probe fail.
     let mut started = None;

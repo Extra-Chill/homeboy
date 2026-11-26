@@ -849,7 +849,7 @@ fn overlay_registered_local_checkout(
 /// Inventory nested portable manifests without traversing dependency trees.
 /// Git provides the tracked/unignored inventory when available; materialized
 /// runner snapshots need a bounded, symlink-free filesystem walk instead.
-fn nested_portable_directories(root: &Path) -> Vec<PathBuf> {
+pub fn nested_portable_directories(root: &Path) -> Vec<PathBuf> {
     fn excluded(name: &str) -> bool {
         name.starts_with('.')
             || matches!(

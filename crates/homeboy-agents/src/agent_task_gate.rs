@@ -1819,6 +1819,9 @@ use extension_sources::*;
 mod environment;
 use environment::*;
 
+mod gate_secret_env;
+pub use gate_secret_env::gate_test_secret_env_names;
+
 mod rust_cache;
 use rust_cache::*;
 

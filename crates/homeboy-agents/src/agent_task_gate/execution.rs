@@ -585,7 +585,7 @@ pub(super) fn run_gate_argv_local(
     let verdict_started = Instant::now();
     selected_environment.configure_rust_cache(cwd)?;
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
-    selected_environment.configure_component_inputs(cwd)?;
+    selected_environment.configure_component_inputs(cwd, std::slice::from_ref(&command_vec))?;
     // Do not clear again: the declared suite deadline is already applied.
     process.envs(&selected_environment.values);
     // Every deterministic gate is contained the same way regardless of

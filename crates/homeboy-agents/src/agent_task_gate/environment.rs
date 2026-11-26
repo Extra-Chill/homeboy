@@ -41,10 +41,14 @@ impl SelectedGateEnvironment {
     /// secrets to the gate. Preflight probes and gate execution both call this,
     /// so a nested `homeboy review test` resolves identically in each
     /// (Extra-Chill/homeboy#16268).
-    pub(super) fn configure_component_inputs(&mut self, cwd: &Path) -> Result<()> {
+    pub(super) fn configure_component_inputs(
+        &mut self,
+        cwd: &Path,
+        gate_argvs: &[Vec<String>],
+    ) -> Result<()> {
         self.register_admitted_component(cwd)?;
         self.configure_linked_extensions(cwd)?;
-        self.carry_declared_secret_env(cwd);
+        self.carry_declared_secret_env(cwd, gate_argvs);
         Ok(())
     }
 
@@ -111,7 +115,8 @@ impl SelectedGateEnvironment {
         fs::write(components.join(file), bytes).map_err(io_error)
     }
 
-    /// Carry the admitted component's declared test secrets into the gate.
+    /// Carry the declared test secrets of the admitted component and of every
+    /// component the gate commands test into the gate (#19187).
     ///
     /// `replace` mode clears the child environment and HOME isolation hides
     /// Homeboy's secret mappings, so a nested `homeboy review test` could never
@@ -120,16 +125,12 @@ impl SelectedGateEnvironment {
     /// its `secret_env` refs) supplied them to this process (#15824). Only the
     /// names the component's test capability declares are carried, only when
     /// present here, and the report records names, never values.
-    pub(super) fn carry_declared_secret_env(&mut self, cwd: &Path) {
-        let Ok(component) = homeboy_core::component::resolve_effective(
+    pub(super) fn carry_declared_secret_env(&mut self, cwd: &Path, gate_argvs: &[Vec<String>]) {
+        let names = super::gate_test_secret_env_names(
             self.admitted_component_id.as_deref(),
-            Some(&cwd.to_string_lossy()),
-            None,
-        ) else {
-            return;
-        };
-        let names = homeboy_core::extension::test::declared_secret_env_names(&component)
-            .unwrap_or_default();
+            cwd,
+            gate_argvs.iter().map(Vec::as_slice),
+        );
         self.carry_secret_env_names(&names, |name| std::env::var(name).ok());
     }
 
