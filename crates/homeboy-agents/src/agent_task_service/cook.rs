@@ -1307,6 +1307,34 @@ pub fn cook_driver_is_live(cook_id: &str) -> Result<bool> {
         .is_some())
 }
 
+/// Whether a held Cook driver lock owns `record` as unspawned work: the record
+/// names its Cook, claims neither a runner process (`runner_pid`) nor a runner
+/// job, and some controller (this process included) holds that Cook's driver
+/// lock. Such an attempt is waiting on its driver (admission, worktree or
+/// provider lookup), not dead, so it is never `missing_runner_pid` (#19182).
+pub(crate) fn cook_driver_owns_unspawned_attempt(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    if record.state().is_terminal()
+        || record.owner_pid().is_some()
+        || record.runner_job_id().is_some()
+    {
+        return false;
+    }
+    let Some(cook_id) = record
+        .metadata
+        .get("cook_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return false;
+    };
+    CookRecipeStore::for_lifecycle_store(store)
+        .cook_driver_held(cook_id)
+        .unwrap_or(false)
+}
+
 pub fn cook_continuation_owner_denial(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     cook_id: &str,
