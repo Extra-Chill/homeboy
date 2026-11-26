@@ -20,6 +20,7 @@ const runner = path.join(extension, 'scripts/test/test-runner-wp-codebox.sh');
 const root = await mkdtemp(path.join(os.tmpdir(), 'wp-codebox-phpunit-host-suite-'));
 const component = path.join(root, 'sample-plugin');
 const cli = path.join(root, 'wp-codebox');
+await mkdir(path.join(root, 'gate-home'));
 
 await mkdir(path.join(component, 'tests/Unit'), { recursive: true });
 await mkdir(path.join(component, 'vendor/bin'), { recursive: true });
@@ -99,7 +100,12 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0' } = {}) {
   const capturedHostRuns = path.join(root, `${name}-host-runs.txt`);
   const run = spawnSync('bash', [runner], {
     env: {
-      ...process.env,
+      // Replace-mode gate: no login-shell environment or host HOME.
+      PATH: process.env.PATH,
+      HOME: path.join(root, 'gate-home'),
+      TMPDIR: root,
+      HOMEBOY_TEST_RESULTS_FILE: path.join(root, `${name}-results.json`),
+      HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: path.resolve(extension, '../../crates/homeboy-core/src/extension/runtime/write-test-results.sh'),
       CAPTURED_CONFIGS: capturedConfigs,
       CAPTURED_HOST_RUNS: capturedHostRuns,
       HOST_PHPUNIT_OUTPUT: hostOutput,
@@ -126,6 +132,8 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0' } = {}) {
   assert.equal(run.status, 0, `expected a passing mixed-runtime run, got ${run.status}\n${run.stdout}\n${run.stderr}`);
   assert.match(run.stdout, /PHPUNIT_SUITE_RESULT:name=sandbox-suite status=passed/);
   assert.match(run.stdout, /PHPUNIT_SUITE_RESULT:name=unit status=passed/);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, 'host-results.json'), 'utf8')),
+    { total: 9, passed: 9, failed: 0, skipped: 0 });
 
   // The host suite must not have been built as a sandbox recipe.
   const configs = (await readFile(capturedConfigs, 'utf8')).trim().split('\n');
@@ -149,6 +157,8 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0' } = {}) {
   assert.notEqual(run.status, 0, 'expected a failing host suite to fail the phase');
   assert.match(run.stdout, /PHPUNIT_SUITE_RESULT:name=sandbox-suite status=passed/);
   assert.match(run.stdout, /PHPUNIT_SUITE_RESULT:name=unit status=failed/);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, 'host-fail-results.json'), 'utf8')),
+    { total: 9, passed: 7, failed: 2, skipped: 0 });
 }
 
 // --- A host suite that executes nothing is a failure, not a pass -----------
