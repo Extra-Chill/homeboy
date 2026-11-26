@@ -32,6 +32,34 @@ if [ ! -f "$OUTPUT_FILE" ]; then
     exit 0
 fi
 
+# The adapter already aggregates host and managed suites into core's flat
+# sidecar. Core invokes this parser again with that sidecar as its input: do
+# not reinterpret it as raw PHPUnit output (or add the host transcript again).
+if python3 - "$OUTPUT_FILE" "${HOMEBOY_TEST_RESULTS_FILE:-}" <<'PY'
+import json
+import os
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except (OSError, ValueError):
+    sys.exit(1)
+keys = ("total", "passed", "failed", "skipped")
+if not isinstance(data, dict) or not all(type(data.get(k)) is int and data[k] >= 0 for k in keys):
+    sys.exit(1)
+if data["total"] != sum(data[k] for k in keys[1:]):
+    sys.exit(1)
+if sys.argv[2] and os.path.abspath(sys.argv[1]) != os.path.abspath(sys.argv[2]):
+    os.makedirs(os.path.dirname(os.path.abspath(sys.argv[2])), exist_ok=True)
+    with open(sys.argv[2], "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+        handle.write("\n")
+PY
+then
+    exit 0
+fi
+
 WRITE_TEST_RESULTS_HELPER="${HOMEBOY_RUNTIME_WRITE_TEST_RESULTS:-}"
 if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; then
     # shellcheck source=/dev/null

@@ -396,7 +396,8 @@ async function runHostSuite(suite) {
   await writeFile(logPath, output);
 
   const summary = parseHostPhpunitSummary(output);
-  await recordSuiteResults(summary);
+  const { assertions, ...counts } = summary;
+  await recordSuiteResults(counts);
   await writeFile(
     path.join(suiteArtifacts, 'wp-codebox-phpunit-results.json'),
     `${JSON.stringify({ schema: 'wp-codebox/phpunit-results/v1', suite: suite.name, runtime: 'host', summary }, null, 2)}\n`,
@@ -1656,10 +1657,15 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   const preservedOutputReferenced = validResults && Array.isArray(results.rawLogReferences) && results.rawLogReferences.some((reference) => reference?.path === 'files/phpunit-output.log' && reference?.kind === 'phpunit-output');
   const preservedOutputMatches = structuredExecution && preservedOutputReferenced && phpunitSummaryMatches(preservedAggregate, results.summary);
   const referencedOutput = structuredExecution ? await readMatchingPhpunitOutput(artifactDirectory, results) : '';
+  // Current recipe-run payloads can carry the only raw PHPUnit transcript.
+  // Structured counts do not imply that a referenced log was published.
+  const capturedOutput = extractPhpunitOutput(stdout, stderr, recipeRun);
+  const matchingCapturedOutput = structuredExecution && phpunitSummaryMatches(phpunitAggregate(capturedOutput), results.summary)
+    ? capturedOutput : '';
   const output = execution.timedOut
     ? `${JSON.stringify(timeoutEvidence)}\n`
     : redactSecrets( structuredExecution
-    ? ((preservedOutputMatches && preservedOutput) || referencedOutput || stageLog || structuredPhpunitOutputUnavailable(results, recipeRun))
+    ? ((preservedOutputMatches && preservedOutput) || referencedOutput || matchingCapturedOutput || stageLog || structuredPhpunitOutputUnavailable(results, recipeRun))
     : extractPhpunitOutput(stdout, stderr, recipeRun) );
   await writeFile(phpunitOutputPath, output);
   const aggregate = phpunitAggregate(output);

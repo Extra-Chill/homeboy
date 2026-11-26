@@ -71,6 +71,10 @@ if (args[0] === 'recipe' && args[1] === 'build') {
   fs.writeFileSync(args[args.indexOf('--output') + 1], '{"schema":"wp-codebox/workspace-recipe/v1"}');
   process.exit(0);
 }
+const managedFailed = process.env.MANAGED_FAILURE === '1';
+const managedOutput = managedFailed
+  ? 'PHPUnit 9.6.0\\n\\nThere was 1 failure:\\n\\n1) FirstTest::testManagedFailure\\nFailed asserting that false is true.\\n\\n/wordpress/wp-content/plugins/sample-plugin/tests/Unit/FirstTest.php:7\\n\\nFAILURES!\\nTests: 2, Assertions: 2, Failures: 1.\\n'
+  : 'OK (2 tests, 2 assertions)\\n';
 const artifactRoot = args[args.indexOf('--artifacts') + 1];
 const runtime = path.join(artifactRoot, 'runtime-fixture');
 fs.mkdirSync(path.join(runtime, 'files', 'phpunit'), { recursive: true });
@@ -84,18 +88,18 @@ fs.writeFileSync(path.join(runtime, 'files', 'phpunit', '.pg-test-result.txt'), 
 ].join('\\n'));
 fs.writeFileSync(path.join(runtime, 'files', 'test-results.json'), JSON.stringify({
   schema: 'wp-codebox/test-results/v1',
-  status: 'passed',
-  summary: { total: 2, passed: 2, failed: 0, skipped: 0, unknown: 0 },
+  status: managedFailed ? 'failed' : 'passed',
+  summary: { total: 2, passed: managedFailed ? 1 : 2, failed: managedFailed ? 1 : 0, skipped: 0, unknown: 0 },
   suites: [],
 }));
 process.stdout.write(JSON.stringify({
-  success: true,
-  executions: [{ command: 'wordpress.phpunit', exitCode: 0, stdout: 'OK (2 tests, 2 assertions)\\n', stderr: '' }],
+  success: !managedFailed,
+  executions: [{ command: 'wordpress.phpunit', exitCode: managedFailed ? 1 : 0, stdout: managedOutput, stderr: '' }],
 }));
 `);
 await chmod(cli, 0o755);
 
-function execute(name, settings, { hostOutput = '', hostStatus = '0' } = {}) {
+function execute(name, settings, { hostOutput = '', hostStatus = '0', managedFailure = false } = {}) {
   const capturedConfigs = path.join(root, `${name}-configs.txt`);
   const capturedHostRuns = path.join(root, `${name}-host-runs.txt`);
   const run = spawnSync('bash', [runner], {
@@ -110,6 +114,8 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0' } = {}) {
       CAPTURED_HOST_RUNS: capturedHostRuns,
       HOST_PHPUNIT_OUTPUT: hostOutput,
       HOST_PHPUNIT_STATUS: hostStatus,
+      MANAGED_FAILURE: managedFailure ? '1' : '0',
+      HOMEBOY_TEST_FAILURES_FILE: path.join(root, `${name}-failures.json`),
       HOMEBOY_COMPONENT_PATH: component,
       COMPONENT_ID: 'sample-plugin',
       HOMEBOY_WP_CODEBOX_BIN: cli,
@@ -159,6 +165,38 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0' } = {}) {
   assert.match(run.stdout, /PHPUNIT_SUITE_RESULT:name=unit status=failed/);
   assert.deepEqual(JSON.parse(await readFile(path.join(root, 'host-fail-results.json'), 'utf8')),
     { total: 9, passed: 7, failed: 2, skipped: 0 });
+}
+
+// --- Managed failures survive host aggregation and core's parser handoff ---
+{
+  const { run, capturedHostRuns } = execute('managed-fail', {
+    wp_codebox_phpunit_suites: [
+      { name: 'sandbox-suite', config: 'phpunit-sandbox.xml.dist' },
+      { name: 'unit-a', config: 'phpunit-unit.xml.dist', runtime: 'host' },
+      { name: 'unit-b', config: 'phpunit-unit.xml.dist', runtime: 'host' },
+    ],
+  }, { managedFailure: true });
+  assert.notEqual(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.match(run.stdout, /PHPUNIT_SUITE_RESULT:name=sandbox-suite status=failed/);
+  assert.equal((await readFile(capturedHostRuns, 'utf8')).trim().split('\n').length, 2);
+  const resultsFile = path.join(root, 'managed-fail-results.json');
+  const counts = JSON.parse(await readFile(resultsFile, 'utf8'));
+  assert.deepEqual(counts, { total: 16, passed: 15, failed: 1, skipped: 0 });
+  const failures = JSON.parse(await readFile(path.join(root, 'managed-fail-failures.json'), 'utf8'));
+  assert.match(JSON.stringify(failures), /testManagedFailure/);
+  // Core calls the declared parser with the existing sidecar, not the raw
+  // transcript. Repeating that handoff must neither erase nor double counts.
+  const parsedFile = path.join(root, 'managed-fail-parsed.json');
+  const parsed = spawnSync('bash', [path.join(extension, 'scripts/test/parse-test-results.sh'), resultsFile, 'wp-codebox-json', 'node-test'], {
+    env: { ...process.env, HOMEBOY_TEST_RESULTS_FILE: parsedFile }, encoding: 'utf8',
+  });
+  assert.equal(parsed.status, 0, parsed.stderr);
+  assert.deepEqual(JSON.parse(await readFile(parsedFile, 'utf8')), counts);
+  const repeated = spawnSync('bash', [path.join(extension, 'scripts/test/parse-test-results.sh'), parsedFile, 'wp-codebox-json', 'node-test'], {
+    env: { ...process.env, HOMEBOY_TEST_RESULTS_FILE: parsedFile }, encoding: 'utf8',
+  });
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.deepEqual(JSON.parse(await readFile(parsedFile, 'utf8')), counts);
 }
 
 // --- A host suite that executes nothing is a failure, not a pass -----------
