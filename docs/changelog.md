@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.497.29] - 2026-11-26
+
+### Fixed
+- hydrate cached extensions beside their declared shared assets
+
 ## [0.497.28] - 2026-11-25
 
 ### Fixed
