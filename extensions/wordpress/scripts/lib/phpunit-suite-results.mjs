@@ -5,6 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 export function createPhpunitSuiteResults(destination) {
   const totals = { total: 0, passed: 0, failed: 0, skipped: 0 };
   const partials = new Set();
+  const metadata = {};
   return async (summary) => {
     if (!destination) return;
     for (const key of Object.keys(totals)) {
@@ -14,9 +15,15 @@ export function createPhpunitSuiteResults(destination) {
       }
       totals[key] += value;
     }
+    // Runtime writers may attach provenance or other contract fields. Keep
+    // those fields even when a later host suite supplies only numeric counts.
+    for (const [key, value] of Object.entries(summary ?? {})) {
+      if (!(key in totals) && key !== 'partial') metadata[key] = value;
+    }
     if (summary?.partial) partials.add(summary.partial);
-    const result = partials.size ? { ...totals, partial: [...partials].join(',') } : totals;
-    await writeFile(destination, `${JSON.stringify(result)}\n`);
+    const result = { ...metadata, ...totals };
+    if (partials.size) result.partial = [...partials].join(',');
+    await writeFile(destination, `${JSON.stringify(result, null, 2)}\n`);
   };
 }
 
