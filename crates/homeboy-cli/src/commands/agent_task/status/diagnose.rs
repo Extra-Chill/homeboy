@@ -1208,9 +1208,25 @@ pub(super) fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAct
             }
         }
     }
-    let runner_id = record.runner_id().filter(|id| !id.trim().is_empty());
+    let decision = serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+        record.metadata["execution_placement_decision"].clone(),
+    )
+    .ok();
+    let decision_lab_runner = decision
+        .as_ref()
+        .filter(|decision| {
+            decision.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab
+        })
+        .and_then(|decision| decision.runner.as_ref())
+        .map(|runner| runner.runner_id.as_str());
+    let runner_id = record
+        .runner_id()
+        .or(decision_lab_runner)
+        .filter(|id| !id.trim().is_empty());
     let local_owner = match runner_id {
         Some(runner_id) => json!({ "placement": "runner", "runner_id": runner_id }),
+        // A Lab-required decision must never be replayed onto the controller.
+        None if decision.as_ref().is_some_and(lab_required) => json!({ "placement": "lab" }),
         None => json!({ "placement": "local" }),
     };
     let plan = match agent_task_lifecycle::load_plan(&record.run_id) {
@@ -1299,6 +1315,13 @@ pub(super) fn lab_replay_retry_action(run_id: &str, owner: Value) -> CommandNext
     )
 }
 
+/// Whether a persisted decision forbids executing on the controller.
+pub(super) fn lab_required(decision: &homeboy_lab_contract::ExecutionPlacementDecision) -> bool {
+    (decision.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab
+        && !decision.permits_local_fallback())
+        || decision.required == homeboy_lab_contract::ExecutionPlacementRequirement::Lab
+}
+
 pub(super) fn owner_bound_retry_action(
     run_id: &str,
     runner_id: Option<&str>,
@@ -1307,6 +1330,8 @@ pub(super) fn owner_bound_retry_action(
     let mut args = Vec::new();
     if let Some(runner_id) = runner_id {
         args.extend(["--runner".to_string(), runner_id.to_string()]);
+    } else if owner["placement"] == "lab" {
+        args.extend(["--placement".to_string(), "lab".to_string()]);
     } else {
         args.extend(["--placement".to_string(), "local".to_string()]);
     }
