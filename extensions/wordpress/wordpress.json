@@ -21,7 +21,7 @@
   "composition": {
     "includes": ["nodejs"]
   },
-  "isolated_home_paths": [".cache/homeboy/wp-codebox", ".wordpress-playground"],
+  "isolated_home_paths": [".cache/homeboy/wp-codebox", ".wordpress-playground", ".cache/composer"],
   "source_snapshot": {
     "sync_excludes": ["vendor/", "vendor/**", "wp-config.php"]
   },
