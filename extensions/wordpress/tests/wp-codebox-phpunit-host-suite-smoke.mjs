@@ -51,7 +51,10 @@ await writeFile(
 await writeFile(path.join(component, 'vendor/bin/phpunit'), `#!/usr/bin/env node
 import fs from 'node:fs';
 fs.appendFileSync(process.env.CAPTURED_HOST_RUNS, process.argv.slice(2).join(' ') + '\\n');
-process.stdout.write(process.env.HOST_PHPUNIT_OUTPUT || 'OK (7 tests, 9 assertions)\\n');
+const count = process.env.REAL_SEQUENCE === '1' ? [3,8,628,63,5,6,53,3,23][Number(process.argv.at(-1).match(/host-(\\d+)/)?.[1] || 0)] : 7;
+// Real host runners publish a per-suite sidecar as well as their transcript.
+if (process.env.HOMEBOY_TEST_RESULTS_FILE) fs.writeFileSync(process.env.HOMEBOY_TEST_RESULTS_FILE, JSON.stringify({ total: count, passed: count, failed: 0, skipped: 0 }));
+process.stdout.write(process.env.HOST_PHPUNIT_OUTPUT || 'OK (' + count + ' tests, 9 assertions)\\n');
 process.exitCode = Number(process.env.HOST_PHPUNIT_STATUS || 0);
 `);
 await chmod(path.join(component, 'vendor/bin/phpunit'), 0o755);
@@ -72,7 +75,11 @@ if (args[0] === 'recipe' && args[1] === 'build') {
   process.exit(0);
 }
 const managedFailed = process.env.MANAGED_FAILURE === '1';
-const managedOutput = managedFailed
+const realSequence = process.env.REAL_SEQUENCE === '1';
+const failureBlocks = Array.from({ length: 121 }, (_, i) => (i + 1) + ') ' + (i < 19 ? 'GuestListModeTest' : 'RsvpGuestListTest') + '::testManagedFailure' + i + '\\nFailed asserting that false is true.\\n\\n/wordpress/wp-content/plugins/sample-plugin/tests/Unit/FirstTest.php:7\\n').join('\\n');
+const managedOutput = realSequence
+  ? 'PHPUnit 9.6.0\\n\\nThere were 121 failures:\\n\\n' + failureBlocks + '\\nFAILURES!\\nTests: 651, Assertions: 651, Failures: 121, Skipped: 7.\\n'
+  : managedFailed
   ? 'PHPUnit 9.6.0\\n\\nThere was 1 failure:\\n\\n1) FirstTest::testManagedFailure\\nFailed asserting that false is true.\\n\\n/wordpress/wp-content/plugins/sample-plugin/tests/Unit/FirstTest.php:7\\n\\nFAILURES!\\nTests: 2, Assertions: 2, Failures: 1.\\n'
   : 'OK (2 tests, 2 assertions)\\n';
 const artifactRoot = args[args.indexOf('--artifacts') + 1];
@@ -89,7 +96,7 @@ fs.writeFileSync(path.join(runtime, 'files', 'phpunit', '.pg-test-result.txt'), 
 fs.writeFileSync(path.join(runtime, 'files', 'test-results.json'), JSON.stringify({
   schema: 'wp-codebox/test-results/v1',
   status: managedFailed ? 'failed' : 'passed',
-  summary: { total: 2, passed: managedFailed ? 1 : 2, failed: managedFailed ? 1 : 0, skipped: 0, unknown: 0 },
+  summary: realSequence ? { total: 651, passed: 523, failed: 121, skipped: 7, unknown: 0 } : { total: 2, passed: managedFailed ? 1 : 2, failed: managedFailed ? 1 : 0, skipped: 0, unknown: 0 },
   suites: [],
 }));
 process.stdout.write(JSON.stringify({
@@ -99,7 +106,16 @@ process.stdout.write(JSON.stringify({
 `);
 await chmod(cli, 0o755);
 
-function execute(name, settings, { hostOutput = '', hostStatus = '0', managedFailure = false } = {}) {
+// Installed runtime adapters may reconcile host evidence when sourced. They
+// must never run against the managed suite's scratch sidecar: host counts have
+// already been recorded by the invocation owner.
+const invocationAdapters = path.join(root, 'invocation-adapters.sh');
+await writeFile(invocationAdapters, `
+echo 'ERROR: suite parser loaded invocation adapters' >&2
+exit 91
+`);
+
+function execute(name, settings, { hostOutput = '', hostStatus = '0', managedFailure = false, realSequence = false } = {}) {
   const capturedConfigs = path.join(root, `${name}-configs.txt`);
   const capturedHostRuns = path.join(root, `${name}-host-runs.txt`);
   const run = spawnSync('bash', [runner], {
@@ -115,6 +131,8 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0', managedFai
       HOST_PHPUNIT_OUTPUT: hostOutput,
       HOST_PHPUNIT_STATUS: hostStatus,
       MANAGED_FAILURE: managedFailure ? '1' : '0',
+      REAL_SEQUENCE: realSequence ? '1' : '0',
+      ...(realSequence ? { HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS: invocationAdapters } : {}),
       HOMEBOY_TEST_FAILURES_FILE: path.join(root, `${name}-failures.json`),
       HOMEBOY_COMPONENT_PATH: component,
       COMPONENT_ID: 'sample-plugin',
@@ -197,6 +215,35 @@ function execute(name, settings, { hostOutput = '', hostStatus = '0', managedFai
   });
   assert.equal(repeated.status, 0, repeated.stderr);
   assert.deepEqual(JSON.parse(await readFile(parsedFile, 'utf8')), counts);
+}
+
+// --- Real sequence: nine host sidecars followed by failing managed tests.
+{
+  const hosts = [];
+  for (let i = 0; i < 9; i++) {
+    const config = `host-${i}.xml`;
+    await writeFile(path.join(component, config), await readFile(path.join(component, 'phpunit-unit.xml.dist')));
+    hosts.push({ name: `host-${i}`, config, runtime: 'host' });
+  }
+  const { run } = execute('real-sequence', {
+    wp_codebox_phpunit_suites: [...hosts, { name: 'managed', config: 'phpunit-sandbox.xml.dist' }],
+  }, { managedFailure: true, realSequence: true });
+  assert.notEqual(run.status, 0, run.stderr);
+  assert.ok(run.stdout.indexOf('PHPUNIT_SUITE_RESULT:name=host-8') < run.stdout.indexOf('PHPUNIT_SUITE_RESULT:name=managed'));
+  const resultsFile = path.join(root, 'real-sequence-results.json');
+  const expected = { total: 1443, passed: 1315, failed: 121, skipped: 7 };
+  assert.deepEqual(JSON.parse(await readFile(resultsFile, 'utf8')), expected);
+  const failures = JSON.parse(await readFile(path.join(root, 'real-sequence-failures.json'), 'utf8')).failures;
+  assert.equal(failures.length, 121);
+  for (let i = 0; i < 121; i++) {
+    assert.ok(failures.some(failure => failure.test_name.endsWith(`::testManagedFailure${i}`)), `missing managed failure ${i}`);
+  }
+  const parsedFile = path.join(root, 'real-sequence-parsed.json');
+  const parsed = spawnSync('bash', [path.join(extension, 'scripts/test/parse-test-results.sh'), resultsFile, 'wp-codebox-json', 'node-test'], {
+    env: { ...process.env, HOMEBOY_TEST_RESULTS_FILE: parsedFile }, encoding: 'utf8',
+  });
+  assert.equal(parsed.status, 0, parsed.stderr);
+  assert.deepEqual(JSON.parse(await readFile(parsedFile, 'utf8')), expected);
 }
 
 // --- A host suite that executes nothing is a failure, not a pass -----------

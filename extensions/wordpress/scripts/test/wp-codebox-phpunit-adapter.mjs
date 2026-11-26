@@ -259,6 +259,17 @@ try {
   if (!discoveryOnly && databaseService?.boundary) {
     executionArgs.push('--approve-external-service-writes', '--policy', JSON.stringify(databaseService.policy));
   }
+  let hostFailureExitCode = 0;
+  if (!discoveryOnly) {
+    // Run the inexpensive host suites first, retaining their individual
+    // sidecars before the managed workload publishes its own evidence.
+    for (const suite of hostSuites) {
+      const result = await runHostSuite(suite);
+      if (result.diagnostic) process.stdout.write(`${result.diagnostic}\n`);
+      process.stdout.write(`PHPUNIT_SUITE_RESULT:name=${suite.name} status=${result.status}\n`);
+      if (result.status === 'failed' && !hostFailureExitCode) hostFailureExitCode = result.exitCode;
+    }
+  }
   const execution = await runCaptured(executionArgs, phpunitTimeoutSeconds);
   if (discoveryOnly) {
     try {
@@ -292,18 +303,9 @@ try {
         process.exitCode = suiteResult.exitCode;
       }
     }
-    // Host suites run last. They need no sandbox, so running them after the
-    // sandboxed ones keeps the expensive provisioning in one contiguous block.
-    for (const suite of hostSuites) {
-      const suiteResult = await runHostSuite(suite);
-      if (suiteResult.diagnostic) {
-        process.stdout.write(`${suiteResult.diagnostic}\n`);
-      }
-      process.stdout.write(`PHPUNIT_SUITE_RESULT:name=${suite.name} status=${suiteResult.status}\n`);
-      if (suiteResult.status === 'failed' && !failed) {
-        failed = true;
-        process.exitCode = suiteResult.exitCode;
-      }
+    if (hostFailureExitCode && !failed) {
+      failed = true;
+      process.exitCode = hostFailureExitCode;
     }
     if (!failed) {
       process.stdout.write('WP Codebox test run complete.\n');
@@ -387,7 +389,9 @@ async function runHostSuite(suite) {
   const logPath = path.join(suiteArtifacts, 'phpunit.log');
   const execution = spawnSync(binary, ['--configuration', suite.config], {
     cwd: pluginSourceDirectory,
-    env: environmentWithoutDatabaseAdministration(),
+    // A child may itself emit Homeboy sidecars. It owns only this suite,
+    // never the invocation aggregate that recordSuiteResults owns.
+    env: { ...environmentWithoutDatabaseAdministration(), HOMEBOY_TEST_RESULTS_FILE: path.join(suiteArtifacts, 'test-results.json') },
     encoding: 'utf8',
     timeout: phpunitTimeoutSeconds * 1000,
     maxBuffer: 64 * 1024 * 1024,
@@ -466,7 +470,11 @@ async function runCaptured(args, timeoutSeconds, artifactRoot = runArtifacts) {
 
   return new Promise((resolve, reject) => {
     const [command, ...prefix] = wpCodeboxCommand();
-    const child = spawn(command, [...prefix, ...args], { cwd: componentPath, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const child = spawn(command, [...prefix, ...args], {
+      cwd: componentPath,
+      env: { ...environmentWithoutDatabaseAdministration(), HOMEBOY_TEST_RESULTS_FILE: path.join(artifactRoot, 'test-results.json') },
+      stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+    });
     const stdoutFile = createWriteStream(stdoutPath);
     const stderrFile = createWriteStream(stderrPath);
     const stdoutRedactor = createTimeoutLineRedactor(secretValues);
@@ -1284,7 +1292,10 @@ async function parsePublishedArtifacts(published) {
     const scratch = `${destination}.${process.pid}.suite`;
     process.env.HOMEBOY_TEST_RESULTS_FILE = scratch;
     try {
-      runScript('parse-test-results.sh', [published.directory]);
+      // This input is one managed suite, not the invocation transcript.
+      // Pin its adapter so host output/sidecars cannot be folded in a second
+      // time by a runtime-selected aggregate adapter.
+      runScript('parse-test-results.sh', [published.directory, 'wp-codebox-json']);
       await recordSuiteResults(await readPhpunitSuiteResults(scratch));
     } finally {
       process.env.HOMEBOY_TEST_RESULTS_FILE = destination;

@@ -109,9 +109,10 @@ pub fn build_test_summary(
 }
 
 pub fn test_failure_summary_items(failures: &[TestFailure]) -> Vec<TestFailureSummaryItem> {
+    // JSON summaries are evidence, not a terminal preview. Keep every failure;
+    // presentation layers may independently bound what they render.
     failures
         .iter()
-        .take(20)
         .map(|failure| TestFailureSummaryItem {
             test_name: failure.test_name.clone(),
             message: failure.message.clone(),
@@ -665,6 +666,27 @@ pub fn parse_coverage_file(path: &std::path::Path) -> Result<Option<CoverageOutp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_summary_preserves_all_managed_failures() {
+        let failures = (0..121)
+            .map(|index| TestFailure {
+                test_name: format!("ManagedTest::test_case_{index}"),
+                test_file: "tests/ManagedTest.php".to_string(),
+                error_type: "assertion".to_string(),
+                message: "Failed assertion".to_string(),
+                stdout_excerpt: String::new(),
+                stderr_excerpt: String::new(),
+                source_file: String::new(),
+                source_line: 0,
+            })
+            .collect::<Vec<_>>();
+        let summary = test_failure_summary_items(&failures);
+        assert_eq!(summary.len(), 121);
+        for (item, failure) in summary.iter().zip(&failures) {
+            assert_eq!(item.test_name, failure.test_name);
+        }
+    }
 
     #[test]
     fn manifest_parse_spec_can_sum_cargo_result_lines() {

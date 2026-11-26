@@ -66,6 +66,28 @@ if [ -n "$WRITE_TEST_RESULTS_HELPER" ] && [ -f "$WRITE_TEST_RESULTS_HELPER" ]; t
     source "$WRITE_TEST_RESULTS_HELPER"
 fi
 
+# A WP Codebox artifact is a single suite's sidecar. Parse it with the
+# extension-owned adapter before loading invocation/runtime adapters: those may
+# reconcile the host transcript too, which the caller already accumulated.
+# In particular, ambient runtime helpers must not turn a managed-suite scratch
+# sidecar into host + managed and then have recordSuiteResults add host again.
+if python3 - "$OUTPUT_FILE" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        data = json.load(handle)
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(data, dict) and data.get("schema") == "wp-codebox/test-results/v1" else 1)
+PY
+then
+    source "${SCRIPT_DIR}/../../wp-codebox-runtime/scripts/lib/test-result-adapters.sh"
+    if homeboy_parse_wp_codebox_test_results "$OUTPUT_FILE"; then
+        exit 0
+    fi
+fi
+
 ADAPTERS_HELPER="${HOMEBOY_RUNTIME_TEST_RESULT_ADAPTERS:-}"
 if [ -z "$ADAPTERS_HELPER" ]; then
     SHARED_LIB_DIR="${HOMEBOY_SHARED_LIB_DIR:-}"
