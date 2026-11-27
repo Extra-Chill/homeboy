@@ -1881,6 +1881,31 @@ fn diagnosis_artifact_surfaces_extension_defined_cause_and_message() {
 }
 
 #[test]
+fn diagnosis_artifact_surfaces_wordpress_cause_detail_and_remediation() {
+    let workspace = tempfile::tempdir().unwrap();
+    let cause = "recipe_run_no_executions";
+    let detail = "The recipe-run payload parsed but declared no execution steps, so no sandbox step ran and PHPUnit never started.";
+    let remediation = "Read logs/recipe-run.stdout.log ...";
+    let artifact = serde_json::json!({
+        "reference": "homeboy://run/test/artifact/diagnosis",
+        "contents": serde_json::json!({
+            "schema": "homeboy/wordpress-phpunit-execution-diagnosis/v1",
+            "cause": cause,
+            "detail": detail,
+            "remediation": remediation
+        }).to_string()
+    });
+    let command = format!("echo 'homeboy-gate-test-artifact {artifact}'; exit 1");
+    let report = run_gate_command(workspace.path(), 1, &command).unwrap();
+    assert_eq!(report.status, AgentTaskGateStatus::Failed);
+    let evidence = serde_json::to_string(&report.failure_evidence).unwrap();
+    for text in [cause, detail, remediation] {
+        assert!(report.stderr.contains(text), "stderr missing {text}");
+        assert!(evidence.contains(text), "failure evidence missing {text}");
+    }
+}
+
+#[test]
 fn local_gate_records_phase_markers_from_its_whole_stdout() {
     let workspace = tempfile::tempdir().expect("workspace");
     // The first marker precedes more output than the report's bounded stdout

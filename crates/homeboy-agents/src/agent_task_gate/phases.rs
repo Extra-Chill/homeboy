@@ -25,12 +25,13 @@ pub struct GateTestArtifact {
 
 impl GateTestArtifact {
     /// Extension-neutral diagnosis contract: JSON artifacts may supply short
-    /// top-level cause/message/reason/summary strings. Never scrape log text.
+    /// top-level cause/message/detail/reason/summary/remediation strings.
+    /// Never scrape log text.
     pub(crate) fn diagnosis_summary(&self) -> Vec<String> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&self.contents) else {
             return Vec::new();
         };
-        ["cause", "message", "reason", "summary"]
+        ["cause", "message", "detail", "reason", "summary", "remediation"]
             .into_iter()
             .filter_map(|field| {
                 let text = value.get(field)?.as_str()?;
@@ -227,6 +228,25 @@ pub fn format_minutes(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnosis_summary_preserves_field_order_and_character_cap() {
+        let fields = ["cause", "message", "detail", "reason", "summary", "remediation"];
+        let contents: serde_json::Value = fields
+            .iter()
+            .map(|field| ((*field).to_string(), serde_json::json!("é".repeat(1025))))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        let artifact = GateTestArtifact {
+            reference: "diagnosis".to_string(),
+            contents: contents.to_string(),
+        };
+        let expected: Vec<_> = fields
+            .iter()
+            .map(|field| format!("{field}: {}", "é".repeat(1024)))
+            .collect();
+        assert_eq!(artifact.diagnosis_summary(), expected);
+    }
 
     #[test]
     fn gate_phase_lines_parse_only_the_documented_shape() {
