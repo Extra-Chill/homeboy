@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.8] - 2026-11-27
+
+### Fixed
+- converge WP Codebox caches to the extension release pin
+
 ## [3.56.7] - 2026-11-26
 
 ### Fixed
