@@ -134,7 +134,10 @@ pub(crate) use process::{
 pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use secrets::runner_exec_secret_env_plan;
 
+mod queue_wait;
 mod request;
+#[cfg(test)]
+mod workspace_progress_tests;
 pub use request::{exec_request, RunnerExecRequest};
 
 // Public surface re-exported by the parent `runner` module. These mirror the

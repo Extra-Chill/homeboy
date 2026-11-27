@@ -2,6 +2,14 @@ use clap::Args;
 
 #[derive(Args)]
 pub(crate) struct RunnerExecArgs {
+    /// Fail instead of waiting for runner admission (resource exit code 20).
+    #[arg(long)]
+    pub(super) no_wait: bool,
+
+    /// Bound time spent queued, independently of command execution time.
+    #[arg(long, conflicts_with = "no_wait", value_parser = crate::commands::utils::watch::parse_duration_arg, value_name = "DURATION")]
+    pub(super) max_queue_wait: Option<std::time::Duration>,
+
     /// Runner ID
     pub(super) id: String,
 
@@ -27,7 +35,7 @@ pub(crate) struct RunnerExecArgs {
     #[arg(long)]
     pub(super) hydrate_deps: bool,
 
-    /// Bound --sync-workspace snapshot preparation and transfer before command handoff. Defaults to 240s; does not limit dependency hydration or the runner command itself.
+    /// Hard wall-clock deadline across all --sync-workspace stages, including source provenance. Defaults to 240s; does not limit dependency hydration or the runner command itself. Sync progress and 10s heartbeats go to stderr.
     #[arg(long = "workspace-sync-timeout", default_value = "240s", value_parser = crate::commands::utils::watch::parse_duration_arg, value_name = "DURATION")]
     pub(super) workspace_sync_timeout: std::time::Duration,
 
@@ -129,12 +137,52 @@ pub(crate) struct RunnerExecArgs {
     pub(super) command: Vec<String>,
 }
 
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Invocation {
+        #[command(flatten)]
+        exec: RunnerExecArgs,
+    }
+
+    #[test]
+    fn admission_flags_parse_and_conflict() {
+        let parsed =
+            Invocation::try_parse_from(["exec", "--no-wait", "lab", "--", "true"]).unwrap();
+        let input: super::super::exec::RunnerExecInput = parsed.exec.into();
+        assert_eq!(input.max_queue_wait, Some(std::time::Duration::ZERO));
+        let parsed =
+            Invocation::try_parse_from(["exec", "--max-queue-wait", "45s", "lab", "--", "true"])
+                .unwrap();
+        assert_eq!(
+            parsed.exec.max_queue_wait,
+            Some(std::time::Duration::from_secs(45))
+        );
+        assert!(Invocation::try_parse_from([
+            "exec",
+            "--no-wait",
+            "--max-queue-wait",
+            "45s",
+            "lab"
+        ])
+        .is_err());
+    }
+}
+
 impl From<RunnerExecArgs> for super::exec::RunnerExecInput {
     fn from(mut args: RunnerExecArgs) -> Self {
         if let Some(id) = args.reservation.take() {
             args.env.push(format!("HOMEBOY_RUNNER_RESERVATION={id}"));
         }
         Self {
+            max_queue_wait: if args.no_wait {
+                Some(std::time::Duration::ZERO)
+            } else {
+                args.max_queue_wait
+            },
             runner_id: args.id,
             command: args.command,
             cwd: args.cwd,

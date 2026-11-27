@@ -26,7 +26,7 @@ impl Default for PressureThresholds {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RunnerPressure {
     /// Hundredths of one percent. None means unavailable, not zero pressure.
@@ -40,6 +40,27 @@ pub struct RunnerPressure {
     pub admission_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reservation: Option<serde_json::Value>,
+}
+
+impl Serialize for RunnerPressure {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = serde_json::json!({
+            "cpu": self.cpu, "io": self.io, "memory": self.memory,
+            "load_fallback": self.load_fallback,
+            "observed_load_per_cpu": self.observed_load_per_cpu,
+            "logical_cpus": self.logical_cpus,
+            "admission_reason": self.admission_reason,
+            "units": {
+                "cpu": "hundredths_of_percent", "io": "hundredths_of_percent",
+                "memory": "hundredths_of_percent",
+                "observed_load_per_cpu": "ten_thousandths (1.0 = 10000), five-minute load per logical CPU"
+            }
+        });
+        if let Some(reservation) = &self.reservation {
+            value["reservation"] = reservation.clone();
+        }
+        value.serialize(serializer)
+    }
 }
 
 impl RunnerPressure {
@@ -87,7 +108,11 @@ impl RunnerPressure {
     }
 
     pub fn apply_thresholds(&mut self, thresholds: &PressureThresholds) {
-        self.admission_reason = self.above(thresholds).then(|| "pressure".to_string());
+        self.admission_reason = if self.reservation.is_some() {
+            Some("reservation".to_string())
+        } else {
+            self.above(thresholds).then(|| "pressure".to_string())
+        };
     }
     pub fn above(&self, thresholds: &PressureThresholds) -> bool {
         [
@@ -175,6 +200,42 @@ fn sample_host(thresholds: &PressureThresholds) -> RunnerPressure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressure_wire_units_are_explicit_and_round_trip() {
+        let pressure = RunnerPressure {
+            observed_load_per_cpu: Some(32001),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&pressure).unwrap();
+        assert!(wire["units"]["observed_load_per_cpu"]
+            .as_str()
+            .unwrap()
+            .contains("10000"));
+        assert_eq!(
+            serde_json::from_value::<RunnerPressure>(wire).unwrap(),
+            pressure
+        );
+    }
+
+    #[test]
+    fn status_reapplies_exec_thresholds_and_reservation_fence() {
+        let mut pressure = RunnerPressure {
+            cpu: Some(2500),
+            ..Default::default()
+        };
+        pressure.apply_thresholds(&PressureThresholds::default());
+        assert_eq!(pressure.admission_reason.as_deref(), Some("pressure"));
+        let thresholds = PressureThresholds {
+            cpu: 30,
+            ..Default::default()
+        };
+        pressure.apply_thresholds(&thresholds);
+        assert!(pressure.admission_reason.is_none());
+        pressure.reservation = Some(serde_json::json!({"id": "measurement"}));
+        pressure.apply_thresholds(&thresholds);
+        assert_eq!(pressure.admission_reason.as_deref(), Some("reservation"));
+    }
 
     #[test]
     fn psi_parses_the_one_minute_window_and_unavailable_is_not_zero() {

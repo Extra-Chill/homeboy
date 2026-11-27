@@ -4,7 +4,8 @@
 
 use super::*;
 use crate::resource_metrics::{
-    measured_command_output_until_cancelled_with_progress, MeasuredOutput,
+    durable_command_output_until_cancelled, measured_command_output_until_cancelled_with_progress,
+    MeasuredOutput,
 };
 use homeboy_core::job_cgroup::test_support::{
     alive, assert_job_cgroups_removed, inside_delegated_scope, run_in_delegated_scope, survivors,
@@ -192,6 +193,64 @@ fn delegated_setsid_fork_bomb() {
 
 /// The process limit counts processes: one process with more threads than
 /// the limit runs to completion (`pids.max` counts threads).
+#[test]
+fn leftover_processes_are_reported_at_settle() {
+    in_delegated_scope("delegated_leftover_evidence", &[]);
+}
+
+#[test]
+#[ignore = "inner half of leftover_processes_are_reported_at_settle"]
+fn delegated_leftover_evidence() {
+    let Some(jobs) = enter_delegated_scope() else {
+        return;
+    };
+    // A sibling job must survive the tested job's teardown.
+    let sibling = JobCgroup::create(Some("sibling"), 0, 1).unwrap().unwrap();
+    let mut sibling_command = Command::new("sleep");
+    sibling_command.arg("60");
+    sibling.join_before_exec(&mut sibling_command);
+    let mut sibling_child = sibling_command.spawn().unwrap();
+    // Durable runs read stdout from the job directory, so the command must
+    // be built by `runner_exec_job::command`, as production does.
+    let temp = tempfile::tempdir().unwrap();
+    let mut command = homeboy_core::daemon::runner_exec_job::command(
+        temp.path(),
+        &[
+            "bash".to_string(),
+            "-c".to_string(),
+            "setsid nohup sleep 777 >/dev/null 2>&1 </dev/null & echo $!; sleep 0.2".to_string(),
+        ],
+    )
+    .expect("durable job command");
+    let output = durable_command_output_until_cancelled(
+        &mut command,
+        temp.path(),
+        || false,
+        None,
+        false,
+        None,
+        None,
+        Some(1),
+    )
+    .unwrap();
+    assert!(output.output.status.success());
+    let stderr = String::from_utf8_lossy(&output.output.stderr);
+    let pid = String::from_utf8_lossy(&output.output.stdout)
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    assert!(
+        stderr.contains("killed 1 leftover process(es) in job cgroup:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&format!("{pid} sleep")), "{stderr}");
+    assert!(stderr.contains("; use --detach for long-running work"));
+    assert!(sibling_child.try_wait().unwrap().is_none());
+    sibling.stop().unwrap();
+    sibling_child.wait().unwrap();
+    assert_job_cgroups_removed(jobs);
+}
+
 #[test]
 fn a_multithreaded_job_under_its_process_limit_runs() {
     in_delegated_scope(

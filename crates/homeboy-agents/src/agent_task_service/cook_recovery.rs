@@ -222,7 +222,7 @@ pub(crate) struct CookRecoveryInputs<'a> {
 /// The complete operator override for an agent-declared incomplete candidate.
 pub(crate) fn incomplete_review_recovery_command(id: &str) -> String {
     format!(
-        "homeboy agent-task recover {} --review-form @FILE --review-form-tool <tool> --review-form-model <model> --review-form-author <author>",
+        "homeboy agent-task recover {} --publish-partial",
         homeboy_core::error::posix_quote_arg(id)
     )
 }
@@ -472,7 +472,7 @@ fn removed_runner_attempt(run_id: &str) -> bool {
 fn agent_incomplete_stop(inputs: &CookRecoveryInputs<'_>) -> Option<CookRecoveryStep> {
     inputs.agent_incomplete_reason.map(|reason| {
         CookRecoveryStep::none(format!(
-            "The agent's review form declares the task incomplete: {reason}. Continuing would re-read the same verdict, so `recover` cannot publish this candidate on its own. If the task is in fact done, publish it with a complete review form via `{command}`, otherwise start a fresh Cook.",
+            "The agent's review form declares the task incomplete: {reason}. Continuing would re-read the same verdict. Publish the green candidate as partial and file its remaining scope with `{command}`.",
             reason = reason.trim_end_matches('.'),
             command = incomplete_review_recovery_command(inputs.run_id)
         ))
@@ -698,6 +698,8 @@ impl CookRegateInputs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CookPublishRequest {
+    /// Publish the agent's incomplete verdict unchanged and track remaining scope.
+    pub partial: bool,
     /// Complete review form for a candidate whose provider outcome recorded
     /// none (or declared the task incomplete).
     pub review_form: Option<super::AgentTaskSuppliedReviewForm>,
@@ -709,7 +711,10 @@ pub struct CookPublishRequest {
 
 impl CookPublishRequest {
     pub fn is_empty(&self) -> bool {
-        self.review_form.is_none() && self.component.is_none() && self.review_overrides.is_empty()
+        !self.partial
+            && self.review_form.is_none()
+            && self.component.is_none()
+            && self.review_overrides.is_empty()
     }
 }
 
@@ -876,6 +881,9 @@ pub trait CookRecoveryPerformer {
         request: &CookPublishRequest,
         preflight: bool,
     ) -> Result<(Value, i32)> {
+        if request.partial {
+            return super::cook_promotion::publish_partial_cook(run_id, request, preflight);
+        }
         let value = super::recover_cook_pr_with_review_form(
             run_id,
             request.review_form.clone(),

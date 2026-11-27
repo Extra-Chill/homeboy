@@ -952,7 +952,7 @@ pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<
 mod terminal_work;
 
 #[path = "agent_task_notify_tracker.rs"]
-mod tracker;
+pub(crate) mod tracker;
 #[path = "agent_task_notify_tracker_note.rs"]
 mod tracker_note;
 

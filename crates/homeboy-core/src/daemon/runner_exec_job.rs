@@ -283,7 +283,11 @@ fn supervise_adopted(
     custody: RunnerExecCustody,
 ) {
     let job = store.handle(job_id);
-    let observed_live = root_is_live(pid, ticks);
+    // Recover by job identity, not by the PID's current cgroup (PID reuse
+    // must never grant custody of another job's processes).
+    let cgroup = crate::job_cgroup::JobCgroup::for_job(&job_id.to_string())
+        .ok()
+        .flatten();
     while root_is_live(pid, ticks) {
         if job.is_cancelled() {
             let _ = crate::process::terminate_isolated_process_group(pid, CANCEL_GRACE);
@@ -291,9 +295,19 @@ fn supervise_adopted(
         }
         std::thread::sleep(SUPERVISE_POLL);
     }
-    if observed_live {
-        let _ = crate::engine::command::terminate_remaining_process_group(pid);
+    if let Some(cgroup) = &cgroup {
+        if let Ok(Some(message)) = cgroup.stop_with_evidence() {
+            use std::io::Write;
+            if let Ok(mut stderr) = fs::OpenOptions::new()
+                .append(true)
+                .open(custody.dir().join(STDERR_FILE))
+            {
+                let _ = writeln!(stderr, "\n{message}");
+            }
+        }
     }
+    // Without a job cgroup there is no safe post-exit PID/PGID custody:
+    // the identifier may already belong to unrelated work.
     let _ = terminalize(store, job_id, custody.dir());
 }
 

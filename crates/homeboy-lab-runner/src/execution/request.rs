@@ -17,6 +17,8 @@ use super::{exec, RunnerExecOptions, RunnerExecOutput, RunnerTransport};
 #[derive(Debug, Clone)]
 pub struct RunnerExecRequest {
     pub runner_id: String,
+    /// None preserves unbounded admission; zero fails on the first queued observation.
+    pub max_queue_wait: Option<Duration>,
     pub options: RunnerExecOptions,
     pub sync_workspace: Option<String>,
     pub workspace_ref: Option<String>,
@@ -31,6 +33,7 @@ impl RunnerExecRequest {
     pub fn new(runner_id: impl Into<String>, options: RunnerExecOptions) -> Self {
         Self {
             runner_id: runner_id.into(),
+            max_queue_wait: None,
             options,
             sync_workspace: None,
             workspace_ref: None,
@@ -70,20 +73,34 @@ pub fn exec_request(mut request: RunnerExecRequest) -> Result<(RunnerExecOutput,
         }
     }
     let deadline = has_workspace_sync.then(|| Instant::now() + request.workspace_sync_timeout);
-    let (cwd, source_snapshot, hydration_source) = workspace_context(
-        &request.runner_id,
-        request.options.cwd.take(),
-        request.sync_workspace.take(),
-        request.workspace_ref.take(),
-        request.hydrate_deps,
-        deadline,
-    )
-    .map_err(|error| {
-        if has_workspace_sync {
-            finish_pre_handoff_failure(run_id.as_deref(), "workspace_sync", &error);
-        }
-        error
-    })?;
+    let runner_id = request.runner_id.clone();
+    let cwd = request.options.cwd.take();
+    let sync_workspace = request.sync_workspace.take();
+    let workspace_ref = request.workspace_ref.take();
+    let hydrate_deps = request.hydrate_deps;
+    let control = crate::WorkspaceControl::before(deadline);
+    let control = if has_workspace_sync {
+        control.with_progress()
+    } else {
+        control
+    };
+    let (cwd, source_snapshot, hydration_source) =
+        bounded_workspace_preparation(control, move |control| {
+            workspace_context(
+                &runner_id,
+                cwd,
+                sync_workspace,
+                workspace_ref,
+                hydrate_deps,
+                control,
+            )
+        })
+        .map_err(|error| {
+            if has_workspace_sync {
+                finish_pre_handoff_failure(run_id.as_deref(), "workspace_sync", &error);
+            }
+            error
+        })?;
     request.options.cwd = cwd;
     request.options.source_snapshot = source_snapshot;
 
@@ -144,6 +161,8 @@ pub fn exec_request(mut request: RunnerExecRequest) -> Result<(RunnerExecOutput,
     }
 
     let options = std::mem::take(&mut request.options);
+    let _queue_policy = super::queue_wait::QueueWaitScope::enter(request.max_queue_wait);
+    eprintln!("submitting: runner {}", request.runner_id);
     let (mut output, exit_code) = exec(&request.runner_id, options)?;
     if output.mirror_run_id.is_none() {
         output.mirror_run_id.clone_from(&run_id);
@@ -156,6 +175,98 @@ pub fn exec_request(mut request: RunnerExecRequest) -> Result<(RunnerExecOutput,
         exit_code,
     )?;
     Ok((output, exit_code))
+}
+
+/// Keep the caller's wall-clock bound even during filesystem or provenance
+/// operations that cannot cooperatively poll. The worker retains its deadline,
+/// so it cannot advance to a later controlled stage after the caller returns.
+fn bounded_workspace_preparation<T: Send + 'static>(
+    control: crate::WorkspaceControl,
+    work: impl FnOnce(&crate::WorkspaceControl) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let Some(deadline) = control.deadline() else {
+        return work(&control);
+    };
+    let started = Instant::now();
+    control.checkpoint()?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker_control = control.clone();
+    std::thread::Builder::new()
+        .name("workspace-sync".into())
+        .spawn(move || {
+            let result = work(&worker_control);
+            let _ = sender.send(result);
+        })
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("start workspace sync worker".into()),
+            )
+        })?;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(control.timeout_error());
+        }
+        match receiver.recv_timeout(remaining.min(Duration::from_secs(10))) {
+            Ok(result) => {
+                control.checkpoint()?;
+                if result.is_ok() {
+                    eprintln!("sync: done in {:.1}s", started.elapsed().as_secs_f64());
+                }
+                return result;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                control.checkpoint()?;
+                control.heartbeat();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::internal_unexpected(
+                    "workspace synchronization worker stopped",
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn uncooperative_sync_stages_cannot_extend_the_deadline() {
+        for stage in [
+            "scanning",
+            "planning on runner",
+            "transferring 0/1 MB",
+            "applying on runner",
+            "collecting source provenance",
+        ] {
+            let started = Instant::now();
+            let deadline = started + Duration::from_millis(300);
+            let control = crate::WorkspaceControl::before(Some(deadline)).with_progress();
+            control.stage(stage);
+            // The stage clock starts after `started`, so the stage can only
+            // have run from (at the latest) here until the deadline.
+            let stage_floor_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64;
+            let error = bounded_workspace_preparation(control, |_| {
+                std::thread::sleep(Duration::from_secs(3));
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert_eq!(error.details["workspace_sync"]["timed_out"], true);
+            assert_eq!(error.details["workspace_sync"]["action"], stage);
+            assert!(
+                error.details["workspace_sync"]["timeout_ms"]
+                    .as_u64()
+                    .unwrap()
+                    >= stage_floor_ms
+            );
+        }
+    }
 }
 
 fn ensure_request_run(
@@ -186,7 +297,7 @@ fn workspace_context(
     sync_workspace: Option<String>,
     workspace_ref: Option<String>,
     verify_hydration_source: bool,
-    deadline: Option<Instant>,
+    control: &crate::WorkspaceControl,
 ) -> Result<(
     Option<String>,
     Option<homeboy_core::source_snapshot::SourceSnapshot>,
@@ -228,17 +339,16 @@ fn workspace_context(
         validation_dependency_ids: None,
         run_isolation_token: None,
     };
-    let (synced, _) = crate::sync_workspace(
-        runner_id,
-        options,
-        &crate::WorkspaceControl::before(Some(deadline.expect("workspace sync has a deadline"))),
-    )?;
+    let (synced, _) = crate::sync_workspace(runner_id, options, control)?;
+    control.stage("collecting source provenance");
+    control.checkpoint()?;
     let mut source_snapshot = homeboy_core::source_snapshot::collect_local(
         runner_id,
         Path::new(&synced.local_path),
         Some(&synced.remote_path),
         synced.sync_mode.as_str(),
     );
+    control.checkpoint()?;
     source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
     Ok((
         Some(synced.remote_path),

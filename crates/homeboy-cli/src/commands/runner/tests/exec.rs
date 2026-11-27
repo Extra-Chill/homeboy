@@ -306,6 +306,21 @@ fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
 }
 
 #[test]
+fn leftover_cgroup_evidence_survives_successful_exec_human_presentation() {
+    let message = "killed 1 leftover process(es) in job cgroup: 123 sleep; use --detach for long-running work\n";
+    let run = raw_exec_command_run(
+        RunnerExecOutput {
+            exit_code: 0,
+            stderr: message.to_string(),
+            ..runner_exec_output("lab", RunnerTransport::Daemon, "/workspace")
+        },
+        0,
+    );
+    assert_eq!(run.presentation.stderr.as_deref(), Some(message));
+    assert_eq!(run.stdout_result.unwrap()["stderr"], message);
+}
+
+#[test]
 fn compact_exec_output_shows_metadata_and_streams_once() {
     let output = RunnerExecOutput {
         stdout: r#"{"runs":[{"id":"run-1"}]}"#.to_string(),

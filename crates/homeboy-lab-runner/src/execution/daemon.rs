@@ -124,6 +124,7 @@ pub(super) fn exec_via_daemon(
         metadata: {
             let mut metadata =
                 runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id);
+            metadata["admission_no_wait"] = json!(super::queue_wait::no_wait());
             metadata["attached_exec"] = json!(run_id_owns_generic_exec && !detach_after_handoff);
             metadata["guard_duplicate_exec"] = json!(run_id_owns_generic_exec && !allow_concurrent);
             if !detach_after_handoff {
@@ -209,6 +210,11 @@ pub(super) fn exec_via_daemon(
     let job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
+    // A newly accepted job is briefly Queued before its worker acquires
+    // capacity. Do not mistake that publication window for an admission wait.
+    if body["admission"]["pending_admission_reason"].is_string() {
+        observe_exec_admission(&client, local_url, &body, &job)?;
+    }
     if detach_after_handoff && print_handoff_output {
         eprintln!("Job {} detached.\nhomeboy runner job logs {} {} --follow\nhomeboy runner job cancel {} {}", job.id, runner.id, job.id, runner.id, job.id);
     }
@@ -346,6 +352,12 @@ pub(super) fn exec_via_daemon(
             *daemon_endpoint.borrow_mut() = endpoint;
             follow.absorb(current.id, &response).map_err(poll_failure)?;
             if !response.terminal {
+                // Watch reports terminality, not the queued -> running edge.
+                // Read admission while queued so feedback/deadlines and the
+                // execution budget follow the daemon's actual start time.
+                if current.status == JobStatus::Queued {
+                    return fetch_daemon_job(&client, &daemon_endpoint.borrow(), &job_id);
+                }
                 return Ok(current.clone());
             }
             // Refresh the job once at terminality so artifacts and finish
@@ -1701,7 +1713,35 @@ pub(super) fn fetch_daemon_job(client: &Client, local_url: &str, job_id: &str) -
         Error::internal_json(err.to_string(), Some("parse daemon job".to_string()))
     })?;
     validate_daemon_job_identity(job_id, &job)?;
+    observe_exec_admission(client, local_url, &body, &job)?;
     Ok(job)
+}
+
+fn observe_exec_admission(client: &Client, endpoint: &str, body: &Value, job: &Job) -> Result<()> {
+    if let Err(mut error) = super::queue_wait::observe(
+        job.status == JobStatus::Queued,
+        &body["admission"],
+        &job.id.to_string(),
+    ) {
+        // Never leave a command queued to execute unexpectedly after its caller
+        // has explicitly refused to wait. Preserve cancellation failures too.
+        let cancellation = daemon_post_json_text(
+            client,
+            endpoint,
+            &format!("/jobs/{}/cancel", job.id),
+            &json!({"reason": "runner exec queue deadline expired"}),
+            DaemonPostOptions {
+                connection_close: true,
+                timeout: Some(Duration::from_secs(10)),
+            },
+        );
+        error.details["cancellation"] = match cancellation {
+            Ok(response) => json!({"http_status": response.status_code, "response": response.body}),
+            Err(failure) => json!({"error": failure.to_string()}),
+        };
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(super) fn validate_daemon_job_identity(requested_job_id: &str, job: &Job) -> Result<()> {

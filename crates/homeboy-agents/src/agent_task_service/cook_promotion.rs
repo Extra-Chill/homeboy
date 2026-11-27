@@ -3136,6 +3136,12 @@ fn terminal_form_title(
     Ok(form.pr_title)
 }
 
+#[path = "cook_partial_publication.rs"]
+mod partial_publication;
+pub(super) use partial_publication::publish_partial_cook;
+#[cfg(test)]
+pub(super) use partial_publication::publish_partial_cook_with;
+
 /// Recover publication from the durable Cook recipe and applied promotion.
 pub fn recover_cook_pr(
     run_or_cook_id: &str,
@@ -3866,6 +3872,20 @@ fn cook_review_dossier_with_stores_and_review_form(
             url: None,
         });
     }
+    let partial = lifecycle_store
+        .read_record(successful_run_id)?
+        .metadata
+        .get("partial_delivery")
+        .cloned();
+    if let Some(partial) = &partial {
+        evidence.push(AgentTaskReviewEvidence {
+            summary: format!(
+                "Partial delivery. Remaining scope: {}",
+                terminal_form.incomplete_reason
+            ),
+            url: partial["follow_up_url"].as_str().map(str::to_string),
+        });
+    }
     // Form-only continuations may substitute the implementation promotion for
     // candidate metadata; the persisted terminal record remains recovery proof.
     if let Some(replacement) = lifecycle_store
@@ -4020,7 +4040,17 @@ fn cook_review_dossier_with_stores_and_review_form(
                 .first()
                 .map(crate::agent_task_review_dossier::delivery_checklist::request_delivery_items)
                 .unwrap_or_default(),
-            &terminal_form.delivery,
+            &if partial.is_some() {
+                let mut delivery = terminal_form.delivery.clone();
+                delivery.push(serde_json::from_value(json!({
+                    "item": "Remaining scope",
+                    "status": "not_delivered",
+                    "reason": terminal_form.incomplete_reason,
+                }))?);
+                delivery
+            } else {
+                terminal_form.delivery.clone()
+            },
         ),
         completion,
     })
@@ -4638,12 +4668,14 @@ fn review_form_for_finalization_in_store(
                 )
             })?;
             form.validate(title_policy)?;
-            form.ensure_publishable()?;
+            if lifecycle_store.read_record(run_id)?.metadata.get("partial_delivery").is_none() {
+                form.ensure_publishable()?;
+            }
             Ok(form)
         })
         .map_err(|mut error| {
             error.message = format!(
-                "{} Supply a complete replacement with `homeboy agent-task recover {run_id} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`.",
+                "{} For a green incomplete candidate, publish its remaining scope with `homeboy agent-task recover {run_id} --publish-partial`. A missing or invalid form can instead be supplied with `--review-form` and authorship inputs.",
                 error.message
             );
             error

@@ -14,6 +14,7 @@ use homeboy_engine_primitives::command::{self, ExecutionOwner};
 pub struct WorkspaceControl {
     control: Option<CooperativeControl>,
     on_checkpoint: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
+    progress: Option<Arc<std::sync::Mutex<(String, Instant)>>>,
 }
 
 impl WorkspaceControl {
@@ -21,6 +22,7 @@ impl WorkspaceControl {
         Self {
             control: Some(control),
             on_checkpoint: None,
+            progress: None,
         }
     }
 
@@ -28,6 +30,7 @@ impl WorkspaceControl {
         Self {
             control: deadline.map(|deadline| CooperativeControl::new(deadline, Arc::new(|| false))),
             on_checkpoint: None,
+            progress: None,
         }
     }
 
@@ -37,6 +40,70 @@ impl WorkspaceControl {
     ) -> Self {
         self.on_checkpoint = Some(observer);
         self
+    }
+
+    pub(crate) fn with_progress(mut self) -> Self {
+        self.progress = Some(Arc::new(std::sync::Mutex::new((
+            "scanning".into(),
+            Instant::now(),
+        ))));
+        eprintln!("sync: scanning");
+        self
+    }
+
+    pub(crate) fn stage(&self, name: &str) {
+        if self
+            .deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return;
+        }
+        if let Some(progress) = &self.progress {
+            let mut stage = progress.lock().unwrap();
+            if stage.0 != name {
+                let same_transfer =
+                    stage.0.starts_with("transferring") && name.starts_with("transferring");
+                let since = if same_transfer {
+                    stage.1
+                } else {
+                    Instant::now()
+                };
+                *stage = (name.to_string(), since);
+                if !same_transfer {
+                    eprintln!("sync: {name}");
+                }
+            }
+        }
+    }
+
+    pub(crate) fn heartbeat(&self) {
+        if let Some(progress) = &self.progress {
+            let stage = progress.lock().unwrap();
+            eprintln!(
+                "sync: {} (active for {:.1}s)",
+                stage.0,
+                stage.1.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    pub(crate) fn timeout_error(&self) -> Error {
+        let (stage, elapsed) = self
+            .progress
+            .as_ref()
+            .map(|progress| {
+                let stage = progress.lock().unwrap();
+                (stage.0.clone(), stage.1.elapsed())
+            })
+            .unwrap_or_else(|| ("workspace snapshot staging".into(), Duration::ZERO));
+        let mut error = super::util::workspace_preparation_timeout(&stage, elapsed);
+        error.details["workspace_sync"]["stage"] = serde_json::json!(stage);
+        error.details["workspace_sync"]["stage_elapsed_ms"] =
+            serde_json::json!(elapsed.as_millis());
+        if stage.starts_with("transferring") || stage.starts_with("applying") {
+            error.details["workspace_sync"]["remote_effect_uncertain"] = serde_json::json!(true);
+        }
+        error
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
@@ -57,10 +124,7 @@ impl WorkspaceControl {
             .deadline()
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
-            return Err(super::util::workspace_preparation_timeout(
-                "workspace snapshot staging",
-                Duration::ZERO,
-            ));
+            return Err(self.timeout_error());
         }
         if let Some(observer) = &self.on_checkpoint {
             observer()?;

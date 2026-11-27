@@ -70,6 +70,25 @@ covers transient phase refinements too.
 | `Blocked` | The previous `recover` performed this same step from this same state with no change. | Nothing; names the blocker so recovery cannot loop. |
 | `None` | Nothing is legal (in flight, live driver, settled, incomplete review form, ...). | Nothing; `reason` says what is required. |
 
+## Partial publication
+
+For a green candidate whose agent declared `completion: incomplete`, run:
+
+```sh
+homeboy agent-task recover <attempt> --publish-partial
+```
+
+This keeps the recorded agent form unchanged. The PR is a partial-delivery draft,
+quotes `incomplete_reason`, and links a follow-up issue on the source task's GitHub
+tracker. Both tracker issues receive the publication receipt and backlinks.
+Status and batch summaries use the existing `succeeded_partial` contract and
+retain the undelivered remaining scope. The source issue is referenced, not closed.
+
+The command refuses candidates without passing gates, an incomplete agent form,
+or a GitHub issue source. `--preflight` validates these requirements without
+creating tracker entries or publishing. A durable follow-up receipt and a remote
+marker allow interrupted recovery to reuse the existing follow-up.
+
 ## Inputs
 
 `CookRecoveryInputs` holds every fact the decision reads: the Cook status,
