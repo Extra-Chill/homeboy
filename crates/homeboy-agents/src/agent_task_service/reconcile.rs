@@ -433,6 +433,28 @@ fn reconciler_cancellation_provenance(
     })
 }
 
+/// Terminal Cook records are absent from active discovery. The daemon's
+/// periodic stale-run sweep must inspect them separately or a dead continuation
+/// job can remain pending forever. Only stranded pending work is rearmed;
+/// failed/exhausted work remains an explicit operator decision.
+pub(super) fn reconcile_stranded_terminal_cooks(
+    store: &LifecycleStore,
+    mut schedule: impl FnMut(&serde_json::Value) -> Result<serde_json::Value>,
+) -> Result<()> {
+    for record in store.read_records()? {
+        if record.state().is_terminal()
+            && super::cook_recipe::stranded_continuation_job(store, &record).is_some()
+        {
+            agent_task_lifecycle::reconcile_terminal_cook_provider_result_in_store(
+                store,
+                &record.run_id,
+                &mut schedule,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileReport> {
     // One store for the whole sweep. Every run this classifies, expires, and
     // cancels is decided from a record read here; a decision taken against one
@@ -444,6 +466,13 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
     // but would otherwise terminalize it before this report can record the
     // actionable retry outcome.
     let report = discover_runs(AgentTaskDiscoveryFilter::Active)?;
+
+    if !dry_run {
+        reconcile_stranded_terminal_cooks(
+            &lifecycle_store,
+            super::cook_recipe::schedule_terminal_cook_continuation,
+        )?;
+    }
 
     let mut runs = Vec::new();
     let mut reconciled = 0usize;
