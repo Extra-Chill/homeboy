@@ -2035,6 +2035,26 @@ pub(super) fn command_output_until_cancelled_with_progress(
             }
         }) as StdoutLineObserver
     });
+    let progress_sink = progress_sink.map(|sink| {
+        let env = env.clone();
+        let secret_env_names = secret_env_names.to_vec();
+        Arc::new(move |mut data: serde_json::Value| {
+            if data["phase"] == "command_output" {
+                if let Some(text) = data["text"].as_str() {
+                    data["text"] = serde_json::Value::String(
+                        super::redaction::redact_runner_exec_streams(
+                            text.to_string(),
+                            String::new(),
+                            &env,
+                            &secret_env_names,
+                        )
+                        .0,
+                    );
+                }
+            }
+            sink(data)
+        }) as RunnerCommandProgressSink
+    });
     let measured = measured_command_output_until_cancelled_with_progress(
         command,
         is_cancelled,

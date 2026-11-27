@@ -2708,6 +2708,7 @@ impl DaemonWatchFollow {
                 message: watched.message.clone(),
                 data: watched.data.clone(),
             });
+            super::stream::emit(self.events.last().expect("just appended watched event"));
             self.cursor = watched.sequence;
         }
         self.cursor = self.cursor.max(response.next_sequence);

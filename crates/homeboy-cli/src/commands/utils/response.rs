@@ -417,6 +417,10 @@ static HUMAN_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 
 /// `--human`: stdout carries the envelope's plain-text summary instead of its
 /// JSON. `--output` files keep the JSON envelope.
+pub(crate) fn human_output() -> bool {
+    HUMAN_OUTPUT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn set_human_output(enabled: bool) {
     HUMAN_OUTPUT.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }

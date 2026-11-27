@@ -286,6 +286,22 @@ normalize the former into `mirror_run_id`, and prefer `mirror_run_id` when the
 two values differ. This does not change provider-facing remote run IDs or
 control-plane location IDs, which have separate semantics.
 
+## Human runner output
+
+`runner status --human` prints admission state and reasons, pressure with units,
+active job count, daemon build/freshness and blocking lease or reservation evidence.
+Unknown observations are reported as unknown rather than zero.
+
+`runner exec --human` forwards attached command stdout and stderr to their matching
+local streams without labels or JSON formatting, preserving the remote exit code.
+Output is followed by one stderr metadata line with runner/job identity, elapsed
+time and the logs command. Durable daemon output is forwarded incrementally at
+line boundaries (including a final unterminated fragment), after secret redaction;
+watch retries do not replay chunks. Older daemons without output progress fall
+back to the terminal streams. JSON and output-file envelopes retain the complete
+execution evidence. Detached jobs are identified as in flight, not as successful
+remote exits.
+
 ## Detached handoff evidence
 
 Detached Lab offload handoffs return a `homeboy/runner-exec-handoff/v1`

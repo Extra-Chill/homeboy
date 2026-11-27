@@ -304,6 +304,7 @@ fn durable_command_output_until_cancelled(
     if let Some(job) = &job_cgroup {
         job.join_before_exec(command);
     }
+    let stream_sink = progress_sink.clone();
     let started = Instant::now();
     let (child, identity) = runner_exec_job::spawn(command)
         .map_err(|error| runner_command_spawn_error(command, &error))?;
@@ -330,7 +331,13 @@ fn durable_command_output_until_cancelled(
         job_cgroup.clone(),
     );
     let mut follower = LineFollower::new(runner_exec_job::stdout_path(dir));
+    let mut stdout_stream = LineFollower::new(runner_exec_job::stdout_path(dir));
+    let mut stderr_stream = LineFollower::new(runner_exec_job::stderr_path(dir));
     let status = loop {
+        if let Some(sink) = &stream_sink {
+            stdout_stream.poll_stream(sink, false, false);
+            stderr_stream.poll_stream(sink, true, false);
+        }
         if let Some(observer) = &stdout_line_observer {
             follower.poll(observer.as_ref());
         }
@@ -353,6 +360,10 @@ fn durable_command_output_until_cancelled(
     }
     if let Some(observer) = &stdout_line_observer {
         follower.poll(observer.as_ref());
+    }
+    if let Some(sink) = &stream_sink {
+        stdout_stream.poll_stream(sink, false, true);
+        stderr_stream.poll_stream(sink, true, true);
     }
     let (stdout, mut stderr, capture) = runner_exec_job::read_output(dir)?;
     let metrics = collector.finish(started.elapsed());
@@ -403,6 +414,37 @@ impl LineFollower {
             path,
             offset: 0,
             pending: Vec::new(),
+        }
+    }
+
+    // Preserve newlines and final fragments, buffering lines for redaction.
+    fn poll_stream(&mut self, sink: &RunnerCommandProgressSink, stderr: bool, finished: bool) {
+        use std::io::{Read as _, Seek as _};
+        let Ok(mut file) = std::fs::File::open(&self.path) else {
+            return;
+        };
+        let mut appended = Vec::new();
+        if file.seek(std::io::SeekFrom::Start(self.offset)).is_err()
+            || file.read_to_end(&mut appended).is_err()
+        {
+            return;
+        }
+        self.offset += appended.len() as u64;
+        self.pending.extend_from_slice(&appended);
+        let end = if finished {
+            self.pending.len()
+        } else {
+            self.pending
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map(|n| n + 1)
+                .unwrap_or(0)
+        };
+        if end > 0 {
+            let bytes: Vec<_> = self.pending.drain(..end).collect();
+            let _ = sink(
+                serde_json::json!({"phase": "command_output", "stderr": stderr, "text": String::from_utf8_lossy(&bytes)}),
+            );
         }
     }
 
@@ -1527,6 +1569,28 @@ fn clock_ticks_per_second() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stream_follower_preserves_newlines_and_terminal_fragment_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stdout");
+        std::fs::write(&path, b"first\r\npartial").unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = events.clone();
+        let sink: RunnerCommandProgressSink = Arc::new(move |value| {
+            recorded.lock().unwrap().push(value);
+            Ok(())
+        });
+        let mut follower = LineFollower::new(path);
+        follower.poll_stream(&sink, false, false);
+        assert_eq!(events.lock().unwrap()[0]["text"], "first\r\n");
+        follower.poll_stream(&sink, false, true);
+        follower.poll_stream(&sink, false, true);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["text"], "partial");
+        assert_eq!(events[1]["stderr"], false);
+    }
+
     #[test]
     fn sampler_loop_ends_when_the_collector_is_dropped() {
         let (stop, stop_rx) = std::sync::mpsc::channel::<()>();
