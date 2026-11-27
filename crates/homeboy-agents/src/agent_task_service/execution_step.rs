@@ -506,6 +506,7 @@ pub fn recovery_step_projection(
     let state = match exit_code {
         Some(0) => "succeeded",
         Some(_) => "failed",
+        None if delivered && terminal["outcome"] == "succeeded" => "succeeded",
         None if delivered => "failed",
         None => "in_flight",
     };
@@ -513,6 +514,7 @@ pub fn recovery_step_projection(
         .then(|| {
             let message = job_id
                 .and_then(step_job::recorded_step_failure_cause)
+                .or_else(|| diagnostic_root_cause(&terminal["error"]))
                 .unwrap_or_else(|| {
                     format!(
                         "recovery step ended without success (outcome {}, exit {})",
@@ -572,13 +574,18 @@ pub fn recovery_step_failure(run_id: &str) -> Result<Option<Value>> {
         } else {
             record.metadata["recovery_step_job"]["job_id"].as_str()
         };
-    Ok(job_id.and_then(|job_id| {
-        step_job::recorded_step_failure_cause(job_id).map(|message| {
-            json!({
-                "code": "agent_task.recovery_step_failed",
-                "message": message,
-                "details": recovery_step_failure_details(Some(job_id)),
-            })
+    let message = job_id
+        .and_then(step_job::recorded_step_failure_cause)
+        .or_else(|| {
+            (terminal["intent_id"] == record.metadata["execution_scheduling"]["current_intent_id"])
+                .then(|| diagnostic_root_cause(&terminal["error"]))
+                .flatten()
+        });
+    Ok(message.map(|message| {
+        json!({
+            "code": "agent_task.recovery_step_failed",
+            "message": message,
+            "details": recovery_step_failure_details(job_id),
         })
     }))
 }
@@ -600,6 +607,9 @@ pub fn recovery_step_exit_code(run_id: &str) -> Result<Option<i32>> {
     {
         if let Some(code) = record.metadata["recovery_step_terminal"]["exit_code"].as_i64() {
             return Ok(Some(code as i32));
+        }
+        if record.metadata["recovery_step_terminal"]["outcome"] == "succeeded" {
+            return Ok(Some(0));
         }
     }
     let Some(job_id) = record.metadata["recovery_step_job"]["job_id"].as_str() else {
@@ -689,7 +699,7 @@ pub(super) fn consume_execution_terminal_in_store(
     if let Ok(intent) = load_execution_intent(store, &delivery.key) {
         if matches!(intent.mode, ExecutionStepMode::Recovery { .. }) {
             store.mutate_record(subject, |record| {
-                record.metadata["recovery_step_terminal"] = json!({"intent_id": delivery.key, "job_id": delivery.job_id, "exit_code": delivery.exit_code, "outcome": delivery.outcome});
+                record.metadata["recovery_step_terminal"] = json!({"intent_id": delivery.key, "job_id": delivery.job_id, "exit_code": delivery.exit_code, "outcome": delivery.outcome, "error": delivery.error});
                 true
             })?;
             return Ok(json!({"acknowledged": true, "disposition": "recovery_completed"}));

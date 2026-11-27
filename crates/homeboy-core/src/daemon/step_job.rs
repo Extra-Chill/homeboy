@@ -1725,7 +1725,14 @@ pub(crate) fn terminal_delivery(
         child,
         outcome,
         error,
-        exit_code: parsed.as_ref().and_then(|cp| cp.exit_code),
+        // Recovered terminal winners can lack an exited checkpoint. The shell
+        // writes exit.json before the supervisor publishes completion; retain
+        // that numeric evidence on delivery rather than dropping it with the
+        // checkpoint (and do not invent a child status from the job outcome).
+        exit_code: parsed
+            .as_ref()
+            .and_then(|cp| cp.exit_code)
+            .or_else(|| recorded_step_exit_code(job_id)),
         cancelled,
         log_path: step_job_dir(job_id)
             .map(|dir| dir.join(STEP_LOG_FILE))
@@ -1832,6 +1839,34 @@ mod forward_compat_tests {
             None,
         );
         assert!(delivery.is_ok(), "{delivery:?}");
+    }
+
+    #[test]
+    fn terminal_delivery_retains_exit_record_without_exit_checkpoint() {
+        crate::test_support::with_isolated_home(|_| {
+            let job_id = uuid::Uuid::new_v4().to_string();
+            let dir = step_job_dir(&job_id).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(STEP_EXIT_FILE),
+                json!({"schema": STEP_EXIT_SCHEMA, "exit_code": 0}).to_string(),
+            )
+            .unwrap();
+            let request = to_value(request()).unwrap();
+            let delivery = terminal_delivery(
+                &job_id,
+                &request,
+                None,
+                Some(crate::api_jobs::JobStatus::Succeeded),
+                None,
+                false,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(delivery.outcome, StepTerminalOutcome::Succeeded);
+            assert_eq!(delivery.exit_code, Some(0));
+        });
     }
 
     #[test]

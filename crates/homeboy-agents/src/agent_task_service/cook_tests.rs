@@ -10445,6 +10445,13 @@ fn failing_regate_is_the_latest_gate_run_not_the_stale_receipt() {
             command
         );
         assert_ne!(latest.deterministic_gates, stale.deterministic_gates);
+        // Exercise the same persisted reader as `agent-task status`, not just
+        // the recovery response: the old unavailable verdict must be gone.
+        let store = test_lifecycle_store();
+        let record = store.read_record(run_id).unwrap();
+        let status = crate::orchestration::project_in_store(&store, &record).unwrap();
+        assert!(status.gates.iter().any(|gate| gate.state == "failed"));
+        assert!(!status.gates.iter().any(|gate| gate.state == "unavailable"));
         let run = &latest.provenance["regate_gate_run"];
         assert_eq!(run["commands"][0], command);
         assert_eq!(

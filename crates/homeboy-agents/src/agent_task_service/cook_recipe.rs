@@ -3948,14 +3948,20 @@ mod tests {
                             .contains("free-space reserve"));
                         std::fs::remove_file(job_dir.join("step.log")).unwrap();
                         std::fs::remove_file(job_dir.join("exit.json")).unwrap();
-                        for (exit_code, state) in [(2, "failed"), (0, "succeeded")] {
+                        for (exit_code, outcome, state) in [
+                            (Some(2), "exited", "failed"),
+                            (Some(0), "exited", "succeeded"),
+                            (None, "succeeded", "succeeded"),
+                            (None, "failed", "failed"),
+                        ] {
                             store
                                 .mutate_record(run_id, |record| {
                                     record.metadata["recovery_step_terminal"] = serde_json::json!({
                                         "intent_id": projection["intent_id"],
                                         "job_id": "test-recovery-job",
                                         "exit_code": exit_code,
-                                        "outcome": "exited",
+                                        "outcome": outcome,
+                                        "error": {"message": "runner connection lost"},
                                     });
                                     true
                                 })
@@ -3966,8 +3972,14 @@ mod tests {
                             )
                             .unwrap();
                             assert_eq!(projection["state"], state);
-                            assert_eq!(projection["exit_code"], exit_code);
-                            if exit_code != 0 {
+                            if outcome == "succeeded" {
+                                assert_eq!(
+                                    super::super::recovery_step_exit_code(run_id).unwrap(),
+                                    Some(0)
+                                );
+                            }
+                            assert_eq!(projection["exit_code"], serde_json::json!(exit_code));
+                            if state == "failed" {
                                 assert_eq!(
                                     projection["failure"]["code"],
                                     "agent_task.recovery_step_failed"
@@ -3975,7 +3987,7 @@ mod tests {
                                 assert!(projection["failure"]["message"]
                                     .as_str()
                                     .unwrap()
-                                    .contains("exit 2"));
+                                    .contains("runner connection lost"));
                             } else {
                                 assert!(projection["failure"].is_null());
                             }
