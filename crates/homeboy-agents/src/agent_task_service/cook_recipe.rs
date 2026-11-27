@@ -5155,19 +5155,22 @@ mod tests {
         let lifecycle = store.lifecycle_store();
         let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
             lifecycle.observation_db_path(),
-        ).unwrap();
+        )
+        .unwrap();
         for retry in 1..=MAX_CONTINUATION_RETRIES + 1 {
             let job = jobs.create("deterministically-failing-continuation");
             jobs.cancel(job.id, "worker stopped").unwrap();
-            lifecycle.mutate_record("run", |record| {
-                record.metadata["cook_continuation_scheduler"] = serde_json::json!({
-                    "status": "scheduled", "job_id": job.id.to_string(),
-                });
-                record.metadata["cook_controller_failure"] = serde_json::json!({
-                    "message": "worker stopped", "job_id": job.id.to_string(),
-                });
-                true
-            }).unwrap();
+            lifecycle
+                .mutate_record("run", |record| {
+                    record.metadata["cook_continuation_scheduler"] = serde_json::json!({
+                        "status": "scheduled", "job_id": job.id.to_string(),
+                    });
+                    record.metadata["cook_controller_failure"] = serde_json::json!({
+                        "message": "worker stopped", "job_id": job.id.to_string(),
+                    });
+                    true
+                })
+                .unwrap();
             assert_eq!(
                 store.enqueue_terminal_continuation("cook", "run").unwrap(),
                 retry <= MAX_CONTINUATION_RETRIES,
@@ -5175,12 +5178,18 @@ mod tests {
             let record = lifecycle.read_record("run").unwrap();
             assert_eq!(record.metadata["cook_continuation"]["retries"], retry);
             assert_eq!(record.metadata["cook_continuation"]["generation"], retry);
-            assert_eq!(record.metadata["cook_controller_failure"]["message"], "worker stopped");
+            assert_eq!(
+                record.metadata["cook_controller_failure"]["message"],
+                "worker stopped"
+            );
         }
         assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
         let record = lifecycle.read_record("run").unwrap();
         assert_eq!(record.metadata["cook_continuation"]["state"], "failed");
-        assert_eq!(record.metadata["cook_continuation"]["diagnostic"], "cook continuation retry budget exhausted");
+        assert_eq!(
+            record.metadata["cook_continuation"]["diagnostic"],
+            "cook continuation retry budget exhausted"
+        );
     }
 
     #[test]
@@ -5192,20 +5201,24 @@ mod tests {
         let lifecycle = store.lifecycle_store();
         let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
             lifecycle.observation_db_path(),
-        ).unwrap();
+        )
+        .unwrap();
         let dead = jobs.create("stranded-continuation");
         jobs.cancel(dead.id, "worker stopped").unwrap();
-        lifecycle.mutate_record("run", |record| {
-            agent_task_lifecycle::set_run_state(
-                record,
-                homeboy_lifecycle_contract::RunExecutionState::Succeeded,
-            );
-            record.metadata["cook_continuation_scheduler"] = serde_json::json!({
-                "status": "scheduled", "job_id": dead.id.to_string(),
-            });
-            record.metadata["cook_controller_failure"] = serde_json::json!({"message": "worker stopped"});
-            true
-        }).unwrap();
+        lifecycle
+            .mutate_record("run", |record| {
+                agent_task_lifecycle::set_run_state(
+                    record,
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded,
+                );
+                record.metadata["cook_continuation_scheduler"] = serde_json::json!({
+                    "status": "scheduled", "job_id": dead.id.to_string(),
+                });
+                record.metadata["cook_controller_failure"] =
+                    serde_json::json!({"message": "worker stopped"});
+                true
+            })
+            .unwrap();
         let mut submitted = 0;
         super::super::reconcile::reconcile_stranded_terminal_cooks(&lifecycle, |request| {
             assert_eq!(request["generation"], 1);
@@ -5213,19 +5226,31 @@ mod tests {
             let replacement = jobs.create("replacement-continuation");
             assert_ne!(replacement.id, dead.id);
             Ok(serde_json::json!({"scheduled": true, "job_id": replacement.id.to_string()}))
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(submitted, 1);
-        let intent = lifecycle.open_observation_readonly().unwrap()
-            .work_intent_by_id("terminal-cook:cook:run:1").unwrap().unwrap();
+        let intent = lifecycle
+            .open_observation_readonly()
+            .unwrap()
+            .work_intent_by_id("terminal-cook:cook:run:1")
+            .unwrap()
+            .unwrap();
         assert_eq!(intent.payload["generation"], 1);
         let record = lifecycle.read_record("run").unwrap();
         assert_eq!(record.metadata["cook_continuation"]["generation"], 1);
         assert_eq!(record.metadata["cook_continuation"]["retries"], 1);
-        assert_eq!(record.metadata["cook_continuation_scheduler"]["status"], "scheduled");
-        assert_eq!(record.metadata["cook_controller_failure"]["message"], "worker stopped");
+        assert_eq!(
+            record.metadata["cook_continuation_scheduler"]["status"],
+            "scheduled"
+        );
+        assert_eq!(
+            record.metadata["cook_controller_failure"]["message"],
+            "worker stopped"
+        );
         super::super::reconcile::reconcile_stranded_terminal_cooks(&lifecycle, |_| {
             panic!("a live replacement must not be rearmed")
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
