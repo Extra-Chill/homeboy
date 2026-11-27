@@ -36,10 +36,16 @@ pub fn render_review_dossier_for_worktree(
     profile: &AgentTaskReviewProfile,
     worktree: &Path,
 ) -> String {
-    match discover(worktree) {
+    let mut body = match discover(worktree) {
         Some(template) => render_template(dossier, &template),
         None => render_review_dossier(dossier, profile),
+    };
+    if let Ok(Some(warning)) =
+        crate::agent_task_promotion::large_untracked_warning(&worktree.to_string_lossy())
+    {
+        body.push_str(&format!("\n\n> **Candidate size warning:** {warning}\n"));
     }
+    body
 }
 
 fn heading(line: &str) -> Option<&str> {

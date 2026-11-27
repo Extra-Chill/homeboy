@@ -3926,6 +3926,13 @@ fn cook_review_dossier_with_stores_and_review_form(
             },
         ]);
     }
+    // Capture before publication can commit the additions; the durable review
+    // form must retain this warning even after the checkout becomes clean.
+    if let Some(path) = promotion.target.path.as_deref() {
+        if let Ok(Some(summary)) = crate::agent_task_promotion::large_untracked_warning(path) {
+            evidence.push(AgentTaskReviewEvidence { summary, url: None });
+        }
+    }
     // A form with a publication gap (missing, invalid, or failed gates) has no
     // verdict that can prove the task (#18931).
     let completion = if gap.is_none() {

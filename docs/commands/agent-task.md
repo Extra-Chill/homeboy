@@ -561,6 +561,17 @@ and digest, and exact commands remain bound to the current candidate. The report
 labels these gates as `verified_inherited`; any stale, red, or malformed receipt
 requires fresh verification instead of silently accepting it.
 
+Candidate fingerprints preserve tracked changes (including force-added ignored
+files) and new non-ignored regular files. Untracked `target/` and `target-*/`
+directories at any depth are excluded during enumeration, so custom Cargo build
+output cannot enter the fingerprint or break it while being deleted. Intentionally
+versioned files inside these directories must be explicitly staged. Providers do
+not need to relocate `CARGO_TARGET_DIR` for fingerprinting. A transient Git
+`unable to stat` staging failure is retried once; other failures remain errors.
+Review bodies warn about included untracked additions totaling at least 1,000
+files or 10 MiB; Cook also retains that diagnostic in its review evidence before
+publication commits the additions.
+
 When multiple registered components share the candidate repository, pass
 `--component <component-id>` with `--manual-finalization` to select the component
 whose review profile applies. Homeboy verifies that the explicit component is

@@ -21,6 +21,7 @@ pub use candidate_bundle::{
 mod committed_changes;
 pub(crate) use committed_changes::resolve_candidate_revision;
 mod fingerprint;
+pub(crate) use fingerprint::large_untracked_warning;
 mod promote;
 mod residue;
 mod run_plan_projection;

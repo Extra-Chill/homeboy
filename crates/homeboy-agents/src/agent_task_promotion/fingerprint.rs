@@ -7,7 +7,8 @@ pub struct AgentTaskCandidateFingerprint {
     pub target_path: String,
     pub head: String,
     pub changed_files: Vec<String>,
-    /// Full workspace content, without changing the real index.
+    /// Tracked content plus eligible non-ignored additions, without changing
+    /// the real index. Untracked Cargo output directories are excluded.
     pub tree: String,
 }
 
@@ -61,12 +62,12 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
     let git = |args: &[&str]| run_git(path, args);
     let head = text(git(&["rev-parse", "HEAD"])?).trim().to_string();
     reject_gitlinks(&git)?;
-    let untracked = paths(git(&["ls-files", "--others", "--exclude-standard", "-z"])?);
+    let untracked = candidate_untracked(path)?;
     let mut changed_files = changed_paths(&git, &untracked)?;
     for relative in &untracked {
         validate_untracked(path, relative)?;
     }
-    let tree = candidate_tree(path)?;
+    let tree = candidate_tree(path, &untracked)?;
     changed_files.sort();
     changed_files.dedup();
     Ok(AgentTaskPromotionCandidate::Git {
@@ -99,7 +100,7 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
 /// modified without a stat change would keep its stale blob and the tree would
 /// describe content that is not on disk. `read-tree` writes entries with no
 /// stat data, so every working-tree file is re-hashed.
-fn candidate_tree(path: &str) -> Result<String> {
+fn candidate_tree(path: &str, untracked: &[String]) -> Result<String> {
     let scratch = || homeboy_core::git::private_index(Path::new(path));
     let real_index = text(run_git(
         path,
@@ -134,12 +135,92 @@ fn candidate_tree(path: &str) -> Result<String> {
         &["read-tree", staged_tree.trim()],
         "seed candidate tree index from real index tree",
     )?;
-    git(&candidate, &["add", "-A"], "stage candidate tree")?;
+    // Never recursively stage the worktree: build output can disappear during
+    // enumeration, and can be enormous even when it is stable. Tracked (also
+    // force-added) files remain authoritative, including ones under target/.
+    let mut additions = tempfile::NamedTempFile::new()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?;
+    use std::io::Write;
+    for relative in untracked {
+        additions
+            .write_all(relative.as_bytes())
+            .and_then(|_| additions.write_all(&[0]))
+            .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?;
+    }
+    retry_stat_race(|| {
+        git(
+            &candidate,
+            &["add", "-u", "--", "."],
+            "stage tracked candidate files",
+        )?;
+        if !untracked.is_empty() {
+            git(
+                &candidate,
+                &[
+                    "--literal-pathspecs",
+                    "add",
+                    "--pathspec-from-file",
+                    additions.path().to_str().unwrap(),
+                    "--pathspec-file-nul",
+                ],
+                "stage untracked candidate files",
+            )?;
+        }
+        Ok(())
+    })?;
     Ok(
         text(git(&candidate, &["write-tree"], "write candidate tree")?)
             .trim()
             .to_string(),
     )
+}
+
+/// Policy for new files: include non-ignored files except conventional Cargo
+/// output directories, at any depth. Explicitly staged files bypass this policy.
+/// Exclude during Git's traversal, not after it: target trees may be mutating.
+fn candidate_untracked(path: &str) -> Result<Vec<String>> {
+    Ok(paths(run_git(
+        path,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--exclude=target/",
+            "--exclude=target-*/",
+        ],
+    )?))
+}
+
+fn retry_stat_race<T>(mut stage: impl FnMut() -> Result<T>) -> Result<T> {
+    match stage() {
+        Err(error)
+            if error.message.contains("unable to stat")
+                || error.details.to_string().contains("unable to stat") =>
+        {
+            stage()
+        }
+        result => result,
+    }
+}
+
+/// Reviewer diagnostic only; it never changes candidate identity. Report new
+/// source trees of at least 1000 files or 10 MiB, rather than silently sweeping
+/// large generated trees into a PR. Failure to inspect must not hide the body.
+pub(crate) fn large_untracked_warning(path: &str) -> Result<Option<String>> {
+    let files = candidate_untracked(path)?;
+    let mut bytes = 0u64;
+    for relative in &files {
+        bytes = bytes.saturating_add(
+            std::fs::symlink_metadata(Path::new(path).join(relative))
+                .map_err(|error| Error::internal_io(error.to_string(), Some(relative.clone())))?
+                .len(),
+        );
+    }
+    Ok((files.len() >= 1000 || bytes >= 10 * 1024 * 1024).then(|| format!(
+        "Candidate includes a large untracked tree: {} new files ({} bytes). Review these additions for generated output.",
+        files.len(), bytes,
+    )))
 }
 
 fn is_git_worktree(path: &str) -> Result<bool> {
@@ -367,6 +448,120 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("nested/deeper")).unwrap();
         std::fs::write(dir.path().join("nested/deeper/file"), "new").unwrap();
         assert_eq!(fingerprint(&dir).changed_files, vec!["nested/deeper/file"]);
+    }
+
+    #[test]
+    fn mutating_cargo_output_is_not_part_of_the_candidate() {
+        let dir = repo();
+        commit(&dir, "base");
+        let clean = fingerprint(&dir);
+        std::fs::write(dir.path().join("source.rs"), "new source").unwrap();
+        std::fs::create_dir_all(dir.path().join("target-x/deep")).unwrap();
+        std::fs::write(dir.path().join("target-x/deep/build.d"), "output").unwrap();
+        // Enumeration must prune output, including nested Cargo output roots.
+        std::fs::create_dir_all(dir.path().join("nested/target-pr")).unwrap();
+        std::fs::write(dir.path().join("nested/target-pr/build"), "output").unwrap();
+        assert_eq!(
+            candidate_untracked(dir.path().to_str().unwrap()).unwrap(),
+            vec!["source.rs"]
+        );
+        std::thread::scope(|scope| {
+            let output = dir.path().join("target-x");
+            scope.spawn(move || {
+                for _ in 0..100 {
+                    let _ = std::fs::remove_dir_all(&output);
+                    let _ = std::fs::create_dir_all(&output);
+                    let _ = std::fs::write(output.join("build.d"), "output");
+                }
+            });
+            for _ in 0..3 {
+                let candidate = fingerprint(&dir);
+                assert_eq!(candidate.changed_files, vec!["source.rs"]);
+                assert_ne!(clean.tree, candidate.tree);
+                let tree_paths = text(
+                    run_git(
+                        dir.path().to_str().unwrap(),
+                        &["ls-tree", "-r", "--name-only", &candidate.tree],
+                    )
+                    .unwrap(),
+                );
+                assert_eq!(tree_paths, "base\nsource.rs\n");
+            }
+        });
+    }
+
+    #[test]
+    fn tracked_build_paths_and_literal_new_paths_are_preserved() {
+        let dir = repo();
+        commit(&dir, "base");
+        std::fs::create_dir_all(dir.path().join("target-pr")).unwrap();
+        commit(&dir, "target-pr/intentional");
+        std::fs::write(dir.path().join("target-pr/intentional"), "edited").unwrap();
+        std::fs::write(dir.path().join("target-pr/ignored"), "output").unwrap();
+        std::fs::write(dir.path().join("[literal]"), "new").unwrap();
+        let candidate = fingerprint(&dir);
+        assert_eq!(
+            candidate.changed_files,
+            vec!["[literal]", "target-pr/intentional"]
+        );
+        assert_eq!(
+            text(
+                run_git(
+                    dir.path().to_str().unwrap(),
+                    &["show", &format!("{}:target-pr/intentional", candidate.tree)]
+                )
+                .unwrap()
+            ),
+            "edited"
+        );
+    }
+
+    #[test]
+    fn stat_race_is_retried_once_but_other_failures_are_not() {
+        for (message, expected) in [
+            ("fatal: unable to stat 'file'", 2),
+            ("permission denied", 1),
+        ] {
+            let mut calls = 0;
+            let result: Result<()> = retry_stat_race(|| {
+                calls += 1;
+                Err(Error::internal_io(message.to_string(), None))
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, expected);
+        }
+        let mut calls = 0;
+        let result = retry_stat_race(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(Error::internal_io("unable to stat".to_string(), None))
+            } else {
+                Ok("staged")
+            }
+        });
+        assert_eq!(result.unwrap(), "staged");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn large_untracked_additions_are_reported_but_build_output_is_not() {
+        let dir = repo();
+        commit(&dir, "base");
+        let path = dir.path().to_str().unwrap();
+        std::fs::create_dir_all(dir.path().join("target-x")).unwrap();
+        std::fs::File::create(dir.path().join("target-x/large"))
+            .unwrap()
+            .set_len(10 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(large_untracked_warning(path).unwrap(), None);
+        std::fs::File::create(dir.path().join("large"))
+            .unwrap()
+            .set_len(10 * 1024 * 1024)
+            .unwrap();
+        assert!(large_untracked_warning(path)
+            .unwrap()
+            .unwrap()
+            .contains("1 new files (10485760 bytes)"));
     }
 
     #[test]

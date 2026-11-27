@@ -2617,6 +2617,35 @@ mod tests {
     }
 
     #[test]
+    fn worktree_review_reports_large_new_trees_with_or_without_a_template() {
+        let worktree = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("init")
+            .current_dir(worktree.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        std::fs::File::create(worktree.path().join("large"))
+            .unwrap()
+            .set_len(10 * 1024 * 1024)
+            .unwrap();
+        for template in [false, true] {
+            if template {
+                std::fs::write(
+                    worktree.path().join("pull_request_template.md"),
+                    "## Summary\n",
+                )
+                .unwrap();
+            }
+            let body =
+                render_review_dossier_for_worktree(&dossier(), &default_profile(), worktree.path());
+            assert!(body.contains("Candidate size warning"));
+            assert!(body.contains("large untracked tree"));
+        }
+    }
+
+    #[test]
     fn worktree_template_render_preserves_repository_contract() {
         let worktree = tempfile::tempdir().unwrap();
         let mut value = dossier();
