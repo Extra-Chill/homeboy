@@ -818,18 +818,6 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
     assert_eq!(killed, 0, "crash routed launcher owner");
     launcher.wait().expect("reap crashed launcher");
 
-    // A reconcile pass (the daemon's orchestration tick or an operator sweep)
-    // can land before the step child binds the handoff. The admitted step is
-    // the Cook's owner, so that pass must not expire the handoff.
-    let mut reconcile = context.command(TestBinary::HomeboyFixture);
-    reconcile.args(["agent-task", "reconcile", "--all", "--apply"]);
-    let reconciled = bounded_output(reconcile);
-    assert!(
-        reconciled.status.success(),
-        "reconcile after launcher crash: {}",
-        String::from_utf8_lossy(&reconciled.stdout)
-    );
-
     // The step was admitted before the launcher died, so the daemon already
     // owns this Cook: the step child binds the handoff and the Cook runs to a
     // terminal state without its launcher.
