@@ -108,6 +108,7 @@ pub(super) fn run_rig_source_management_on_runner(
             run_id: None,
             run_id_owns_generic_exec: false,
             detach_after_handoff: false,
+            allow_concurrent: false,
             mirror_evidence: true,
             print_handoff: true,
             read_only_artifact_access: false,

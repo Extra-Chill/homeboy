@@ -1042,7 +1042,9 @@ Runner job environment:
 
 ### Long-running detached workloads
 
-`runner exec` is foreground-only: every runner job is process-tree-isolated under the runner daemon, and when the job's root process exits the runner deterministically terminates and reaps all remaining descendants before reporting terminal evidence. Backgrounding inside the command does not survive this cleanup:
+Daemon `runner exec` is attached by default: SIGINT/SIGTERM requests cancellation, and losing the client heartbeat cancels the job after its lease expires (10 seconds plus the daemon maintenance interval). Use `--detach` to print a job ID and log/cancel commands and exit while the job continues. Identical live executions (runner, cwd, argv) are refused with the existing job ID; `--allow-concurrent` explicitly permits them. `runner doctor` reports expired attached owners with a cancel command. Older daemons do not enforce these new ownership and duplicate policies.
+
+Every runner job is process-tree-isolated under the runner daemon, and when the job's root process exits the runner deterministically terminates and reaps all remaining descendants before reporting terminal evidence. Backgrounding inside the command does not survive this cleanup:
 
 ```sh
 # WRONG: returns immediately, then the runner job cleanup kills the workload.

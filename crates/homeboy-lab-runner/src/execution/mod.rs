@@ -190,6 +190,7 @@ pub struct RunnerExecOptions {
     /// agent-task record (Extra-Chill/homeboy#8447).
     pub run_id_owns_generic_exec: bool,
     pub detach_after_handoff: bool,
+    pub allow_concurrent: bool,
     pub mirror_evidence: bool,
     pub print_handoff: bool,
     /// This runner exec is a read-only retrieval of evidence that a completed
@@ -267,6 +268,7 @@ impl Default for RunnerExecOptions {
             run_id: None,
             run_id_owns_generic_exec: false,
             detach_after_handoff: false,
+            allow_concurrent: false,
             mirror_evidence: true,
             print_handoff: true,
             read_only_artifact_access: false,
@@ -1178,6 +1180,7 @@ fn exec_with_status_snapshot_attempt(
                     .session
                     .as_ref()
                     .and_then(|session| session.homeboy_build_identity.clone()),
+                options.allow_concurrent,
             )
         }
         (Some(RunnerTransport::Local), _) => exec_local(plan),

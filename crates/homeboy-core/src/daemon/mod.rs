@@ -3758,6 +3758,8 @@ fn enqueue_exec_request(
     job_store: &JobStore,
     staged_adoption: Option<StagedDirectExecution>,
 ) -> Result<serde_json::Value> {
+    static EXEC_ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _admission = EXEC_ADMISSION.lock().unwrap();
     let dispatch = request.envelope.dispatch.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "envelope.dispatch",
@@ -3917,6 +3919,20 @@ fn enqueue_exec_request(
         "kind": lifecycle.as_ref().and_then(|lifecycle| lifecycle.kind.clone()).unwrap_or_else(|| "runner.exec".to_string()),
         "lifecycle": lifecycle.clone(),
     });
+    if execution_metadata
+        .and_then(|m| m.get("guard_duplicate_exec"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        if let Some(id) = job_store.duplicate_exec(
+            &plan.runner_id,
+            &plan.cwd,
+            &plan.command,
+            submission_key.as_deref(),
+        ) {
+            return Err(Error::validation_invalid_argument("command", format!("identical exec is live as {id}; cancel with `homeboy runner job cancel {} {id}` or use --allow-concurrent", plan.runner_id), None, None));
+        }
+    }
     // Capture any potentially slow baseline before reserving child capacity.
     // Once the reservation is durable, the worker performs only the bounded
     // process-spawn handoff before persisting child ownership.
@@ -4036,6 +4052,13 @@ fn enqueue_exec_request(
         }
     };
     let _workspace_owner_lease = pending_owner_lease.disarm();
+    if execution_metadata
+        .and_then(|m| m.get("attached_exec"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        job_store.attach_exec(runner.job_id)?;
+    }
     if queued_owner_heartbeat {
         // Liveness is best effort: the job is already durably accepted.
         let _ = job_store.observe_queued_job(runner.job_id);

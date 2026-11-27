@@ -349,6 +349,8 @@ pub(super) struct ControllerJobSubmission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredJob {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) attached_exec_heartbeat_ms: Option<u64>,
     /// Durable admission state for direct exec and gate jobs, owned by the executing daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_admission_reason: Option<String>,
@@ -1871,6 +1873,7 @@ impl JobStore {
         inner.jobs.insert(
             job.id,
             StoredJob {
+                attached_exec_heartbeat_ms: None,
                 // The worker's first admission probe records any wait.
                 pending_admission_reason: None,
                 pending_execution_envelope,
@@ -2952,6 +2955,7 @@ impl JobStore {
                 data: Some(event_data),
             };
             let mut stored = StoredJob {
+                attached_exec_heartbeat_ms: None,
                 pending_admission_reason: None,
                 pending_execution_envelope: None,
                 job,

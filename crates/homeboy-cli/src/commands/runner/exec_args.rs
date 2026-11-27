@@ -109,6 +109,14 @@ pub(crate) struct RunnerExecArgs {
     #[arg(long)]
     pub(super) raw: bool,
 
+    /// Let the remote job outlive this client.
+    #[arg(long)]
+    pub(super) detach: bool,
+
+    /// Permit an identical live command in the same working directory.
+    #[arg(long)]
+    pub(super) allow_concurrent: bool,
+
     /// Treat this exec as a read-only retrieval of evidence the runner
     /// already retains (for example, hydrating a completed run's artifact).
     /// Routes through the runner's current daemon session and never rotates the shared tunnel, so a stale admission daemon does not
@@ -150,6 +158,8 @@ impl From<RunnerExecArgs> for super::exec::RunnerExecInput {
             summary_outputs: args.summary_outputs,
             read_only_artifact: args.read_only_artifact,
             raw: args.raw,
+            detach: args.detach,
+            allow_concurrent: args.allow_concurrent,
             extension_env_providers: args.extension_env_providers,
         }
     }

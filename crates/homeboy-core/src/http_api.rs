@@ -685,8 +685,7 @@ where
             })
         }
         HttpEndpoint::JobObserve { id } => {
-            // A waiting client's owner heartbeat for a queued job (#18601).
-            // It touches only in-memory liveness, never the durable ledger.
+            // Renew queued-owner liveness and any durable attached-exec lease.
             json!({
                 "command": "api.jobs.observe",
                 "job": job_store.observe_queued_job(parse_job_id(id)?)?,
