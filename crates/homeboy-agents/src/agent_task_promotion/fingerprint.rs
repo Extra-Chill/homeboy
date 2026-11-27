@@ -134,12 +134,27 @@ fn candidate_tree(path: &str) -> Result<String> {
         &["read-tree", staged_tree.trim()],
         "seed candidate tree index from real index tree",
     )?;
-    git(&candidate, &["add", "-A"], "stage candidate tree")?;
+    stage_with_stat_retry(|| git(&candidate, &["add", "-A"], "stage candidate tree").map(|_| ()))?;
     Ok(
         text(git(&candidate, &["write-tree"], "write candidate tree")?)
             .trim()
             .to_string(),
     )
+}
+
+/// A disappearing file can race Git's directory scan. Retry only that failure,
+/// once; other failures (including permissions and index locks) remain fatal.
+fn stage_with_stat_retry(mut stage: impl FnMut() -> Result<()>) -> Result<()> {
+    match stage() {
+        Err(error)
+            if error.details["stderr"]
+                .as_str()
+                .is_some_and(|stderr| stderr.contains("unable to stat")) =>
+        {
+            stage()
+        }
+        result => result,
+    }
 }
 
 fn is_git_worktree(path: &str) -> Result<bool> {
@@ -280,6 +295,72 @@ mod tests {
         assert!(!error.message.trim().is_empty());
         assert_eq!(error.details["command"], "git diff --quiet");
         assert_eq!(error.details["exit_code"], 1);
+    }
+
+    #[test]
+    fn vanished_untracked_tree_is_absent_after_staging_retry() {
+        let dir = repo();
+        commit(&dir, "base");
+        let build = dir.path().join("target-x");
+        std::fs::create_dir(&build).unwrap();
+        std::fs::write(build.join("artifact"), "temporary").unwrap();
+        let mut calls = 0;
+        let mut tree = None;
+        stage_with_stat_retry(|| {
+            calls += 1;
+            if calls == 1 {
+                // Deterministically model deletion between Git's scan and stat.
+                std::fs::remove_dir_all(&build).unwrap();
+                let mut error = Error::internal_unexpected("staging stat race");
+                error.details = serde_json::json!({
+                    "stderr": "fatal: unable to stat 'target-x/artifact': No such file or directory"
+                });
+                return Err(error);
+            }
+            tree = Some(candidate_tree(dir.path().to_str().unwrap())?);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        let entries = text(
+            run_git(
+                dir.path().to_str().unwrap(),
+                &["ls-tree", "-r", "--name-only", tree.as_deref().unwrap()],
+            )
+            .unwrap(),
+        );
+        assert_eq!(entries.trim(), "base");
+        assert_eq!(fingerprint(&dir).tree, tree.unwrap());
+    }
+
+    #[test]
+    fn staging_retries_only_one_stat_failure() {
+        for (message, succeeds, expected_calls) in [
+            (
+                "fatal: unable to stat 'vanished': No such file or directory",
+                true,
+                2,
+            ),
+            (
+                "fatal: unable to stat 'vanished': No such file or directory",
+                false,
+                2,
+            ),
+            ("fatal: index.lock exists", true, 1),
+        ] {
+            let mut calls = 0;
+            let result = stage_with_stat_retry(|| {
+                calls += 1;
+                if calls == 2 && succeeds {
+                    return Ok(());
+                }
+                let mut error = Error::internal_unexpected(message);
+                error.details = serde_json::json!({"stderr": message});
+                Err(error)
+            });
+            assert_eq!(calls, expected_calls);
+            assert_eq!(result.is_ok(), succeeds && expected_calls == 2);
+        }
     }
 
     #[test]

@@ -23,8 +23,15 @@ ${XDG_DATA_HOME:-$HOME/.local/share}/homeboy/cargo-targets/<component>-<repo-has
 
 This keeps target artifacts reusable across primary checkouts and worktrees for
 the same repository while avoiding cross-project target collisions. If the user
-sets `CARGO_TARGET_DIR` explicitly, the provider emits `{}` and does not
-override it.
+sets `CARGO_TARGET_DIR` explicitly, the provider preserves that location.
+
+Cook resolves the portable component's linked extension environments before
+launching its agent. The Rust provider's external target directory therefore
+reaches agent child shells as well as gates. Components opting into the shared
+managed Cargo cache continue to use that compatibility-keyed cache. Agents
+should not override this with an in-worktree build directory: candidate staging
+intentionally retains generic `git add -A` semantics and does not exclude build
+output by directory name.
 
 ## sccache
 

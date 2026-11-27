@@ -997,6 +997,17 @@ pub(super) fn run_materialized_provider_command_once(
         }
     };
 
+    if let Err(error) = apply_component_provider_environment(cwd.as_deref(), &mut env) {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::ProviderError,
+            AgentTaskFailureClassification::InvalidInput,
+            "agent_task.extension_environment_unavailable",
+            error.to_string(),
+            json!({ "provider": provider.id }),
+        );
+    }
+
     let dir = super::pi::agent_dir(&request.request.executor.config, &env);
     env.retain(|(key, _)| key != "PI_CODING_AGENT_DIR");
     env.push(("PI_CODING_AGENT_DIR".into(), dir));
@@ -1772,6 +1783,122 @@ pub(super) fn run_materialized_provider_command_once(
         );
     }
     outcome
+}
+
+/// Resolve component-owned environments before launching the agent, not only
+/// when running its gates. In particular build tools must inherit the same
+/// external build-output location in the agent's child shells.
+fn apply_component_provider_environment(
+    cwd: Option<&Path>,
+    environment: &mut Vec<(String, String)>,
+) -> homeboy_core::Result<()> {
+    let Some(cwd) = cwd else { return Ok(()) };
+    let Some(component) = homeboy_core::component::try_discover_from_portable(cwd)? else {
+        return Ok(());
+    };
+    let mut ids = component
+        .extensions
+        .unwrap_or_default()
+        .into_keys()
+        .collect::<Vec<_>>();
+    ids.sort();
+    let mut providers = Vec::new();
+    for id in ids {
+        let extension = homeboy_core::extension::catalog::load_extension(&id)?;
+        if extension.env_provider.is_some() {
+            providers.push(id);
+        }
+    }
+    let context =
+        homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy");
+    for id in providers {
+        let contribution =
+            homeboy_core::extension::invoke::resolve_installed(&context, &id, cwd, environment)?;
+        for (name, value) in contribution.public_env {
+            if let Some((_, existing)) = environment.iter().rev().find(|(key, _)| key == &name) {
+                // Providers may echo an explicit caller setting. Do not treat
+                // an identical value as a collision or append duplicate keys.
+                if existing == &value {
+                    continue;
+                }
+                return Err(homeboy_core::error::Error::validation_invalid_argument(
+                    "extension_env",
+                    format!("Extension '{id}' conflicts with existing environment key '{name}'"),
+                    Some(name),
+                    None,
+                ));
+            }
+            environment.push((name, value));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod component_environment_tests {
+    use super::*;
+
+    #[test]
+    fn managed_extension_output_reaches_agent_shell_outside_worktree() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().unwrap();
+            let output = tempfile::tempdir().unwrap();
+            std::fs::write(
+                workspace.path().join("homeboy.json"),
+                r#"{"id":"cook-fixture","extensions":{"build-env":{}}}"#,
+            )
+            .unwrap();
+            let source = tempfile::tempdir().unwrap();
+            std::fs::write(
+                source.path().join("build-env.json"),
+                r#"{"id":"build-env","name":"Build env","version":"1.0.0","env_provider":{"script":"env.sh"}}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                source.path().join("env.sh"),
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                    serde_json::json!({"CARGO_TARGET_DIR": output.path()})
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                source.path().join("env.sh"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            homeboy_core::extension::lifecycle::install(
+                &source.path().display().to_string(),
+                Some("build-env"),
+            )
+            .unwrap();
+            let mut automatic = Vec::new();
+            apply_component_provider_environment(Some(workspace.path()), &mut automatic).unwrap();
+            assert_eq!(
+                automatic,
+                vec![(
+                    "CARGO_TARGET_DIR".to_string(),
+                    output.path().display().to_string(),
+                )]
+            );
+            let mut environment = vec![(
+                "CARGO_TARGET_DIR".to_string(),
+                output.path().display().to_string(),
+            )];
+            apply_component_provider_environment(Some(workspace.path()), &mut environment).unwrap();
+            assert_eq!(environment.len(), 1);
+            assert!(Command::new("sh")
+                .args(["-c", "printf artifact > \"$CARGO_TARGET_DIR/artifact\""])
+                .current_dir(workspace.path())
+                .envs(environment)
+                .status()
+                .unwrap()
+                .success());
+            assert!(output.path().join("artifact").exists());
+            assert!(!workspace.path().join("artifact").exists());
+        });
+    }
 }
 
 fn provider_cargo_target(
