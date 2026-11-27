@@ -21,6 +21,7 @@ pub use homeboy_runner_contract::{
 // ----------------------------------------------------------------------------
 
 pub use crate::daemon_repair_codes;
+pub use crate::execution::with_exec_stream;
 pub use crate::peer_session_maintenance;
 pub use crate::select_environment_runner;
 pub use crate::{

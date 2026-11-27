@@ -428,12 +428,31 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
 }
 
 pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
-    crate::commands::utils::tty::status("homeboy is working...");
+    if !crate::commands::utils::response::human_output() {
+        crate::commands::utils::tty::status("homeboy is working...");
+    }
 
     match args.command {
         RunnerCommand::Exec(args) => {
             let json = args.json;
             run_exec_command(args.into(), json)
+        }
+        RunnerCommand::Status { id, full } if crate::commands::utils::response::human_output() => {
+            match status_mod::status(id.as_deref(), full || id.is_none()) {
+                Ok((output, code)) => {
+                    let text = status_mod::render_human_status(&output);
+                    let (json, _) = crate::commands::utils::response::map_cmd_result_to_json(
+                        map_registry(Ok((output, code))),
+                    );
+                    CommandRun::from_raw_stdout("runner", Ok(text), code, Some(json))
+                }
+                Err(error) => {
+                    let (json, code) = crate::commands::utils::response::map_cmd_result_to_json::<
+                        RunnerCommandOutput,
+                    >(Err(error));
+                    CommandRun::from_stdout_result(json, code)
+                }
+            }
         }
         RunnerCommand::List { full: false } => {
             let (stdout_result, exit_code) =
@@ -453,8 +472,92 @@ pub(crate) fn run_command_output(args: RunnerArgs) -> CommandRun {
 }
 
 pub(super) fn run_exec_command(input: RunnerExecInput, json: bool) -> CommandRun {
+    let human = crate::commands::utils::response::human_output() && !json && !input.raw;
     let raw = input.raw;
-    match execute(input) {
+    let started = Instant::now();
+    let streamed = std::rc::Rc::new(std::cell::RefCell::new((String::new(), String::new())));
+    let seen = streamed.clone();
+    let result = if human {
+        let mut input = input;
+        input.raw = true; // Human output owns the sole trailing handoff line.
+        runner::with_exec_stream(
+            move |stderr, text| {
+                use std::io::Write;
+                let mut seen = seen.borrow_mut();
+                if stderr {
+                    seen.1.push_str(text);
+                } else {
+                    seen.0.push_str(text);
+                }
+                if stderr {
+                    let mut writer = std::io::stderr().lock();
+                    let _ = writer.write_all(text.as_bytes());
+                    let _ = writer.flush();
+                } else {
+                    let mut writer = std::io::stdout().lock();
+                    let _ = writer.write_all(text.as_bytes());
+                    let _ = writer.flush();
+                }
+            },
+            || execute(input),
+        )
+    } else {
+        execute(input)
+    };
+    match result {
+        Ok((output, exit_code)) if human => {
+            let job = output.job_id.as_deref().unwrap_or("unavailable");
+            let state = if output.is_in_flight() {
+                "in flight".to_string()
+            } else {
+                format!("exit {exit_code}")
+            };
+            let metadata = format!(
+                "[{} job {job} {state}, {:.1}s; logs: homeboy runner job logs {} {job}]\n",
+                output.runner_id,
+                started.elapsed().as_secs_f64(),
+                output.runner_id
+            );
+            let seen = streamed.borrow();
+            let remaining_stdout =
+                output
+                    .stdout
+                    .strip_prefix(&seen.0)
+                    .unwrap_or(if seen.0.is_empty() {
+                        &output.stdout
+                    } else {
+                        ""
+                    });
+            let remaining_stderr =
+                output
+                    .stderr
+                    .strip_prefix(&seen.1)
+                    .unwrap_or(if seen.1.is_empty() {
+                        &output.stderr
+                    } else {
+                        ""
+                    });
+            let separator = if !output.stderr.is_empty() && !output.stderr.ends_with('\n') {
+                "\n"
+            } else {
+                ""
+            };
+            let presentation = CommandPresentation {
+                stdout: Some(remaining_stdout.to_string()),
+                stderr: Some(format!("{remaining_stderr}{separator}{metadata}")),
+            };
+            let (artifact, _) = crate::commands::utils::response::map_cmd_result_to_json(Ok((
+                RunnerCommandOutput::Execution(Box::new(runner_exec_command_output(output))),
+                exit_code,
+            )));
+            CommandRun::from_raw_stdout(
+                "runner",
+                Ok(presentation.stdout.unwrap_or_default()),
+                exit_code,
+                Some(artifact),
+            )
+            .with_raw_completion_stderr(presentation.stderr.unwrap_or_default())
+        }
         Ok((output, exit_code)) if json => {
             let (stdout_result, _) =
                 crate::commands::utils::response::map_cmd_result_to_json(Ok((

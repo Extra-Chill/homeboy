@@ -67,7 +67,9 @@ mod process;
 mod recovery;
 pub(crate) mod redaction;
 mod secrets;
+mod stream;
 mod submission;
+pub use stream::with_exec_stream;
 
 #[cfg(test)]
 pub(crate) mod tests;

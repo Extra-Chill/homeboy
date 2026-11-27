@@ -151,6 +151,11 @@ pub fn spawn(command: &mut Command) -> io::Result<(Child, RunnerChildIdentity)> 
     Ok((child, identity))
 }
 
+/// Durable stderr file, available for incremental attached output observation.
+pub fn stderr_path(dir: &Path) -> PathBuf {
+    dir.join(STDERR_FILE)
+}
+
 pub fn stdout_path(dir: &Path) -> PathBuf {
     dir.join(STDOUT_FILE)
 }

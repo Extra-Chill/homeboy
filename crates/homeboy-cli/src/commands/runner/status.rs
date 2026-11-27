@@ -19,6 +19,130 @@ use super::types::{
 
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
 
+pub(super) fn render_human_status(output: &RunnerOutput) -> String {
+    let mut text = String::new();
+    if let Some(summary) = &output.extra.admission_summary {
+        text.push_str(&format!(
+            "{}: {}\nAdmission: {}\nActive jobs: {}\nDaemon: {} ({})\n",
+            summary.runner_id,
+            summary
+                .readiness_state
+                .as_deref()
+                .unwrap_or(if summary.connected {
+                    "connected"
+                } else {
+                    "disconnected"
+                }),
+            if summary.reasons.is_empty() {
+                if summary.accepting_jobs {
+                    "accepting jobs".to_string()
+                } else {
+                    "not accepting jobs".to_string()
+                }
+            } else {
+                summary.reasons.join(", ")
+            },
+            summary
+                .active_job_count
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            summary
+                .daemon_build_identity
+                .as_deref()
+                .unwrap_or("unknown build"),
+            if !summary.daemon_lease_verdict.freshness_observed {
+                "freshness unobserved"
+            } else if summary.daemon_fresh {
+                "fresh"
+            } else {
+                "stale"
+            },
+        ));
+        if let Some(age) = summary.daemon_lease_verdict.observation_age_ms {
+            text.push_str(&format!("Observation age: {:.1}s\n", age as f64 / 1000.0));
+        }
+        if let Some(pressure) = &summary.pressure {
+            let percent = |value: Option<u32>| {
+                value
+                    .map(|n| format!("{:.2}%", n as f64 / 100.0))
+                    .unwrap_or_else(|| "unknown".to_string())
+            };
+            text.push_str(&format!(
+                "Pressure: CPU {}, IO {}, memory {}\n",
+                percent(pressure.cpu),
+                percent(pressure.io),
+                percent(pressure.memory)
+            ));
+            if let Some(load) = pressure.observed_load_per_cpu {
+                text.push_str(&format!(
+                    "Load: {:.2} per CPU (5 min)\n",
+                    load as f64 / 10_000.0
+                ));
+            }
+            if let Some(reservation) = &pressure.reservation {
+                text.push_str(&format!("Blocking reservation: {reservation}\n"));
+            }
+        } else {
+            text.push_str("Pressure: unknown\n");
+        }
+        let lease = &summary.daemon_lease_verdict;
+        if !lease.fresh || !lease.lease_published {
+            text.push_str(&format!(
+                "Blocking lease: {} ({})\n",
+                lease.generation_id.as_deref().unwrap_or("unknown"),
+                if lease.lease_published {
+                    "not fresh"
+                } else {
+                    "not published"
+                }
+            ));
+        }
+        if let Some(action) = &summary.next_action {
+            text.push_str(&format!("Next: {action}\n"));
+        }
+    } else {
+        if let Some(RunnerConnectionOutput::Status(report)) = &output.extra.connection {
+            let row = RunnerOutput {
+                extra: RunnerExtra {
+                    admission_summary: Some(report.admission_summary()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            text.push_str(&render_human_status(&row));
+        }
+        for report in &output.extra.sessions {
+            let row = RunnerOutput {
+                extra: RunnerExtra {
+                    admission_summary: Some(report.admission_summary()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            text.push_str(&render_human_status(&row));
+        }
+        for summary in output
+            .extra
+            .operator_summary
+            .iter()
+            .chain(output.extra.operator_summaries.iter())
+        {
+            text.push_str(&format!("{}: {}\n", summary.identity, summary.state));
+            for risk in &summary.risk {
+                text.push_str(&format!("Blocker: {risk}\n"));
+            }
+            text.push_str(&format!("Next: {}\n", summary.next_action));
+        }
+        for hint in &output.extra.operator_hints {
+            text.push_str(&format!("{hint}\n"));
+        }
+        if text.is_empty() {
+            text.push_str("No runner status available\n");
+        }
+    }
+    text
+}
+
 pub(super) fn status(id: Option<&str>, full: bool) -> CmdResult<RunnerOutput> {
     let runners = runner::list()?;
     let remote_ids = super::selection::remote_ids(&runners);
@@ -1489,6 +1613,37 @@ mod tests {
     use super::*;
     use homeboy::runner::runners::{RunnerSession, RunnerSessionState, RunnerTunnelMode};
     use homeboy::runner::{RunnerActiveJobState, RunnerSessionRole, RunnerStaleDaemonWarning};
+
+    #[test]
+    fn human_status_reports_units_unknowns_and_blocking_lease() {
+        let report = stale_daemon_report();
+        let mut summary = report.admission_summary();
+        summary.pressure = Some(homeboy::core::runner_pressure::RunnerPressure {
+            cpu: Some(1234),
+            io: None,
+            memory: Some(567),
+            load_fallback: false,
+            observed_load_per_cpu: Some(12500),
+            logical_cpus: Some(4),
+            admission_reason: None,
+            reservation: None,
+        });
+        summary.daemon_lease_verdict.fresh = false;
+        let output = RunnerOutput {
+            extra: RunnerExtra {
+                admission_summary: Some(summary),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = render_human_status(&output);
+        assert!(text.contains("CPU 12.34%, IO unknown, memory 5.67%"));
+        assert!(text.contains("Load: 1.25 per CPU (5 min)"));
+        assert!(text.contains("Active jobs:"));
+        assert!(text.contains("Daemon:"));
+        assert!(text.contains("Blocking lease:"));
+        assert!(!text.contains("command-result"));
+    }
 
     #[test]
     fn build_drift_alone_is_not_a_stale_daemon_with_refresh_guidance() {
