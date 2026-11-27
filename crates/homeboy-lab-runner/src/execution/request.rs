@@ -17,6 +17,8 @@ use super::{exec, RunnerExecOptions, RunnerExecOutput, RunnerTransport};
 #[derive(Debug, Clone)]
 pub struct RunnerExecRequest {
     pub runner_id: String,
+    /// None preserves unbounded admission; zero fails on the first queued observation.
+    pub max_queue_wait: Option<Duration>,
     pub options: RunnerExecOptions,
     pub sync_workspace: Option<String>,
     pub workspace_ref: Option<String>,
@@ -31,6 +33,7 @@ impl RunnerExecRequest {
     pub fn new(runner_id: impl Into<String>, options: RunnerExecOptions) -> Self {
         Self {
             runner_id: runner_id.into(),
+            max_queue_wait: None,
             options,
             sync_workspace: None,
             workspace_ref: None,
@@ -158,6 +161,8 @@ pub fn exec_request(mut request: RunnerExecRequest) -> Result<(RunnerExecOutput,
     }
 
     let options = std::mem::take(&mut request.options);
+    let _queue_policy = super::queue_wait::QueueWaitScope::enter(request.max_queue_wait);
+    eprintln!("submitting: runner {}", request.runner_id);
     let (mut output, exit_code) = exec(&request.runner_id, options)?;
     if output.mirror_run_id.is_none() {
         output.mirror_run_id.clone_from(&run_id);

@@ -1343,6 +1343,14 @@ fn status_until_with_controller_scope(
     };
     let mut daemon_freshness = local_daemon_freshness
         .or_else(|| remote_daemon_recovery_freshness_until(runner_id, &runner, deadline));
+    // Direct describe and tunneled health observations must use the same
+    // configured thresholds that the exec descriptor sends to the daemon.
+    if let Some(paths) = daemon_freshness
+        .as_mut()
+        .and_then(|report| report.runtime_paths.as_mut())
+    {
+        paths.apply_pressure_thresholds(runner.settings.pressure_thresholds.clone());
+    }
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
     let direct_daemon_active_jobs =
         matches!(active_job_source, Some(RunnerActiveJobSource::DirectDaemon))

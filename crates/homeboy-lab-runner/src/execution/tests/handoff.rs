@@ -1778,6 +1778,25 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
 }
 
 #[test]
+fn daemon_exec_capacity_refusal_preserves_resource_exit_contract() {
+    let error = daemon_exec_request_failed_error(
+        "lab",
+        409,
+        &DaemonEnvelope {
+            success: false,
+            data: None,
+            error: Some(serde_json::json!({
+                "error": ErrorCode::RunnerCapacityBusy.as_str(),
+                "message": "busy", "details": {"admission_reason": "pressure", "pressure": {"memory": 9000}}
+            })),
+        },
+    );
+    assert_eq!(error.code, ErrorCode::RunnerCapacityBusy);
+    assert_eq!(error.details["admission_reason"], "pressure");
+    assert_eq!(error.details["blocker"]["memory"], 9000);
+}
+
+#[test]
 fn daemon_exec_request_failed_error_surfaces_io_error_cause_from_details() {
     // `internal.io_error` always carries the literal message "IO error"; the
     // real OS error and failing operation live only in `details` (the daemon's
