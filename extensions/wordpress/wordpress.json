@@ -6,7 +6,8 @@
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
   "wp_codebox": {
-    "minimum_version": "0.21.0"
+    "minimum_version": "0.21.0",
+    "ref": "v0.34.3"
   },
   "env_provider": {
     "script": "scripts/env-provider.js"

@@ -199,6 +199,11 @@ NODE
             rm -f "${result_file}"
             return 1
         fi
+        if [ -n "${expected_release_version}" ] && [ "$(jq -r '.observed.version' "${result_file}")" != "${expected_release_version}" ]; then
+            echo "WP Codebox release does not match expected version ${expected_release_version}" >&2
+            rm -f "${result_file}"
+            return 1
+        fi
         identity_tmp="${identity_file}.tmp"
         jq -n \
             --arg schema "homeboy-wordpress/wp-codebox-managed-release/v1" \
@@ -409,7 +414,9 @@ NODE
     bin_dir="${HOME}/.local/bin"
     bin_path="${bin_dir}/wp-codebox"
     source="${HOMEBOY_WP_CODEBOX_SOURCE:-https://github.com/Automattic/wp-codebox.git}"
-    ref="${HOMEBOY_WP_CODEBOX_REF:-main}"
+    local pinned_ref
+    pinned_ref="$(jq -er '.wp_codebox.ref | select(type == "string" and length > 0)' "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/wordpress.json")"
+    ref="${HOMEBOY_WP_CODEBOX_REF:-${pinned_ref}}"
     repo_dir="${install_root}/source"
     download_url="${HOMEBOY_WP_CODEBOX_DOWNLOAD_URL:-}"
     if [ -e "${source}" ]; then
@@ -437,12 +444,15 @@ NODE
 
     if [ "${install_mode}" != "source" ]; then
         artifact_name="wp-codebox-cli-${platform}-${arch}.tar.gz"
-        download_url="${download_url:-https://github.com/Automattic/wp-codebox/releases/latest/download/${artifact_name}}"
+        if [ -z "${download_url}" ]; then
+            download_url="https://github.com/Automattic/wp-codebox/releases/download/${pinned_ref}/${artifact_name}"
+            expected_release_version="${pinned_ref#v}"
+        fi
         release_authority_digest="$(wp_codebox_authority_digest "${download_url}")"
         source_authority_label="managed release artifact ${artifact_name}"
         identity_file="$(wp_codebox_identity_file)"
         if [ -f "${identity_file}" ] && [ "$(jq -r '.schema // empty' "${identity_file}" 2>/dev/null)" = "homeboy-wordpress/wp-codebox-managed-release/v1" ] && [ "$(jq -r '.authority_sha256 // empty' "${identity_file}" 2>/dev/null)" = "${release_authority_digest}" ]; then
-            expected_release_version="$(jq -r '.version // empty' "${identity_file}")"
+            expected_release_version="${expected_release_version:-$(jq -r '.version // empty' "${identity_file}")}"
             expected_release_dist="$(jq -r '.dist_sha256 // empty' "${identity_file}")"
         fi
     fi
@@ -453,7 +463,17 @@ NODE
 
     if [ "${install_mode}" = "source" ]; then
         managed_candidate="${repo_dir}/packages/cli/dist/index.js"
-        if [ -x "${managed_candidate}" ] && [ -d "${repo_dir}/.git" ] && [ "$(git -C "${repo_dir}" remote get-url origin 2>/dev/null || true)" = "${source}" ] && wp_codebox_candidate_is_fresh "${managed_candidate}" managed source "${source_authority_label}" "" "" "${expected_source_ref}" "${expected_source_commit}" "refresh and rebuild the managed source checkout" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${managed_candidate}" && preflight_wp_codebox_version "${managed_candidate}" && probe_wp_codebox_native_runtime "${repo_dir}"; then
+        # A local ref/provenance pair cannot prove that origin is still current.
+        # Resolve the authority before accepting a warm cache (including moving
+        # branch overrides); unavailable origin must not produce a false no-op.
+        local source_authority_resolved=1
+        if [[ "${ref}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            expected_source_commit="${ref}"
+        elif [ -d "${repo_dir}/.git" ]; then
+            expected_source_commit="$(git ls-remote "${source}" "refs/heads/${ref}" "refs/tags/${ref}" "refs/tags/${ref}^{}" | sort -k2 -r | awk 'NR==1{print $1}')" || source_authority_resolved=0
+            [ -n "${expected_source_commit}" ] || source_authority_resolved=0
+        fi
+        if [ "${source_authority_resolved}" -eq 1 ] && [ -x "${managed_candidate}" ] && [ -d "${repo_dir}/.git" ] && [ "$(git -C "${repo_dir}" remote get-url origin 2>/dev/null || true)" = "${source}" ] && wp_codebox_candidate_is_fresh "${managed_candidate}" managed source "${source_authority_label}" "" "" "${expected_source_ref}" "${expected_source_commit}" "refresh and rebuild the managed source checkout" && resolve_core_module_from_known_locations && probe_wp_codebox_runtime "${managed_candidate}" && preflight_wp_codebox_version "${managed_candidate}" && probe_wp_codebox_native_runtime "${repo_dir}"; then
             persist_managed_wp_codebox_selection "${managed_candidate}"
             echo "WP Codebox managed source is already current: ${managed_candidate}"
             return 0

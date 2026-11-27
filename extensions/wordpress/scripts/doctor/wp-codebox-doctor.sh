@@ -43,4 +43,13 @@ fi
 WP_CODEBOX_BIN="$(homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}")"
 homeboy_wp_codebox_set_command "$WP_CODEBOX_BIN"
 homeboy_wp_codebox_preflight_command
+# Keep upstream JSON on stdout intact while surfacing extension/cache drift.
+PINNED_REF="$(jq -r '.wp_codebox.ref // empty' "${SCRIPT_DIR}/../../wordpress.json")"
+if [[ "${PINNED_REF}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    OBSERVED_VERSION="$("${HOMEBOY_WP_CODEBOX_COMMAND[@]}" --version 2>/dev/null || true)"
+    OBSERVED_VERSION="$(printf '%s' "${OBSERVED_VERSION}" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' | head -n 1 || true)"
+    if [ "${OBSERVED_VERSION}" != "${PINNED_REF#v}" ]; then
+        echo "WP Codebox pin/cache mismatch: expected ${PINNED_REF}, observed ${OBSERVED_VERSION:-unavailable}. Run homeboy extension setup wordpress." >&2
+    fi
+fi
 exec "${HOMEBOY_WP_CODEBOX_COMMAND[@]}" "$MODE" "$@"
