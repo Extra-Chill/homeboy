@@ -238,10 +238,14 @@ mod deadline_tests {
             "collecting source provenance",
         ] {
             let started = Instant::now();
-            let control =
-                crate::WorkspaceControl::before(Some(started + Duration::from_millis(300)))
-                    .with_progress();
+            let deadline = started + Duration::from_millis(300);
+            let control = crate::WorkspaceControl::before(Some(deadline)).with_progress();
             control.stage(stage);
+            // The stage clock starts after `started`, so the stage can only
+            // have run from (at the latest) here until the deadline.
+            let stage_floor_ms = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u64;
             let error = bounded_workspace_preparation(control, |_| {
                 std::thread::sleep(Duration::from_secs(3));
                 Ok(())
@@ -254,7 +258,7 @@ mod deadline_tests {
                 error.details["workspace_sync"]["timeout_ms"]
                     .as_u64()
                     .unwrap()
-                    >= 300
+                    >= stage_floor_ms
             );
         }
     }
