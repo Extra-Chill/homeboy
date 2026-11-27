@@ -710,6 +710,8 @@ pub struct AgentTaskGateReport {
     /// in printed order (#17893). Absent for a gate that printed none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<phases::AgentTaskGatePhase>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_artifacts: Vec<phases::GateTestArtifact>,
     #[serde(default)]
     pub capture: AgentTaskGateCapture,
     /// The workspace requested by Cook and the component workspace that
@@ -1509,6 +1511,7 @@ impl AgentTaskGateReport {
             termination: AgentTaskGateTermination::Completed,
             signal: None,
             test_execution_outcome: None,
+            test_artifacts: Vec::new(),
             phases: phases::gate_phases(&stdout),
             stdout,
             stderr: stderr.into(),
@@ -1579,6 +1582,7 @@ impl AgentTaskGateReport {
             test_execution_outcome: None,
             stdout: String::new(),
             stderr: String::new(),
+            test_artifacts: Vec::new(),
             phases: Vec::new(),
             capture: AgentTaskGateCapture::default(),
             cwd: None,
