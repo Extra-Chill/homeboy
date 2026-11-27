@@ -210,12 +210,18 @@ fn delegated_leftover_evidence() {
     sibling_command.arg("60");
     sibling.join_before_exec(&mut sibling_command);
     let mut sibling_child = sibling_command.spawn().unwrap();
-    let mut command = Command::new("bash");
-    command.args([
-        "-c",
-        "setsid nohup sleep 777 >/dev/null 2>&1 </dev/null & echo $!; sleep 0.2",
-    ]);
+    // Durable runs read stdout from the job directory, so the command must
+    // be built by `runner_exec_job::command`, as production does.
     let temp = tempfile::tempdir().unwrap();
+    let mut command = homeboy_core::daemon::runner_exec_job::command(
+        temp.path(),
+        &[
+            "bash".to_string(),
+            "-c".to_string(),
+            "setsid nohup sleep 777 >/dev/null 2>&1 </dev/null & echo $!; sleep 0.2".to_string(),
+        ],
+    )
+    .expect("durable job command");
     let output = durable_command_output_until_cancelled(
         &mut command,
         temp.path(),
