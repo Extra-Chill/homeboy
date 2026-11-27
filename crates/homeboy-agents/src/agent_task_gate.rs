@@ -469,6 +469,30 @@ pub fn base_explainable(command: &str, repro: &[String]) -> bool {
 pub const NO_REPRO_GATE_WARNING: &str = "no --repro gate declared: the declared gates are not shown to fail on base, so they do not prove this issue is fixed (repro: none). Add --repro <command> (or --repro-file <path>) that fails on base and passes once the issue is fixed";
 
 impl VerifyGateOptions {
+    /// Advisory only: extension lint contracts can change, and `--locked` or
+    /// workspace selection may be stronger than the extension's clippy gate.
+    /// Never disclose private gate commands in an admission warning.
+    pub fn lint_overlap_warning(&self) -> Option<&'static str> {
+        let has_lint = self.verify.iter().any(|command| {
+            let words = command.split_whitespace().collect::<Vec<_>>();
+            words
+                .iter()
+                .position(|word| *word == "homeboy")
+                .is_some_and(|index| {
+                    words[index + 1..]
+                        .windows(2)
+                        .any(|words| words == ["review", "lint"])
+                })
+        });
+        let has_cargo = self.verify.iter().any(|command| {
+            let words = command.split_whitespace().collect::<Vec<_>>();
+            words.starts_with(&["cargo", "fmt"]) || words.starts_with(&["cargo", "check"])
+        });
+        (has_lint && has_cargo).then_some(
+            "Declared Cargo fmt/check gates may overlap the lint extension's fmt/clippy checks. All declared gates are retained: compare workspace, target and --locked coverage before removing a gate.",
+        )
+    }
+
     /// Run every repro gate as a visible candidate gate too. Idempotent, so a
     /// reconstructed recipe that already carries them is unchanged.
     pub fn include_repro_in_candidate_gates(&mut self) {
