@@ -86,16 +86,43 @@ pub fn gate_failure_projection(promotion: &Value) -> Option<Value> {
         let lines = combined.lines().collect::<Vec<_>>();
         homeboy_core::redaction::redact_string(&lines[lines.len().saturating_sub(40)..].join("\n"))
     });
+    let transport = unavailable
+        .then(|| transport_diagnostic(&gate["lab_receipt"]))
+        .flatten();
     let label = text("/label").or_else(|| text("/id")).unwrap_or("verify");
     Some(json!({
         "gate": format!("{label}#{}", index + 1),
         "command": command,
         "exit_code": gate.get("exit_code").or_else(|| gate.pointer("/lab_receipt/exit_code")).or_else(|| gate.pointer("/failure_evidence/exit_code")),
+        "error_code": transport.and_then(|cause| cause["code"].as_str()),
+        "message": transport.and_then(|cause| cause["message"].as_str()),
+        "next_action": transport.and_then(|cause| transport_next_action(cause)),
         "termination": termination,
         "reason": reason,
         "output_tail": output_tail,
         "artifact": gate.pointer("/lab_receipt/artifact_ref").or_else(|| gate.get("artifact_ref")),
     }))
+}
+
+// Follow only diagnostic wrappers, never arbitrary output or user data.
+fn transport_diagnostic(value: &Value) -> Option<&Value> {
+    if value["code"] == "runner.lab_transport_failure" {
+        return Some(value);
+    }
+    ["diagnostic", "details"]
+        .into_iter()
+        .find_map(|key| value.get(key).and_then(transport_diagnostic))
+}
+
+fn transport_next_action(value: &Value) -> Option<&str> {
+    value["next_action"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            ["details", "diagnostic"]
+                .into_iter()
+                .find_map(|key| value.get(key).and_then(transport_next_action))
+        })
 }
 
 /// A classification alone determines the next gate recovery action. The run
@@ -119,6 +146,26 @@ pub fn gate_failure_next_action(reason: &str, run: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnected_lab_retains_transport_cause_and_connect_action() {
+        let report = json!({"deterministic_gates": [{
+            "id": "gate-1", "status": "unavailable", "exit_code": 0,
+            "lab_receipt": {"diagnostic": {
+                "code": "runner.lab_transport_failure",
+                "message": "Lab gate runner `homeboy-lab` cannot accept jobs (not_connected)",
+                "details": {"reasons": ["not_connected"], "next_action": "homeboy runner connect homeboy-lab"}
+            }}
+        }]});
+        let failure = gate_failure_projection(&report).unwrap();
+        assert_eq!(failure["error_code"], "runner.lab_transport_failure");
+        assert_eq!(failure["next_action"], "homeboy runner connect homeboy-lab");
+        assert!(failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("not_connected"));
+        assert_eq!(failure["reason"], "gate_environment_unavailable");
+    }
 
     /// A gate whose setup failed before a verdict projects as infrastructure
     /// with a re-gate next step and keeps the setup error in its output.

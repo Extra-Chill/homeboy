@@ -269,6 +269,36 @@ fn terminal_notification_names_skipped_provider_routes() {
 }
 
 #[test]
+fn disconnected_lab_notification_names_connect_then_regate() {
+    let promotion = serde_json::from_value(json!({
+        "status": "gate_environment_unavailable",
+        "source": {"kind": "aggregate", "task_id": "task", "run_id": "run-1"},
+        "to_worktree": "fixture", "target": {"worktree": "fixture", "path": "/fixture"},
+        "candidate": null,
+        "deterministic_gates": [{"id": "gate-1", "status": "unavailable",
+            "command": ["true"], "exit_code": 0,
+            "lab_receipt": {"diagnostic": {"code": "runner.lab_transport_failure",
+                "message": "not_connected", "details": {"next_action": "homeboy runner connect homeboy-lab"}}}}],
+        "operator_notification": {"status": "completed", "message": "blocked"}
+    })).unwrap();
+    let mut failed = report("gate_environment_unavailable", None);
+    failed
+        .attempts
+        .push(crate::agent_task_service::AgentTaskCookAttemptReport {
+            attempt: 1,
+            run_id: "run-1".into(),
+            run_state: "candidate_recoverable".into(),
+            aggregate_path: None,
+            promotion: Some(promotion),
+            feedback: None,
+        });
+    let body = terminal_payload(&failed, None, 1).render_body();
+    assert!(body.contains("not_connected"));
+    assert!(body.contains("homeboy runner connect homeboy-lab"));
+    assert!(body.contains("homeboy agent-task recover cook-abc --regate"));
+}
+
+#[test]
 fn rotation_exhaustion_notification_preserves_the_terminal_cause() {
     let mut report = report("provider_failure", None);
     report.terminal_phase = Some("provider".to_string());
