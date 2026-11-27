@@ -5245,7 +5245,21 @@ pub(crate) fn cook_failure_context_with_probe_policy(
                         .flat_map(|outcome| &outcome.diagnostics),
                 )
             });
-    let (phase, reason_code, diagnostic) = if status == "no_candidate" {
+    let stranded_job = record
+        .as_ref()
+        .and_then(|record| super::cook_recipe::stranded_continuation_job(lifecycle_store, record));
+    let (phase, reason_code, diagnostic) = if let Some(job_id) = stranded_job.as_ref() {
+        (
+            "terminal_continuation".to_string(),
+            "stranded_continuation".to_string(),
+            Some(serde_json::json!({
+                "class": "agent_task.stranded_continuation",
+                "message": "Terminal Cook continuation is pending and unclaimed but its scheduled job is terminal",
+                "job_id": job_id,
+                "repair_command": format!("homeboy agent-task recover {cook_id}"),
+            })),
+        )
+    } else if status == "no_candidate" {
         (
             "candidate_selection".to_string(),
             "no_candidate".to_string(),
@@ -5461,7 +5475,7 @@ pub(crate) fn cook_failure_context_with_probe_policy(
                             !wait.live_driver && wait.liveness.is_reconcilable()
                         }) || agent_task_lifecycle::disconnected_runner_recovery_available(&record)
                     }),
-                live_driver,
+                live_driver && stranded_job.is_none(),
                 recovery_legal,
                 blocking_claim.is_some(),
                 pending_operator_feedback,
