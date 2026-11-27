@@ -261,6 +261,7 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
     };
     let replace_gates = replace_gates_request(&mut args)?;
     let publish = CookPublishRequest {
+        partial: args.publish_partial,
         review_form: super::review::supplied_review_form(
             args.review_form.as_deref(),
             args.review_form_tool.as_deref(),
