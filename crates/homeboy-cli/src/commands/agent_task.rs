@@ -25,6 +25,7 @@ pub(crate) mod fake_pi_test;
 pub(crate) mod feedback;
 pub(crate) mod gate_contract;
 pub(crate) mod history;
+pub mod landing;
 pub mod prompts;
 pub(crate) mod provider_evidence;
 pub(crate) mod recover;
@@ -354,6 +355,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             )
         }
         AgentTaskCommand::CookFeedback(args) => feedback::feedback(args),
+        AgentTaskCommand::BatchLand(args) => landing::land(args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::ExecutionStep { intent_id } => {
             let (report, exit_code) =
