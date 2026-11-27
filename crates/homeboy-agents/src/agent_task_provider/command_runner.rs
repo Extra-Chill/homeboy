@@ -22,6 +22,13 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+#[cfg(test)]
+thread_local! {
+    // Scoped to the calling test thread; provider reader threads still use real IO.
+    pub(super) static TEST_PROVIDER_ELAPSED: std::cell::RefCell<Option<Box<dyn FnMut(u64, u64) -> Duration>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
 /// Floor and ceiling for how often the liveness watchdog re-samples the
@@ -1318,9 +1325,15 @@ pub(super) fn run_materialized_provider_command_once(
                 if execution.cancellation.is_cancelled() {
                     break (None, false, false, true);
                 }
-                let elapsed = started.elapsed();
-                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let output_progress_ms = last_progress_ms.load(Ordering::SeqCst);
+                let elapsed = started.elapsed();
+                #[cfg(test)]
+                let elapsed = TEST_PROVIDER_ELAPSED.with(|hook| {
+                    hook.borrow_mut().as_mut().map_or(elapsed, |clock| {
+                        clock(output_progress_ms, current_deadline_ms)
+                    })
+                });
+                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let mut progressed = output_progress_ms > observed_output_progress_ms;
                 observed_output_progress_ms = output_progress_ms;
                 let mut progress_source = "runtime_output";

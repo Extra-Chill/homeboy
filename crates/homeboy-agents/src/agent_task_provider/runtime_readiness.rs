@@ -1051,10 +1051,11 @@ mod tests {
         config["runtime_env"]["RELEASE"] = json!(release);
         let mut cache = test_cache();
 
-        // The short deadline must only outlast the probe's process startup,
-        // which on a loaded host is scheduling latency rather than readiness
-        // work; the probe itself never answers before the deadline.
-        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 5_000;
+        // Hold the permit so the owner deterministically expires while its
+        // worker is waiting, independently of shell startup under CPU load.
+        let gate = Arc::clone(&cache.shared.probe_gate);
+        *gate.active.lock().unwrap() = MAX_CONCURRENT_PROVIDER_READINESS_PROBES;
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 100;
         let short_provider = provider.clone();
         let mut short_cache = cache.clone();
         let short_config = config.clone();
@@ -1068,13 +1069,6 @@ mod tests {
                 None,
             )
         });
-        while !count.exists() {
-            assert!(
-                crate::agent_task_timeout::now_unix_ms() < short_deadline,
-                "short deadline expired before its probe started"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
         let error = short
             .join()
             .expect("short probe owner")
@@ -1082,6 +1076,23 @@ mod tests {
         assert_eq!(error.details["classification"], "timeout");
         assert_eq!(error.details["deadline_unix_ms"], short_deadline);
 
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let state = cache.shared.state.lock().unwrap();
+            if state.by_request.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline,
+                "waiting for expired owner's singleflight entry to be discarded; observed {state:?}");
+            drop(state);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !count.exists(),
+            "expired owner must not launch a child without a permit"
+        );
+        *gate.active.lock().unwrap() = 0;
+        gate.changed.notify_all();
         std::fs::write(&release, "release").expect("release probe");
         let verdict = readiness_verdict(
             &provider,
@@ -1098,7 +1109,8 @@ mod tests {
                 .expect("probe count")
                 .lines()
                 .count(),
-            2
+            1,
+            "only the long-deadline retry may launch the probe"
         );
     }
 

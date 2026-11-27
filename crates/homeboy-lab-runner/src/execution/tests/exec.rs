@@ -1367,6 +1367,7 @@ fn test_exec_runs_local_runner_command() {
         let (output, exit_code) = exec(
             "lab-local",
             RunnerExecOptions {
+                allow_concurrent: false,
                 execution_context:
                     homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
                         "homeboy",
@@ -1502,6 +1503,7 @@ fn test_exec_isolates_ambient_process_env_and_preserves_explicit_request_env() {
                     "test -z \"${HOMEBOY_TEST_AMBIENT_ONLY+x}\" && printf %s \"$HOMEBOY_TEST_EXPLICIT\""
                         .to_string(),
                 ],
+                allow_concurrent: false,
                 env: HashMap::from([("HOMEBOY_TEST_EXPLICIT".to_string(), "planned".to_string())]),
                 secret_env_names: Vec::new(),
                 secret_env_plan: None,
@@ -1594,6 +1596,7 @@ fn runner_exec_explicit_run_id_overrides_conflicting_run_id_env() {
                 accepted_extension_settings: Vec::new(),
                 require_paths: Vec::new(),
                 lab_runner_workload: None,
+                allow_concurrent: false,
                 run_id: Some("explicit-run".to_string()),
                 run_id_owns_generic_exec: false,
                 detach_after_handoff: false,
@@ -1664,6 +1667,7 @@ fn test_exec_rejects_missing_required_local_runner_path() {
                 required_extensions: Vec::new(),
                 extension_env_providers: Vec::new(),
                 accepted_extension_settings: Vec::new(),
+                allow_concurrent: false,
                 require_paths: vec![missing.display().to_string()],
                 lab_runner_workload: None,
                 run_id: None,
@@ -1722,6 +1726,7 @@ fn test_exec_reports_required_path_diagnostics() {
                 required_extensions: Vec::new(),
                 extension_env_providers: Vec::new(),
                 accepted_extension_settings: Vec::new(),
+                allow_concurrent: false,
                 require_paths: vec![required_path.display().to_string()],
                 lab_runner_workload: None,
                 run_id: None,
@@ -1785,6 +1790,7 @@ fn test_exec_rejects_unreachable_ssh_runner_without_diagnostic_fallback() {
                 project_id: None,
                 allow_diagnostic_ssh: false,
                 diagnostic_ssh_timeout: None,
+                allow_concurrent: false,
                 command: vec!["homeboy".to_string(), "test".to_string()],
                 env: Default::default(),
                 secret_env_names: Vec::new(),
@@ -1828,6 +1834,7 @@ fn explicit_diagnostic_ssh_wins_for_ssh_runners() {
         project_id: None,
         allow_diagnostic_ssh: true,
         diagnostic_ssh_timeout: None,
+        allow_concurrent: false,
         command: vec!["homeboy".to_string(), "--version".to_string()],
         env: Default::default(),
         secret_env_names: Vec::new(),

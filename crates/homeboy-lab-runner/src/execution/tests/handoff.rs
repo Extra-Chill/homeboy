@@ -607,6 +607,62 @@ fn daemon_identity_transition_reports_a_restarted_control_plane() {
 }
 
 #[test]
+fn daemon_exec_refuses_duplicate_detached_sleep() {
+    crate::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        let workspace = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+        let submit = || {
+            exec_via_daemon(
+                &ssh_runner(),
+                &url,
+                None,
+                workspace.path().display().to_string(),
+                None,
+                vec!["sleep".into(), "300".into()],
+                Default::default(),
+                Default::default(),
+                false,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                true,
+                false,
+                false,
+                None,
+                false,
+            )
+        };
+        let (first, _) = submit().expect("detached sleep accepted");
+        let id = first.job_id.unwrap();
+        let error = submit().expect_err("duplicate must be refused");
+        assert!(error.message.contains(&id), "{error:?}");
+        assert!(error.message.contains("runner job cancel"), "{error:?}");
+        let client = Client::builder().no_proxy().build().unwrap();
+        daemon_post_json_text(
+            &client,
+            &url,
+            &format!("/jobs/{id}/cancel"),
+            &serde_json::json!({}),
+            DaemonPostOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            fetch_daemon_job(&client, &url, &id).unwrap().status,
+            JobStatus::Cancelled
+        );
+    });
+}
+
+#[test]
 fn daemon_exec_reuses_one_run_and_closes_it_at_the_daemon_finish_time() {
     crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
@@ -649,6 +705,7 @@ fn daemon_exec_reuses_one_run_and_closes_it_at_the_daemon_finish_time() {
                 true,
                 false,
                 None,
+                false,
             )
             .expect("daemon exec");
             assert_eq!(exit_code, code);
@@ -726,6 +783,7 @@ fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
             true,
             false,
             None,
+            false,
         )
         .expect("zero-wait direct daemon handoff");
 
@@ -788,6 +846,7 @@ fn zero_wait_direct_daemon_cancels_unset_agent_task_workload() {
             true,
             false,
             None,
+            false,
         )
         .expect("zero-wait direct daemon cancellation result");
 
@@ -1135,6 +1194,7 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
             false,
             false,
             None,
+            false,
         )
         .expect("detached direct-daemon handoff");
 
@@ -1324,6 +1384,7 @@ fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_i
             false,
             false,
             None,
+            false,
         )
         .expect("foreground portable handoff");
 
@@ -1702,6 +1763,7 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
             true,
             true,
             None,
+            false,
         )
         .expect_err("daemon exec failure");
 
@@ -2284,6 +2346,7 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
             true,
             true,
             None,
+            false,
         )
         .expect_err("daemon exec failure");
 

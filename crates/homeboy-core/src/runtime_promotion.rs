@@ -1396,6 +1396,13 @@ fn archive_stale_lease(
     }
     let archived = root.join(format!("promotion.stale.{}.lock", uuid::Uuid::new_v4()));
     fs::rename(path, &archived)?;
+    eprintln!(
+        "runtime-promotion-reclaimed pid={} operation={:?} liveness={} archived={}",
+        current.pid,
+        current.operation,
+        owner_liveness(&current),
+        archived.display()
+    );
     Ok(archived)
 }
 
@@ -1561,6 +1568,8 @@ fn authorizes_local_reentrancy(
 
 fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error {
     let age = age_seconds(&held.started_at).unwrap_or(-1);
+    let mut public_record = held.clone();
+    public_record.capability.clear();
     let action = if reclaimable {
         "The holder is proven dead; retry the command to reclaim the lease automatically."
     } else {
@@ -1580,6 +1589,7 @@ fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error
             "holder_status_command": held.status_command,
             "holder_generation": held.generation,
             "holder_compatibility_key": held.compatibility_key,
+            "holder_record": public_record,
             "reclaimable": reclaimable,
             "tried": [action, "Follow: `homeboy self doctor`"],
         }),
@@ -1588,6 +1598,10 @@ fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error
 
 fn contention_owner(error: &Error) -> Result<RuntimePromotionLeaseRecord> {
     let details = &error.details;
+    if let Some(record) = details.get("holder_record") {
+        return serde_json::from_value(record.clone())
+            .map_err(|error| Error::internal_json(error.to_string(), None));
+    }
     let pid = details["holder_pid"].as_u64().ok_or_else(|| {
         Error::internal_unexpected("runtime promotion contention omitted holder pid")
     })? as u32;
@@ -1673,11 +1687,12 @@ fn wait_timeout_error(
     Error::new(
         ErrorCode::RuntimePromotionWaitTimeout,
         format!(
-            "runtime promotion wait timed out after {}s behind pid {} operation `{}` target `{}`",
-            timeout.as_secs(),
+            "runtime promotion wait timed out after {}ms behind pid {} operation `{}` target `{}` (liveness: {}); inspect with `homeboy self doctor`, or retry to reclaim a proven-dead owner",
+            timeout.as_millis(),
             owner.pid,
             owner.operation,
-            owner.target
+            owner.target,
+            owner_liveness(owner)
         ),
         serde_json::json!({
             "schema": "homeboy/runtime-promotion-admission/v1",
@@ -1686,6 +1701,9 @@ fn wait_timeout_error(
             "resource_class": "runtime_promotion",
             "state": "busy",
             "wait_timeout_seconds": timeout.as_secs(),
+            "wait_timeout_ms": timeout.as_millis(),
+            "holder_liveness": owner_liveness(owner),
+            "recovery_command": "homeboy self doctor",
             "target": owner.target,
             "holder_pid": owner.pid,
             "holder_operation": owner.operation,
@@ -1779,6 +1797,47 @@ fn pin_admission_cancelled(waited: Duration) -> Error {
 
 pub fn is_contention_error(error: &Error) -> bool {
     error.code == ErrorCode::RuntimePromotionContended
+}
+
+/// Read-only blocking evidence for operator diagnostics. Expiry never grants
+/// permission to steal from a live owner; only proven death or reuse does.
+pub fn blocking_lease_status() -> Result<Option<serde_json::Value>> {
+    blocking_lease_status_in_root(&paths::runtime_promotion_dir()?)
+}
+
+fn blocking_lease_status_in_root(root: &Path) -> Result<Option<serde_json::Value>> {
+    let path = root.join(LEASE_DIR);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let owner = read_record(&path)?;
+    let dead = reclaimable(&owner);
+    let overdue = chrono::DateTime::parse_from_rfc3339(&owner.expires_at)
+        .is_ok_and(|expiry| expiry < chrono::Utc::now());
+    if !dead && !overdue {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::json!({
+        "status": "blocking",
+        "holder_pid": owner.pid,
+        "holder_operation": owner.operation,
+        "holder_liveness": owner_liveness(&owner),
+        "expired": overdue,
+        "reclaimable": dead,
+        "recovery_command": if dead { "Retry the blocked command to reclaim automatically" } else { "homeboy self doctor" },
+        "message": format!("runtime promotion held by pid {} operation `{}`: {}; {}", owner.pid, owner.operation, owner_liveness(&owner), if dead { "retry the blocked command to reclaim automatically" } else { "owner exceeded its lease bound; inspect with `homeboy self doctor` (do not steal a live lease)" }),
+    })))
+}
+
+fn owner_liveness(record: &RuntimePromotionLeaseRecord) -> String {
+    format!(
+        "{:?}",
+        crate::process::process_identity_state_with_start_identity(
+            record.pid,
+            record.linux_starttime_ticks,
+            record.process_start_identity.as_ref()
+        )
+    )
 }
 
 fn reclaimable(record: &RuntimePromotionLeaseRecord) -> bool {
@@ -2895,6 +2954,50 @@ mod tests {
             expires_at: expiry(),
             capability: "unforgeable-capability".to_string(),
         }
+    }
+
+    #[test]
+    fn exited_client_is_reported_and_reclaimed_on_next_contention() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(LEASE_DIR);
+        fs::create_dir(&path).unwrap();
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let mut record = lease_record();
+        record.pid = child.id();
+        record.operation = "runner daemon reconnect".to_string();
+        record.linux_starttime_ticks = None;
+        record.process_start_identity = None;
+        write_record(&path, &record).unwrap();
+        child.wait().unwrap();
+        let status = blocking_lease_status_in_root(root.path()).unwrap().unwrap();
+        assert_eq!(status["reclaimable"], true);
+        assert_eq!(status["holder_liveness"], "Dead");
+        let lease = acquire_in_root(root.path(), "successor", "lab").unwrap();
+        assert_eq!(read_record(&path).unwrap().pid, std::process::id());
+        drop(lease);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn overdue_live_owner_is_blocking_but_not_reclaimable() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(LEASE_DIR);
+        fs::create_dir(&path).unwrap();
+        let mut record = lease_record();
+        record.pid = std::process::id();
+        record.linux_starttime_ticks = None;
+        record.process_start_identity = None;
+        record.expires_at = "2000-01-01T00:00:00Z".to_string();
+        write_record(&path, &record).unwrap();
+        let status = blocking_lease_status_in_root(root.path()).unwrap().unwrap();
+        assert_eq!(status["expired"], true);
+        assert_eq!(status["reclaimable"], false);
+        let error = blocked_error(&record, false);
+        let owner = contention_owner(&error).unwrap();
+        assert_eq!(owner.expires_at, record.expires_at);
+        let error = wait_timeout_error(&owner, Duration::from_millis(25), "lease_record");
+        assert_eq!(error.details["holder_liveness"], "Live");
+        assert_eq!(error.details["wait_timeout_ms"], 25);
     }
 
     fn capability(record: &RuntimePromotionLeaseRecord) -> SubprocessLeaseCapability {

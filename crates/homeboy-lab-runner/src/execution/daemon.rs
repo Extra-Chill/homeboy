@@ -55,7 +55,21 @@ pub(super) fn exec_via_daemon(
     mirror_evidence: bool,
     print_handoff_output: bool,
     accepted_daemon_identity: Option<String>,
+    allow_concurrent: bool,
 ) -> Result<(RunnerExecOutput, i32)> {
+    static EXEC_STOP: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>> = Mutex::new(None);
+    let stop = if run_id_owns_generic_exec && !detach_after_handoff {
+        let mut installed = EXEC_STOP.lock().unwrap();
+        if installed.is_none() {
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            homeboy_core::process::install_shutdown_handler(stop.clone(), "runner exec")?;
+            homeboy_core::process::install_terminate_handler(stop.clone())?;
+            *installed = Some(stop);
+        }
+        installed.as_ref().unwrap().clone()
+    } else {
+        Arc::new(std::sync::atomic::AtomicBool::new(false))
+    };
     let run_id_owns_generic_exec = run_id_owns_generic_exec || run_id.is_none();
     let run_id = Some(run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
     let client = Client::builder()
@@ -111,6 +125,8 @@ pub(super) fn exec_via_daemon(
             let mut metadata =
                 runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id);
             metadata["admission_no_wait"] = json!(super::queue_wait::no_wait());
+            metadata["attached_exec"] = json!(run_id_owns_generic_exec && !detach_after_handoff);
+            metadata["guard_duplicate_exec"] = json!(run_id_owns_generic_exec && !allow_concurrent);
             if !detach_after_handoff {
                 // This call waits on the job below, so it owns the job's
                 // queued-owner heartbeat from the moment it is accepted.
@@ -199,6 +215,9 @@ pub(super) fn exec_via_daemon(
     if body["admission"]["pending_admission_reason"].is_string() {
         observe_exec_admission(&client, local_url, &body, &job)?;
     }
+    if detach_after_handoff && print_handoff_output {
+        eprintln!("Job {} detached.\nhomeboy runner job logs {} {} --follow\nhomeboy runner job cancel {} {}", job.id, runner.id, job.id, runner.id, job.id);
+    }
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let lease_store = run_id
         .as_deref()
@@ -280,9 +299,26 @@ pub(super) fn exec_via_daemon(
                     .renew_running_runner_exec_source_lease(run_id, token)?;
             }
             let job_id = current.id.to_string();
-            // `current` keeps the accepted status until terminal; the beat
-            // itself stops once the daemon reports the job admitted.
-            if current.status == JobStatus::Queued {
+            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let response = daemon_post_json_text(
+                    &client,
+                    &daemon_endpoint.borrow(),
+                    &format!("/jobs/{job_id}/cancel"),
+                    &json!({"reason": "attached exec client interrupted"}),
+                    DaemonPostOptions {
+                        connection_close: true,
+                        timeout: Some(Duration::from_secs(3)),
+                    },
+                )?;
+                if response.status_code >= 400 {
+                    return Err(Error::internal_unexpected(
+                        "runner exec cancellation was not acknowledged",
+                    ));
+                }
+            }
+            // Attached exec ownership continues after admission; queued-only
+            // clients remain compatible with the same observe endpoint.
+            if !current.status.is_terminal() {
                 queued_owner_heartbeat.beat(&client, &daemon_endpoint.borrow(), &job_id);
             }
             let reload = || owner_transport.reload(&runner.id, &client, &job_id);
@@ -1867,15 +1903,15 @@ const DAEMON_TERMINAL_WAIT_MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// How often a waiting client renews its owner heartbeat on a queued job. The
 /// daemon reaps an opted-in queued job after
 /// [`homeboy_core::api_jobs::QUEUED_OWNER_DEADLINE_MS`] of silence (#18601).
-const QUEUED_OWNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const QUEUED_OWNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
-/// A waiting client's owner heartbeat for one queued daemon job.
+/// A waiting client's heartbeat for queued or running daemon work.
 ///
 /// While the job is queued, each [`Self::beat`] tells the daemon, at most once
 /// per [`QUEUED_OWNER_HEARTBEAT_INTERVAL`], that this client still waits for
 /// it. If the client is cancelled, killed, or gives up, the beats stop and the
 /// daemon frees the job's queue position instead of holding it for hours.
-/// Beats stop once the daemon reports the job admitted or settled, or rejects
+/// Beats stop once the daemon reports the job settled, or rejects
 /// the route (an older daemon keeps its no-deadline queue policy). A failed
 /// beat is never an observation failure: the poll loop owns transport errors.
 #[derive(Default)]
@@ -1912,7 +1948,7 @@ impl QueuedOwnerHeartbeat {
             .ok()
             .and_then(|body| body.pointer("/data/body/job/status").cloned())
             .and_then(|status| serde_json::from_value::<JobStatus>(status).ok());
-        if status.is_some_and(|status| status != JobStatus::Queued) {
+        if status.is_some_and(|status| status.is_terminal()) {
             self.done.set(true);
         }
     }

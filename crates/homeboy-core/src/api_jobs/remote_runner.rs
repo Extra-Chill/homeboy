@@ -1183,6 +1183,7 @@ impl JobStore {
         inner.jobs.insert(
             job.id,
             StoredJob {
+                attached_exec_heartbeat_ms: None,
                 pending_admission_reason: None,
                 pending_execution_envelope: None,
                 job: job.clone(),

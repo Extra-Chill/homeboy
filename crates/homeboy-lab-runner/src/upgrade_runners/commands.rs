@@ -60,6 +60,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         run_id: None,
         run_id_owns_generic_exec: false,
         detach_after_handoff: false,
+        allow_concurrent: false,
         mirror_evidence: true,
         print_handoff: true,
         read_only_artifact_access: false,

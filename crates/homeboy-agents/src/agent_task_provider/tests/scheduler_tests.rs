@@ -1783,19 +1783,48 @@ fn a_flat_rate_usage_limit_is_classified_rate_limited_and_carries_its_reset_time
 
 #[test]
 fn a_provider_still_making_progress_is_extended_past_its_base_timeout() {
-    // The base deadline must leave room for interpreter startup and the first
-    // progress write. A provider that has shown no progress by its base
-    // deadline is correctly not extended, so a 150ms base raced node startup
-    // on loaded CI runners (#17410). The answer still lands well past it.
-    let fake = node_pi("let t=setInterval(()=>process.stderr.write('.'),20); setTimeout(()=>{clearInterval(t);answer('finished after the base deadline');},2500);");
+    let root = tempfile::tempdir().expect("clock fixture");
+    let release = root.path().join("extended");
+    let fake = node_pi(&format!(
+        "let t=setInterval(()=>{{process.stderr.write('.'); if(fs.existsSync({})){{clearInterval(t);answer('finished after the base deadline');}}}},20);",
+        serde_json::to_string(&release).unwrap()
+    ));
     let mut request = fake.request("task-timeout-extended");
     let provider = fake.provider();
     request.limits.timeout_ms = Some(1_000);
     request.limits.max_timeout_ms = Some(5_000);
     request.limits.liveness_timeout_ms = Some(2_000);
 
+    // Advance past the base deadline only after the real output reader has
+    // observed progress. Release the provider only after the monitor actually
+    // extends that deadline, not after an assumed amount of wall-clock time.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let observed_extension = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let extended = Arc::clone(&observed_extension);
+    super::super::command_runner::TEST_PROVIDER_ELAPSED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |progress, current_deadline| {
+            assert!(std::time::Instant::now() < deadline,
+                "waiting for provider progress and deadline extension; progress={progress}, deadline={current_deadline}");
+            if current_deadline > 1_000 {
+                extended.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::fs::write(&release, "extended").expect("release provider after extension");
+            }
+            std::time::Duration::from_millis(if progress > 0 { 1_100 } else { 0 })
+        }));
+    });
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) {
+            super::super::command_runner::TEST_PROVIDER_ELAPSED.with(|hook| hook.replace(None));
+        }
+    }
+    let _clock = ResetClock;
     let outcome = run_provider_command_once(&request, &provider);
 
+    assert!(
+        observed_extension.load(std::sync::atomic::Ordering::SeqCst),
+        "provider must finish only after its deadline was extended: {outcome:?}"
+    );
     assert_eq!(
         outcome.status,
         AgentTaskOutcomeStatus::Succeeded,

@@ -259,3 +259,59 @@ fn runner_cancellation_uses_runner_evidence_before_a_proven_replay() {
         ]
     );
 }
+
+fn lab_required_decision() -> homeboy_lab_contract::ExecutionPlacementDecision {
+    use homeboy_lab_contract::*;
+    ExecutionPlacementDecision::new(
+        "cook-placement",
+        "v1",
+        ExecutionPlacementIdentity {
+            repository: "extrachill".to_string(),
+            workspace: "/tmp/extrachill".to_string(),
+            task: "cook".to_string(),
+            candidate: None,
+            base: None,
+        },
+        Placement::Lab,
+        ExecutionPlacementRequirement::Lab,
+        EffectiveExecutionPlacement::Lab,
+        Some(ExecutionPlacementRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: RunnerSelectionSource::Explicit,
+        }),
+        ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        ExecutionPlacementOverrideAuthorization {
+            authorized: false,
+            authority: None,
+        },
+    )
+}
+
+/// #19181: a Lab-required mission's retry must never be advertised as a
+/// controller-local replay.
+#[test]
+fn lab_required_retry_action_never_emits_placement_local() {
+    assert!(lab_required(&lab_required_decision()));
+    let retry = owner_bound_retry_action("run-1", None, json!({ "placement": "lab" }));
+    assert_eq!(
+        retry.command,
+        "homeboy --placement lab agent-task retry run-1 --run"
+    );
+    assert!(!retry.command.contains("--placement local"));
+
+    let retry = owner_bound_retry_action(
+        "run-1",
+        lab_required_decision()
+            .runner
+            .as_ref()
+            .map(|runner| runner.runner_id.as_str()),
+        json!({ "placement": "runner", "runner_id": "homeboy-lab" }),
+    );
+    assert_eq!(
+        retry.command,
+        "homeboy --runner homeboy-lab agent-task retry run-1 --run"
+    );
+}

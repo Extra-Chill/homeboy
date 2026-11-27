@@ -35,7 +35,7 @@ pub(crate) struct RunnerExecArgs {
     #[arg(long)]
     pub(super) hydrate_deps: bool,
 
-    /// Bound --sync-workspace snapshot preparation and transfer before command handoff. Defaults to 240s; does not limit dependency hydration or the runner command itself.
+    /// Hard wall-clock deadline across all --sync-workspace stages, including source provenance. Defaults to 240s; does not limit dependency hydration or the runner command itself. Sync progress and 10s heartbeats go to stderr.
     #[arg(long = "workspace-sync-timeout", default_value = "240s", value_parser = crate::commands::utils::watch::parse_duration_arg, value_name = "DURATION")]
     pub(super) workspace_sync_timeout: std::time::Duration,
 
@@ -116,6 +116,14 @@ pub(crate) struct RunnerExecArgs {
     /// Use global --output to still write the full structured envelope to a file.
     #[arg(long)]
     pub(super) raw: bool,
+
+    /// Let the remote job outlive this client.
+    #[arg(long)]
+    pub(super) detach: bool,
+
+    /// Permit an identical live command in the same working directory.
+    #[arg(long)]
+    pub(super) allow_concurrent: bool,
 
     /// Treat this exec as a read-only retrieval of evidence the runner
     /// already retains (for example, hydrating a completed run's artifact).
@@ -198,6 +206,8 @@ impl From<RunnerExecArgs> for super::exec::RunnerExecInput {
             summary_outputs: args.summary_outputs,
             read_only_artifact: args.read_only_artifact,
             raw: args.raw,
+            detach: args.detach,
+            allow_concurrent: args.allow_concurrent,
             extension_env_providers: args.extension_env_providers,
         }
     }

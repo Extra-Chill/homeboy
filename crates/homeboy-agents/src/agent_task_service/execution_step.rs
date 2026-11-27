@@ -787,6 +787,17 @@ pub(super) fn consume_execution_terminal_in_store(
     let mut disposition = "stale";
     let mut reconcile = None;
     let mut cancel_target = None;
+    let interrupted = !delivery.cancelled
+        && command.is_none()
+        && (delivery.outcome == StepTerminalOutcome::SpawnInterrupted
+            || (delivery.exit_code.is_none()
+                && (delivery.child.is_some()
+                    || delivery.outcome == StepTerminalOutcome::Exited
+                    || delivery.error.as_ref().is_some_and(|error| {
+                        error["data"]["step_outcome"] == "exit_status_unknown"
+                            || error["details"]["step_outcome"] == "exit_status_unknown"
+                    }))));
+    let mut interrupted_attempt = None;
     let committed = store.transition_when(subject, |stored| {
         if stored.metadata["execution_scheduling"]["current_intent_id"].as_str()
             != Some(&delivery.key)
@@ -851,7 +862,16 @@ pub(super) fn consume_execution_terminal_in_store(
                     && execution_record.metadata["execution_scheduling"]["current_intent_id"]
                         .is_string())
             {
-                reconcile = Some(execution_record.run_id.clone());
+                if interrupted {
+                    interrupted_attempt = Some((
+                        execution_record.run_id.clone(),
+                        stored.metadata["execution_scheduling"]["recovery_failures"]
+                            .as_u64()
+                            .unwrap_or(0),
+                    ));
+                } else {
+                    reconcile = Some(execution_record.run_id.clone());
+                }
             }
             return None;
         }
@@ -1006,6 +1026,19 @@ pub(super) fn consume_execution_terminal_in_store(
             .then(|| deterministic_failure(&error, delivery))
         })?;
         disposition = "failed";
+    }
+    if let Some((run_id, recovery_failures)) = interrupted_attempt {
+        if crate::agent_task_lifecycle::defer_interrupted_cook_execution_in_store(
+            store,
+            &run_id,
+            json!({"job_id": delivery.job_id, "step_key": delivery.key,
+                "recovery_failures": recovery_failures}),
+            EXECUTION_RECOVERY_LIMIT,
+        )? {
+            disposition = "recovered";
+        } else {
+            reconcile = Some(run_id);
+        }
     }
     if let Some(run_id) = reconcile {
         if let Err(error) =

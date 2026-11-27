@@ -422,9 +422,45 @@ fn ensure_cook_attempt_index(
         &record,
         &controller_plan,
     )?;
+    inherit_recipe_attempt_placement(lifecycle_store, &recipe, &attempt.run_id)?;
     lifecycle_store
         .record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)
         .map(|_| ())
+}
+
+/// Every attempt and retry of a Lab-dispatched Cook inherits the mission's
+/// persisted placement decision instead of the controller-local submission
+/// stamp, so it never re-resolves to `automatic` or drops to the controller.
+pub(crate) fn inherit_recipe_attempt_placement(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    recipe: &super::AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<bool> {
+    let Some(decision) = recipe_attempt_dispatch_placement(recipe) else {
+        return Ok(false);
+    };
+    agent_task_lifecycle::inherit_cook_execution_placement_decision_in_store(
+        lifecycle_store,
+        run_id,
+        &decision,
+    )
+}
+
+pub(crate) fn recipe_attempt_dispatch_placement(
+    recipe: &super::AgentTaskCookRecipe,
+) -> Option<homeboy_lab_contract::ExecutionPlacementDecision> {
+    let dispatch = &recipe.promotion_transport["attempt_dispatch"];
+    if dispatch["kind"] != "lab" {
+        return None;
+    }
+    serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+        dispatch["execution_placement_decision"].clone(),
+    )
+    .ok()
+    .filter(|decision| {
+        decision.is_valid()
+            && decision.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab
+    })
 }
 
 /// Record a failure for an already materialized Cook attempt using its exact
@@ -1685,6 +1721,134 @@ mod tests {
                 .expect("read retry cook index")
                 .latest_run_id,
             run_id
+        );
+    }
+
+    fn lab_required_mission_decision() -> homeboy_lab_contract::ExecutionPlacementDecision {
+        use homeboy_lab_contract::*;
+        ExecutionPlacementDecision::new(
+            "cook-placement",
+            "v1",
+            ExecutionPlacementIdentity {
+                repository: "extrachill".to_string(),
+                workspace: "/tmp/extrachill".to_string(),
+                task: "task".to_string(),
+                candidate: None,
+                base: None,
+            },
+            Placement::Lab,
+            ExecutionPlacementRequirement::Lab,
+            EffectiveExecutionPlacement::Lab,
+            Some(ExecutionPlacementRunnerSelection {
+                runner_id: "homeboy-lab".to_string(),
+                source: RunnerSelectionSource::Explicit,
+            }),
+            ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        )
+    }
+
+    /// #19181: an attempt or retry of a Cook whose mission requires the Lab
+    /// inherits that decision instead of a controller-local submission stamp.
+    #[test]
+    fn lab_required_cook_retry_attempt_inherits_mission_placement() {
+        use homeboy_lab_contract::{
+            EffectiveExecutionPlacement, ExecutionPlacementDecision, ExecutionPlacementRequirement,
+            Placement,
+        };
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let recipe_store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+
+        let cook_id = "lab-required-cook";
+        let run_id = "lab-required-cook-attempt-1-retry";
+        let retry_plan = plan(cook_id, "lab-required-retry");
+        let mission = lab_required_mission_decision();
+        let mut lab_recipe = recipe(cook_id, run_id, retry_plan.clone());
+        lab_recipe.promotion_transport = serde_json::json!({
+            "provider_invocation": null,
+            "attempt_dispatch": {
+                "kind": "lab",
+                "runner_id": "homeboy-lab",
+                "execution_placement_decision": mission,
+            },
+        });
+        recipe_store
+            .persist_recipe(&lab_recipe)
+            .expect("persist lab recipe");
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&retry_plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("submit retry plan");
+
+        materialize_cook_attempt_with_stores(
+            &recipe_store,
+            &lifecycle_store,
+            cook_id,
+            run_id,
+            &retry_plan,
+        )
+        .expect("materialize retry attempt");
+
+        let record = lifecycle_store.read_record(run_id).expect("read record");
+        let decision: ExecutionPlacementDecision =
+            serde_json::from_value(record.metadata["execution_placement_decision"].clone())
+                .expect("attempt carries a placement decision");
+        assert_eq!(decision, mission);
+        assert_eq!(decision.requested, Placement::Lab);
+        assert_eq!(decision.required, ExecutionPlacementRequirement::Lab);
+        assert_eq!(decision.selected, EffectiveExecutionPlacement::Lab);
+        assert!(!decision.fallback.local_allowed);
+        assert!(!decision.permits_local_execution());
+        assert_eq!(
+            decision
+                .runner
+                .as_ref()
+                .map(|runner| runner.runner_id.as_str()),
+            Some("homeboy-lab")
+        );
+
+        // The dispatching Lab route may refine the inherited decision, but a
+        // controller-local decision can never replace it.
+        let local = ExecutionPlacementDecision::controller_local(
+            "some-policy",
+            "v1",
+            mission.identity.clone(),
+            Placement::Local,
+        );
+        assert!(
+            !agent_task_lifecycle::normalize_missing_execution_placement_decision_in_store(
+                &lifecycle_store,
+                run_id,
+                &local,
+            )
+            .expect("normalize local")
+        );
+        let mut refined_identity = mission.identity.clone();
+        refined_identity.candidate = Some("abc123".to_string());
+        let refined = ExecutionPlacementDecision::new(
+            mission.policy_id.clone(),
+            mission.policy_revision.clone(),
+            refined_identity,
+            mission.requested,
+            mission.required,
+            mission.selected,
+            mission.runner.clone(),
+            mission.fallback.clone(),
+            mission.override_authorization.clone(),
+        );
+        assert!(
+            agent_task_lifecycle::normalize_missing_execution_placement_decision_in_store(
+                &lifecycle_store,
+                run_id,
+                &refined,
+            )
+            .expect("normalize refined")
         );
     }
 }

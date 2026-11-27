@@ -84,6 +84,26 @@ pub fn report(
         default_artifact_root(client)
     };
     let mut checks = Vec::new();
+    if let Ok(owners) = runner::daemon_api_get(runner_id, "/exec-owners") {
+        if let Some(jobs) = owners
+            .pointer("/body/jobs")
+            .or_else(|| owners.get("jobs"))
+            .and_then(serde_json::Value::as_array)
+        {
+            for job in jobs.iter().filter(|job| job["owner_missing"] == true) {
+                checks.push(checks::warning(
+                    "daemon.exec_owner",
+                    "Attached exec has no live client heartbeat".to_string(),
+                    Some(
+                        job["cancel_command"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    ),
+                ));
+            }
+        }
+    }
     let mut tools = BTreeMap::new();
 
     checks.push(checks::ok_with_details(

@@ -143,7 +143,7 @@ mod tests {
                     .spawn(inherit(|| {
                         homeboy_engine_primitives::phase_timing::PhaseTimer::current()
                             .time::<_, crate::Error>("gate.destination_execute", || {
-                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                assert!(current().is_some(), "worker must inherit the run context");
                                 Ok(())
                             })
                     }))
@@ -169,8 +169,29 @@ mod tests {
         ] {
             assert!(spans.iter().any(|span| span.id == phase), "missing {phase}");
         }
+        // Measure the execution boundary, not the scheduling/SQLite latency
+        // between admitting the run and entering that boundary. Coverage of
+        // arbitrary admission gaps is tested separately in phase_coverage.
+        let execution = spans
+            .iter()
+            .find(|span| span.id == "cook.execution")
+            .expect("persisted execution boundary");
+        let start = chrono::DateTime::parse_from_rfc3339(&execution.started_at).unwrap();
+        let duration = execution.duration_ms.expect("completed execution span");
+        let mut window = store.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(
+            window.status, "pass",
+            "finalization must persist before the boundary closes"
+        );
+        window.started_at = execution.started_at.clone();
+        window.finished_at = Some(
+            (start + chrono::Duration::milliseconds(duration.ceil() as i64))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        );
+        store.upsert_imported_run(&window).unwrap();
         let coverage = store.phase_coverage(&run.id, 10).unwrap();
-        assert!(coverage.covered_percentage >= 95.0, "{coverage:?}");
+        assert!((coverage.wall_ms - coverage.covered_ms).abs() <= 1.0,
+            "execution boundary should cover its worker and recovery leaves: {coverage:?}; spans: {spans:?}");
     }
 
     #[test]

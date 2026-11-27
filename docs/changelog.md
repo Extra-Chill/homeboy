@@ -4,6 +4,49 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.498.0] - 2026-11-27
+
+### Added
+- aggregate cook-batch child phases and stream batch progress
+
+### Fixed
+- bound promotion admission retries and expose stale lease owners
+- cancel orphaned attached exec jobs and guard duplicates
+
+## [0.497.33] - 2026-11-27
+
+### Fixed
+- reject divergent linked checkout sources
+
+## [0.497.32] - 2026-11-27
+
+### Fixed
+- retain extension test artifacts across gate finalization
+
+## [0.497.31] - 2026-11-26
+
+### Fixed
+- Cook attempts inherit the mission's Lab placement decision
+- don't cancel queued pre-spawn Cook attempts while their driver is live
+
+## [0.497.30] - 2026-11-26
+
+### Fixed
+- carry tested subcomponents' declared test secrets into Lab gates
+
+## [0.497.29] - 2026-11-26
+
+### Fixed
+- hydrate cached extensions beside their declared shared assets
+
+## [0.497.28] - 2026-11-25
+
+### Fixed
+- requeue interrupted zero-execution Cook attempts
+- Deflake process-lifecycle and chaos tests (launcher crash, daemon/step chaos, sigterm, service cleanup)
+- deflake heartbeat and deadline tests and protect SQLite from package scans
+- hydrate job extension overlays in a runner-side content-addressed cache
+
 ## [0.497.27] - 2026-11-25
 
 ### Changed

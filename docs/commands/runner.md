@@ -107,6 +107,14 @@ Commands that are both resource-policy hot and portable for Lab offload (full `l
 
 Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. The stable contract is `schema: "homeboy/lab-offload/v1"`: `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; successful offloads include `runner_id` plus `remote_workspace`; local fallback records the runner and `fallback_reason`; skipped local execution records why no automatic offload was used, such as `placement_local_override` or `no_default_runner`. The same object also carries `plan_id` and plan-derived phase fields including `sync_mode`, `capability_preflight`, `extension_parity`, and `patch_captured`.
 
+`runner exec --sync-workspace <path>` reports scanning, planning, transfer size,
+runner application, and completion on stderr, with a heartbeat every 10 seconds
+while sync is active. `--workspace-sync-timeout <DURATION>` defaults to `240s`
+and is a wall-clock deadline across all workspace-sync preparation stages,
+including source provenance collection. Timeout errors identify the active stage
+and its elapsed time. This budget does not limit optional dependency hydration
+or the dispatched command; exec admission and queue behavior are separate.
+
 Commands launched through non-local `homeboy runner exec` run with `HOMEBOY_RUNNER_HOSTED_EXEC=1` and the private `HOMEBOY_RUNNER_PLACEMENT_RESOLVED=1` marker. Nested runner commands such as `homeboy agent-task cook` pass the non-interactive resource preflight without a public placement override because the work is already intentionally hosted on the selected runner.
 
 For reviewer-facing output, treat `runner exec` stdout as operator context and
@@ -1050,7 +1058,9 @@ Runner job environment:
 
 ### Long-running detached workloads
 
-`runner exec` is foreground-only: every runner job is process-tree-isolated under the runner daemon, and when the job's root process exits the runner deterministically terminates and reaps all remaining descendants before reporting terminal evidence. Backgrounding inside the command does not survive this cleanup:
+Daemon `runner exec` is attached by default: SIGINT/SIGTERM requests cancellation, and losing the client heartbeat cancels the job after its lease expires (10 seconds plus the daemon maintenance interval). Use `--detach` to print a job ID and log/cancel commands and exit while the job continues. Identical live executions (runner, cwd, argv) are refused with the existing job ID; `--allow-concurrent` explicitly permits them. `runner doctor` reports expired attached owners with a cancel command. Older daemons do not enforce these new ownership and duplicate policies.
+
+Every runner job is process-tree-isolated under the runner daemon, and when the job's root process exits the runner deterministically terminates and reaps all remaining descendants before reporting terminal evidence. Backgrounding inside the command does not survive this cleanup:
 
 ```sh
 # WRONG: returns immediately, then the runner job cleanup kills the workload.

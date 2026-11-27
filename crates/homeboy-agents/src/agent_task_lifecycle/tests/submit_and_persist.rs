@@ -103,6 +103,58 @@ fn unclaimed_placeholder_survives_its_lease_while_its_writer_lives() {
 }
 
 #[test]
+fn admitted_step_keeps_custody_after_launcher_exit_before_child_binding() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "admitted-step-dead-launcher";
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "launcher").unwrap();
+    record_claimed_detached_cook_step_admission_in_store(&store, cook_id, "launcher", "step-job")
+        .expect("transfer custody before starting step");
+    let mut owner = Command::new("sleep").arg("60").spawn().unwrap();
+    let identity = homeboy_core::process::process_start_identity(owner.id())
+        .unwrap()
+        .unwrap();
+    let pid = owner.id();
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+    store
+        .mutate_record(cook_id, |record| {
+            let handoff = &mut record.metadata["detached_cook_handoff"];
+            handoff["launcher_pid"] = json!(pid);
+            handoff["launcher_start_identity"] = json!(identity);
+            true
+        })
+        .unwrap();
+
+    assert!(!expire_detached_cook_admission_in_store(&store, cook_id).unwrap());
+    assert!(claim_detached_cook_handoff_parent_in_store(&store, cook_id, "replacement").is_err());
+    fail_claimed_detached_cook_handoff_parent_in_store(
+        &store,
+        cook_id,
+        "launcher",
+        "launcher exited",
+    )
+    .unwrap();
+    assert!(!store.read_record(cook_id).unwrap().state().is_terminal());
+    let child_identity = homeboy_core::process::process_start_identity(std::process::id())
+        .unwrap()
+        .unwrap();
+    let bound = record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        "launcher",
+        std::process::id(),
+        child_identity,
+        "step-job",
+    )
+    .expect("admitted child can still bind");
+    assert_eq!(
+        bound.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
+}
+
+#[test]
 fn detached_admission_expires_dead_launcher_even_before_fallback_deadline() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());

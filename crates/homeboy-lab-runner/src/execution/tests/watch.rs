@@ -72,6 +72,7 @@ fn start_direct_daemon_job(
         true,
         false,
         None,
+        false,
     )
     .expect("zero-wait direct daemon handoff");
     output.job_id.expect("accepted job id")
@@ -185,6 +186,7 @@ fn watch_follow_reproduces_the_daemon_event_log_and_reports_promotion_once() {
             false,
             false,
             None,
+            false,
         )
         .expect("watched direct-daemon handoff");
         releaser.join().expect("releaser thread");

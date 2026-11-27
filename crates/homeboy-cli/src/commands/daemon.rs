@@ -703,13 +703,28 @@ const COMPACT_STATUS_JOB_LIMIT: usize = 8;
 /// Status collection remains lossless in core. The CLI's default is deliberately
 /// a bounded decision surface; `--full` is the existing complete evidence view.
 fn status_output(status: DaemonStatus, full: bool) -> Value {
-    if full {
+    let mut value = if full {
         let mut value = serde_json::to_value(&status).expect("daemon status serializes");
         value["admission"] = status.admission_report();
-        return value;
+        value
+    } else {
+        bounded_status_projection(&status)
+    };
+    match homeboy::core::runtime_promotion::blocking_lease_status() {
+        Ok(Some(check)) => {
+            value["summary"] = json!(format!(
+                "{}; {}",
+                status.summary,
+                check["message"].as_str().unwrap_or_default()
+            ));
+            value["runtime_promotion"] = check;
+        }
+        Err(error) => {
+            value["runtime_promotion"] = json!({"status": "blocking", "message": error.to_string(), "recovery_command": "homeboy self doctor"});
+        }
+        Ok(None) => {}
     }
-
-    bounded_status_projection(&status)
+    value
 }
 
 fn bounded_status_projection(status: &DaemonStatus) -> Value {

@@ -1839,6 +1839,25 @@ os._exit({code})
 }
 
 #[test]
+fn zero_test_gate_retains_extension_artifacts_after_finalization() {
+    let workspace = tempfile::tempdir().unwrap();
+    let command = r#"echo 'homeboy-gate-test-artifact {"reference":"homeboy://run/test/artifact/diagnosis","contents":"PHPUNIT_ZERO_TESTS: Managed runtime service failed to start"}';
+        echo 'homeboy-gate-test-artifact {"reference":"homeboy://run/test/artifact/steps","contents":"{\"steps\":[]}"}';
+        head -c 100000 /dev/zero | tr '\0' 'x'; echo;
+        echo '[test-results] Total: 0, Passed: 0, Failed: 0, Skipped: 0' >&2;
+        exit 1"#;
+    let report = run_gate_command(workspace.path(), 1, command).unwrap();
+    assert_eq!(report.status, AgentTaskGateStatus::Failed);
+    assert!(report.capture.stdout.truncated);
+    assert_eq!(report.test_artifacts.len(), 2);
+    assert!(report.stderr.starts_with("PHPUNIT_ZERO_TESTS"));
+    let wire = serde_json::to_vec(&report).unwrap();
+    let retained: AgentTaskGateReport = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(retained.test_artifacts, report.test_artifacts);
+    assert!(retained.test_artifacts[1].contents.contains("steps"));
+}
+
+#[test]
 fn local_gate_records_phase_markers_from_its_whole_stdout() {
     let workspace = tempfile::tempdir().expect("workspace");
     // The first marker precedes more output than the report's bounded stdout
