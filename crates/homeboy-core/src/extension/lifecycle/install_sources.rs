@@ -205,7 +205,7 @@ pub(crate) fn resolve_cloned_extension(
         return Ok(extension_id.to_string());
     }
 
-    // Preserve the legacy direct-child layout before considering declared roots.
+    // Check the direct-child layout before considering declared roots.
     let mut roots = vec![temp_dir.to_path_buf()];
     roots.extend(nested_extension_roots(temp_dir));
     for source_root in roots {
@@ -366,7 +366,7 @@ fn install_shared_assets_from_root(
 /// Whether two recorded source URLs name the same repository. Controllers
 /// spell one GitHub repository differently (`…/repo`, `…/repo.git`, SSH), and
 /// a spelling difference must not read as a competing owner.
-fn same_extension_source(left: &str, right: &str) -> bool {
+pub(super) fn same_extension_source(left: &str, right: &str) -> bool {
     let (left, right) = (left.trim(), right.trim());
     if left == right {
         return true;
@@ -656,7 +656,7 @@ pub(crate) fn rename_dir(from: &Path, to: &Path) -> Result<()> {
 
 /// Recursively copy a directory tree.
 ///
-/// Thin wrapper over [`homeboy_core::io::copy_tree`] with the legacy
+/// Thin wrapper over [`homeboy_core::io::copy_tree`] with the
 /// extension-lifecycle entry policy (copy any non-directory entry).
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     homeboy_core::io::copy_tree(

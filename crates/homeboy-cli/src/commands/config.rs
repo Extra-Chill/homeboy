@@ -472,54 +472,28 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn config_set_string_mode_stores_literal_string() {
-        let value = parse_config_set_value("/settings/provider", "example", true)
-            .expect("literal string value");
+    fn config_set_value_parses_json_unless_string_mode_and_hints_on_bare_strings() {
+        assert_eq!(
+            parse_config_set_value("/settings/provider", "example", true)
+                .expect("literal string value"),
+            Value::String("example".to_string())
+        );
+        assert_eq!(
+            parse_config_set_value("/defaults/deploy/scp_flags", "[]", false)
+                .expect("json array value"),
+            Value::Array(Vec::new())
+        );
 
-        assert_eq!(value, Value::String("example".to_string()));
-    }
-
-    #[test]
-    fn config_set_unquoted_string_error_includes_string_hints() {
         let err = parse_config_set_value("/settings/provider", "example", false)
             .expect_err("bare string should not parse as JSON");
-
         let hints = err
             .hints
             .iter()
             .map(|hint| hint.message.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-
         assert!(hints.contains("'\"example\"'"));
         assert!(hints.contains("--string"));
-    }
-
-    #[test]
-    fn config_set_json_mode_keeps_json_values() {
-        let value = parse_config_set_value("/defaults/deploy/scp_flags", "[]", false)
-            .expect("json array value");
-
-        assert_eq!(value, Value::Array(Vec::new()));
-    }
-
-    #[test]
-    fn pointer_read_supports_nested_objects_and_arrays() {
-        let config = serde_json::json!({
-            "notifications": { "default_transport": "discord" },
-            "defaults": { "version_candidates": [{ "file": "Cargo.toml" }] },
-        });
-
-        assert_eq!(
-            homeboy::core::config::get_json_pointer(&config, "/notifications")
-                .expect("valid pointer"),
-            Some(&serde_json::json!({ "default_transport": "discord" }))
-        );
-        assert_eq!(
-            homeboy::core::config::get_json_pointer(&config, "/defaults/version_candidates/0/file")
-                .expect("valid pointer"),
-            Some(&serde_json::json!("Cargo.toml"))
-        );
     }
 
     #[test]
@@ -650,11 +624,9 @@ mod tests {
         });
     }
 
-    /// Reproduces #13635: an unscoped `config show` used to dump the entire
-    /// multi-line binary-upgrade and source-build scripts inline, burying
-    /// settings like `agent_task`/`notifications`/`release_gate` in ~15KB of
-    /// install-method shell programs. The actual settings must be readable
-    /// without the embedded scripts drowning them out.
+    /// #13635: an unscoped `config show` keeps the multi-line binary-upgrade
+    /// and source-build scripts out of the output, so settings like
+    /// `agent_task`/`notifications`/`release_gate` stay readable.
     #[test]
     fn unscoped_show_elides_large_install_scripts_but_keeps_real_settings_readable() {
         homeboy::core::test_support::with_isolated_home(|_| {
@@ -675,7 +647,7 @@ mod tests {
                 "release_gate settings must still be present: {config}"
             );
 
-            // The large embedded source-build script no longer dominates the
+            // The large embedded source-build script does not dominate the
             // output.
             let source_script = config
                 .pointer("/defaults/install_methods/source/upgrade_command")
@@ -710,29 +682,19 @@ mod tests {
                 "unscoped config show should be readable, got {} bytes",
                 serialized.len()
             );
-        });
-    }
 
-    /// A pointer read explicitly requesting the script still returns it in
-    /// full — eliding only changes what an *unscoped* dump shows by default.
-    #[test]
-    fn pointer_read_still_returns_the_full_install_script() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            let (output, _) =
+            // An explicit pointer read still returns the full script: eliding
+            // only changes what an unscoped dump shows by default.
+            let (explicit, _) =
                 show_pointer(false, "/defaults/install_methods/source/upgrade_command")
                     .expect("explicit pointer read of the install script");
-            let value = output
-                .value
-                .expect("script value")
-                .as_str()
-                .unwrap()
-                .to_string();
-
-            assert!(value.contains('\n'), "full script must remain multi-line");
+            let full_script = explicit.value.expect("script value");
+            let full_script = full_script.as_str().expect("script string");
             assert!(
-                value.len() > INSTALL_SCRIPT_ELISION_THRESHOLD,
-                "an explicit pointer read must not be elided"
+                full_script.contains('\n'),
+                "full script must remain multi-line"
             );
+            assert!(full_script.len() > INSTALL_SCRIPT_ELISION_THRESHOLD);
         });
     }
 }

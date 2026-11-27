@@ -387,30 +387,6 @@ mod provider_rotation_tests {
     }
 
     #[test]
-    fn total_execution_budget_of_one_prevents_provider_rotation() {
-        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
-        let calls = Arc::clone(&executor.calls);
-        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = plan_with_tasks(1);
-        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
-        plan.options.execution_budget = AgentTaskExecutionBudget {
-            version: AgentTaskExecutionBudget::VERSION,
-            deadline_unix_ms: None,
-            max_provider_executions: 1,
-            max_same_provider_retries: 0,
-            max_provider_rotations: 1,
-        };
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            aggregate.outcomes[0].metadata["execution_budget"]["exhausted"],
-            "total_executions"
-        );
-    }
-
-    #[test]
     fn rotates_to_next_entry_on_provider_failure_and_stops_at_first_success() {
         let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
         let observed = Arc::clone(&executor.observed);
@@ -536,56 +512,6 @@ mod provider_rotation_tests {
             attempt["candidate_producing_model"],
             "openai/gpt-5.6-actual"
         );
-    }
-
-    #[test]
-    fn timeout_candidate_converges_before_failed_rotation() {
-        retained_timeout_candidate_converges_before_rotation();
-    }
-
-    #[test]
-    fn timeout_candidate_converges_before_another_provider_rotation() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let run_id = "timeout-candidate-convergence";
-        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
-        assert!(Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/repo.git",
-            ])
-            .current_dir(&workspace)
-            .status()
-            .expect("configure repository identity")
-            .success());
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut plan = plan_with_tasks(1);
-        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
-        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
-        enable_rotation(&mut plan);
-        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit run");
-
-        let aggregate = AgentTaskScheduler::new(Arc::new(DirtyCandidateThenTerminalExecutor {
-            calls: Arc::clone(&calls),
-            terminal: AgentTaskOutcomeStatus::Succeeded,
-            terminal_outputs: Value::Null,
-        }))
-        .with_run_id(run_id)
-        .run(plan);
-
-        assert_eq!(aggregate.status(), RunExecutionState::CandidateRecoverable);
-        assert_eq!(
-            aggregate.outcomes[0].status,
-            AgentTaskOutcomeStatus::CandidateRecoverable
-        );
-        assert!(aggregate.events.iter().all(|event| !event
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("provider rotation queued"))));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -787,7 +713,10 @@ mod provider_rotation_tests {
         );
     }
 
-    fn retained_timeout_candidate_converges_before_rotation() {
+    /// A timed-out attempt that left a workspace edit converges as a
+    /// recoverable candidate instead of spending another provider rotation.
+    #[test]
+    fn timeout_candidate_converges_before_provider_rotation() {
         let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
@@ -837,6 +766,10 @@ mod provider_rotation_tests {
             .all(|artifact| artifact.kind == "patch"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(outcome.metadata.pointer("/provider_rotation").is_none());
+        assert!(aggregate.events.iter().all(|event| !event
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("provider rotation queued"))));
     }
 
     #[test]
@@ -914,68 +847,41 @@ mod provider_rotation_tests {
             .is_none());
     }
 
+    /// #9013: with a configured `rotation.entries` default and no explicit
+    /// --model, the first entry's model is applied to the very first request
+    /// so it is persisted before execution — otherwise the cook runs with a
+    /// null model and fails finalization after publishing a PR. The initial
+    /// application only fills gaps: an explicit --model wins.
     #[test]
-    fn initial_attempt_applies_the_first_rotation_entry_model() {
-        // #9013: with a configured `rotation.entries` default and no explicit
-        // --model, the first entry describes the initial attempt. Its model must
-        // be applied to the very first request so it is persisted before
-        // execution — otherwise the cook runs with a null model and fails
-        // finalization after publishing a PR.
-        let executor = RotationScriptedExecutor::new(vec![success()]);
-        let observed = Arc::clone(&executor.observed);
-        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = plan_with_tasks(1);
-        assert!(
-            plan.tasks[0].executor.model.is_none(),
-            "fixture starts with no explicit model"
-        );
-        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
-            backend: None,
-            selector: None,
-            model: Some("configured-default-model".to_string()),
-            provider_config: json!({}),
-            adoption: None,
-        }]));
-        enable_rotation(&mut plan);
+    fn initial_attempt_applies_the_first_rotation_entry_model_unless_one_is_explicit() {
+        for (explicit, expected) in [
+            (None, "configured-default-model"),
+            (Some("explicit-cli-model"), "explicit-cli-model"),
+        ] {
+            let executor = RotationScriptedExecutor::new(vec![success()]);
+            let observed = Arc::clone(&executor.observed);
+            let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+            let mut plan = plan_with_tasks(1);
+            plan.tasks[0].executor.model = explicit.map(str::to_string);
+            plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+                backend: None,
+                selector: None,
+                model: Some("configured-default-model".to_string()),
+                provider_config: json!({}),
+                adoption: None,
+            }]));
+            enable_rotation(&mut plan);
 
-        let aggregate = scheduler.run(plan);
+            let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
-        let observed = observed.lock().expect("observed requests");
-        assert_eq!(
-            observed[0].executor.model.as_deref(),
-            Some("configured-default-model"),
-            "the initial attempt must carry the configured rotation-entry model"
-        );
-    }
-
-    #[test]
-    fn initial_attempt_preserves_an_explicit_model_over_the_first_rotation_entry() {
-        // The initial application only fills gaps: an explicit --model already on
-        // the request wins over the configured entry default.
-        let executor = RotationScriptedExecutor::new(vec![success()]);
-        let observed = Arc::clone(&executor.observed);
-        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
-        let mut plan = plan_with_tasks(1);
-        plan.tasks[0].executor.model = Some("explicit-cli-model".to_string());
-        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
-            backend: None,
-            selector: None,
-            model: Some("configured-default-model".to_string()),
-            provider_config: json!({}),
-            adoption: None,
-        }]));
-        enable_rotation(&mut plan);
-
-        let aggregate = scheduler.run(plan);
-
-        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
-        let observed = observed.lock().expect("observed requests");
-        assert_eq!(
-            observed[0].executor.model.as_deref(),
-            Some("explicit-cli-model"),
-            "an explicit model must not be overridden by the rotation-entry default"
-        );
+            assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
+            let observed = observed.lock().expect("observed requests");
+            assert_eq!(
+                observed[0].executor.model.as_deref(),
+                Some(expected),
+                "explicit={explicit:?}"
+            );
+        }
     }
 
     #[test]
@@ -1008,6 +914,10 @@ mod provider_rotation_tests {
         assert_eq!(
             diagnostic.data["exhausted_budget"],
             "max_provider_executions"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["execution_budget"]["exhausted"],
+            "total_executions"
         );
     }
 

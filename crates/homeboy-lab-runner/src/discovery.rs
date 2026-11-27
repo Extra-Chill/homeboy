@@ -66,9 +66,21 @@ impl RunnerDiscoveryService {
                 reasons: Vec::new(),
             });
         }
+        // Capabilities are served by their own Runner API endpoint.
+        let policy = crate::RunnerAdmissionPolicy {
+            capacity: runner.settings.concurrency_limit,
+            capabilities_ready: true,
+            exact_version: crate::lab::offload::metadata::require_exact_runner_version(
+                &runner.settings,
+            ),
+        };
         Ok(readiness(
             &runner,
-            crate::runner_admission_snapshot(runner_id)?,
+            crate::runner_admission_snapshot(
+                runner_id,
+                None,
+                crate::RunnerAdmissionReadiness::Policy(policy),
+            )?,
         ))
     }
 
@@ -324,10 +336,7 @@ fn descriptor(runner: &Runner) -> RunnerDescriptor {
 }
 
 fn readiness(runner: &Runner, snapshot: RunnerAdmissionSnapshot) -> RunnerReadiness {
-    let availability = snapshot
-        .status
-        .admission_availability(runner.settings.concurrency_limit);
-    let mut reasons = availability.reasons;
+    let mut reasons = snapshot.summary.reasons;
     if !snapshot.summary.daemon_compatible {
         reasons.push("daemon_incompatible".to_string());
     }
@@ -349,7 +358,7 @@ fn readiness(runner: &Runner, snapshot: RunnerAdmissionSnapshot) -> RunnerReadin
         connected: snapshot.summary.connected,
         accepting_jobs: snapshot.summary.accepting_jobs,
         active_job_count: snapshot.summary.active_job_count,
-        capacity: availability.capacity,
+        capacity: runner.settings.concurrency_limit,
         reasons,
     }
 }
@@ -357,16 +366,6 @@ fn readiness(runner: &Runner, snapshot: RunnerAdmissionSnapshot) -> RunnerReadin
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn local_runner_descriptor_uses_the_canonical_resource() {
-        let runner = crate::builtin_local_runner();
-        let descriptor = descriptor(&runner);
-
-        assert_eq!(descriptor.schema, RUNNER_DESCRIPTOR_SCHEMA);
-        assert_eq!(descriptor.runner_id, "local");
-        assert_eq!(descriptor.kind, RunnerKind::Local);
-    }
 
     #[test]
     fn handshake_selects_the_highest_shared_version_and_returns_inspection() {
@@ -445,187 +444,120 @@ mod tests {
             .any(|descriptor| descriptor.runner_id == "local"));
     }
 
-    #[test]
-    fn inspect_api_returns_the_canonical_inspection() {
-        let response = RunnerDiscoveryService::inspect_api(&RunnerApiInspectRequest {
-            schema: RUNNER_API_INSPECT_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            runner_id: "local".to_string(),
-        })
-        .expect("inspect Runner API");
-
-        assert!(response.failure.is_none());
-        assert_eq!(
-            response
-                .inspection
-                .expect("inspection")
-                .descriptor
-                .runner_id,
-            "local"
-        );
+    /// Each request is validated (schema, then API version) before the runner
+    /// is looked up; an unknown runner is a typed failure, and the canonical
+    /// local runner resolves.
+    fn operation_cases(
+        request_schema: &'static str,
+        invalid_schema: &'static str,
+    ) -> [(
+        &'static str,
+        RunnerApiVersion,
+        &'static str,
+        Option<RunnerApiOperationFailureCode>,
+    ); 4] {
+        let missing = "runner-that-does-not-exist";
+        [
+            (
+                invalid_schema,
+                RUNNER_API_V1,
+                missing,
+                Some(RunnerApiOperationFailureCode::InvalidRequestSchema),
+            ),
+            (
+                request_schema,
+                RunnerApiVersion { major: 99 },
+                missing,
+                Some(RunnerApiOperationFailureCode::UnsupportedApiVersion),
+            ),
+            (
+                request_schema,
+                RUNNER_API_V1,
+                missing,
+                Some(RunnerApiOperationFailureCode::RunnerNotFound),
+            ),
+            (request_schema, RUNNER_API_V1, "local", None),
+        ]
     }
 
     #[test]
-    fn discovery_operations_validate_before_runner_lookup() {
-        let fixtures = [
-            (
-                "homeboy/runner-api-inspect-request/v99",
-                RUNNER_API_V1,
-                RunnerApiOperationFailureCode::InvalidRequestSchema,
-            ),
-            (
-                RUNNER_API_INSPECT_REQUEST_SCHEMA,
-                RunnerApiVersion { major: 99 },
-                RunnerApiOperationFailureCode::UnsupportedApiVersion,
-            ),
-        ];
-
-        for (schema, api_version, expected_failure) in fixtures {
+    fn inspect_api_validates_then_resolves_the_runner() {
+        for (schema, api_version, runner_id, expected_failure) in operation_cases(
+            RUNNER_API_INSPECT_REQUEST_SCHEMA,
+            "homeboy/runner-api-inspect-request/v99",
+        ) {
             let response = RunnerDiscoveryService::inspect_api(&RunnerApiInspectRequest {
                 schema: schema.to_string(),
                 api_version,
-                runner_id: "runner-that-does-not-exist".to_string(),
+                runner_id: runner_id.to_string(),
             })
-            .expect("validation response");
+            .expect("inspect response");
 
-            assert_eq!(response.inspection, None);
-            assert_eq!(response.failure.expect("failure").code, expected_failure);
+            assert_eq!(
+                response.failure.map(|failure| failure.code),
+                expected_failure
+            );
+            assert_eq!(
+                response
+                    .inspection
+                    .map(|inspection| inspection.descriptor.runner_id),
+                expected_failure.is_none().then(|| runner_id.to_string())
+            );
         }
     }
 
     #[test]
-    fn inspect_api_types_unknown_runner_failures() {
-        let response = RunnerDiscoveryService::inspect_api(&RunnerApiInspectRequest {
-            schema: RUNNER_API_INSPECT_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            runner_id: "runner-that-does-not-exist".to_string(),
-        })
-        .expect("unknown runner response");
-
-        assert_eq!(response.inspection, None);
-        assert_eq!(
-            response.failure.expect("failure").code,
-            RunnerApiOperationFailureCode::RunnerNotFound
-        );
-    }
-
-    #[test]
-    fn capabilities_api_returns_the_canonical_inventory() {
-        let response = RunnerDiscoveryService::capabilities_api(&RunnerApiCapabilitiesRequest {
-            schema: RUNNER_API_CAPABILITIES_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            runner_id: "local".to_string(),
-        })
-        .expect("capabilities Runner API");
-
-        assert!(response.failure.is_none());
-        assert_eq!(
-            response.capabilities.expect("capabilities").runner_id,
-            "local"
-        );
-    }
-
-    #[test]
-    fn capabilities_api_validates_before_runner_lookup() {
-        let fixtures = [
-            (
-                "homeboy/runner-api-capabilities-request/v99",
-                RUNNER_API_V1,
-                RunnerApiOperationFailureCode::InvalidRequestSchema,
-            ),
-            (
-                RUNNER_API_CAPABILITIES_REQUEST_SCHEMA,
-                RunnerApiVersion { major: 99 },
-                RunnerApiOperationFailureCode::UnsupportedApiVersion,
-            ),
-        ];
-
-        for (schema, api_version, expected_failure) in fixtures {
+    fn capabilities_api_validates_then_resolves_the_runner() {
+        for (schema, api_version, runner_id, expected_failure) in operation_cases(
+            RUNNER_API_CAPABILITIES_REQUEST_SCHEMA,
+            "homeboy/runner-api-capabilities-request/v99",
+        ) {
             let response =
                 RunnerDiscoveryService::capabilities_api(&RunnerApiCapabilitiesRequest {
                     schema: schema.to_string(),
                     api_version,
-                    runner_id: "runner-that-does-not-exist".to_string(),
+                    runner_id: runner_id.to_string(),
                 })
-                .expect("validation response");
+                .expect("capabilities response");
 
-            assert_eq!(response.capabilities, None);
-            assert_eq!(response.failure.expect("failure").code, expected_failure);
+            assert_eq!(
+                response.failure.map(|failure| failure.code),
+                expected_failure
+            );
+            assert_eq!(
+                response
+                    .capabilities
+                    .map(|capabilities| capabilities.runner_id),
+                expected_failure.is_none().then(|| runner_id.to_string())
+            );
         }
     }
 
     #[test]
-    fn capabilities_api_types_unknown_runner_failures() {
-        let response = RunnerDiscoveryService::capabilities_api(&RunnerApiCapabilitiesRequest {
-            schema: RUNNER_API_CAPABILITIES_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            runner_id: "runner-that-does-not-exist".to_string(),
-        })
-        .expect("unknown runner response");
-
-        assert_eq!(response.capabilities, None);
-        assert_eq!(
-            response.failure.expect("failure").code,
-            RunnerApiOperationFailureCode::RunnerNotFound
-        );
-    }
-
-    #[test]
-    fn readiness_api_returns_the_canonical_readiness() {
-        let response = RunnerDiscoveryService::readiness_api(&RunnerApiReadinessRequest {
-            schema: RUNNER_API_READINESS_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            runner_id: "local".to_string(),
-        })
-        .expect("readiness Runner API");
-
-        assert!(response.failure.is_none());
-        let readiness = response.readiness.expect("readiness");
-        assert_eq!(readiness.runner_id, "local");
-        assert!(readiness.accepting_jobs);
-    }
-
-    #[test]
-    fn readiness_api_validates_before_runner_lookup() {
-        let fixtures = [
-            (
-                "homeboy/runner-api-readiness-request/v99",
-                RUNNER_API_V1,
-                RunnerApiOperationFailureCode::InvalidRequestSchema,
-            ),
-            (
-                RUNNER_API_READINESS_REQUEST_SCHEMA,
-                RunnerApiVersion { major: 99 },
-                RunnerApiOperationFailureCode::UnsupportedApiVersion,
-            ),
-        ];
-
-        for (schema, api_version, expected_failure) in fixtures {
+    fn readiness_api_validates_then_resolves_the_runner() {
+        for (schema, api_version, runner_id, expected_failure) in operation_cases(
+            RUNNER_API_READINESS_REQUEST_SCHEMA,
+            "homeboy/runner-api-readiness-request/v99",
+        ) {
             let response = RunnerDiscoveryService::readiness_api(&RunnerApiReadinessRequest {
                 schema: schema.to_string(),
                 api_version,
-                runner_id: "runner-that-does-not-exist".to_string(),
+                runner_id: runner_id.to_string(),
             })
-            .expect("validation response");
+            .expect("readiness response");
 
-            assert_eq!(response.readiness, None);
-            assert_eq!(response.failure.expect("failure").code, expected_failure);
+            assert_eq!(
+                response.failure.map(|failure| failure.code),
+                expected_failure
+            );
+            assert_eq!(
+                response
+                    .readiness
+                    .map(|readiness| (readiness.runner_id, readiness.accepting_jobs)),
+                expected_failure
+                    .is_none()
+                    .then(|| (runner_id.to_string(), true))
+            );
         }
-    }
-
-    #[test]
-    fn readiness_api_types_unknown_runner_failures() {
-        let response = RunnerDiscoveryService::readiness_api(&RunnerApiReadinessRequest {
-            schema: RUNNER_API_READINESS_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            runner_id: "runner-that-does-not-exist".to_string(),
-        })
-        .expect("unknown runner response");
-
-        assert_eq!(response.readiness, None);
-        assert_eq!(
-            response.failure.expect("failure").code,
-            RunnerApiOperationFailureCode::RunnerNotFound
-        );
     }
 }

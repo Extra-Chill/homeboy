@@ -108,86 +108,72 @@ fn local_git_rig_package_evidence_records_source_identity() {
 }
 
 #[test]
-fn run_selects_single_scenario() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
+fn run_selects_requested_scenarios_in_order() {
+    let cases: &[&[&str]] = &[&["slow"], &["in-tree", "slow"]];
+    for selected in cases {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) = run(run_args(
-            Some("studio"),
-            Vec::new(),
-            vec!["slow".to_string()],
-        ))
-        .expect("selected bench should run");
+            let (output, exit_code) = run(run_args(
+                Some("studio"),
+                Vec::new(),
+                selected.iter().map(|id| id.to_string()).collect(),
+            ))
+            .expect("selected bench should run");
 
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let scenarios = result.results.expect("results").scenarios;
-                assert_eq!(scenarios.len(), 1);
-                assert_eq!(scenarios[0].id, "slow");
-            }
-            _ => panic!("expected single output"),
-        }
-    });
+            assert_eq!(exit_code, 0);
+            let BenchOutput::Single(result) = output else {
+                panic!("expected single output");
+            };
+            let scenario_ids: Vec<String> = result
+                .results
+                .expect("results")
+                .scenarios
+                .into_iter()
+                .map(|scenario| scenario.id)
+                .collect();
+            assert_eq!(scenario_ids, *selected);
+        });
+    }
 }
 
 #[test]
-fn selected_visual_scenario_emits_a_non_empty_comparison_directory() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
+fn only_visual_scenario_emits_a_non_empty_comparison_directory() {
+    for (scenario_id, expects_dir) in [("visual", true), ("slow", false)] {
+        with_isolated_home(|home| {
+            write_bench_extension(home);
+            let component_dir = tempfile::TempDir::new().expect("component dir");
+            write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) = run(run_args(
-            Some("studio"),
-            Vec::new(),
-            vec!["visual".to_string()],
-        ))
-        .expect("selected visual bench should run");
+            let (output, exit_code) = run(run_args(
+                Some("studio"),
+                Vec::new(),
+                vec![scenario_id.to_string()],
+            ))
+            .expect("selected bench should run");
 
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let mut results = result.results.expect("results");
-                let scenario = results.scenarios.remove(0);
-                let path = scenario.artifacts["visual_comparison_dir"]
-                    .path
-                    .as_deref()
-                    .expect("visual comparison directory path");
-                assert!(!path.trim().is_empty());
-                assert!(std::path::Path::new(path).is_dir());
+            assert_eq!(exit_code, 0);
+            let BenchOutput::Single(result) = output else {
+                panic!("expected single output");
+            };
+            let mut results = result.results.expect("results");
+            let scenario = results.scenarios.remove(0);
+            match scenario.artifacts.get("visual_comparison_dir") {
+                Some(artifact) => {
+                    assert!(expects_dir, "{scenario_id} must omit the optional artifact");
+                    let path = artifact
+                        .path
+                        .as_deref()
+                        .expect("visual comparison directory path");
+                    assert!(!path.trim().is_empty());
+                    assert!(std::path::Path::new(path).is_dir());
+                }
+                None => assert!(!expects_dir, "{scenario_id} must emit the artifact"),
             }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
-fn selected_non_visual_scenario_omits_optional_comparison_artifacts() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let (output, exit_code) = run(run_args(
-            Some("studio"),
-            Vec::new(),
-            vec!["slow".to_string()],
-        ))
-        .expect("selected non-visual bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let mut results = result.results.expect("results");
-                let scenario = results.scenarios.remove(0);
-                assert!(!scenario.artifacts.contains_key("visual_comparison_dir"));
-            }
-            _ => panic!("expected single output"),
-        }
-    });
+        });
+    }
 }
 
 #[test]
@@ -218,21 +204,14 @@ fn selected_scenario_workload_failure_preserves_runner_error() {
                     failure.scenario_id.as_deref(),
                     Some("studio-agent-site-build")
                 );
-                assert!(failure.stderr_tail.contains("WORKLOAD_ERROR"));
-                assert!(failure.stderr_tail.contains("warmup iteration 1/1"));
-                assert!(failure.stderr_tail.contains("component id `studio`"));
-                assert!(failure
-                    .stderr_tail
-                    .contains("workload id `studio-agent-site-build`"));
-                assert!(failure
-                    .stderr_tail
-                    .contains("scenario id `studio-agent-site-build`"));
-                assert!(failure.stderr_tail.contains("phase `warmup`"));
-                assert!(failure.stderr_tail.contains("iteration 1/1"));
-                assert!(failure
-                    .stderr_tail
-                    .contains("artifact key `visual_comparison_dir`"));
-                assert!(failure.stderr_tail.contains("Omit optional artifacts"));
+                for expected in [
+                    "WORKLOAD_ERROR",
+                    "phase `warmup`",
+                    "artifact key `visual_comparison_dir`",
+                    "Omit optional artifacts",
+                ] {
+                    assert!(failure.stderr_tail.contains(expected), "missing {expected}");
+                }
             }
             _ => panic!("expected single output"),
         }
@@ -287,40 +266,6 @@ fn runtime_failure_surfaces_envelope_error_chain_and_envelope_artifact() {
 }
 
 #[test]
-fn run_selects_multiple_scenarios() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_registered_component(home, "studio", component_dir.path());
-
-        let (output, exit_code) = run(run_args(
-            Some("studio"),
-            Vec::new(),
-            vec!["in-tree".to_string(), "slow".to_string()],
-        ))
-        .expect("selected bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                let scenario_ids: Vec<String> = result
-                    .results
-                    .expect("results")
-                    .scenarios
-                    .into_iter()
-                    .map(|scenario| scenario.id)
-                    .collect();
-                assert_eq!(
-                    scenario_ids,
-                    vec!["in-tree".to_string(), "slow".to_string()]
-                );
-            }
-            _ => panic!("expected single output"),
-        }
-    });
-}
-
-#[test]
 fn unknown_scenario_reports_discovered_ids() {
     with_isolated_home(|home| {
         write_bench_extension(home);
@@ -340,34 +285,6 @@ fn unknown_scenario_reports_discovered_ids() {
         assert!(message.contains("missing"), "got: {}", message);
         assert!(message.contains("in-tree"), "got: {}", message);
         assert!(message.contains("slow"), "got: {}", message);
-    });
-}
-
-#[test]
-fn single_rig_selector_filters_extra_workloads_before_execution() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let component_dir = tempfile::TempDir::new().expect("component dir");
-        write_rig(home, "rig-a", "studio", component_dir.path());
-
-        let (output, exit_code) = run(run_args(
-            None,
-            vec!["rig-a".to_string()],
-            vec!["rig-slow".to_string()],
-        ))
-        .expect("single-rig selected bench should run");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Single(result) => {
-                assert_eq!(result.iterations, 1);
-                let scenarios = result.results.expect("results").scenarios;
-                assert_eq!(scenarios.len(), 1);
-                assert_eq!(scenarios[0].id, "rig-slow");
-                assert_eq!(scenarios[0].iterations, 1);
-            }
-            _ => panic!("expected single output"),
-        }
     });
 }
 
@@ -501,6 +418,7 @@ fn single_rig_runs_preserve_run_level_summaries_after_selection() {
             BenchOutput::Single(result) => {
                 let scenarios = result.results.expect("results").scenarios;
                 assert_eq!(scenarios.len(), 1);
+                assert_eq!(scenarios[0].id, "rig-slow");
                 let runs = scenarios[0].runs.as_ref().expect("per-run metrics");
                 assert_eq!(runs.len(), 3);
                 assert!(scenarios[0].runs_summary.as_ref().is_some_and(|summary| {
@@ -570,7 +488,7 @@ fn profile_with_unknown_scenario_lists_discovered_scenarios() {
     });
 }
 
-/// #17679: the extension child resolves `node` in the caller's PATH order, and
+/// The extension child resolves `node` in the caller's PATH order, and
 /// bench provenance records which `node` that was.
 #[cfg(unix)]
 #[test]

@@ -95,7 +95,7 @@ pub(crate) fn parse_duration(raw: &str) -> homeboy::core::Result<Duration> {
 /// Compile a JSONPath expression. Returns a structured validation error on
 /// invalid syntax instead of panicking. Schema-blind: the engine doesn't know
 /// what the JSON looks like, only how to walk it.
-pub(crate) fn compile_jsonpath(expr: &str) -> homeboy::core::Result<serde_json_path::JsonPath> {
+fn compile_jsonpath(expr: &str) -> homeboy::core::Result<serde_json_path::JsonPath> {
     serde_json_path::JsonPath::parse(expr).map_err(|e| {
         Error::validation_invalid_argument(
             "jsonpath",
@@ -108,7 +108,7 @@ pub(crate) fn compile_jsonpath(expr: &str) -> homeboy::core::Result<serde_json_p
 
 /// Apply a compiled JSONPath to a JSON value and return all matched nodes,
 /// each as an owned `Value` clone.
-pub(crate) fn eval_jsonpath(path: &serde_json_path::JsonPath, value: &Value) -> Vec<Value> {
+fn eval_jsonpath(path: &serde_json_path::JsonPath, value: &Value) -> Vec<Value> {
     path.query(value).all().into_iter().cloned().collect()
 }
 
@@ -179,22 +179,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_duration_accepts_supported_units() {
+    fn parse_duration_accepts_supported_units_and_rejects_invalid_input() {
         assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
         assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
         assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
         assert_eq!(parse_duration("3d").unwrap(), Duration::from_secs(259_200));
+        for invalid in ["0s", "10x", "h"] {
+            assert!(parse_duration(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
-    fn parse_duration_rejects_zero_and_unknown_units() {
-        assert!(parse_duration("0s").is_err());
-        assert!(parse_duration("10x").is_err());
-        assert!(parse_duration("h").is_err());
-    }
-
-    #[test]
-    fn select_fields_collapses_matches_per_selector() {
+    fn select_fields_collapses_matches_per_selector_and_rejects_invalid_selectors() {
         let root = serde_json::json!({
             "status": "pass",
             "metadata": { "run_dir": "/tmp/run" },
@@ -214,43 +210,11 @@ mod tests {
             selected[0],
             ("$.status".to_string(), Value::String("pass".into()))
         );
-        assert_eq!(
-            selected[1],
-            (
-                "$.metadata.run_dir".to_string(),
-                Value::String("/tmp/run".into())
-            )
-        );
+        assert_eq!(selected[1].1, Value::String("/tmp/run".into()));
         assert_eq!(selected[2].1, serde_json::json!(["a", "b"]));
         assert_eq!(selected[3].1, Value::Null);
-    }
 
-    #[test]
-    fn select_fields_rejects_empty_and_invalid_selectors() {
-        let root = serde_json::json!({ "a": 1 });
         assert!(select_fields(&root, &["   ".to_string()]).is_err());
         assert!(select_fields(&root, &["$[".to_string()]).is_err());
-    }
-
-    #[test]
-    fn eval_jsonpath_matches_root_property() {
-        let path = compile_jsonpath("$.color").expect("compile");
-        let value = serde_json::json!({ "color": "red" });
-        let matches = eval_jsonpath(&path, &value);
-        assert_eq!(matches, vec![Value::String("red".into())]);
-    }
-
-    #[test]
-    fn eval_jsonpath_matches_array_wildcard() {
-        let path = compile_jsonpath("$.runs[*].status").expect("compile");
-        let value = serde_json::json!({
-            "runs": [
-                { "status": "pass" },
-                { "status": "fail" },
-                { "status": "pass" }
-            ]
-        });
-        let matches = eval_jsonpath(&path, &value);
-        assert_eq!(matches.len(), 3);
     }
 }

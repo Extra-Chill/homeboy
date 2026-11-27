@@ -551,31 +551,14 @@ mod tests {
         });
     }
 
+    /// Descriptor-produced viewer metadata round-trips into an encoded viewer
+    /// link once a public artifact URL is known.
     #[test]
-    fn derives_viewer_link_from_public_artifact_url_metadata() {
-        let artifact = ArtifactRecord {
-            id: "artifact-1".to_string(),
-            run_id: "run-1".to_string(),
-            kind: "preview-after".to_string(),
-            path: "/tmp/preview.after.json".to_string(),
-            mime: Some("application/json".to_string()),
-            metadata_json: serde_json::json!({
-                "viewer": {
-                    "kind": "artifact-preview",
-                    "base": "https://viewer.example.test/",
-                    "query": {
-                        "parameter": "artifact-url",
-                        "value": { "source": "public-artifact-url", "path": "preview.after.json" },
-                        "encoding": "url"
-                    },
-                    "replay": { "status": "partial", "limitations": [] }
-                }
-            }),
-            created_at: "2026-06-12T00:00:00Z".to_string(),
-            ..Default::default()
-        };
-
-        let links = viewer_links(&artifact, Some("https://artifacts.example.test/a b.json"));
+    fn derives_viewer_link_from_descriptor_metadata() {
+        let links = viewer_links(
+            &viewer_artifact(),
+            Some("https://artifacts.example.test/a b.json"),
+        );
 
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].kind, "artifact-preview");
@@ -586,47 +569,21 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_produces_public_artifact_viewer_metadata() {
-        let viewer = ArtifactViewerDescriptor::new(
-            "example-viewer-kind",
-            "https://viewer.example.test/",
-            "artifact-url",
-        )
-        .to_metadata(None);
-
-        assert_eq!(viewer["kind"], "example-viewer-kind");
-        assert_eq!(viewer["base"], "https://viewer.example.test/");
-        assert_eq!(viewer["query"]["parameter"], "artifact-url");
-        assert_eq!(viewer["query"]["value"]["source"], "public-artifact-url");
-    }
-
-    #[test]
     fn validated_viewer_links_requires_reachable_public_url() {
-        let public_url = serve_once(404);
-        let artifact = viewer_artifact();
+        for (status, expected_links, expected_error) in [
+            (404, 0, Some("public artifact URL returned HTTP 404")),
+            (200, 1, None),
+        ] {
+            let public_url = serve_once(status);
 
-        let (links, validation) = validated_viewer_links(&artifact, &public_url);
+            let (links, validation) = validated_viewer_links(&viewer_artifact(), &public_url);
 
-        assert!(links.is_empty());
-        let validation = validation.expect("validation result");
-        assert!(!validation.reachable);
-        assert_eq!(validation.status_code, Some(404));
-        assert_eq!(
-            validation.error.as_deref(),
-            Some("public artifact URL returned HTTP 404")
-        );
-    }
-
-    #[test]
-    fn validated_viewer_links_emits_links_for_reachable_public_url() {
-        let public_url = serve_once(200);
-        let artifact = viewer_artifact();
-
-        let (links, validation) = validated_viewer_links(&artifact, &public_url);
-
-        assert_eq!(links.len(), 1);
-        assert!(links[0].url.contains("artifact-url="));
-        assert!(validation.expect("validation result").reachable);
+            assert_eq!(links.len(), expected_links, "HTTP {status}");
+            let validation = validation.expect("validation result");
+            assert_eq!(validation.reachable, expected_error.is_none());
+            assert_eq!(validation.status_code, Some(status));
+            assert_eq!(validation.error.as_deref(), expected_error);
+        }
     }
 
     #[test]
@@ -673,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_origin_uses_typed_config_before_legacy_environment() {
+    fn controller_origin_uses_typed_config_before_environment() {
         crate::test_support::with_isolated_home(|_| {
             let _env = EnvGuard::set(PUBLIC_ARTIFACT_BASE_URL_ENV, "https://runner.example.test");
             let mut config = crate::defaults::HomeboyConfig::default();
@@ -743,15 +700,12 @@ mod tests {
             path: "/tmp/preview.after.json".to_string(),
             mime: Some("application/json".to_string()),
             metadata_json: serde_json::json!({
-                "viewer": {
-                    "kind": "artifact-preview",
-                    "base": "https://viewer.example.test/",
-                    "query": {
-                        "parameter": "artifact-url",
-                        "value": { "source": "public-artifact-url" },
-                        "encoding": "url"
-                    }
-                }
+                "viewer": ArtifactViewerDescriptor::new(
+                    "artifact-preview",
+                    "https://viewer.example.test/",
+                    "artifact-url",
+                )
+                .to_metadata(None)
             }),
             created_at: "2026-06-12T00:00:00Z".to_string(),
             ..Default::default()
@@ -815,38 +769,29 @@ mod tests {
     }
 
     #[test]
-    fn required_missing_retained_artifact_fails_availability() {
-        let artifact = ArtifactRecord {
+    fn missing_or_checksum_mismatched_retained_artifact_fails_availability() {
+        let missing = ArtifactRecord {
             artifact_type: "file".to_string(),
             path: "/tmp/homeboy-missing-retained-artifact".to_string(),
             sha256: Some("abc".to_string()),
             ..viewer_artifact()
         };
-
-        let availability =
-            classify_retained_artifact_availability(&artifact).expect("classify availability");
-        match availability {
+        match classify_retained_artifact_availability(&missing).expect("classify availability") {
             RetainedArtifactAvailability::Missing { reason } => {
                 assert!(reason.contains("missing"));
             }
             other => panic!("missing required evidence must fail: {other:?}"),
         }
-    }
 
-    #[test]
-    fn checksum_mismatched_retained_artifact_fails_availability() {
         let source = tempfile::NamedTempFile::new().expect("retained artifact");
         std::fs::write(source.path(), b"altered bytes").expect("write retained bytes");
-        let artifact = ArtifactRecord {
+        let altered = ArtifactRecord {
             artifact_type: "file".to_string(),
             path: source.path().display().to_string(),
             sha256: Some("0".repeat(64)),
             ..viewer_artifact()
         };
-
-        let availability =
-            classify_retained_artifact_availability(&artifact).expect("classify availability");
-        match availability {
+        match classify_retained_artifact_availability(&altered).expect("classify availability") {
             RetainedArtifactAvailability::ChecksumMismatch { expected, actual } => {
                 assert_eq!(expected, "0".repeat(64));
                 assert_ne!(actual, expected);

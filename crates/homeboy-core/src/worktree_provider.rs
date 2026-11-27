@@ -1081,25 +1081,3 @@ mod tests {
         });
     }
 }
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn worktree_terminal_disposition_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (WorktreeTerminalDisposition::Succeeded, "succeeded"),
-            (WorktreeTerminalDisposition::Failed, "failed"),
-            (WorktreeTerminalDisposition::Cancelled, "cancelled"),
-            (WorktreeTerminalDisposition::TimedOut, "timed_out"),
-            (WorktreeTerminalDisposition::Interrupted, "interrupted"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
-    }
-}

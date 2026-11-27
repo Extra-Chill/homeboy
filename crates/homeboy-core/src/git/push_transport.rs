@@ -437,99 +437,78 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn classifies_agent_refusal_with_its_trailing_permission_denied() {
-        assert_eq!(
-            classify_git_push_failure(
-                "sign_and_send_pubkey: signing failed for ECDSA \"~/.ssh/example.pub\" from agent: agent refused operation\ngit@git.example.test: Permission denied (publickey).\nfatal: Could not read from remote repository."
+    fn classifies_push_failures_from_stderr() {
+        use GitPushTransportClass::*;
+        for (stderr, class) in [
+            (
+                "sign_and_send_pubkey: signing failed for ECDSA \"~/.ssh/example.pub\" from agent: agent refused operation\ngit@git.example.test: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+                SshAgentRefused,
             ),
-            GitPushTransportClass::SshAgentRefused
-        );
-        assert_eq!(
-            classify_git_push_failure("sign_and_send_pubkey: signing failed"),
-            GitPushTransportClass::SshAgentRefused
-        );
-    }
-
-    #[test]
-    fn classifies_unavailable_agent_sockets() {
-        for stderr in [
-            "ssh_add: could not open connection to agent",
-            "Could not open a connection to your authentication agent.",
-            "error connecting to agent",
-        ] {
-            assert_eq!(
-                classify_git_push_failure(stderr),
-                GitPushTransportClass::SshAgentUnavailable,
-                "stderr: {stderr}"
-            );
-        }
-    }
-
-    #[test]
-    fn classifies_rejected_credentials() {
-        for stderr in [
-            "git@git.example.test: Permission denied (publickey).\nfatal: Could not read from remote repository.",
-            "fatal: Authentication failed for 'https://git.example.test/acme/repo.git'",
-            "fatal: unable to access 'https://git.example.test/acme/repo.git/': The requested URL returned error: 401",
-            "remote: HTTP Basic: Access denied",
-        ] {
-            assert_eq!(
-                classify_git_push_failure(stderr),
-                GitPushTransportClass::AuthRejected,
-                "stderr: {stderr}"
-            );
-        }
-    }
-
-    #[test]
-    fn classifies_unreachable_transport() {
-        for stderr in [
-            "fatal: unable to access 'https://git.example.test/acme/repo.git/': Could not resolve host: git.example.test",
-            "ssh: connect to host git.example.test port 22: Connection refused",
-            "Failed to connect to 127.0.0.1 port 8080: Connection timed out",
-            "fatal: unable to access 'https://git.example.test/': Empty reply from server; proxy error",
-            "Host key verification failed.",
+            ("sign_and_send_pubkey: signing failed", SshAgentRefused),
+            ("ssh_add: could not open connection to agent", SshAgentUnavailable),
+            (
+                "Could not open a connection to your authentication agent.",
+                SshAgentUnavailable,
+            ),
+            ("error connecting to agent", SshAgentUnavailable),
+            (
+                "git@git.example.test: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+                AuthRejected,
+            ),
+            (
+                "fatal: Authentication failed for 'https://git.example.test/acme/repo.git'",
+                AuthRejected,
+            ),
+            (
+                "fatal: unable to access 'https://git.example.test/acme/repo.git/': The requested URL returned error: 401",
+                AuthRejected,
+            ),
+            ("remote: HTTP Basic: Access denied", AuthRejected),
+            (
+                "fatal: unable to access 'https://git.example.test/acme/repo.git/': Could not resolve host: git.example.test",
+                TransportUnreachable,
+            ),
+            (
+                "ssh: connect to host git.example.test port 22: Connection refused",
+                TransportUnreachable,
+            ),
+            (
+                "Failed to connect to 127.0.0.1 port 8080: Connection timed out",
+                TransportUnreachable,
+            ),
+            (
+                "fatal: unable to access 'https://git.example.test/': Empty reply from server; proxy error",
+                TransportUnreachable,
+            ),
+            ("Host key verification failed.", TransportUnreachable),
             // The bounded runner's synthesized deadline message.
-            "git push timed out after 300s; terminated child process group.",
+            (
+                "git push timed out after 300s; terminated child process group.",
+                TransportUnreachable,
+            ),
+            // Commit-signature failures are not push transport failures.
+            (
+                "error: gpg failed to sign the data\nfatal: failed to write commit object",
+                Other,
+            ),
+            ("gpg: signing failed: No secret key", Other),
+            ("error: ssh signing failed: agent refused operation", Other),
+            // A hostname is not evidence: invalid refs and hook rejections stay
+            // non-transport even when the remote is named like a proxy.
+            (
+                "fatal: couldn't find remote ref refs/heads/nope on proxy.example.test",
+                Other,
+            ),
+            (
+                " ! [remote rejected] HEAD -> feature (pre-receive hook declined)",
+                Other,
+            ),
+            (
+                "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.",
+                Other,
+            ),
         ] {
-            assert_eq!(
-                classify_git_push_failure(stderr),
-                GitPushTransportClass::TransportUnreachable,
-                "stderr: {stderr}"
-            );
-        }
-    }
-
-    #[test]
-    fn commit_signature_failures_are_not_push_transport() {
-        for stderr in [
-            "error: gpg failed to sign the data\nfatal: failed to write commit object",
-            "gpg: signing failed: No secret key",
-            "error: ssh signing failed: agent refused operation",
-        ] {
-            assert_eq!(
-                classify_git_push_failure(stderr),
-                GitPushTransportClass::Other,
-                "stderr: {stderr}"
-            );
-        }
-    }
-
-    #[test]
-    fn unrelated_failures_stay_other() {
-        // Parity with promotion's preflight: a hostname is not evidence, and
-        // a genuinely invalid ref must stay a non-transport failure even when
-        // the remote is named like a proxy.
-        for stderr in [
-            "fatal: couldn't find remote ref refs/heads/nope on proxy.example.test",
-            " ! [remote rejected] HEAD -> feature (pre-receive hook declined)",
-            "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.",
-        ] {
-            assert_eq!(
-                classify_git_push_failure(stderr),
-                GitPushTransportClass::Other,
-                "stderr: {stderr}"
-            );
+            assert_eq!(classify_git_push_failure(stderr), class, "stderr: {stderr}");
         }
     }
 

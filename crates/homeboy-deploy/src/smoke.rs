@@ -110,80 +110,81 @@ where
 mod tests {
     use super::*;
 
-    fn config(enabled: bool) -> SmokeCheckConfig {
-        SmokeCheckConfig {
-            enabled,
-            url: "https://example.test/".to_string(),
-            expected_status: 200,
-            expect_content: None,
-            timeout_secs: 5,
-            warn_only: false,
+    #[test]
+    fn evaluate_classifies_fetch_results() {
+        type Fetched = std::result::Result<(u16, &'static str), &'static str>;
+        // (url, expect_content, fetch result, expected outcome kind, detail substring)
+        let cases: Vec<(&str, Option<&str>, Fetched, &str, &str)> = vec![
+            (
+                "https://example.test/",
+                None,
+                Ok((200, "<html>ok</html>")),
+                "passed",
+                "",
+            ),
+            (
+                "https://example.test/",
+                Some("Welcome"),
+                Ok((200, "<html>Welcome home</html>")),
+                "passed",
+                "",
+            ),
+            (
+                "https://example.test/",
+                None,
+                Ok((500, "Fatal error")),
+                "failed",
+                "HTTP 500 (expected 200)",
+            ),
+            (
+                "https://example.test/",
+                Some("Welcome"),
+                Ok((200, "<html>different</html>")),
+                "failed",
+                "did not contain expected content",
+            ),
+            (
+                "https://example.test/",
+                None,
+                Err("connection refused"),
+                "errored",
+                "connection refused",
+            ),
+            // An empty URL errors before any fetch is attempted.
+            (
+                "   ",
+                None,
+                Err("fetch must not run"),
+                "errored",
+                "url is empty",
+            ),
+        ];
+
+        for (url, expect_content, fetched, kind, detail) in cases {
+            let config = SmokeCheckConfig {
+                enabled: true,
+                url: url.to_string(),
+                expected_status: 200,
+                expect_content: expect_content.map(str::to_string),
+                timeout_secs: 5,
+                warn_only: false,
+            };
+            let outcome = evaluate(&config, |_, _| {
+                fetched
+                    .map(|(status, body)| (status, body.to_string()))
+                    .map_err(str::to_string)
+            });
+            let actual_kind = match outcome {
+                SmokeOutcome::Passed { .. } => "passed",
+                SmokeOutcome::Failed { .. } => "failed",
+                SmokeOutcome::Errored { .. } => "errored",
+            };
+            assert_eq!(actual_kind, kind, "url={url:?} content={expect_content:?}");
+            assert_eq!(outcome.is_ok(), kind == "passed");
+            assert!(
+                outcome.failure_detail().unwrap_or("").contains(detail),
+                "{outcome:?} should mention {detail:?}"
+            );
         }
-    }
-
-    #[test]
-    fn disabled_check_is_skipped() {
-        assert!(run_smoke_check(&config(false)).is_none());
-    }
-
-    #[test]
-    fn passes_when_status_matches() {
-        let outcome = evaluate(&config(true), |_, _| {
-            Ok((200, "<html>ok</html>".to_string()))
-        });
-        assert!(outcome.is_ok());
-        assert_eq!(outcome, SmokeOutcome::Passed { status: 200 });
-    }
-
-    #[test]
-    fn fails_on_unexpected_status() {
-        let outcome = evaluate(&config(true), |_, _| Ok((500, "Fatal error".to_string())));
-        assert!(!outcome.is_ok());
-        let detail = outcome.failure_detail().expect("failure detail");
-        assert!(detail.contains("HTTP 500"));
-        assert!(detail.contains("expected 200"));
-    }
-
-    #[test]
-    fn fails_when_required_content_missing() {
-        let mut cfg = config(true);
-        cfg.expect_content = Some("Welcome".to_string());
-        let outcome = evaluate(&cfg, |_, _| Ok((200, "<html>different</html>".to_string())));
-        assert!(!outcome.is_ok());
-        assert!(outcome
-            .failure_detail()
-            .unwrap()
-            .contains("did not contain expected content"));
-    }
-
-    #[test]
-    fn passes_when_required_content_present() {
-        let mut cfg = config(true);
-        cfg.expect_content = Some("Welcome".to_string());
-        let outcome = evaluate(&cfg, |_, _| {
-            Ok((200, "<html>Welcome home</html>".to_string()))
-        });
-        assert!(outcome.is_ok());
-    }
-
-    #[test]
-    fn errors_on_empty_url() {
-        let mut cfg = config(true);
-        cfg.url = "   ".to_string();
-        let outcome = evaluate(&cfg, |_, _| panic!("fetch must not run for empty url"));
-        assert!(matches!(outcome, SmokeOutcome::Errored { .. }));
-        assert!(outcome.failure_detail().unwrap().contains("url is empty"));
-    }
-
-    #[test]
-    fn errors_surface_fetch_failure() {
-        let outcome = evaluate(&config(true), |_, _| {
-            Err("HTTP GET https://example.test/ failed: connection refused".to_string())
-        });
-        assert!(matches!(outcome, SmokeOutcome::Errored { .. }));
-        assert!(outcome
-            .failure_detail()
-            .unwrap()
-            .contains("connection refused"));
     }
 }

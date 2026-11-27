@@ -167,10 +167,9 @@ fn reconcile_terminal_runner_exec_runs_with_owner(
     // Reconciliation runs under the caller's child lock and writes the same
     // runs the caller already opened, so it shares the caller's roots (#7505).
     let store = ObservationStore::open_initialized_in_roots(roots)?;
-    // The checkpoint, promotion, and artifact-ref writes below used to each open
-    // their own ambient store, so a pass that read through these injected roots
-    // wrote through whatever the environment happened to name. Reads and writes
-    // in one reconciliation are the same rows, so they share one store (#7505).
+    // The checkpoint, promotion, and artifact-ref writes below go through this
+    // same store: reads and writes in one reconciliation are the same rows, so
+    // they must address the injected roots rather than an ambient store (#7505).
     let lifecycle_store =
         homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
     let mut reconciled = 0;

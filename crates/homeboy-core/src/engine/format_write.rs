@@ -185,41 +185,19 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn skipped_when_no_files() {
+    fn skipped_without_files_or_matching_formatter() {
         let dir = TempDir::new().expect("temp dir");
-        let result = format_after_write(
-            &Component::new(
-                "fixture".into(),
-                dir.path().to_string_lossy().into(),
-                "fixture".into(),
-                None,
-            ),
-            dir.path(),
-            &[],
-        )
-        .unwrap();
-        assert!(result.success);
-        assert!(result.command.is_none());
-        assert_eq!(result.files_in_scope, 0);
-    }
-
-    #[test]
-    fn skipped_when_no_formatter_found() {
-        let dir = TempDir::new().expect("temp dir");
-        let files = vec![dir.path().join("unknown.xyz")];
-        let result = format_after_write(
-            &Component::new(
-                "fixture".into(),
-                dir.path().to_string_lossy().into(),
-                "fixture".into(),
-                None,
-            ),
-            dir.path(),
-            &files,
-        )
-        .unwrap();
-        assert!(result.success);
-        assert!(result.command.is_none());
+        let component = Component::new(
+            "fixture".into(),
+            dir.path().to_string_lossy().into(),
+            "fixture".into(),
+            None,
+        );
+        for files in [vec![], vec![dir.path().join("unknown.xyz")]] {
+            let result = format_after_write(&component, dir.path(), &files).unwrap();
+            assert!(result.success);
+            assert!(result.command.is_none());
+        }
     }
 
     #[test]

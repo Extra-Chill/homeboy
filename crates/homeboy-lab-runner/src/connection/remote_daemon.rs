@@ -370,20 +370,21 @@ fn contain_tunnel_child(child: &mut std::process::Child) {
     }
 }
 
-pub(super) fn open_loopback_tunnel(
-    server: &Server,
-    local_port: u16,
-    remote_host: &str,
-    remote_port: u16,
-    loopback_transport: bool,
-) -> SshTunnelOutput {
-    open_loopback_tunnel_with_lifetime(
+/// SSH option args shared by every controller-owned runner tunnel. Tunnels are
+/// long-lived `-N` sessions, so ServerAlive probes make SSH notice a dead peer
+/// instead of holding a half-open forward forever.
+fn tunnel_ssh_option_args(server: &Server) -> Vec<String> {
+    homeboy_core::server::ssh_args::server_option_args(
         server,
-        local_port,
-        remote_host,
-        remote_port,
-        loopback_transport,
-        false,
+        homeboy_core::server::ssh_args::SshArgOptions {
+            batch_mode: true,
+            connect_timeout: true,
+            exit_on_forward_failure: true,
+            disable_multiplexing: true,
+            keepalive: true,
+            port_flag: Some(homeboy_core::server::ssh_args::SshPortFlag::Lowercase),
+            ..homeboy_core::server::ssh_args::SshArgOptions::default()
+        },
     )
 }
 
@@ -405,17 +406,7 @@ pub(super) fn open_loopback_tunnel_with_lifetime(
         };
     }
 
-    let mut args = homeboy_core::server::ssh_args::server_option_args(
-        server,
-        homeboy_core::server::ssh_args::SshArgOptions {
-            batch_mode: true,
-            connect_timeout: true,
-            exit_on_forward_failure: true,
-            disable_multiplexing: true,
-            port_flag: Some(homeboy_core::server::ssh_args::SshPortFlag::Lowercase),
-            ..homeboy_core::server::ssh_args::SshArgOptions::default()
-        },
-    );
+    let mut args = tunnel_ssh_option_args(server);
     args.extend([
         "-N".to_string(),
         "-L".to_string(),
@@ -486,17 +477,7 @@ pub(super) fn open_reverse_proxy_tunnel(
     proxy_host: &str,
     proxy_port: u16,
 ) -> SshTunnelOutput {
-    let mut args = homeboy_core::server::ssh_args::server_option_args(
-        server,
-        homeboy_core::server::ssh_args::SshArgOptions {
-            batch_mode: true,
-            connect_timeout: true,
-            exit_on_forward_failure: true,
-            disable_multiplexing: true,
-            port_flag: Some(homeboy_core::server::ssh_args::SshPortFlag::Lowercase),
-            ..homeboy_core::server::ssh_args::SshArgOptions::default()
-        },
-    );
+    let mut args = tunnel_ssh_option_args(server);
     args.extend([
         "-v".to_string(),
         "-N".to_string(),
@@ -598,8 +579,24 @@ pub(super) fn allocated_remote_port(line: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod proxy_forward_tests {
-    use super::{allocated_remote_port, contain_tunnel_child, spawn_tunnel_process};
+    use super::{
+        allocated_remote_port, contain_tunnel_child, spawn_tunnel_process, tunnel_ssh_option_args,
+    };
     use std::time::Duration;
+
+    #[test]
+    fn tunnel_args_enable_server_alive_probes() {
+        let server: homeboy_core::server::Server =
+            serde_json::from_str(r#"{"host":"lab.example","user":"runner"}"#).unwrap();
+        let args = tunnel_ssh_option_args(&server);
+        for option in ["ServerAliveInterval=15", "ServerAliveCountMax=3"] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-o" && pair[1] == option),
+                "missing -o {option} in {args:?}"
+            );
+        }
+    }
 
     #[test]
     fn reads_the_port_allocated_by_openssh() {

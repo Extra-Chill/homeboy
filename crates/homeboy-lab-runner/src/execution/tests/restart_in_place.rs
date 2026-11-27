@@ -1,4 +1,4 @@
-//! End-to-end acceptance for refresh's in-place daemon restart (#16680).
+//! End-to-end acceptance for refresh's in-place daemon restart.
 //!
 //! A refresh whose active jobs are all re-adoptable restarts the connected
 //! daemon on its own state directory instead of starting a replacement daemon.
@@ -695,7 +695,7 @@ fn service_refresh_repoints_and_restarts_the_unit_in_place_and_keeps_its_re_adop
             .expect("unit runs the stable binary link");
         assert_eq!(std::fs::read_link(link).expect("binary link"), promoted);
         let systemctl = std::fs::read_to_string(&fixture.systemctl_log).expect("systemctl log");
-        // The unit's daemon stops and starts around the job adoption (#18543);
+        // The unit's daemon stops and starts around the job adoption;
         // `KillMode=process` and the separate job tree unit keep the job.
         let lines = systemctl.lines().collect::<Vec<_>>();
         let position = |line: String| lines.iter().position(|logged| *logged == line);

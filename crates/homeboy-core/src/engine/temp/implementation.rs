@@ -247,7 +247,7 @@ struct RuntimeRunOwner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     /// The generic Homeboy subsystem that created this managed storage.
-    /// Absent values are legacy entries and retain their existing treatment.
+    /// Absent on entries that record no producer; those keep the generic treatment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     producer: Option<String>,
     /// Which root this owner was allocated under, when it was not the default
@@ -988,7 +988,6 @@ pub struct RuntimeTempCleanupRow {
 /// Present an already-planned runtime-temp cleanup without changing its totals
 /// or mutation set. Aggregate cleanup uses this agent-facing view; specialist
 /// commands retain their established lossless output unless they opt in.
-#[allow(dead_code)]
 pub fn present_runtime_temp_cleanup(
     output: &mut RuntimeTempCleanupOutput,
     full: bool,
@@ -2638,17 +2637,6 @@ mod tests {
             let terminal = cleanup_runtime_tmp_bounded(options).expect("terminal cleanup");
             assert_eq!(terminal.removed_count, 1);
             assert!(!path.exists());
-        });
-    }
-
-    #[test]
-    fn runtime_temp_dir_creates_dir() {
-        with_isolated_home(|_| {
-            let result = runtime_temp_dir("test-dir");
-            assert!(result.is_ok());
-            if let Ok(path) = result {
-                assert!(path.is_dir());
-            }
         });
     }
 

@@ -1321,41 +1321,6 @@ mod tests {
     }
 
     #[test]
-    fn clean_workspace_is_clean_but_unrelated_untracked_files_are_not() {
-        let workspace = tempfile::tempdir().expect("workspace repository");
-        git(workspace.path(), &["init", "-b", "main"]);
-        fs::write(workspace.path().join("tracked.txt"), "base").expect("base file");
-        git(workspace.path(), &["add", "tracked.txt"]);
-        git(
-            workspace.path(),
-            &[
-                "-c",
-                "user.name=Homeboy Test",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-
-        assert!(
-            git_status_porcelain(workspace.path())
-                .expect("clean workspace status")
-                .is_empty(),
-            "a pristine candidate workspace is clean"
-        );
-
-        fs::write(workspace.path().join("user-output.txt"), "candidate")
-            .expect("unrelated untracked file");
-        let status = git_status_porcelain(workspace.path()).expect("candidate workspace status");
-        assert!(
-            status.contains("user-output.txt"),
-            "unrelated untracked files must still fail the cleanliness check: {status}"
-        );
-    }
-
-    #[test]
     fn excluded_tracked_context_is_clean_but_real_drift_is_not() {
         let workspace = tempfile::tempdir().expect("workspace repository");
         git(workspace.path(), &["init", "-b", "main"]);

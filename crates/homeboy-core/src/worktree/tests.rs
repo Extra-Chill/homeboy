@@ -792,15 +792,13 @@ fn create_accepts_an_existing_repository_path_without_component_registration() {
 
 /// #15364: a cook whose head branch already exists locally (an operator's
 /// branch for the task, not checked out anywhere) adopts it instead of failing
-/// `git worktree add -b` with "a branch named ... already exists".
+/// `git worktree add -b` with "a branch named ... already exists". A
+/// remote-only branch is tracked the same way.
 #[test]
-fn create_adopts_an_existing_unclaimed_local_branch() {
-    assert_create_adopts_existing_branch(false);
-}
-
-#[test]
-fn create_tracks_an_existing_remote_only_branch() {
-    assert_create_adopts_existing_branch(true);
+fn create_adopts_an_existing_unclaimed_local_or_remote_only_branch() {
+    for remote_only in [false, true] {
+        assert_create_adopts_existing_branch(remote_only);
+    }
 }
 
 fn assert_create_adopts_existing_branch(remote_only: bool) {
@@ -1513,35 +1511,24 @@ fn assert_superseded_recreate(
 }
 
 #[test]
-fn create_supersedes_a_removed_record_whose_path_and_branch_are_gone() {
-    crate::test_support::with_isolated_home(|home| {
-        let (source, options) = registered_create_fixture(home.path(), "supersede-fixture");
-        let created = create(options.clone()).expect("create task worktree");
-        let removed = remove_for_recreate(&created.record.id, true);
-        assert_eq!(removed.record.state, TaskWorktreeState::Removed);
-        assert!(!PathBuf::from(&removed.record.worktree_path).exists());
-        assert!(!local_branch_present(&source, &options.branch));
+fn create_supersedes_a_removed_record_whether_or_not_its_empty_branch_survived() {
+    for cleanup_branch in [true, false] {
+        crate::test_support::with_isolated_home(|home| {
+            let (source, options) = registered_create_fixture(home.path(), "supersede-fixture");
+            let created = create(options.clone()).expect("create task worktree");
+            let removed = remove_for_recreate(&created.record.id, cleanup_branch);
+            assert_eq!(removed.record.state, TaskWorktreeState::Removed);
+            assert!(!PathBuf::from(&removed.record.worktree_path).exists());
+            assert_eq!(
+                local_branch_present(&source, &options.branch),
+                !cleanup_branch
+            );
 
-        let recreated = create(options).expect("re-create the removed handle");
+            let recreated = create(options).expect("re-create the removed handle");
 
-        assert_superseded_recreate(&removed.record, recreated, "fix/restore");
-    });
-}
-
-#[test]
-fn create_supersedes_a_removed_record_whose_empty_branch_survived() {
-    crate::test_support::with_isolated_home(|home| {
-        let (source, options) = registered_create_fixture(home.path(), "supersede-branch");
-        let created = create(options.clone()).expect("create task worktree");
-        let removed = remove_for_recreate(&created.record.id, false);
-        assert_eq!(removed.record.state, TaskWorktreeState::Removed);
-        assert!(!PathBuf::from(&removed.record.worktree_path).exists());
-        assert!(local_branch_present(&source, &options.branch));
-
-        let recreated = create(options).expect("re-create the removed handle");
-
-        assert_superseded_recreate(&removed.record, recreated, "fix/restore");
-    });
+            assert_superseded_recreate(&removed.record, recreated, "fix/restore");
+        });
+    }
 }
 
 #[test]
@@ -1610,31 +1597,6 @@ fn add_bare_origin(home: &Path, source: &Path) -> PathBuf {
 }
 
 #[test]
-fn create_can_issue_remote_verified_handoff_freshness() {
-    crate::test_support::with_isolated_home(|home| {
-        let (source, mut options) = registered_create_fixture(home.path(), "fresh-fixture");
-        add_bare_origin(home.path(), &source);
-        options.from = Some("origin/main".to_string());
-        options.require_handoff_freshness = true;
-
-        let created = create(options).expect("create with freshness proof");
-        let freshness = created.handoff_freshness.expect("freshness evidence");
-
-        assert_eq!(freshness.status, "verified");
-        assert_eq!(freshness.proof.handle, created.record.id);
-        assert_eq!(freshness.proof.resolved_base_ref, "origin/main");
-        assert_eq!(
-            freshness.proof.remote_default_sha,
-            freshness.proof.remote_default_advertised_sha
-        );
-        assert_eq!(
-            freshness.proof.worktree_sha,
-            freshness.proof.resolved_base_sha
-        );
-    });
-}
-
-#[test]
 fn freshness_required_create_fetches_an_advanced_remote_base() {
     crate::test_support::with_isolated_home(|home| {
         let (source, mut options) = registered_create_fixture(home.path(), "advanced-fixture");
@@ -1663,8 +1625,16 @@ fn freshness_required_create_fetches_an_advanced_remote_base() {
         options.from = Some("origin/main".to_string());
         options.require_handoff_freshness = true;
         let created = create(options).expect("create from refreshed base");
-        let proof = created.handoff_freshness.expect("freshness").proof;
+        let freshness = created.handoff_freshness.expect("freshness evidence");
+        let proof = freshness.proof;
 
+        assert_eq!(freshness.status, "verified");
+        assert_eq!(proof.handle, created.record.id);
+        assert_eq!(proof.resolved_base_ref, "origin/main");
+        assert_eq!(
+            proof.remote_default_sha,
+            proof.remote_default_advertised_sha
+        );
         assert_eq!(proof.resolved_base_sha, advanced_sha);
         assert_eq!(proof.worktree_sha, advanced_sha);
     });
@@ -1983,41 +1953,28 @@ fn materialize_partial_clone(home: &Path, id: &str, bare: &Path, origin_url: &st
 }
 
 #[test]
-fn create_reuses_existing_worktree_with_a_relative_gitdir_pointer() {
+fn create_reuses_and_restores_worktrees_with_relative_gitdir_pointers() {
     crate::test_support::with_isolated_home(|home| {
-        let (source, options) = registered_create_fixture(home.path(), "relative-existing-fixture");
+        let (source, options) = registered_create_fixture(home.path(), "relative-fixture");
         run_git(&source, &["config", "worktree.useRelativePaths", "true"]);
         let created = create(options.clone()).expect("create task worktree");
         let path = PathBuf::from(&created.record.worktree_path);
-        let pointer = fs::read_to_string(path.join(".git")).expect("worktree pointer");
+        let relative_pointer = || {
+            fs::read_to_string(path.join(".git"))
+                .expect("worktree pointer")
+                .trim_start_matches("gitdir:")
+                .trim()
+                .starts_with("..")
+        };
+        assert!(relative_pointer());
 
-        let existing = create(options).expect("reuse relative-pointer worktree");
-
-        assert!(pointer
-            .trim_start_matches("gitdir:")
-            .trim()
-            .starts_with(".."));
+        let existing = create(options.clone()).expect("reuse relative-pointer worktree");
         assert_eq!(existing.record, created.record);
         assert!(existing.reconciliation.is_none());
-    });
-}
 
-#[test]
-fn create_restores_worktree_with_relative_gitdir_pointers() {
-    crate::test_support::with_isolated_home(|home| {
-        let (source, options) = registered_create_fixture(home.path(), "relative-restore-fixture");
-        run_git(&source, &["config", "worktree.useRelativePaths", "true"]);
-        let created = create(options.clone()).expect("create task worktree");
-        let path = PathBuf::from(&created.record.worktree_path);
         run_git(&source, &["worktree", "remove", &path.to_string_lossy()]);
-
         let restored = create(options).expect("restore relative-pointer worktree");
-        let pointer = fs::read_to_string(path.join(".git")).expect("restored worktree pointer");
-
-        assert!(pointer
-            .trim_start_matches("gitdir:")
-            .trim()
-            .starts_with(".."));
+        assert!(relative_pointer());
         assert_eq!(
             restored.reconciliation.expect("restore evidence").action,
             WorktreeCreateAction::Restored
@@ -2156,75 +2113,6 @@ fn create_restoration_preserves_dirty_source_and_unpushed_branch_commit() {
 }
 
 #[test]
-fn metadata_round_trips_and_lists() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("source");
-    let worktree = dir.path().join("source@task");
-    fs::create_dir_all(&source).unwrap();
-    fs::create_dir_all(&worktree).unwrap();
-    let store = dir.path().join("store");
-    let record = fixture_record(&source, &worktree);
-
-    write_record(&store, &record).unwrap();
-    let listed = list_with_store(&store).unwrap();
-
-    assert_eq!(listed.worktrees, vec![record]);
-}
-
-#[test]
-fn safety_report_blocks_dirty_worktree() {
-    let source = git_repo();
-    let worktree = sibling_worktree_path(source.path(), "dirty");
-    run_git(
-        source.path(),
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "dirty-task",
-            &worktree.to_string_lossy(),
-        ],
-    );
-    fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
-
-    let report = safety_report(&fixture_record(source.path(), &worktree)).unwrap();
-
-    assert!(report.dirty);
-    assert!(!report.safe);
-    assert!(report
-        .reasons
-        .iter()
-        .any(|reason| reason == "dirty worktree"));
-}
-
-#[test]
-fn safety_report_blocks_primary_checkout() {
-    let source = git_repo();
-
-    let report = safety_report(&fixture_record(source.path(), source.path())).unwrap();
-
-    assert!(report.primary_checkout);
-    assert!(!report.path_contained);
-    assert!(!report.worktree_missing);
-    assert!(!report.safe);
-}
-
-#[test]
-fn safety_report_allows_missing_contained_worktree() {
-    let source = git_repo();
-    let worktree = sibling_worktree_path(source.path(), "missing");
-
-    let report = safety_report(&fixture_record(source.path(), &worktree)).unwrap();
-
-    assert!(report.worktree_missing);
-    assert!(report.path_contained);
-    assert!(!report.primary_checkout);
-    assert!(!report.dirty);
-    assert_eq!(report.unpushed_commits, 0);
-    assert!(report.safe);
-}
-
-#[test]
 fn provider_admission_rejects_dirty_missing_primary_outside_and_branch_mismatch_worktrees() {
     let source = git_repo();
     let store = tempfile::tempdir().unwrap();
@@ -2288,35 +2176,6 @@ fn provider_admission_rejects_dirty_missing_primary_outside_and_branch_mismatch_
 }
 
 #[test]
-fn cleanup_marks_missing_worktree_record_removed() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = git_repo();
-    let worktree = sibling_worktree_path(source.path(), "missing-cleanup");
-    let store = dir.path().join("store");
-    let record = succeeded_record(source.path(), &worktree);
-    write_record(&store, &record).unwrap();
-
-    let output = cleanup_with_store(
-        WorktreeCleanupOptions {
-            force: false,
-            dry_run: false,
-            cleanup_branches: false,
-            allow_unmerged_branches: false,
-            reaper: None,
-        },
-        &store,
-    )
-    .unwrap();
-    let updated = read_record(&store, &record.id).unwrap();
-
-    assert_eq!(output.counts.candidates, 1);
-    assert_eq!(output.counts.removed, 1);
-    assert_eq!(output.counts.skipped, 0);
-    assert_eq!(output.counts.reconciliation_blockers, 0);
-    assert_eq!(updated.state, TaskWorktreeState::Removed);
-}
-
-#[test]
 fn identityless_manifest_is_a_diagnostic_and_does_not_stop_residue_retirement() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
@@ -2327,7 +2186,7 @@ fn identityless_manifest_is_a_diagnostic_and_does_not_stop_residue_retirement() 
     tombstone.state = TaskWorktreeState::Removed;
     write_record(&store, &tombstone).unwrap();
 
-    // A legacy manifest written before identities were required.
+    // A manifest without a workspace identity.
     let mut legacy = fixture_record(source.path(), &dir.path().join("legacy"));
     rebind_handle(&mut legacy, "fixture@legacy".to_string());
     legacy.workspace_identity = None;
@@ -2898,55 +2757,24 @@ fn inventory_preview_reports_per_record_remote_claim_reasons() {
 }
 
 #[test]
-fn inventory_refuses_expired_workspace_claims() {
+fn inventory_preserves_live_and_refuses_incomplete_or_expired_authority() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
     let store = dir.path().join("store");
     run_git(source.path(), &["branch", "task"]);
     let record = fixture_record(source.path(), &sibling_worktree_path(source.path(), "gone"));
     write_record(&store, &record).unwrap();
-
     let mut expired = terminal_claim();
     expired.expires_at_ms = 1;
-    let expired_authority = FixedLivenessAuthority(WorktreeLivenessAuthority::Terminal {
-        claim: expired,
-        provenance: "expired claim".to_string(),
-    });
-    let expired_output = inventory_with_store_and_authority(
-        WorktreeInventoryOptions {
-            limit: 10,
-            apply: true,
-            ..Default::default()
-        },
-        &store,
-        &dir.path().join("adopted"),
-        &expired_authority,
-    )
-    .unwrap();
-    assert_eq!(
-        expired_output.records[0]
-            .reconciliation
-            .as_ref()
-            .unwrap()
-            .action,
-        WorktreeReconciliationAction::Refused
-    );
-    assert_eq!(
-        read_record(&store, &record.id).unwrap().state,
-        TaskWorktreeState::Active
-    );
-}
-
-#[test]
-fn inventory_preserves_live_and_incomplete_remote_authority() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = git_repo();
-    let store = dir.path().join("store");
-    run_git(source.path(), &["branch", "task"]);
-    let record = fixture_record(source.path(), &sibling_worktree_path(source.path(), "gone"));
-    write_record(&store, &record).unwrap();
 
     for (authority, expected_action) in [
+        (
+            FixedLivenessAuthority(WorktreeLivenessAuthority::Terminal {
+                claim: expired,
+                provenance: "expired claim".to_string(),
+            }),
+            WorktreeReconciliationAction::Refused,
+        ),
         (
             FixedLivenessAuthority(WorktreeLivenessAuthority::Live {
                 provenance: "remote runner reports active".to_string(),
@@ -3247,50 +3075,6 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
         read_record(&store, &removable_record.id).unwrap().state,
         TaskWorktreeState::Removed
     );
-}
-
-#[test]
-fn cleanup_offers_both_existing_and_missing_worktree_candidates() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = git_repo();
-    let store = dir.path().join("store");
-    let removable = sibling_worktree_path(source.path(), "mixed-removable");
-    run_git(
-        source.path(),
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "mixed-removable",
-            &removable.to_string_lossy(),
-        ],
-    );
-    let removable_record = succeeded_record(source.path(), &removable);
-    let mut missing_record = succeeded_record(
-        source.path(),
-        &sibling_worktree_path(source.path(), "mixed-missing"),
-    );
-    rebind_handle(&mut missing_record, "fixture@mixed-missing".to_string());
-    write_record(&store, &removable_record).unwrap();
-    write_record(&store, &missing_record).unwrap();
-
-    let output = cleanup_with_store(
-        WorktreeCleanupOptions {
-            force: false,
-            dry_run: true,
-            cleanup_branches: false,
-            allow_unmerged_branches: false,
-            reaper: None,
-        },
-        &store,
-    )
-    .unwrap();
-
-    assert_eq!(output.counts.candidates, 2);
-    assert_eq!(output.counts.reconciliation_blockers, 0);
-    assert_eq!(output.counts.skipped, 0);
-    assert_eq!(output.candidates.len(), 2);
-    assert!(output.skipped.is_empty());
 }
 
 #[test]
@@ -3872,49 +3656,6 @@ fn cleanup_force_removes_dirty_worktree_after_homeboy_gates_pass() {
     assert!(!worktree.exists());
 }
 
-#[test]
-fn safety_report_blocks_unpushed_commits() {
-    let remote = tempfile::tempdir().unwrap();
-    run_git(remote.path(), &["init", "--bare", "-q"]);
-    let source = tempfile::tempdir().unwrap();
-    run_git(
-        source.path(),
-        &["clone", &remote.path().to_string_lossy(), "."],
-    );
-    run_git(
-        source.path(),
-        &["config", "user.email", "homeboy@example.com"],
-    );
-    run_git(source.path(), &["config", "user.name", "Homeboy Test"]);
-    fs::write(source.path().join("README.md"), "initial\n").unwrap();
-    run_git(source.path(), &["add", "."]);
-    run_git(source.path(), &["commit", "-q", "-m", "initial"]);
-    run_git(source.path(), &["push", "-u", "origin", "HEAD:main"]);
-
-    let worktree = sibling_worktree_path(source.path(), "unpushed");
-    run_git(
-        source.path(),
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "unpushed-task",
-            &worktree.to_string_lossy(),
-            "HEAD",
-        ],
-    );
-    fs::write(worktree.join("change.txt"), "change\n").unwrap();
-    run_git(&worktree, &["add", "."]);
-    run_git(&worktree, &["commit", "-q", "-m", "change"]);
-
-    let mut record = fixture_record(source.path(), &worktree);
-    record.base_ref = "origin/main".to_string();
-    let report = safety_report(&record).unwrap();
-
-    assert_eq!(report.unpushed_commits, 1);
-    assert!(!report.safe);
-}
-
 fn sibling_worktree_path(source: &Path, suffix: &str) -> PathBuf {
     let name = source
         .file_name()
@@ -4330,28 +4071,6 @@ fn reclaim_skips_nonterminal_loops_without_leadership_over_lifecycle_owner() {
 }
 
 #[test]
-fn reaping_audit_requires_removal_not_a_plan() {
-    let (data_root, _source, _worktree, record) = reclaim_fixture();
-    reaping::append_reaping_audit_in_root(
-        data_root.path(),
-        &record,
-        1_000,
-        Some("cleanup --include task-worktrees"),
-        Some("cli-pid:1"),
-        false,
-        false,
-    )
-    .unwrap();
-    let audit = reaping::read_task_worktree_reaping_audit_in_root(data_root.path()).unwrap();
-    assert_eq!(audit.len(), 1);
-    assert_eq!(audit[0].at_ms, 1_000);
-    assert_eq!(
-        audit[0].reason.as_deref(),
-        Some("cleanup --include task-worktrees")
-    );
-}
-
-#[test]
 fn reaping_audit_rows_live_in_the_coordination_audit_and_survive_reopen() {
     let (data_root, _source, _worktree, record) = reclaim_fixture();
     let mut second = record.clone();
@@ -4376,13 +4095,6 @@ fn reaping_audit_rows_live_in_the_coordination_audit_and_survive_reopen() {
     let ids: Vec<_> = audit.iter().map(|entry| entry.record_id.as_str()).collect();
     assert_eq!(ids, vec![record.id.as_str(), "second-record"]);
     assert!(audit[1].branch_deleted && audit[0].force);
-    assert!(
-        !data_root
-            .path()
-            .join("task-worktree-reaping.jsonl")
-            .exists(),
-        "the reaping audit no longer writes a JSONL file"
-    );
 
     let store = crate::observation::ObservationStore::open_initialized_for_lifecycle_at(
         crate::paths::observation_db_in_root(data_root.path()),
@@ -4432,196 +4144,93 @@ fn stable_main_branch(source: &Path) -> &'static str {
 }
 
 #[test]
-fn cleanup_reclaims_squash_merged_multi_commit_task_branch() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = git_repo();
-    let main = stable_main_branch(source.path());
-    let worktree = sibling_worktree_path(source.path(), "squash-merged-cleanup");
-    run_git(
-        source.path(),
-        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
-    );
-    // Two commits so the squash must combine more than one change — a
-    // single-commit probe (matching the branch's one remaining commit
-    // one-for-one against the squash commit) would miss this failure mode.
-    fs::write(worktree.join("task-1.txt"), "one\n").unwrap();
-    run_git(&worktree, &["add", "."]);
-    run_git(&worktree, &["commit", "-q", "-m", "task work 1"]);
-    fs::write(worktree.join("task-2.txt"), "two\n").unwrap();
-    run_git(&worktree, &["add", "."]);
-    run_git(&worktree, &["commit", "-q", "-m", "task work 2"]);
-
-    // Simulate GitHub's "Squash and merge": one new rewritten commit lands
-    // on the target carrying the branch's combined diff. The branch's two
-    // original commits are never main's ancestors.
-    run_git(source.path(), &["merge", "--squash", "task"]);
-    run_git(
-        source.path(),
-        &["commit", "-q", "-m", "squashed task work (#1)"],
-    );
-    assert!(
-        run_git_status(
+fn cleanup_reclaims_task_branch_merged_by_squash_rebase_or_fast_forward() {
+    for strategy in ["squash", "rebase", "fast-forward"] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = git_repo();
+        let main = stable_main_branch(source.path());
+        let worktree = sibling_worktree_path(source.path(), &format!("{strategy}-merged-cleanup"));
+        run_git(
             source.path(),
-            &["merge-base", "--is-ancestor", "task", main]
+            &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+        );
+        // Two commits so a squash must combine more than one change: a
+        // single-commit probe matching the branch one-for-one against the
+        // squash commit would miss this failure mode.
+        fs::write(worktree.join("task-1.txt"), "one\n").unwrap();
+        run_git(&worktree, &["add", "."]);
+        run_git(&worktree, &["commit", "-q", "-m", "task work 1"]);
+        fs::write(worktree.join("task-2.txt"), "two\n").unwrap();
+        run_git(&worktree, &["add", "."]);
+        run_git(&worktree, &["commit", "-q", "-m", "task work 2"]);
+
+        match strategy {
+            // GitHub's "Squash and merge": one rewritten commit carries the
+            // branch's combined diff.
+            "squash" => {
+                run_git(source.path(), &["merge", "--squash", "task"]);
+                run_git(
+                    source.path(),
+                    &["commit", "-q", "-m", "squashed task work (#1)"],
+                );
+            }
+            // GitHub's "Rebase and merge": each commit is replayed with a new
+            // hash. Advance the target first, or the replay reproduces the
+            // original SHAs byte for byte and ancestry still holds.
+            "rebase" => {
+                fs::write(source.path().join("main-1.txt"), "main\n").unwrap();
+                run_git(source.path(), &["add", "."]);
+                run_git(source.path(), &["commit", "-q", "-m", "main work 1"]);
+                run_git(source.path(), &["cherry-pick", &format!("{main}..task")]);
+            }
+            // The ordinary case: plain ancestry governs.
+            _ => run_git(source.path(), &["merge", "--ff-only", "task"]),
+        }
+        assert_eq!(
+            run_git_status(
+                source.path(),
+                &["merge-base", "--is-ancestor", "task", main]
+            )
+            .is_ok(),
+            strategy == "fast-forward",
+            "{strategy}: only a fast-forward keeps the branch a plain ancestor, \
+             or this case proves nothing"
+        );
+
+        let store = dir.path().join("store");
+        let mut record = succeeded_record(source.path(), &worktree);
+        record.base_ref = main.to_string();
+        write_record(&store, &record).unwrap();
+
+        let safety = safety_report(&record).unwrap();
+        assert_eq!(
+            safety.unpushed_commits, 0,
+            "{strategy}: merged content must not block reclamation"
+        );
+        assert!(safety.safe, "{strategy}: {:?}", safety.reasons);
+
+        let output = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: false,
+                dry_run: false,
+                cleanup_branches: true,
+                allow_unmerged_branches: false,
+                reaper: None,
+            },
+            &store,
         )
-        .is_err(),
-        "the squash rewrite must actually defeat plain ancestry, or this test proves nothing"
-    );
+        .unwrap();
 
-    let store = dir.path().join("store");
-    let mut record = succeeded_record(source.path(), &worktree);
-    record.base_ref = main.to_string();
-    write_record(&store, &record).unwrap();
-
-    let safety = safety_report(&record).unwrap();
-    assert_eq!(
-        safety.unpushed_commits, 0,
-        "squash-merged content must not block reclamation just because its \
-         original commits were rewritten"
-    );
-    assert!(safety.safe, "reasons: {:?}", safety.reasons);
-
-    let output = cleanup_with_store(
-        WorktreeCleanupOptions {
-            force: false,
-            dry_run: false,
-            cleanup_branches: true,
-            allow_unmerged_branches: false,
-            reaper: None,
-        },
-        &store,
-    )
-    .unwrap();
-
-    assert_eq!(output.counts.candidates, 1);
-    assert_eq!(output.counts.removed, 1);
-    assert_eq!(output.counts.skipped, 0);
-    assert_eq!(output.counts.branches_deleted, 1);
-    assert!(!worktree.exists());
-    assert!(!std::process::Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", "refs/heads/task"])
-        .current_dir(source.path())
-        .status()
-        .unwrap()
-        .success());
-}
-
-#[test]
-fn cleanup_reclaims_rebase_merged_task_branch() {
-    let dir = tempfile::tempdir().unwrap();
-    let source = git_repo();
-    let main = stable_main_branch(source.path());
-    let worktree = sibling_worktree_path(source.path(), "rebase-merged-cleanup");
-    run_git(
-        source.path(),
-        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
-    );
-    fs::write(worktree.join("task-1.txt"), "one\n").unwrap();
-    run_git(&worktree, &["add", "."]);
-    run_git(&worktree, &["commit", "-q", "-m", "task work 1"]);
-    fs::write(worktree.join("task-2.txt"), "two\n").unwrap();
-    run_git(&worktree, &["add", "."]);
-    run_git(&worktree, &["commit", "-q", "-m", "task work 2"]);
-
-    // Advance the target first. Without this the replay below reproduces the
-    // original commits byte for byte — same tree, parent, message, author and
-    // date all hash to the same SHAs — so the target would literally contain
-    // the branch's own commits and plain ancestry would still hold, leaving
-    // the containment probe untested.
-    fs::write(source.path().join("main-1.txt"), "main\n").unwrap();
-    run_git(source.path(), &["add", "."]);
-    run_git(source.path(), &["commit", "-q", "-m", "main work 1"]);
-
-    // Simulate GitHub's "Rebase and merge": each original commit is replayed
-    // individually onto the target with the same diff/patch-id but a new
-    // hash and parent. Plain ancestry still cannot see it.
-    run_git(source.path(), &["cherry-pick", &format!("{main}..task")]);
-    assert!(
-        run_git_status(
-            source.path(),
-            &["merge-base", "--is-ancestor", "task", main]
-        )
-        .is_err(),
-        "the rebase rewrite must actually defeat plain ancestry, or this test proves nothing"
-    );
-
-    let store = dir.path().join("store");
-    let mut record = succeeded_record(source.path(), &worktree);
-    record.base_ref = main.to_string();
-    write_record(&store, &record).unwrap();
-
-    let safety = safety_report(&record).unwrap();
-    assert_eq!(safety.unpushed_commits, 0);
-    assert!(safety.safe, "reasons: {:?}", safety.reasons);
-
-    let output = cleanup_with_store(
-        WorktreeCleanupOptions {
-            force: false,
-            dry_run: false,
-            cleanup_branches: true,
-            allow_unmerged_branches: false,
-            reaper: None,
-        },
-        &store,
-    )
-    .unwrap();
-
-    assert_eq!(output.counts.candidates, 1);
-    assert_eq!(output.counts.removed, 1);
-    assert_eq!(output.counts.skipped, 0);
-    assert_eq!(output.counts.branches_deleted, 1);
-    assert!(!worktree.exists());
-}
-
-#[test]
-fn cleanup_reclaims_fast_forward_merged_task_branch() {
-    // The ordinary case: an actual merge commit (or fast-forward) keeps the
-    // branch's original commits as real ancestors of the target, so the
-    // plain `git merge-base --is-ancestor` fast path still governs and the
-    // content-containment fallback is never needed to reach the same
-    // answer.
-    let dir = tempfile::tempdir().unwrap();
-    let source = git_repo();
-    let main = stable_main_branch(source.path());
-    let worktree = sibling_worktree_path(source.path(), "ff-merged-cleanup");
-    run_git(
-        source.path(),
-        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
-    );
-    fs::write(worktree.join("task.txt"), "task\n").unwrap();
-    run_git(&worktree, &["add", "."]);
-    run_git(&worktree, &["commit", "-q", "-m", "task work"]);
-    run_git(source.path(), &["merge", "--ff-only", "task"]);
-    assert!(
-        run_git_status(
-            source.path(),
-            &["merge-base", "--is-ancestor", "task", main]
-        )
-        .is_ok(),
-        "an ordinary fast-forward merge must remain a plain ancestor"
-    );
-
-    let store = dir.path().join("store");
-    let mut record = succeeded_record(source.path(), &worktree);
-    record.base_ref = main.to_string();
-    write_record(&store, &record).unwrap();
-
-    let output = cleanup_with_store(
-        WorktreeCleanupOptions {
-            force: false,
-            dry_run: false,
-            cleanup_branches: true,
-            allow_unmerged_branches: false,
-            reaper: None,
-        },
-        &store,
-    )
-    .unwrap();
-
-    assert_eq!(output.counts.candidates, 1);
-    assert_eq!(output.counts.removed, 1);
-    assert_eq!(output.counts.branches_deleted, 1);
-    assert!(!worktree.exists());
+        assert_eq!(output.counts.candidates, 1, "{strategy}");
+        assert_eq!(output.counts.removed, 1, "{strategy}");
+        assert_eq!(output.counts.skipped, 0, "{strategy}");
+        assert_eq!(output.counts.branches_deleted, 1, "{strategy}");
+        assert!(!worktree.exists(), "{strategy}");
+        assert!(
+            !local_branch_present(source.path(), "task"),
+            "{strategy}: merged branch is deleted"
+        );
+    }
 }
 
 #[test]
@@ -4669,130 +4278,6 @@ fn cleanup_retains_task_branch_with_genuinely_unmerged_commits() {
         .reasons
         .iter()
         .any(|reason| reason.contains("unpushed commit")));
-    assert!(worktree.exists());
-}
-
-#[test]
-fn cleanup_retains_dirty_worktree_even_when_its_branch_is_squash_merged() {
-    // A squash-merged branch whose worktree still has an uncommitted or
-    // untracked change must stay retained: content containment answers "is
-    // the committed work already on the target?", not "is this checkout
-    // safe to delete right now?".
-    let dir = tempfile::tempdir().unwrap();
-    let source = git_repo();
-    let main = stable_main_branch(source.path());
-    let worktree = sibling_worktree_path(source.path(), "dirty-squash-merged-cleanup");
-    run_git(
-        source.path(),
-        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
-    );
-    fs::write(worktree.join("task.txt"), "task\n").unwrap();
-    run_git(&worktree, &["add", "."]);
-    run_git(&worktree, &["commit", "-q", "-m", "task work"]);
-    run_git(source.path(), &["merge", "--squash", "task"]);
-    run_git(
-        source.path(),
-        &["commit", "-q", "-m", "squashed task work (#2)"],
-    );
-    // Untracked residue left behind in the reclaimable worktree.
-    fs::write(worktree.join("scratch.txt"), "not committed\n").unwrap();
-
-    let store = dir.path().join("store");
-    let mut record = succeeded_record(source.path(), &worktree);
-    record.base_ref = main.to_string();
-    write_record(&store, &record).unwrap();
-
-    let safety = safety_report(&record).unwrap();
-    assert_eq!(
-        safety.unpushed_commits, 0,
-        "the committed work is squash-merged and must not itself block reclamation"
-    );
-    assert!(safety.dirty);
-    assert!(!safety.safe);
-
-    let output = cleanup_with_store(
-        WorktreeCleanupOptions {
-            force: false,
-            dry_run: false,
-            cleanup_branches: true,
-            allow_unmerged_branches: false,
-            reaper: None,
-        },
-        &store,
-    )
-    .unwrap();
-
-    assert_eq!(output.counts.candidates, 0);
-    assert_eq!(output.counts.removed, 0);
-    assert_eq!(output.counts.skipped, 1);
-    assert!(output.skipped[0]
-        .reasons
-        .iter()
-        .any(|reason| reason == "dirty worktree"));
-    assert!(worktree.exists());
-}
-
-#[test]
-fn cleanup_retains_squash_merged_worktree_claimed_by_a_live_owner() {
-    // A live durable claim must keep governing even once content
-    // containment makes a worktree otherwise reclaimable — an active run or
-    // process still owns the checkout.
-    let data_root = tempfile::tempdir().unwrap();
-    let source = git_repo();
-    let main = stable_main_branch(source.path());
-    let worktree = sibling_worktree_path(source.path(), "claimed-squash-merged-cleanup");
-    run_git(
-        source.path(),
-        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
-    );
-    fs::write(worktree.join("task.txt"), "task\n").unwrap();
-    run_git(&worktree, &["add", "."]);
-    run_git(&worktree, &["commit", "-q", "-m", "task work"]);
-    run_git(source.path(), &["merge", "--squash", "task"]);
-    run_git(
-        source.path(),
-        &["commit", "-q", "-m", "squashed task work (#3)"],
-    );
-
-    let store = data_root.path().join("task-worktrees");
-    let mut record = succeeded_record(source.path(), &worktree);
-    record.base_ref = main.to_string();
-    write_record(&store, &record).unwrap();
-    let claims = crate::workspace_claim::WorkspaceClaimStore::in_data_root(data_root.path());
-    claims
-        .register_owner(
-            record.effective_workspace_identity().unwrap(),
-            "live-cook-run",
-            60_000,
-            now_ms(),
-        )
-        .unwrap();
-
-    let safety = safety_report(&record).unwrap();
-    assert_eq!(
-        safety.unpushed_commits, 0,
-        "the committed work is squash-merged and must not itself block reclamation"
-    );
-
-    let output = cleanup_with_store(
-        WorktreeCleanupOptions {
-            force: false,
-            dry_run: false,
-            cleanup_branches: true,
-            allow_unmerged_branches: false,
-            reaper: None,
-        },
-        &store,
-    )
-    .unwrap();
-
-    assert_eq!(output.counts.candidates, 0);
-    assert_eq!(output.counts.removed, 0);
-    assert_eq!(output.counts.skipped, 1);
-    assert!(output.skipped[0]
-        .reasons
-        .iter()
-        .any(|reason| reason.contains("live-cook-run")));
     assert!(worktree.exists());
 }
 

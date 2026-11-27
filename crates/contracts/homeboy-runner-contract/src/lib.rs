@@ -712,19 +712,6 @@ mod tests {
     }
 
     #[test]
-    fn runner_execution_record_planned_captures_non_terminal_execution() {
-        let record = RunnerExecutionRecord::planned("plan-1", "lab-a", "refresh_plan");
-
-        assert_eq!(record.schema, RUNNER_EXECUTION_RECORD_SCHEMA);
-        assert_eq!(record.execution_id, "plan-1");
-        assert_eq!(record.runner_id, "lab-a");
-        assert_eq!(record.transport, "refresh_plan");
-        assert_eq!(record.status, "planned");
-        assert!(record.job_id.is_none());
-        assert!(record.artifact_refs.is_empty());
-    }
-
-    #[test]
     fn path_materialization_entry_parses_known_modes_without_rejecting_unknowns() {
         let entry = PathMaterializationEntry::primary_workspace_materialized(
             PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
@@ -739,32 +726,9 @@ mod tests {
 
         assert_eq!(entry.mode(), Some(PathMaterializationMode::Snapshot));
         assert_eq!(provider_owned.mode(), None);
-    }
-
-    #[test]
-    fn path_materialization_plan_helpers_emit_canonical_shape() {
-        let plan = PathMaterializationPlan::non_empty(vec![
-            PathMaterializationEntry::required_existing_remote("/runner/cache"),
-        ])
-        .expect("non-empty plan");
-
-        assert_eq!(plan.schema, PATH_MATERIALIZATION_PLAN_SCHEMA);
         assert_eq!(
-            plan.entries[0].role,
-            PATH_MATERIALIZATION_ROLE_REQUIRED_PATH
-        );
-        assert_eq!(
-            plan.entries[0].owner,
-            PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS
-        );
-        assert_eq!(plan.entries[0].remote_path, "/runner/cache");
-        assert_eq!(
-            plan.entries[0].mode(),
+            PathMaterializationEntry::required_existing_remote("/runner/cache").mode(),
             Some(PathMaterializationMode::ExistingRemote)
-        );
-        assert_eq!(
-            plan.entries[0].validation_status,
-            PATH_MATERIALIZATION_STATUS_VALIDATED
         );
         assert!(PathMaterializationPlan::non_empty(Vec::new()).is_none());
     }

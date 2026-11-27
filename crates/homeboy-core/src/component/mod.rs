@@ -50,19 +50,19 @@ pub use remote_path::{
     try_auto_resolve_remote_path_in_root,
 };
 pub use resolution::{
-    local_path_is_relative, normalize_component_local_path, normalize_component_local_path_against,
-    resolve, resolve_artifact, resolve_artifact_in_root, resolve_effective,
-    resolve_effective_in_root, resolve_in_root, resolve_registered_primary_identity,
-    resolve_registered_primary_path, resolve_target, resolve_target_from_component,
-    validate_local_path, RegisteredPathCandidates, RegisteredPrimaryPathResolution,
-    RegistryLookupPolicy, ResolvedTarget, TargetSpec,
+    local_path_is_relative, nested_portable_directories, normalize_component_local_path,
+    normalize_component_local_path_against, resolve, resolve_artifact, resolve_artifact_in_root,
+    resolve_effective, resolve_effective_in_root, resolve_in_root,
+    resolve_registered_primary_identity, resolve_registered_primary_path, resolve_target,
+    resolve_target_from_component, validate_local_path, RegisteredPathCandidates,
+    RegisteredPrimaryPathResolution, RegistryLookupPolicy, ResolvedTarget, TargetSpec,
 };
 pub use scope::{
     resolve_component_scope, resolve_component_scope_at, EffectiveScope, ScopeCommand,
 };
 pub use versioning::{
     normalize_version_pattern, parse_capability_extensions, parse_version_targets,
-    validate_version_pattern, validate_version_target_conflict,
+    validate_version_pattern,
 };
 
 #[cfg(test)]

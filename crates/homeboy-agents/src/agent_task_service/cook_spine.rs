@@ -1263,6 +1263,17 @@ pub(super) fn run_cook_spine(
                         &options,
                         &run_id,
                     )?;
+                    // Host-level admission for this local attempt only. The
+                    // slot is held while the provider runs and released when
+                    // this dispatch scope ends.
+                    let _local_dispatch_lease =
+                        super::cook_local_dispatch::admit_local_provider_attempt(
+                            lifecycle_store,
+                            durable_observer,
+                            &cook_id,
+                            &run_id,
+                            attempt,
+                        )?;
                     let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
                     let heartbeat_run_id = run_id.clone();
                     let heartbeat_cook_id = cook_id.clone();
@@ -2059,11 +2070,9 @@ pub(super) fn run_cook_spine(
             && persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
                 .is_some_and(|promotion| promotion.applied_with_passing_verdict())
             && !matches!(review_form_from_aggregate(&aggregate), Ok(Some(form)) if form.validate(crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&options.identity.initial_plan)).is_ok());
-        let persisted_terminal_status = record.metadata["cook_progress"]["terminal_status"]
-            .as_str()
-            .map(str::to_string);
-        if let Some(status @ ("intentional_no_change" | "no_candidate")) =
-            persisted_terminal_status.as_deref()
+        if let Some(status @ (CookStatus::IntentionalNoChange | CookStatus::NoCandidate)) =
+            super::CookOutcome::from_run_metadata(&record.metadata)
+                .and_then(|outcome| outcome.status)
         {
             let declaration =
                 intentional_no_change_from_aggregate(&aggregate).ok_or_else(|| {
@@ -2082,12 +2091,7 @@ pub(super) fn run_cook_spine(
                 promotion: None,
                 feedback: None,
             });
-            let is_refusal = status == "no_candidate";
-            let status = if is_refusal {
-                CookStatus::NoCandidate
-            } else {
-                CookStatus::IntentionalNoChange
-            };
+            let is_refusal = status == CookStatus::NoCandidate;
             let mut report = stores.report(CookReportInput {
                 cook_id,
                 status,

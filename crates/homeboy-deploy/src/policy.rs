@@ -123,86 +123,33 @@ mod tests {
     }
 
     #[test]
-    fn validate_deploy_target_rejects_generic_shared_suffix() {
-        let result = validate_deploy_target("/srv/site/vendor", "/srv/site", "my-component", &[]);
+    fn validate_deploy_target_rejects_destructive_targets() {
+        let plugins_protected = vec!["/wp-content/plugins".to_string()];
+        // (install_dir, extension suffixes, expected error substring or None for Ok)
+        let cases: [(&str, &[String], Option<&str>); 4] = [
+            ("/srv/site/", &[], Some("project base_path")),
+            ("/srv/site/vendor", &[], Some("shared parent")),
+            ("/srv/site/wp-content/plugins", &[], None),
+            (
+                "/srv/site/wp-content/plugins",
+                &plugins_protected,
+                Some("/srv/site/wp-content/plugins/my-plugin"),
+            ),
+        ];
 
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("shared parent"));
-    }
-
-    #[test]
-    fn validate_deploy_target_allows_framework_path_without_extension_policy() {
-        let result = validate_deploy_target(
-            "/srv/site/wp-content/plugins",
-            "/srv/site",
-            "my-plugin",
-            &[],
-        );
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn validate_deploy_target_rejects_extension_protected_suffix() {
-        let protected = vec!["/wp-content/plugins".to_string()];
-        let result = validate_deploy_target(
-            "/srv/site/wp-content/plugins",
-            "/srv/site",
-            "my-plugin",
-            &protected,
-        );
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("my-plugin"));
-    }
-
-    #[test]
-    fn test_protected_path_suffixes() {
-        with_isolated_home(|_| {
-            let extension = homeboy_core::paths::extensions()
-                .expect("extensions dir")
-                .join("example");
-            write_extension_fixture(
-                &extension,
-                "example",
-                r#"{
-    "protected_path_suffixes": ["/shared/plugins", "/shared/uploads"]
-  }"#,
-            );
-
-            let component = component_with_extension("example");
-
-            assert_eq!(
-                protected_path_suffixes(&component),
-                vec!["/shared/plugins", "/shared/uploads"]
-            );
-        });
-    }
-
-    #[test]
-    fn test_owner_hint_for_path() {
-        with_isolated_home(|_| {
-            let extension = homeboy_core::paths::extensions()
-                .expect("extensions dir")
-                .join("example");
-            write_extension_fixture(
-                &extension,
-                "example",
-                r#"{
-    "owner_hints": [
-      { "path_contains": "shared/plugins/", "suggested_owner": "www-data:www-data" }
-    ]
-  }"#,
-            );
-
-            let component = component_with_extension("example");
-
-            assert_eq!(
-                owner_hint_for_path(&component, "shared/plugins/my-plugin").as_deref(),
-                Some("www-data:www-data")
-            );
-            assert!(owner_hint_for_path(&component, "other/my-plugin").is_none());
-        });
+        for (install_dir, suffixes, expected_error) in cases {
+            let result = validate_deploy_target(install_dir, "/srv/site", "my-plugin", suffixes);
+            match expected_error {
+                None => assert!(result.is_ok(), "{install_dir} should be allowed"),
+                Some(needle) => {
+                    let message = result.expect_err(install_dir).to_string();
+                    assert!(
+                        message.contains(needle),
+                        "{message} should mention {needle}"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -224,6 +171,9 @@ mod tests {
             let component = component_with_extension("example");
             let copied_policy = protected_path_suffixes(&component);
             let copied_owner = owner_hint_for_path(&component, "shared/plugins/my-plugin");
+            assert_eq!(copied_policy, vec!["/shared/plugins"]);
+            assert_eq!(copied_owner.as_deref(), Some("www-data:www-data"));
+            assert!(owner_hint_for_path(&component, "other/my-plugin").is_none());
 
             std::fs::remove_dir_all(&copied).expect("remove copied extension");
             let source = tempfile::tempdir().expect("extension source");

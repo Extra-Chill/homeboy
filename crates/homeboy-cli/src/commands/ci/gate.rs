@@ -90,34 +90,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn baseline_failure_is_inconclusive_success() {
-        let decision = classify(input(1, 0));
+    fn classify_maps_baseline_and_head_exits_to_status_and_exit_code() {
+        // (baseline exit, head exit, status, passed, process exit code)
+        let cases = [
+            // A red baseline is inconclusive, never a PR-head regression.
+            (1, 0, "baseline_red", true, 0),
+            (1, 3, "baseline_red", true, 0),
+            (0, 1, "failed", false, 1),
+            // A failing head propagates its own exit code.
+            (0, 2, "failed", false, 2),
+            (0, 0, "passed", true, 0),
+        ];
 
-        assert_eq!(decision.status, "baseline_red");
-        assert!(decision.passed);
-        assert_eq!(decision.exit_code(), 0);
-        assert!(!decision.baseline.passed);
-        assert!(decision.head.passed);
-    }
-
-    #[test]
-    fn candidate_failure_after_green_baseline_is_regression() {
-        let decision = classify(input(0, 1));
-
-        assert_eq!(decision.status, "failed");
-        assert!(!decision.passed);
-        assert_eq!(decision.exit_code(), 1);
-        assert!(decision.baseline.passed);
-        assert!(!decision.head.passed);
-    }
-
-    #[test]
-    fn green_baseline_and_head_pass() {
-        let decision = classify(input(0, 0));
-
-        assert_eq!(decision.status, "passed");
-        assert!(decision.passed);
-        assert_eq!(decision.exit_code(), 0);
+        for (baseline_exit, head_exit, status, passed, exit_code) in cases {
+            let decision = classify(input(baseline_exit, head_exit));
+            let case = format!("baseline={baseline_exit} head={head_exit}");
+            assert_eq!(decision.status, status, "{case}");
+            assert_eq!(decision.passed, passed, "{case}");
+            assert_eq!(decision.exit_code(), exit_code, "{case}");
+            assert_eq!(decision.baseline.passed, baseline_exit == 0, "{case}");
+            assert_eq!(decision.head.passed, head_exit == 0, "{case}");
+        }
     }
 
     fn input(baseline_exit_code: i32, head_exit_code: i32) -> DifferentialGateInput {

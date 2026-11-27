@@ -608,18 +608,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_pr_ci_distinguishes_terminal_green() {
-        let checks = serde_json::json!([
-            {"status":"COMPLETED","conclusion":"SUCCESS"},
-            {"status":"COMPLETED","conclusion":"SKIPPED"}
-        ]);
-        let (state, summary, next_action) =
-            classify_pr_ci("OPEN", None, None, checks.as_array().unwrap());
+    fn classify_pr_ci_recommends_the_next_action_for_terminal_checks() {
+        for (checks, merge_state, state, action, summary_part) in [
+            (
+                serde_json::json!([
+                    {"status":"COMPLETED","conclusion":"SUCCESS"},
+                    {"status":"COMPLETED","conclusion":"SKIPPED"}
+                ]),
+                None,
+                "terminal_green",
+                "merge_ready",
+                "1 skipped",
+            ),
+            (
+                serde_json::json!([{"status":"COMPLETED","conclusion":"SUCCESS"}]),
+                Some("BEHIND"),
+                "terminal_green",
+                "update_branch",
+                "next action: update branch",
+            ),
+            (
+                serde_json::json!([
+                    {"status":"COMPLETED","conclusion":"CANCELLED","name":"homeboy / Lint"}
+                ]),
+                None,
+                "terminal_failed",
+                "rerun",
+                "next action: rerun",
+            ),
+        ] {
+            let (got_state, summary, next_action) =
+                classify_pr_ci("OPEN", None, merge_state, checks.as_array().unwrap());
 
-        assert_eq!(state, "terminal_green");
-        assert!(summary.contains("1 passed"));
-        assert!(summary.contains("1 skipped"));
-        assert_eq!(next_action, "merge_ready");
+            assert_eq!(got_state, state, "{checks}");
+            assert_eq!(next_action, action, "{checks}");
+            assert!(summary.contains(summary_part), "{summary}");
+        }
     }
 
     #[test]
@@ -698,95 +722,44 @@ mod tests {
     }
 
     #[test]
-    fn classify_pr_ci_recommends_update_branch_when_behind() {
-        let checks = serde_json::json!([
-            {"status":"COMPLETED","conclusion":"SUCCESS"}
-        ]);
-        let (state, summary, next_action) =
-            classify_pr_ci("OPEN", None, Some("BEHIND"), checks.as_array().unwrap());
+    fn readiness_interprets_merge_state_and_ci_into_blockers() {
+        for (merge_state, ci_state, interpreted, blocker) in [
+            (
+                "UNKNOWN",
+                "terminal_green",
+                "unknown",
+                Some("mergeability_unknown"),
+            ),
+            (
+                "UNSTABLE",
+                "terminal_failed",
+                "failing_optional_checks",
+                Some("optional_checks_unstable"),
+            ),
+            (
+                "CLEAN",
+                "no_checks",
+                "waiting_on_required_checks",
+                Some("checks_not_reported"),
+            ),
+            ("CLEAN", "terminal_green", "mergeable_now", None),
+        ] {
+            let readiness = interpret_pr_merge_readiness(
+                Some(merge_state),
+                ci_state,
+                "ci summary",
+                Some("APPROVED"),
+                false,
+            );
 
-        assert_eq!(state, "terminal_green");
-        assert!(summary.contains("next action: update branch"));
-        assert_eq!(next_action, "update_branch");
-    }
-
-    #[test]
-    fn classify_pr_ci_recommends_rerun_for_cancelled_checks() {
-        let checks = serde_json::json!([
-            {"status":"COMPLETED","conclusion":"CANCELLED","name":"homeboy / Lint","detailsUrl":"https://example.test/lint"}
-        ]);
-        let (state, summary, next_action) =
-            classify_pr_ci("OPEN", None, None, checks.as_array().unwrap());
-
-        assert_eq!(state, "terminal_failed");
-        assert!(summary.contains("next action: rerun"));
-        assert_eq!(next_action, "rerun");
-    }
-
-    #[test]
-    fn readiness_explains_unknown_without_merge_probe() {
-        let readiness = interpret_pr_merge_readiness(
-            Some("UNKNOWN"),
-            "terminal_green",
-            "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending",
-            Some("APPROVED"),
-            false,
-        );
-
-        assert_eq!(readiness.raw_merge_state.as_deref(), Some("UNKNOWN"));
-        assert_eq!(readiness.interpreted_state, "unknown");
-        assert!(!readiness.mergeable);
-        assert_eq!(readiness.blockers[0].kind, "mergeability_unknown");
-        assert!(readiness.blockers[0]
-            .guidance
-            .contains("do not attempt a merge"));
-    }
-
-    #[test]
-    fn readiness_explains_unstable_as_optional_checks() {
-        let readiness = interpret_pr_merge_readiness(
-            Some("UNSTABLE"),
-            "terminal_failed",
-            "2 check(s): 1 terminal-green, 1 failed/unknown, 0 pending",
-            Some("APPROVED"),
-            false,
-        );
-
-        assert_eq!(readiness.interpreted_state, "failing_optional_checks");
-        assert!(!readiness.mergeable);
-        assert_eq!(readiness.blockers[0].kind, "optional_checks_unstable");
-        assert!(readiness
-            .conflict_guidance
-            .contains("not a conflict signal"));
-    }
-
-    #[test]
-    fn readiness_treats_clean_without_checks_as_required_wait() {
-        let readiness = interpret_pr_merge_readiness(
-            Some("CLEAN"),
-            "no_checks",
-            "GitHub reported no status checks for this PR head.",
-            Some("APPROVED"),
-            false,
-        );
-
-        assert_eq!(readiness.interpreted_state, "waiting_on_required_checks");
-        assert!(!readiness.mergeable);
-        assert_eq!(readiness.blockers[0].kind, "checks_not_reported");
-    }
-
-    #[test]
-    fn readiness_allows_clean_green_non_draft_pr() {
-        let readiness = interpret_pr_merge_readiness(
-            Some("CLEAN"),
-            "terminal_green",
-            "1 check(s): 1 terminal-green, 0 failed/unknown, 0 pending",
-            Some("APPROVED"),
-            false,
-        );
-
-        assert_eq!(readiness.interpreted_state, "mergeable_now");
-        assert!(readiness.mergeable);
-        assert!(readiness.blockers.is_empty());
+            assert_eq!(readiness.raw_merge_state.as_deref(), Some(merge_state));
+            assert_eq!(readiness.interpreted_state, interpreted, "{merge_state}");
+            assert_eq!(readiness.mergeable, blocker.is_none(), "{merge_state}");
+            assert_eq!(
+                readiness.blockers.first().map(|b| b.kind.as_str()),
+                blocker,
+                "{merge_state}"
+            );
+        }
     }
 }

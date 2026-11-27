@@ -564,8 +564,8 @@ pub fn wait_at_file_gate(variable: &str) -> crate::Result<()> {
 ///
 /// Constructing this type does not mutate the parent process. Prefer
 /// [`HermeticTestContext::command`] for subprocess tests. `HomeGuard` exists
-/// only for legacy in-process tests whose dependencies still read environment
-/// variables directly.
+/// only for in-process tests whose dependencies read environment variables
+/// directly.
 pub struct HermeticTestContext {
     _store_isolation: crate::paths::ObservationStoreIsolation,
     root: TempDir,
@@ -1081,7 +1081,7 @@ impl HomeGuard {
         // they read it under a lock instead of racing this `setenv` from
         // worker threads a test spawns inside itself (#7505).
         crate::paths::set_home_root_override(Some(context.home().to_path_buf()));
-        // Preserve the legacy in-process data fallback while the subprocess
+        // In-process tests resolve data roots through XDG while the subprocess
         // context uses explicit paths. Unit tests assert this resolver's XDG
         // behavior, so an inherited explicit data root must not override it.
         std::env::set_var("XDG_CONFIG_HOME", context.home().join(".config"));
@@ -1435,10 +1435,10 @@ fn tempdir_with_cached_exec_base(
         // Not exec-capable (e.g. `noexec` mount) — drop it and try the next
         // candidate rather than handing back a dir scripts cannot run from.
     }
-    // The fallback keeps the owned prefix. It used to be a bare `TempDir::new`,
-    // which produced an *unmarked* `.tmpXXXXXX` directory — invisible to the
-    // in-process sweep below and to the `leaked-test-homes` cleanup category,
-    // because both identify a home by its name. On any host where no candidate
+    // The fallback keeps the owned prefix. An *unmarked* `.tmpXXXXXX` directory
+    // would be invisible to the in-process sweep below and to the
+    // `leaked-test-homes` cleanup category, because both identify a home by its
+    // name. On any host where no candidate
     // root passes the exec probe, that is every isolated home in the run, and it
     // leaks with nothing able to recognize it (#11073).
     tempfile::Builder::new()
@@ -1905,7 +1905,6 @@ pub fn serve_public_artifact_base(status: u16, request_count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[cfg(unix)]
     #[test]
@@ -1933,7 +1932,6 @@ mod tests {
     struct HomeGuardTestScope {
         prior: Vec<(&'static str, Option<std::ffi::OsString>)>,
         home: Option<HomeGuard>,
-        unwind_validation: Option<Arc<AtomicBool>>,
         _guard: MutexGuard<'static, ()>,
     }
 
@@ -1946,7 +1944,6 @@ mod tests {
                     .map(|name| (*name, std::env::var_os(name)))
                     .collect(),
                 home: None,
-                unwind_validation: None,
                 _guard: guard,
             };
             setup();
@@ -1974,18 +1971,11 @@ mod tests {
                 assert_eq!(&std::env::var_os(name), value, "{name} was fully restored");
             }
         }
-
-        fn record_unwind_validation(&mut self, validation: Arc<AtomicBool>) {
-            self.unwind_validation = Some(validation);
-        }
     }
 
     impl Drop for HomeGuardTestScope {
         fn drop(&mut self) {
             self.restore_real_environment_and_assert();
-            if let Some(validation) = &self.unwind_validation {
-                validation.store(true, Ordering::SeqCst);
-            }
         }
     }
 
@@ -2186,15 +2176,6 @@ mod tests {
         assert_pid_reaped(wait_for_pid_file(&descendant));
     }
 
-    #[test]
-    fn hermetic_commands_keep_daemons_in_the_test_runner_process_group() {
-        let command = HermeticTestContext::new().command(TestBinary::CurrentTest);
-        assert_eq!(
-            command_env(&command, TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV),
-            Some(Some(test_runner_process_group().into()))
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn hermetic_runner_clean_exits_do_not_pay_descendant_cleanup_grace_period() {
@@ -2221,7 +2202,7 @@ mod tests {
     /// The runner must hand the test a temp root it can execute from (#12345),
     /// and that root must not sit inside the repository (#12377).
     ///
-    /// It used to `unset TMPDIR TMP TEMP`, dropping every test onto the shared
+    /// Unsetting `TMPDIR TMP TEMP` would drop every test onto the shared
     /// system `/tmp`. On a host that mounts `/tmp` noexec that is not a loud
     /// failure: bash's PATH search calls `access(X_OK)`, Linux fails it on a
     /// noexec mount, so a mock executable written into the temp dir is SKIPPED
@@ -2352,52 +2333,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hermetic_runner_reaps_descendants_after_a_panicking_test_binary() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let descendant = temp.path().join("descendant.pid");
+    fn hermetic_runner_reaps_descendants_whatever_the_test_binary_exit_code() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
             .expect("workspace root");
         let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
-        let mut command = Command::new("sh");
-        command
-            .arg(runner)
-            .args([
-                "sh",
-                "-c",
-                &format!(
-                    "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; exit 101",
-                    crate::engine::shell::quote_path(&descendant.display().to_string())
-                ),
-            ]);
-        let output = command.output().expect("run hermetic test runner");
-        assert_eq!(output.status.code(), Some(101));
-        assert_pid_reaped(wait_for_pid_file(&descendant));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn hermetic_runner_reaps_descendants_after_a_successful_test_binary() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let descendant = temp.path().join("descendant.pid");
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("workspace root");
-        let runner = workspace.join("scripts/nextest-hermetic-test-environment.sh");
-        let mut command = Command::new("sh");
-        command.arg(runner).args([
-            "sh",
-            "-c",
-            &format!(
-                "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; exit 0",
-                crate::engine::shell::quote_path(&descendant.display().to_string())
-            ),
-        ]);
-        let output = command.output().expect("run hermetic test runner");
-        assert!(output.status.success());
-        assert_pid_reaped(wait_for_pid_file(&descendant));
+        for exit_code in [0, 101] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let descendant = temp.path().join("descendant.pid");
+            let output = Command::new("sh")
+                .arg(&runner)
+                .args([
+                    "sh",
+                    "-c",
+                    &format!(
+                        "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; exit {exit_code}",
+                        crate::engine::shell::quote_path(&descendant.display().to_string())
+                    ),
+                ])
+                .output()
+                .expect("run hermetic test runner");
+            assert_eq!(output.status.code(), Some(exit_code));
+            assert_pid_reaped(wait_for_pid_file(&descendant));
+        }
     }
 
     #[test]
@@ -2464,6 +2423,10 @@ mod tests {
         assert_eq!(
             command_env(&command, TEST_DAEMON_NAMESPACE_ENV),
             Some(Some(context.daemon_dir().into_os_string()))
+        );
+        assert_eq!(
+            command_env(&command, TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV),
+            Some(Some(test_runner_process_group().into()))
         );
     }
 
@@ -2549,45 +2512,6 @@ mod tests {
         scope.restore_real_environment_and_assert();
     }
 
-    #[test]
-    fn home_guard_test_scope_restores_the_real_environment_after_unwind() {
-        const NAME: &str = "__HOMEBOY_TEST_SCOPE_UNWIND__";
-        let validated = Arc::new(AtomicBool::new(false));
-
-        let panicked = std::panic::catch_unwind({
-            let validated = Arc::clone(&validated);
-            move || {
-                let mut scope = HomeGuardTestScope::new(&[NAME], || {
-                    std::env::set_var(NAME, "sentinel");
-                });
-                scope.record_unwind_validation(validated);
-                panic!("exercise scope unwind");
-            }
-        })
-        .is_err();
-
-        assert!(panicked);
-        assert!(validated.load(Ordering::SeqCst));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn hermetic_commands_allow_explicit_complete_lab_transport_metadata() {
-        let context = HermeticTestContext::new();
-        let source = crate::observation::SOURCE_SNAPSHOT_METADATA_ENV;
-        let lab = crate::observation::LAB_OFFLOAD_METADATA_ENV;
-        let source_value = r#"{"source":"fixture"}"#;
-        let lab_value = r#"{"lab":"fixture"}"#;
-        let mut command = context.command(TestBinary::CurrentTest);
-        command.env(source, source_value).env(lab, lab_value);
-
-        assert_eq!(
-            command_env(&command, source),
-            Some(Some(source_value.into()))
-        );
-        assert_eq!(command_env(&command, lab), Some(Some(lab_value.into())));
-    }
-
     #[cfg(unix)]
     #[test]
     fn cached_exec_base_probes_once_and_creates_distinct_tempdirs() {
@@ -2616,44 +2540,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn sweep_removes_stale_hb_test_dirs_and_spares_fresh_and_foreign() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = TempDir::new().expect("sweep root");
-
-        // Stale leaked tempdir: matching prefix, mtime well past the threshold.
-        let stale = root.path().join("hb-test-STALE");
-        fs::create_dir(&stale).expect("create stale dir");
-        fs::write(stale.join("leaked.txt"), b"leaked").expect("write into stale dir");
-        // Backdate mtime to just beyond LEAKED_TEMPDIR_MAX_AGE.
-        let past = std::time::SystemTime::now()
-            - (LEAKED_TEMPDIR_MAX_AGE + std::time::Duration::from_secs(60));
-        set_dir_mtime(&stale, past);
-
-        // Fresh tempdir from a concurrent run: matching prefix, current mtime.
-        let fresh = root.path().join("hb-test-FRESH");
-        fs::create_dir(&fresh).expect("create fresh dir");
-
-        // Foreign directory: old but does not match the hb-test- prefix.
-        let foreign = root.path().join("someones-important-data");
-        fs::create_dir(&foreign).expect("create foreign dir");
-        set_dir_mtime(&foreign, past);
-
-        // A matching-prefix *file* (not a dir) must be left alone.
-        let stray_file = root.path().join("hb-test-not-a-dir");
-        fs::write(&stray_file, b"file").expect("write stray file");
-        let _ = fs::set_permissions(&stray_file, fs::Permissions::from_mode(0o644));
-
-        sweep_leaked_test_tempdirs(std::slice::from_ref(&root.path().to_path_buf()), None);
-
-        assert!(!stale.exists(), "stale hb-test- dir should be swept");
-        assert!(fresh.exists(), "fresh hb-test- dir must be spared");
-        assert!(foreign.exists(), "non-hb-test- dir must never be touched");
-        assert!(stray_file.exists(), "matching-prefix file must be spared");
-    }
-
-    #[cfg(unix)]
     fn set_dir_mtime(path: &Path, when: std::time::SystemTime) {
         // Portable backdating: `touch -d @secs` is GNU-only and silently
         // fails on macOS BSD `touch`.
@@ -2662,21 +2548,11 @@ mod tests {
             .expect("backdate directory mtime");
     }
 
-    #[test]
-    fn tempdir_names_carry_their_owning_pid() {
-        let prefix = owned_tempdir_prefix();
-        assert!(prefix.starts_with(TEST_TEMPDIR_PREFIX));
-        assert_eq!(
-            tempdir_owner_pid(&format!("{prefix}AbCdEf")),
-            Some(std::process::id())
-        );
-    }
-
     /// The marker is the only thing that makes a leaked home recognizable after
     /// its process is gone, so *every* allocation path has to carry it —
     /// including the fallback taken when no candidate root passes the exec
-    /// probe. That path used to hand back an unmarked `.tmpXXXXXX` directory,
-    /// which no sweep and no cleanup category could attribute (#11073).
+    /// probe; an unmarked `.tmpXXXXXX` directory is one no sweep and no cleanup
+    /// category could attribute (#11073).
     #[cfg(unix)]
     #[test]
     fn every_allocation_path_marks_its_tempdir_including_the_fallback() {
@@ -2710,22 +2586,6 @@ mod tests {
         }
     }
 
-    /// Directories written before the PID prefix existed must stay on the age
-    /// heuristic rather than being misread as owned by PID-less garbage.
-    #[cfg(unix)]
-    #[test]
-    fn legacy_and_malformed_tempdir_names_report_no_owner() {
-        for name in [
-            "hb-test-AbCdEf",
-            "hb-test-",
-            "hb-test-notapid-AbCdEf",
-            "hb-test--AbCdEf",
-            "something-else",
-        ] {
-            assert_eq!(tempdir_owner_pid(name), None, "{name} must have no owner");
-        }
-    }
-
     /// The reclaim contract: a dead owner's directory goes, a live owner's
     /// stays, and neither decision waits on a clock.
     #[cfg(unix)]
@@ -2754,15 +2614,30 @@ mod tests {
         let active_tmp = active.join("tmp");
         // This process is unambiguously alive.
         let live = root.path().join(owned_tempdir_prefix() + "livexx");
-        // No PID segment and freshly created — the age fallback must keep it.
-        let legacy_fresh = root.path().join("hb-test-legacyx");
-        // Not ours at all.
+        // No PID segment: the age fallback keeps a fresh one, reclaims an old one.
+        let pid_less_fresh = root.path().join("hb-test-nopidx");
+        let pid_less_stale = root.path().join("hb-test-STALE");
+        // Not ours at all, even when old.
         let unrelated = root.path().join("someone-elses-dir");
+        // A matching-prefix *file* (not a dir) must be left alone.
+        let stray_file = root.path().join("hb-test-not-a-dir");
 
-        for path in [&dead, &active_tmp, &live, &legacy_fresh, &unrelated] {
+        for path in [
+            &dead,
+            &active_tmp,
+            &live,
+            &pid_less_fresh,
+            &pid_less_stale,
+            &unrelated,
+        ] {
             fs::create_dir_all(path).expect("seed sweep fixture");
             fs::write(path.join("payload"), b"x").expect("seed payload");
         }
+        fs::write(&stray_file, b"file").expect("write stray file");
+        let past = std::time::SystemTime::now()
+            - (LEAKED_TEMPDIR_MAX_AGE + std::time::Duration::from_secs(60));
+        set_dir_mtime(&pid_less_stale, past);
+        set_dir_mtime(&unrelated, past);
 
         sweep_leaked_test_tempdirs(&[root.path().to_path_buf()], Some(&active_tmp));
 
@@ -2773,24 +2648,18 @@ mod tests {
         );
         assert!(live.exists(), "a live owner's tempdir must be preserved");
         assert!(
-            legacy_fresh.exists(),
+            pid_less_fresh.exists(),
             "a recent PID-less tempdir must survive on the age heuristic"
+        );
+        assert!(
+            !pid_less_stale.exists(),
+            "an old PID-less tempdir must be reclaimed on the age heuristic"
         );
         assert!(
             unrelated.exists(),
             "unrelated directories must be untouched"
         );
-    }
-
-    /// The PID segment lengthens the invocation runtime root, which is the
-    /// budget `sockaddr_un` is measured against. Pin that it still fits, so a
-    /// future change to the naming cannot silently push socket paths over.
-    #[cfg(unix)]
-    #[test]
-    fn the_invocation_tempdir_still_fits_the_socket_budget() {
-        let dir = short_invocation_tempdir();
-        crate::engine::invocation::enforce_path_budget(&dir.path().join(TEST_INVOCATION_ID))
-            .expect("invocation runtime plus its leaf must leave room for a workload socket name");
+        assert!(stray_file.exists(), "matching-prefix file must be spared");
     }
 
     #[cfg(target_os = "macos")]

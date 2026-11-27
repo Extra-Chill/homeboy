@@ -422,235 +422,6 @@ pub(super) fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::c
     Ok(())
 }
 
-/// How often a queued local Cook dispatch re-checks capacity.
-pub(super) const LOCAL_DISPATCH_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(15);
-
-/// Admit or queue a local Cook provider dispatch against the
-/// resource-policy snapshot the controller already captured at preflight
-/// (`captured_pressure_severity` in `homeboy-core::lab_routing`, consulted
-/// today for pressure-driven Lab promotion but never for local dispatch).
-///
-/// Returns `Ok(None)` when preflight captured no snapshot at all — a command
-/// resource policy never evaluated for this invocation — so admission fails
-/// open rather than guessing at evidence it does not have.
-pub(super) fn admit_local_cook_dispatch(
-    run_id: &str,
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-) -> homeboy::core::Result<Option<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease>>
-{
-    if homeboy::core::resource_policy_context::captured_context().is_none() {
-        return Ok(None);
-    }
-    let data_root = homeboy::core::paths::homeboy_data()?;
-    let run_id_for_notice = run_id.to_string();
-    admit_local_cook_dispatch_with_clock(
-        run_id,
-        &data_root,
-        || {
-            use crate::commands::resources::ResourceRecommendation;
-            // Refresh on every poll: a captured hot snapshot never cools on
-            // its own. Use the same lightweight pressure probe as preflight.
-            let (resources, _) = crate::commands::resources::run_preflight()?;
-            let severity = match resources.recommendation {
-                ResourceRecommendation::Ok => "ok",
-                ResourceRecommendation::Warm => "warm",
-                ResourceRecommendation::Hot => "hot",
-            };
-            Ok((
-                severity.to_string(),
-                resources.load.one,
-                resources.load.cpu_count,
-            ))
-        },
-        LOCAL_DISPATCH_QUEUE_POLL_INTERVAL,
-        std::thread::sleep,
-        move |reason| {
-            eprintln!("Local dispatch queued for {run_id_for_notice}: {reason}.");
-            record_local_dispatch_wait(lifecycle_store, run_id, reason);
-        },
-    )
-    .map(Some)
-}
-
-/// Phase a durable Cook reports while its local dispatch waits for pressure.
-pub(super) const LOCAL_DISPATCH_QUEUED_PHASE: &str = "queued_local_pressure";
-
-/// Make a pressure wait visible to `status` and `diagnose`. The phase keeps
-/// its first `phase_started_at`, so `elapsed_ms` is the whole wait.
-pub(super) fn record_local_dispatch_wait(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-    reason: &str,
-) {
-    if lifecycle_store.read_record(run_id).is_ok() {
-        if let Err(error) = lifecycle_store.record_cook_progress_with_activity(
-            run_id,
-            LOCAL_DISPATCH_QUEUED_PHASE,
-            0,
-            Some(reason),
-            Some(local_dispatch_wait_evidence()),
-        ) {
-            homeboy::core::log_status!("cook", "local dispatch wait not recorded: {}", error);
-        }
-    }
-}
-
-/// Evidence is sampled only when admission refuses, not on every status read.
-fn local_dispatch_wait_evidence() -> Value {
-    let resources = crate::commands::resources::run_preflight()
-        .ok()
-        .map(|(r, _)| r);
-    let cpus = resources.as_ref().map_or(1, |r| r.load.cpu_count.max(1)) as f64;
-    let mut holders = homeboy::core::paths::homeboy_data()
-        .and_then(|root| homeboy::core::local_dispatch_admission::local_dispatch_holders(&root))
-        .unwrap_or_default();
-    let processes = std::process::Command::new("ps")
-        .args(["-axo", "pid=,user=,pcpu=,rss=,comm="])
-        .output();
-    let (groups, probe_error) = match processes {
-        Ok(output) if output.status.success() => (
-            group_pressure_processes(&String::from_utf8_lossy(&output.stdout)),
-            None,
-        ),
-        Ok(output) => (Vec::new(), Some(format!("ps exited {}", output.status))),
-        Err(error) => (Vec::new(), Some(error.to_string())),
-    };
-    holders.extend(groups);
-    json!({
-        "local_dispatch_wait": {
-            "pressure": resources.as_ref().map(|r| json!({"load1": r.load.one, "load5": r.load.five,
-                "memory": r.memory, "recommendation": r.recommendation})),
-            "pressure_thresholds": {"load1": cpus * 1.5, "load5": cpus * 1.25,
-                "available_memory_ratio": 0.10},
-            "pressure_holders": holders,
-            "process_probe_error": probe_error,
-            "next_attempt_at": (chrono::Utc::now() + chrono::Duration::seconds(15)).to_rfc3339(),
-            "queue_position": null,
-            "eta_seconds": null,
-            "queue_policy": "pressure polling; no ordered queue or admission ETA"
-        }
-    })
-}
-
-/// Group by executable and OS user, retaining PIDs and aggregate CPU/RSS.
-/// `comm` deliberately avoids arguments (which may contain credentials).
-fn group_pressure_processes(output: &str) -> Vec<Value> {
-    let mut groups = std::collections::BTreeMap::<(String, String), (Vec<u32>, f64, u64)>::new();
-    for line in output.lines() {
-        let mut fields = line.split_whitespace();
-        let (Some(pid), Some(user), Some(cpu), Some(rss)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        let (Ok(pid), Ok(cpu), Ok(rss)) =
-            (pid.parse::<u32>(), cpu.parse::<f64>(), rss.parse::<u64>())
-        else {
-            continue;
-        };
-        let command = fields.collect::<Vec<_>>().join(" ");
-        if command.is_empty() {
-            continue;
-        }
-        let group = groups.entry((user.to_string(), command)).or_default();
-        group.0.push(pid);
-        group.1 += cpu;
-        group.2 = group.2.saturating_add(rss);
-    }
-    let mut groups: Vec<_> = groups.into_iter().collect();
-    groups.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1).then_with(|| b.1 .2.cmp(&a.1 .2)));
-    // Include memory-heavy groups even when they are currently sleeping.
-    let mut memory = groups.clone();
-    memory.sort_by_key(|entry| std::cmp::Reverse(entry.1 .2));
-    let selected: std::collections::BTreeSet<_> = groups
-        .iter()
-        .take(8)
-        .chain(memory.iter().take(8))
-        .map(|entry| entry.0.clone())
-        .collect();
-    groups
-        .into_iter()
-        .filter(|entry| selected.contains(&entry.0))
-        .map(|((user, command), (pids, cpu, rss))| {
-            json!({
-                "kind": "process_group", "user": user, "command": command,
-                "count": pids.len(), "pids": pids, "cpu_percent": cpu, "rss_kb": rss
-            })
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod pressure_evidence_tests {
-    use super::*;
-
-    #[test]
-    fn synthetic_php_servers_are_grouped_by_user_with_pids_and_usage() {
-        let groups = group_pressure_processes(
-            "101 chubes 50.0 1024 php\n102 chubes 25.0 2048 php\n103 other 1.0 512 php\nmalformed\n",
-        );
-        assert_eq!(groups[0]["command"], "php");
-        assert_eq!(groups[0]["user"], "chubes");
-        assert_eq!(groups[0]["count"], 2);
-        assert_eq!(groups[0]["pids"], json!([101, 102]));
-        assert_eq!(groups[0]["cpu_percent"], 75.0);
-        assert_eq!(groups[0]["rss_kb"], 3072);
-        assert_eq!(groups.len(), 2);
-    }
-
-    #[test]
-    fn wait_evidence_always_has_retry_and_explicit_queue_policy() {
-        let evidence = local_dispatch_wait_evidence();
-        let wait = &evidence["local_dispatch_wait"];
-        assert!(wait["pressure_holders"].is_array());
-        assert!(wait["pressure_thresholds"]["load1"].is_number());
-        assert!(
-            chrono::DateTime::parse_from_rfc3339(wait["next_attempt_at"].as_str().unwrap()).is_ok()
-        );
-        assert!(wait["queue_policy"]
-            .as_str()
-            .unwrap()
-            .contains("no ordered queue"));
-    }
-}
-
-/// The testable core of [`admit_local_cook_dispatch`]: the clock and the queue
-/// notice and pressure probe are injected for deterministic queue tests.
-/// There is no admission timeout: the enclosing workflow owns its deadline.
-pub(super) fn admit_local_cook_dispatch_with_clock(
-    run_id: &str,
-    data_root: &Path,
-    mut pressure: impl FnMut() -> homeboy::core::Result<(String, Option<f64>, usize)>,
-    poll_interval: Duration,
-    mut sleep: impl FnMut(Duration),
-    mut on_queue: impl FnMut(&str),
-) -> homeboy::core::Result<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease> {
-    use homeboy::core::local_dispatch_admission::{
-        evaluate_local_dispatch_admission, try_admit_local_dispatch, LocalDispatchAdmission,
-        LocalDispatchAttempt,
-    };
-
-    loop {
-        let (severity, load_one, cpu_count) = pressure()?;
-        let attempt = try_admit_local_dispatch(data_root, run_id, |active| {
-            evaluate_local_dispatch_admission(active, &severity, load_one, cpu_count, false)
-        })?;
-        let decision = match attempt {
-            LocalDispatchAttempt::Admitted(lease) => return Ok(lease),
-            LocalDispatchAttempt::NotAdmitted(decision) => decision,
-        };
-        match decision {
-            // An admitting decision always takes the slot in the same
-            // transaction; re-run admission rather than trust a stale one.
-            LocalDispatchAdmission::Admit => continue,
-            LocalDispatchAdmission::Queue { reason } => {
-                on_queue(&reason);
-                sleep(poll_interval);
-            }
-        }
-    }
-}
-
 pub(super) fn run_preflight_cook_execution(
     args: AgentTaskCookArgs,
     executor: SharedAgentTaskExecutor,
@@ -810,25 +581,7 @@ pub(super) fn run_preflight_cook_execution(
     let commit_message = args.commit_message.clone().unwrap_or_default();
     let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
     let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    let local_dispatch = !args.preview && attempt_dispatcher.is_none();
-    // The outer Option tracks admission even when no resource snapshot exists.
-    // Keep the lease across every workflow resume, until this Cook returns.
-    let local_dispatch_lease: std::sync::Mutex<
-        Option<Option<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease>>,
-    > = std::sync::Mutex::new(None);
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
-        // Required checks run remotely; the local slot only bounds provider,
-        // promotion and gate work on this host. Keep the admitted marker so a
-        // workflow resume does not re-admit.
-        if event.phase == homeboy::agents::agent_task_service::AWAITING_CI_PHASE {
-            if let Some(held) = local_dispatch_lease
-                .lock()
-                .expect("local dispatch lease lock")
-                .as_mut()
-            {
-                held.take();
-            }
-        }
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
         }
@@ -844,7 +597,7 @@ pub(super) fn run_preflight_cook_execution(
             event
                 .terminal_success
                 .map(|succeeded| if succeeded { "succeeded" } else { "failed" });
-        let published = progress
+        progress
             .map(|progress| {
                 progress(
                     event.phase,
@@ -859,18 +612,7 @@ pub(super) fn run_preflight_cook_execution(
                     event.terminal_retry_command,
                 )
             })
-            .unwrap_or(Ok(()));
-        // Publish the materialized attempt to detached clients before capacity
-        // admission can block. Lab dispatch does not consume a local slot.
-        if local_dispatch && event.phase == "durable_identity" {
-            let mut lease = local_dispatch_lease
-                .lock()
-                .expect("local dispatch lease lock");
-            if lease.is_none() {
-                *lease = Some(admit_local_cook_dispatch(event.run_id, &lifecycle_store)?);
-            }
-        }
-        published
+            .unwrap_or(Ok(()))
     };
     let request = agent_task_service::CookRequest {
         identity: homeboy::agents::agent_task_service::CookIdentity {
@@ -913,29 +655,17 @@ pub(super) fn run_preflight_cook_execution(
         harvest_context:
             homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()?,
     };
-    // Keep the original step process alive while Cook is in flight. The
-    // workflow owns this process (including cancellation and its deadline),
-    // so waiting here neither submits another step nor admits another Cook.
-    let workflow_step =
-        std::env::var_os(homeboy::core::daemon::workflow_job::WORKFLOW_INSTANCE_ENV).is_some();
-    let result = wait_for_workflow_cook(
-        workflow_step,
-        || {
-            agent_task_service::CookService::run(
-                request.clone(),
-                agent_task_service::CookRuntime::production_with_observer(
-                    executor.clone(),
-                    &recipe_store,
-                    &lifecycle_store,
-                    &durable_observer,
-                ),
-            )
-            .map(|result| {
-                let disposition = result.value.disposition;
-                (result, disposition)
-            })
-        },
-        || std::thread::sleep(LOCAL_DISPATCH_QUEUE_POLL_INTERVAL),
+    // A workflow step keeps its process alive until the Cook is terminal; the
+    // engine owns that wait.
+    let result = agent_task_service::CookService::run(
+        request,
+        agent_task_service::CookRuntime::production_with_observer(
+            executor,
+            &recipe_store,
+            &lifecycle_store,
+            &durable_observer,
+        )
+        .as_workflow_step(args.workflow_instance.clone()),
     )?;
     Ok((
         super::status::compact_cook_report(
@@ -946,61 +676,6 @@ pub(super) fn run_preflight_cook_execution(
         ),
         result.exit_code,
     ))
-}
-
-/// Re-drive only the already-admitted Cook. Non-workflow callers retain their
-/// one-report contract; workflow steps wait for a terminal disposition.
-fn wait_for_workflow_cook<T>(
-    workflow_step: bool,
-    mut drive: impl FnMut() -> homeboy::core::Result<(T, homeboy::core::cook_status::CookDisposition)>,
-    mut wait: impl FnMut(),
-) -> homeboy::core::Result<T> {
-    loop {
-        let (report, disposition) = drive()?;
-        if !workflow_step || disposition.is_terminal() {
-            return Ok(report);
-        }
-        wait();
-    }
-}
-
-#[cfg(test)]
-mod workflow_cook_wait_tests {
-    use super::*;
-    use homeboy::core::cook_status::CookDisposition;
-
-    #[test]
-    fn queued_cook_step_waits_then_succeeds() {
-        let mut calls = 0;
-        let mut waits = 0;
-        let outcome = wait_for_workflow_cook(
-            true,
-            || {
-                calls += 1;
-                if calls == 1 {
-                    Ok((("queued", 75), CookDisposition::InFlight))
-                } else {
-                    Ok((("succeeded", 0), CookDisposition::Terminal))
-                }
-            },
-            || waits += 1,
-        )
-        .unwrap();
-        assert_eq!(outcome, ("succeeded", 0));
-        assert_eq!(calls, 2);
-        assert_eq!(waits, 1);
-    }
-
-    #[test]
-    fn foreground_cook_preserves_in_flight_report() {
-        let report = wait_for_workflow_cook(
-            false,
-            || Ok((("queued", 75), CookDisposition::InFlight)),
-            || panic!("foreground caller must not wait"),
-        )
-        .unwrap();
-        assert_eq!(report, ("queued", 75));
-    }
 }
 
 pub(crate) fn record_cook_argument_provenance(

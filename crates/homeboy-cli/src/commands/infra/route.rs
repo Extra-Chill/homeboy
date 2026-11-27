@@ -918,7 +918,12 @@ pub(crate) fn cook_admission_decision(
     };
     let runner_id = &runner.runner_id;
     let snapshot = homeboy::runner::runners::persisted_status(runner_id)
-        .map(homeboy::runner::runners::runner_admission_snapshot_for_status)
+        .map(|status| {
+            homeboy::runner::runners::runner_admission_snapshot_for_status(
+                status,
+                homeboy::runner::runners::RunnerAdmissionReadiness::Observation,
+            )
+        })
         .ok();
     let ready = preflight.lab_readiness.as_ref().is_some_and(|r| {
         r.state == "connected_ready"
@@ -3052,19 +3057,17 @@ fn runner_wait_step_key(
 /// These are properties of the argument combination alone, not of the execution
 /// context, so they are evaluated before `route_after_parse` consults any
 /// transport state. The bail-outs at the top of routing exist to stop a
-/// runner-side process recursing back through controller routing; they were
-/// never meant to waive validation. While they did, a single inherited
-/// controller-transport variable let a contradictory cook through to real
-/// worktree and provider work instead of a fast rejection (#10917).
+/// runner-side process recursing back through controller routing; they do not
+/// waive validation, so an inherited controller-transport variable cannot let a
+/// contradictory cook through to real worktree and provider work (#10917).
 ///
 /// This is the only place this rejection lives. `run_split_placement_cook`
 /// deliberately does not repeat it: duplicated validation drifts, and which
 /// message an operator sees should never depend on the path taken to reach it.
 ///
-/// `--placement local --detach-after-handoff` used to be rejected here too. It
-/// is not a contradiction — it is a request this controller can now serve by
-/// re-executing the Cook in its own session, so its verdict belongs to
-/// [`local_detach::intercept_local_detached_cook`] (#11476).
+/// `--placement local --detach-after-handoff` is not a contradiction: this
+/// controller serves it by re-executing the Cook in its own session, so its
+/// verdict belongs to [`local_detach::intercept_local_detached_cook`] (#11476).
 fn reject_contradictory_cook_arguments(cli: &Cli) -> homeboy::core::Result<()> {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),

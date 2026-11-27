@@ -32,7 +32,53 @@ pub const QUEUED_OWNER_DEADLINE_MS: u64 = 30 * 60 * 1000;
 /// Prefix of the reason recorded on a job reaped for owner silence.
 pub(crate) const QUEUED_OWNER_ABANDONED_REASON: &str = "queued_owner_abandoned";
 
+/// Maximum silence for a foreground exec, including admitted children.
+pub const ATTACHED_EXEC_DEADLINE_MS: u64 = 10_000;
+
 impl JobStore {
+    pub(crate) fn attach_exec(&self, id: Uuid) -> Result<()> {
+        self.durable_transaction(|inner| {
+            if let Some(stored) = inner.jobs.get_mut(&id) {
+                stored.attached_exec_heartbeat_ms = Some(timestamp_ms());
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn attached_exec_diagnostics(&self) -> Vec<serde_json::Value> {
+        let now = timestamp_ms();
+        let inner = self.inner.lock().unwrap();
+        inner.jobs.values().filter(|s| self.owns(s) && !s.job.status.is_terminal())
+            .filter_map(|s| s.attached_exec_heartbeat_ms.map(|last| serde_json::json!({
+                "job_id": s.job.id, "heartbeat_age_ms": now.saturating_sub(last),
+                "deadline_ms": ATTACHED_EXEC_DEADLINE_MS,
+                "owner_missing": now.saturating_sub(last) >= ATTACHED_EXEC_DEADLINE_MS,
+                "cancel_command": format!("homeboy runner job cancel {} {}", s.job.target_runner_id.as_deref().unwrap_or("<runner>"), s.job.id)
+            }))).collect()
+    }
+
+    pub(crate) fn duplicate_exec(
+        &self,
+        runner: &str,
+        cwd: &str,
+        argv: &[String],
+        key: Option<&str>,
+    ) -> Option<Uuid> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .jobs
+            .values()
+            .find(|s| {
+                self.owns(s)
+                    && !s.job.status.is_terminal()
+                    && (key.is_none() || s.admission_idempotency_key.as_deref() != key)
+                    && s.local_runner.as_ref().is_some_and(|r| {
+                        r.runner_id == runner && r.cwd.as_deref() == Some(cwd) && r.command == argv
+                    })
+            })
+            .map(|s| s.job.id)
+    }
+
     /// Record an owner heartbeat for a queued job, opting it in to owner
     /// liveness. A job that is no longer queued leaves the ledger. Returns the
     /// current job so the client can stop heartbeating once it is admitted.
@@ -42,6 +88,14 @@ impl JobStore {
 
     pub(crate) fn observe_queued_job_at(&self, job_id: Uuid, now: u64) -> Result<Job> {
         let job = self.get(job_id)?;
+        self.durable_transaction(|inner| {
+            if let Some(stored) = inner.jobs.get_mut(&job_id) {
+                if stored.attached_exec_heartbeat_ms.is_some() {
+                    stored.attached_exec_heartbeat_ms = Some(now);
+                }
+            }
+            Ok(())
+        })?;
         let mut observers = self
             .queued_observers
             .lock()
@@ -66,7 +120,29 @@ impl JobStore {
     }
 
     pub(crate) fn reconcile_abandoned_queued_jobs(&self) -> Result<Vec<Uuid>> {
-        self.reconcile_abandoned_queued_jobs_at(timestamp_ms(), QUEUED_OWNER_DEADLINE_MS)
+        let now = timestamp_ms();
+        let expired = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .jobs
+                .values()
+                .filter(|s| {
+                    self.owns(s)
+                        && !s.job.status.is_terminal()
+                        && s.attached_exec_heartbeat_ms.is_some_and(|last| {
+                            now.saturating_sub(last) >= ATTACHED_EXEC_DEADLINE_MS
+                        })
+                })
+                .map(|s| s.job.id)
+                .collect::<Vec<_>>()
+        };
+        for id in expired {
+            self.cancel(
+                id,
+                "attached_exec_owner_abandoned: client heartbeat expired",
+            )?;
+        }
+        self.reconcile_abandoned_queued_jobs_at(now, QUEUED_OWNER_DEADLINE_MS)
     }
 
     /// Cancel opted-in queued jobs whose owner has been silent for
@@ -173,6 +249,82 @@ mod tests {
             })
             .unwrap();
         job.id
+    }
+
+    #[test]
+    fn duplicate_exec_matches_exact_argv_and_ignores_terminal_jobs() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = JobStore::open_without_reconciliation(
+                &home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+            )
+            .unwrap();
+            let argv = vec!["sleep".to_string(), "300".to_string()];
+            let job = store.create_test_local_runner_job(Some(LocalRunnerJob {
+                runner_id: "lab".into(),
+                command: argv.clone(),
+                cwd: Some("/tmp".into()),
+                lifecycle: None,
+                workspace_owner_lease: None,
+            }));
+            assert_eq!(
+                store.duplicate_exec("lab", "/tmp", &argv, None),
+                Some(job.id)
+            );
+            assert_eq!(store.duplicate_exec("other", "/tmp", &argv, None), None);
+            assert_eq!(store.duplicate_exec("lab", "/elsewhere", &argv, None), None);
+            assert_eq!(
+                store.duplicate_exec("lab", "/tmp", &["sleep 300".into()], None),
+                None
+            );
+            store.cancel(job.id, "test").unwrap();
+            assert_eq!(store.duplicate_exec("lab", "/tmp", &argv, None), None);
+        });
+    }
+
+    #[test]
+    fn attached_owner_expiry_cancels_but_detached_jobs_survive() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = JobStore::open_without_reconciliation(
+                &home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+            )
+            .unwrap();
+            let attached = store.create("runner.exec");
+            let detached = store.create("runner.exec");
+            store.attach_exec(attached.id).unwrap();
+            store
+                .durable_transaction(|inner| {
+                    inner
+                        .jobs
+                        .get_mut(&attached.id)
+                        .unwrap()
+                        .attached_exec_heartbeat_ms = Some(0);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(store.attached_exec_diagnostics()[0]["owner_missing"]
+                .as_bool()
+                .unwrap());
+            store.reconcile_abandoned_queued_jobs().unwrap();
+            assert_eq!(store.get(attached.id).unwrap().status, JobStatus::Cancelled);
+            assert!(!store.get(detached.id).unwrap().status.is_terminal());
+        });
+    }
+
+    #[test]
+    fn attached_heartbeat_renews_after_admission() {
+        crate::test_support::with_isolated_home(|home| {
+            let store = JobStore::open_without_reconciliation(
+                &home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+            )
+            .unwrap();
+            let job = store.create_running("runner.exec");
+            store.attach_exec(job.id).unwrap();
+            store.observe_queued_job_at(job.id, 1234).unwrap();
+            assert_eq!(
+                store.inner.lock().unwrap().jobs[&job.id].attached_exec_heartbeat_ms,
+                Some(1234)
+            );
+        });
     }
 
     #[test]

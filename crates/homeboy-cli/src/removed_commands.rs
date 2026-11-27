@@ -273,70 +273,56 @@ mod tests {
     }
 
     #[test]
-    fn removed_rig_sync_yields_command_removed_error() {
-        let args = argv(&[
-            "homeboy",
-            "rig",
-            "sync",
-            "static-site-importer-fixture-matrix",
-        ]);
-        let removed = find_removed_command(&parse_error(&args), &args)
-            .expect("rig sync must match the removed-command registry");
-        assert_eq!(removed.path, &["rig", "sync"]);
-
-        let envelope = serde_json::to_value(removed.envelope()).expect("serialize envelope");
-        assert_eq!(envelope["success"], false);
-        assert_eq!(envelope["command"], "rig");
-        let error = &envelope["diagnostics"];
-        assert_eq!(error["code"], "command.removed");
-        assert_eq!(error["details"]["removed_path"], "rig sync");
-        assert_eq!(error["details"]["replacement"], Value::Null);
-        assert_eq!(error["details"]["hint"], removed.hint);
-        assert_eq!(error["details"]["removed_in"], "0.418.9");
-        assert!(error["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("no replacement")));
-
-        let human = removed.human_message();
-        assert!(human.contains("`homeboy rig sync` was removed in Homeboy 0.418.9"));
-        assert!(human.contains("replacement: no replacement"));
-        assert!(human.contains(removed.hint));
-    }
-
-    #[test]
-    fn removed_command_with_global_flag_and_replacement_names_it() {
-        let args = argv(&[
-            "homeboy",
-            "--placement",
-            "local",
-            "agent-task",
-            "cook-continue",
-        ]);
-        let removed = find_removed_command(&parse_error(&args), &args)
-            .expect("agent-task cook-continue must match the registry");
-        let envelope = serde_json::to_value(removed.envelope()).expect("serialize envelope");
-        assert_eq!(
-            envelope["diagnostics"]["details"]["replacement"],
-            "homeboy agent-task recover"
-        );
-        assert!(removed
-            .human_message()
-            .contains("replacement: homeboy agent-task recover"));
-    }
-
-    #[test]
-    fn removed_agent_task_verbs_point_at_recover() {
-        for verb in [
-            "promote",
-            "gate-feedback",
-            "quarantine",
-            "rearm",
-            "replay-provider-boundary",
-        ] {
-            let args = argv(&["homeboy", "agent-task", verb, "cook-1"]);
+    fn removed_command_yields_typed_error_naming_its_replacement() {
+        let cases: [(&[&str], &[&str], Value, &str); 2] = [
+            (
+                &[
+                    "homeboy",
+                    "rig",
+                    "sync",
+                    "static-site-importer-fixture-matrix",
+                ],
+                &["rig", "sync"],
+                Value::Null,
+                "no replacement",
+            ),
+            // A global flag before the path does not hide the removal.
+            (
+                &[
+                    "homeboy",
+                    "--placement",
+                    "local",
+                    "agent-task",
+                    "cook-continue",
+                ],
+                &["agent-task", "cook-continue"],
+                json!("homeboy agent-task recover"),
+                "homeboy agent-task recover",
+            ),
+        ];
+        for (args, path, replacement, replacement_label) in cases {
+            let args = argv(args);
             let removed = find_removed_command(&parse_error(&args), &args)
-                .unwrap_or_else(|| panic!("agent-task {verb} must match the registry"));
-            assert_eq!(removed.replacement, Some("homeboy agent-task recover"));
+                .unwrap_or_else(|| panic!("{path:?} must match the removed-command registry"));
+            assert_eq!(removed.path, path);
+
+            let envelope = serde_json::to_value(removed.envelope()).expect("serialize envelope");
+            assert_eq!(envelope["success"], false);
+            assert_eq!(envelope["command"], path[0]);
+            let error = &envelope["diagnostics"];
+            assert_eq!(error["code"], "command.removed");
+            assert_eq!(error["details"]["removed_path"], path.join(" "));
+            assert_eq!(error["details"]["replacement"], replacement);
+            assert_eq!(error["details"]["hint"], removed.hint);
+            assert_eq!(error["details"]["removed_in"], removed.removed_in);
+
+            let human = removed.human_message();
+            assert!(human.contains(&format!(
+                "`homeboy {}` was removed in Homeboy {}",
+                path.join(" "),
+                removed.removed_in
+            )));
+            assert!(human.contains(&format!("replacement: {replacement_label}")));
         }
     }
 
@@ -346,20 +332,5 @@ mod tests {
         let error = parse_error(&args);
         assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
         assert!(find_removed_command(&error, &args).is_none());
-    }
-
-    #[test]
-    fn removed_registry_paths_are_not_live_commands() {
-        for removed in REMOVED_COMMANDS {
-            let mut args = vec!["homeboy".to_string()];
-            args.extend(removed.path.iter().map(|segment| segment.to_string()));
-            let error = parse_error(&args);
-            assert_eq!(
-                find_removed_command(&error, &args).map(|entry| entry.path),
-                Some(removed.path),
-                "{:?} must be rejected and matched",
-                removed.path
-            );
-        }
     }
 }

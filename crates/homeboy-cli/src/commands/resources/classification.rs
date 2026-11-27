@@ -1,22 +1,15 @@
 use super::{ProcessRow, ResourceRecommendation};
 
+/// Load thresholds are owned by local dispatch admission, which judges the
+/// same reading before every local Cook provider attempt.
 pub(super) fn classify_load(
     averages: Option<[f64; 3]>,
     cpu_count: usize,
 ) -> ResourceRecommendation {
-    let Some([one, five, _]) = averages else {
-        return ResourceRecommendation::Ok;
-    };
-    let cpus = cpu_count.max(1) as f64;
-    let one_ratio = one / cpus;
-    let five_ratio = five / cpus;
-
-    if one_ratio >= 1.5 || five_ratio >= 1.25 {
-        ResourceRecommendation::Hot
-    } else if one_ratio >= 0.75 || five_ratio >= 0.75 {
-        ResourceRecommendation::Warm
-    } else {
-        ResourceRecommendation::Ok
+    match homeboy::core::local_dispatch_admission::classify_load_severity(averages, cpu_count) {
+        "hot" => ResourceRecommendation::Hot,
+        "warm" => ResourceRecommendation::Warm,
+        _ => ResourceRecommendation::Ok,
     }
 }
 
@@ -195,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_rig_leases_by_configured_concurrency_with_legacy_fallback() {
+    fn classifies_rig_leases_by_configured_concurrency_or_unconfigured_default() {
         assert_eq!(classify_rig_leases(2, Some(8)), ResourceRecommendation::Ok);
         assert_eq!(
             classify_rig_leases(6, Some(8)),
@@ -205,17 +198,5 @@ mod tests {
         assert_eq!(classify_rig_leases(0, None), ResourceRecommendation::Ok);
         assert_eq!(classify_rig_leases(1, None), ResourceRecommendation::Warm);
         assert_eq!(classify_rig_leases(2, None), ResourceRecommendation::Hot);
-    }
-
-    #[test]
-    fn overall_recommendation_returns_hottest_signal() {
-        assert_eq!(
-            overall_recommendation(&[
-                ResourceRecommendation::Ok,
-                ResourceRecommendation::Hot,
-                ResourceRecommendation::Warm,
-            ]),
-            ResourceRecommendation::Hot
-        );
     }
 }

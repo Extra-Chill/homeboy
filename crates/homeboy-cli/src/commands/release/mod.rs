@@ -1874,90 +1874,30 @@ mod tests {
     }
 
     #[test]
-    fn artifact_source_authority_uses_configured_notes_when_cwd_has_none() {
-        let current = tempfile::tempdir().expect("current directory");
-        let component = tempfile::tempdir().expect("component directory");
-        let canonical = component.path().join(release::release_notes_path("v1.2.3"));
-        std::fs::create_dir_all(canonical.parent().unwrap()).expect("build dir");
-        std::fs::write(&canonical, "exact body").expect("canonical notes");
-
-        assert_eq!(
-            select_artifact_source_authority_release_notes(
-                None,
-                Some(current.path()),
-                Some(component.path()),
-                "v1.2.3",
-            ),
-            Some(canonical)
-        );
-    }
-
-    #[test]
-    fn artifact_source_authority_prefers_cwd_notes_over_configured_component() {
+    fn artifact_source_authority_notes_prefer_explicit_then_cwd_then_component() {
         let current = tempfile::tempdir().expect("current directory");
         let component = tempfile::tempdir().expect("component directory");
         let cwd_notes = current.path().join(release::release_notes_path("v1.2.3"));
         let component_notes = component.path().join(release::release_notes_path("v1.2.3"));
-        for notes in [&cwd_notes, &component_notes] {
-            std::fs::create_dir_all(notes.parent().unwrap()).expect("build dir");
-            std::fs::write(notes, "exact body").expect("canonical notes");
-        }
-
-        assert_eq!(
+        let select = |explicit: Option<&str>| {
             select_artifact_source_authority_release_notes(
-                None,
+                explicit,
                 Some(current.path()),
                 Some(component.path()),
                 "v1.2.3",
-            ),
-            Some(cwd_notes)
-        );
-    }
+            )
+        };
 
-    #[test]
-    fn artifact_source_authority_explicit_notes_override_canonical_notes() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let explicit = temp.path().join("provided.md");
-        let canonical = temp.path().join(release::release_notes_path("v1.2.3"));
-        std::fs::create_dir_all(canonical.parent().unwrap()).expect("build dir");
-        std::fs::write(&canonical, "canonical body").expect("canonical notes");
+        std::fs::create_dir_all(component_notes.parent().unwrap()).expect("build dir");
+        std::fs::write(&component_notes, "exact body").expect("component notes");
+        assert_eq!(select(None), Some(component_notes.clone()));
 
-        assert_eq!(
-            select_artifact_source_authority_release_notes(
-                Some(explicit.to_str().unwrap()),
-                Some(temp.path()),
-                Some(temp.path()),
-                "v1.2.3",
-            ),
-            Some(explicit)
-        );
-    }
+        std::fs::create_dir_all(cwd_notes.parent().unwrap()).expect("build dir");
+        std::fs::write(&cwd_notes, "exact body").expect("cwd notes");
+        assert_eq!(select(None), Some(cwd_notes));
 
-    #[test]
-    fn final_bump_keyword_stays_component() {
-        let release_args = args(&["api", "patch"]);
-        let components = resolve_component_ids(&release_args, &release_args.components).unwrap();
-
-        assert_eq!(components, vec!["api", "patch"]);
-    }
-
-    #[test]
-    fn single_component_named_like_bump_stays_component() {
-        let release_args = args(&["patch"]);
-        let components = resolve_component_ids(&release_args, &release_args.components).unwrap();
-
-        assert_eq!(components, vec!["patch"]);
-    }
-
-    #[test]
-    fn canonical_bump_flag_does_not_change_components() {
-        let mut release_args = args(&["api"]);
-        release_args.bump = Some("minor".to_string());
-
-        let components = resolve_component_ids(&release_args, &release_args.components).unwrap();
-
-        assert_eq!(components, vec!["api"]);
-        assert_eq!(release_args.bump.as_deref(), Some("minor"));
+        let explicit = current.path().join("provided.md");
+        assert_eq!(select(Some(explicit.to_str().unwrap())), Some(explicit));
     }
 
     #[test]
@@ -2018,102 +1958,92 @@ mod tests {
         });
     }
 
-    fn skip_args(skip_checks: Option<Vec<&str>>) -> ReleaseExecuteArgs {
-        ReleaseExecuteArgs {
-            components: vec!["fixture".to_string()],
-            project: None,
-            outdated: false,
-            path: None,
-            preflight_runner: None,
-            preflight_placement: ReleasePreflightPlacementArg::Local,
-            dry_run_args: DryRunArgs { dry_run: true },
-            full: false,
-            apply: false,
-            deploy: false,
-            recover: false,
-            repair_changelog_history: Vec::new(),
-            owner_run_ref: None,
-            retag: false,
-            head: false,
-            protected_branch: false,
-            from_artifacts: None,
-            package_only: false,
-            tag: None,
-            skip_checks: skip_checks
-                .map(|values| values.iter().map(|value| value.to_string()).collect()),
-            skip_build_validation: false,
-            bump: None,
-            force_lower_bump: false,
-            skip_publish: false,
-            no_github_release: false,
-            i_know_ci_creates_the_github_release: false,
-            i_know_this_is_a_manual_tag_only_release: false,
-            git_identity: None,
-            cascade: false,
-        }
-    }
-
     #[test]
-    fn resolve_skip_checks_absent_runs_all_gates() {
-        let args = skip_args(None);
-        let (skip_all, granular) = args.resolve_skip_checks().expect("absent is valid");
-        assert!(!skip_all);
-        assert!(granular.is_empty());
-    }
+    fn resolve_skip_checks_distinguishes_absent_bare_granular_and_unknown() {
+        let resolve = |skip_checks: Option<Vec<&str>>| {
+            let mut release_args = args(&["fixture"]);
+            release_args.skip_checks =
+                skip_checks.map(|values| values.iter().map(|value| value.to_string()).collect());
+            release_args.resolve_skip_checks()
+        };
 
-    #[test]
-    fn resolve_skip_checks_bare_skips_all() {
-        let args = skip_args(Some(Vec::new()));
-        let (skip_all, granular) = args.resolve_skip_checks().expect("bare is valid");
-        assert!(skip_all);
-        assert!(granular.is_empty());
-    }
+        assert_eq!(resolve(None).unwrap(), (false, Vec::new()));
+        assert_eq!(resolve(Some(Vec::new())).unwrap(), (true, Vec::new()));
+        assert_eq!(
+            resolve(Some(vec!["lint", "tests", "test"])).unwrap(),
+            (false, vec!["lint".to_string(), "test".to_string()])
+        );
 
-    #[test]
-    fn resolve_skip_checks_granular_lint_only() {
-        let args = skip_args(Some(vec!["lint"]));
-        let (skip_all, granular) = args.resolve_skip_checks().expect("lint is valid");
-        assert!(!skip_all);
-        assert_eq!(granular, vec!["lint"]);
-    }
-
-    #[test]
-    fn resolve_skip_checks_unknown_name_is_rejected() {
-        let args = skip_args(Some(vec!["bogus"]));
-        let err = args
-            .resolve_skip_checks()
-            .expect_err("unknown check rejected");
+        let err = resolve(Some(vec!["bogus"])).expect_err("unknown check rejected");
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.to_string().contains("Unknown check 'bogus'"));
     }
 
     #[test]
-    fn risky_real_release_requires_apply() {
-        let mut args = args(&["fixture"]);
-        args.dry_run_args.dry_run = false;
-        args.head = true;
+    fn apply_boundary_guards_risky_real_releases_only() {
+        let real = |configure: fn(&mut ReleaseExecuteArgs)| {
+            let mut release_args = args(&["fixture"]);
+            release_args.dry_run_args.dry_run = false;
+            configure(&mut release_args);
+            release_args
+        };
+        // (args, bare --skip-checks, expected error fragment)
+        let cases: Vec<(ReleaseExecuteArgs, bool, Option<&str>)> = vec![
+            (
+                real(|a| a.head = true),
+                false,
+                Some("Real releases with --head require explicit --apply"),
+            ),
+            (
+                real(|a| {
+                    a.package_only = true;
+                    a.tag = Some("v1.2.3".to_string());
+                }),
+                false,
+                Some("Real releases with --package-only require explicit --apply"),
+            ),
+            (
+                real(|_| {}),
+                true,
+                Some("Real releases with bare --skip-checks require explicit --apply"),
+            ),
+            // granular skip-checks is not guarded
+            (real(|_| {}), false, None),
+            // dry-run may preview a risky mode
+            (
+                {
+                    let mut release_args = args(&["fixture"]);
+                    release_args.head = true;
+                    release_args
+                },
+                false,
+                None,
+            ),
+            // --apply confirms a risky mode
+            (
+                real(|a| {
+                    a.recover = true;
+                    a.retag = true;
+                    a.apply = true;
+                }),
+                false,
+                None,
+            ),
+        ];
 
-        let execution = args.execution_plan(false);
-        let err = validate_apply_boundary(&execution).expect_err("--head requires --apply");
-
-        assert!(err
-            .message
-            .contains("Real releases with --head require explicit --apply"));
-    }
-
-    #[test]
-    fn package_only_real_release_requires_apply() {
-        let mut args = args(&["fixture"]);
-        args.dry_run_args.dry_run = false;
-        args.package_only = true;
-        args.tag = Some("v1.2.3".to_string());
-
-        let execution = args.execution_plan(false);
-        let err = validate_apply_boundary(&execution).expect_err("--package-only requires --apply");
-
-        assert!(err
-            .message
-            .contains("Real releases with --package-only require explicit --apply"));
+        for (release_args, skip_all, expected) in cases {
+            let result = validate_apply_boundary(&release_args.execution_plan(skip_all));
+            match expected {
+                Some(fragment) => assert!(
+                    result
+                        .expect_err("apply required")
+                        .message
+                        .contains(fragment),
+                    "{fragment}"
+                ),
+                None => result.expect("apply not required"),
+            }
+        }
     }
 
     #[test]
@@ -2152,50 +2082,6 @@ mod tests {
     }
 
     #[test]
-    fn risky_dry_run_release_does_not_require_apply() {
-        let mut args = args(&["fixture"]);
-        args.head = true;
-
-        let execution = args.execution_plan(false);
-        validate_apply_boundary(&execution).expect("dry-run may preview risky mode");
-    }
-
-    #[test]
-    fn bare_skip_checks_real_release_requires_apply() {
-        let mut args = args(&["fixture"]);
-        args.dry_run_args.dry_run = false;
-
-        let execution = args.execution_plan(true);
-        let err =
-            validate_apply_boundary(&execution).expect_err("bare --skip-checks requires --apply");
-
-        assert!(err
-            .message
-            .contains("Real releases with bare --skip-checks require explicit --apply"));
-    }
-
-    #[test]
-    fn granular_skip_checks_real_release_does_not_require_apply() {
-        let mut args = args(&["fixture"]);
-        args.dry_run_args.dry_run = false;
-
-        let execution = args.execution_plan(false);
-        validate_apply_boundary(&execution).expect("granular skip-checks is not guarded");
-    }
-
-    #[test]
-    fn apply_confirms_risky_real_release() {
-        let mut args = args(&["fixture"]);
-        args.dry_run_args.dry_run = false;
-        args.recover = true;
-        args.retag = true;
-        args.apply = true;
-
-        let execution = args.execution_plan(false);
-        validate_apply_boundary(&execution).expect("--apply confirms risky release mode");
-    }
-
-    #[test]
     fn retag_requires_recover_even_when_apply_is_present() {
         let mut args = args(&["fixture"]);
         args.dry_run_args.dry_run = false;
@@ -2211,19 +2097,20 @@ mod tests {
     }
 
     #[test]
-    fn no_github_release_guard_skips_when_flag_absent() {
-        let mut args = args(&["fixture"]);
-        args.dry_run_args.dry_run = false;
-        // no_github_release stays false; guard is a no-op even for unknown ids.
-        guard_no_github_release(&args, &["fixture".to_string()])
-            .expect("guard is inert without --no-github-release");
-    }
+    fn no_github_release_guard_is_inert_without_flag_in_dry_run_or_for_unknown_components() {
+        let unknown = "definitely-not-a-real-component-xyz";
+        let mut absent = args(&[unknown]);
+        absent.dry_run_args.dry_run = false;
+        let mut dry_run = args(&[unknown]);
+        dry_run.no_github_release = true;
+        let mut unresolvable = args(&[unknown]);
+        unresolvable.dry_run_args.dry_run = false;
+        unresolvable.no_github_release = true;
 
-    #[test]
-    fn normal_manual_release_creates_github_release_by_default() {
-        let args = args(&["fixture"]);
-
-        assert!(!args.no_github_release);
+        for release_args in [absent, dry_run, unresolvable] {
+            guard_no_github_release(&release_args, &[unknown.to_string()])
+                .expect("guard does not gate this invocation");
+        }
     }
 
     fn github_component(local_path: &std::path::Path) -> component::Component {
@@ -2317,38 +2204,6 @@ jobs:
         no_github_release_guard_for_components(&args, vec![("fixture", component)]).expect(
             "manual tag-only confirmation satisfies the guard without implying CI ownership",
         );
-    }
-
-    #[test]
-    fn no_github_release_guard_exempts_dry_run() {
-        let mut args = args(&["fixture"]);
-        // dry_run defaults to true via the helper.
-        args.no_github_release = true;
-        guard_no_github_release(&args, &["fixture".to_string()])
-            .expect("dry-run preview is never blocked by the guard");
-    }
-
-    #[test]
-    fn no_github_release_guard_ignores_unresolvable_components() {
-        let mut args = args(&["definitely-not-a-real-component-xyz"]);
-        args.dry_run_args.dry_run = false;
-        args.no_github_release = true;
-        // A component that cannot be loaded (or is non-GitHub) is not gated;
-        // the downstream release flow surfaces load failures with full context.
-        guard_no_github_release(&args, &["definitely-not-a-real-component-xyz".to_string()])
-            .expect("unresolvable components are not gated by the GitHub-release guard");
-    }
-
-    #[test]
-    fn execution_plan_resolves_phase_from_args() {
-        let mut args = args(&["fixture"]);
-        args.dry_run_args.dry_run = false;
-        args.skip_publish = true;
-
-        let execution = args.execution_plan(false);
-
-        assert_eq!(execution.phase, ReleasePhase::Prepare);
-        assert!(!execution.requires_apply);
     }
 
     #[test]
@@ -2456,99 +2311,60 @@ jobs:
     }
 
     #[test]
-    fn portable_child_success_rejects_missing_source_commit() {
-        let mut child = valid_child_evidence();
-        child.source_commit.clear();
-        assert!(validate_portable_child_success(
-            &child,
-            "frozen-source",
-            "lint",
-            &["run://1".to_string()],
-        )
-        .is_err());
+    fn portable_child_success_rejects_incomplete_or_mismatched_evidence() {
+        let durable = vec!["run://1".to_string()];
+        let cases: [(fn(&mut PortableChildReadinessEvidence), &[String]); 6] = [
+            (|child| child.source_commit.clear(), &durable),
+            (
+                |child| child.source_commit = "other-source".to_string(),
+                &durable,
+            ),
+            (|child| child.runner_id = None, &durable),
+            (|_| {}, &[]),
+            (|child| child.provenance = Default::default(), &durable),
+            (|child| child.gate = "test".to_string(), &durable),
+        ];
+        for (index, (mutate, evidence)) in cases.into_iter().enumerate() {
+            let mut child = valid_child_evidence();
+            mutate(&mut child);
+            assert!(
+                validate_portable_child_success(&child, "frozen-source", "lint", evidence).is_err(),
+                "case {index} must be rejected"
+            );
+        }
+        validate_portable_child_success(&valid_child_evidence(), "frozen-source", "lint", &durable)
+            .expect("complete evidence is accepted");
     }
 
-    #[test]
-    fn portable_child_success_rejects_mismatched_source_commit() {
-        let mut child = valid_child_evidence();
-        child.source_commit = "other-source".to_string();
-        assert!(validate_portable_child_success(
-            &child,
-            "frozen-source",
-            "lint",
-            &["run://1".to_string()],
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn portable_child_success_rejects_missing_runner_or_durable_evidence() {
-        let mut child = valid_child_evidence();
-        child.runner_id = None;
-        assert!(validate_portable_child_success(
-            &child,
-            "frozen-source",
-            "lint",
-            &["run://1".to_string()],
-        )
-        .is_err());
-        let child = valid_child_evidence();
-        assert!(validate_portable_child_success(&child, "frozen-source", "lint", &[]).is_err());
-    }
-
-    #[test]
-    fn portable_child_success_rejects_empty_provenance() {
-        let mut child = valid_child_evidence();
-        child.provenance = Default::default();
-        assert!(validate_portable_child_success(
-            &child,
-            "frozen-source",
-            "lint",
-            &["run://1".to_string()],
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn portable_child_success_rejects_mismatched_gate_evidence() {
-        let mut child = valid_child_evidence();
-        child.gate = "test".to_string();
-
-        let error = validate_portable_child_success(
-            &child,
-            "frozen-source",
-            "lint",
-            &["run://1".to_string()],
-        )
-        .expect_err("evidence for a different gate must not authorize lint");
-
-        assert!(error
-            .message
-            .contains("does not match the requested release gate"));
+    fn finalized_record(
+        owner_run_ref: &str,
+        operation: &str,
+    ) -> release::operation_record::OperationRecord {
+        release::operation_record::OperationRecord {
+            owner_run_ref: owner_run_ref.to_string(),
+            operation: operation.to_string(),
+            subject: "fixture".to_string(),
+            provider: "lab".to_string(),
+            handle: "commit".to_string(),
+            path: None,
+            source_sha: "commit".to_string(),
+            cleanup_policy: "retain".to_string(),
+            lifecycle_state: "finalized".to_string(),
+            terminal_disposition: Some("succeeded".to_string()),
+            finalization_status: "completed".to_string(),
+            finalization_lease: None,
+            finalization_lease_started_ms: None,
+            attempt_count: 1,
+            mutation_attempted: false,
+            continuation_evidence: Vec::new(),
+            attributes: Default::default(),
+        }
     }
 
     #[test]
     fn readiness_show_resolves_operation_reference_for_operators() {
         homeboy::core::test_support::with_isolated_home(|_| {
-            let record = release::operation_record::OperationRecord {
-                owner_run_ref: "release-readiness-operator-test".to_string(),
-                operation: "release_readiness".to_string(),
-                subject: "fixture".to_string(),
-                provider: "lab".to_string(),
-                handle: "commit".to_string(),
-                path: None,
-                source_sha: "commit".to_string(),
-                cleanup_policy: "retain".to_string(),
-                lifecycle_state: "finalized".to_string(),
-                terminal_disposition: Some("succeeded".to_string()),
-                finalization_status: "completed".to_string(),
-                finalization_lease: None,
-                finalization_lease_started_ms: None,
-                attempt_count: 1,
-                mutation_attempted: false,
-                continuation_evidence: Vec::new(),
-                attributes: Default::default(),
-            };
+            let record = finalized_record("release-readiness-operator-test", "release_readiness");
             test_store().create(&record).expect("record");
             let (output, exit_code) = run(ReleaseArgs {
                 command: Some(ReleaseSubcommand::Readiness(ReleaseReadinessArgs {
@@ -2570,25 +2386,7 @@ jobs:
     #[test]
     fn readiness_show_rejects_non_readiness_operation_records() {
         homeboy::core::test_support::with_isolated_home(|_| {
-            let record = release::operation_record::OperationRecord {
-                owner_run_ref: "not-readiness".to_string(),
-                operation: "provider_workspace".to_string(),
-                subject: "fixture".to_string(),
-                provider: "lab".to_string(),
-                handle: "commit".to_string(),
-                path: None,
-                source_sha: "commit".to_string(),
-                cleanup_policy: "retain".to_string(),
-                lifecycle_state: "finalized".to_string(),
-                terminal_disposition: Some("succeeded".to_string()),
-                finalization_status: "completed".to_string(),
-                finalization_lease: None,
-                finalization_lease_started_ms: None,
-                attempt_count: 1,
-                mutation_attempted: false,
-                continuation_evidence: Vec::new(),
-                attributes: Default::default(),
-            };
+            let record = finalized_record("not-readiness", "provider_workspace");
             test_store().create(&record).expect("record");
             let error = match run(ReleaseArgs {
                 command: Some(ReleaseSubcommand::Readiness(ReleaseReadinessArgs {

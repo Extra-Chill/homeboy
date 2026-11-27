@@ -268,20 +268,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bounded_probe_reports_unresolved_outside_a_repository() {
-        let dir = tempfile::tempdir().expect("tempdir");
-
-        assert_eq!(
-            head_sha_within(dir.path(), DEFAULT_GIT_READ_PROBE_TIMEOUT),
-            BoundedGitRead::Unresolved
-        );
-    }
-
     #[cfg(unix)]
     #[test]
-    fn bounded_probe_times_out_instead_of_hanging() {
+    fn bounded_probe_separates_unresolved_from_timed_out() {
         let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            head_sha_within(dir.path(), DEFAULT_GIT_READ_PROBE_TIMEOUT),
+            BoundedGitRead::Unresolved,
+            "outside a repository the probe answers unresolved, not timed out"
+        );
         git(dir.path(), &["init", "--quiet"]);
 
         // A shell alias that outlives the budget is the deterministic stand-in

@@ -368,18 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn candidate_and_policy_revision_invalidate_a_decision() {
-        assert_ne!(
-            decision(Some("a"), "1").decision_id,
-            decision(Some("b"), "1").decision_id
-        );
-        assert_ne!(
-            decision(Some("a"), "1").decision_id,
-            decision(Some("a"), "2").decision_id
-        );
-    }
-
-    #[test]
     fn validation_rejects_a_forged_content_identity() {
         let mut decision = decision(None, "1");
         assert!(decision.is_valid());
@@ -417,86 +405,72 @@ mod tests {
 
         let mut lab = decision(None, "1");
         lab.runner = None;
-        let lab = ExecutionPlacementDecision::new(
-            lab.policy_id,
-            lab.policy_revision,
-            lab.identity,
-            lab.requested,
-            lab.required,
-            lab.selected,
-            lab.runner,
-            lab.fallback,
-            lab.override_authorization,
-        );
+        let lab = rebuild(lab);
         assert!(!lab.is_valid());
     }
 
-    #[test]
-    fn required_lab_refuses_a_local_fallback() {
-        let decision = decision(None, "1");
-        assert!(!decision.verifies_outcome(EffectiveExecutionPlacement::Local));
-        assert!(!decision.permits_local_fallback());
+    fn rebuild(decision: ExecutionPlacementDecision) -> ExecutionPlacementDecision {
+        ExecutionPlacementDecision::new(
+            decision.policy_id,
+            decision.policy_revision,
+            decision.identity,
+            decision.requested,
+            decision.required,
+            decision.selected,
+            decision.runner,
+            decision.fallback,
+            decision.override_authorization,
+        )
     }
 
     #[test]
-    fn policy_selected_lab_can_verify_an_authorized_local_fallback() {
-        let mut decision = decision(None, "1");
-        decision.requested = Placement::LabOrLocal;
-        decision.required = ExecutionPlacementRequirement::Either;
-        decision.fallback.local_allowed = true;
+    fn local_fallback_requires_explicit_authorization_outside_required_lab() {
+        let required = decision(None, "1");
+        assert!(!required.verifies_outcome(EffectiveExecutionPlacement::Local));
+        assert!(!required.permits_local_fallback());
 
-        assert!(decision.permits_local_fallback());
-        assert!(decision.verifies_outcome(EffectiveExecutionPlacement::Local));
+        let mut policy_selected = decision(None, "1");
+        policy_selected.requested = Placement::LabOrLocal;
+        policy_selected.required = ExecutionPlacementRequirement::Either;
+        policy_selected.fallback.local_allowed = true;
+        assert!(policy_selected.permits_local_fallback());
+        assert!(policy_selected.verifies_outcome(EffectiveExecutionPlacement::Local));
     }
 
+    /// Every changed routing input is named as a stale reason and produces a
+    /// distinct content identity, so persisted results for the old decision
+    /// are invalidated.
     #[test]
-    fn stale_reasons_name_only_changed_routing_inputs() {
+    fn changed_routing_inputs_are_named_and_invalidate_the_decision() {
         let original = decision(Some("a"), "1");
         assert!(original.stale_reasons(&decision(Some("a"), "1")).is_empty());
-        assert_eq!(
-            original.stale_reasons(&decision(Some("b"), "2")),
-            ["candidate_changed", "policy_revision_changed"]
-        );
-    }
 
-    #[test]
-    fn workspace_and_task_changes_invalidate_a_decision() {
-        let original = decision(Some("a"), "1");
-        let mut replacement = original.clone();
-        replacement.identity.workspace = "other-workspace".to_string();
-        replacement.identity.task = "other-task".to_string();
-
-        assert_eq!(
-            original.stale_reasons(&replacement),
-            ["workspace_changed", "task_changed"]
-        );
-    }
-
-    #[test]
-    fn runner_selection_source_changes_the_stable_decision_identity() {
-        let original = decision(Some("a"), "1");
-        let mut replacement = original.clone();
-        replacement
+        let mut workspace_and_task = original.clone();
+        workspace_and_task.identity.workspace = "other-workspace".to_string();
+        workspace_and_task.identity.task = "other-task".to_string();
+        let mut runner_source = original.clone();
+        runner_source
             .runner
             .as_mut()
             .expect("Lab runner selection")
             .source = RunnerSelectionSource::Policy;
-        let replacement = ExecutionPlacementDecision::new(
-            replacement.policy_id,
-            replacement.policy_revision,
-            replacement.identity,
-            replacement.requested,
-            replacement.required,
-            replacement.selected,
-            replacement.runner,
-            replacement.fallback,
-            replacement.override_authorization,
-        );
 
-        assert_eq!(
-            original.stale_reasons(&replacement),
-            ["runner_selection_changed"]
-        );
-        assert_ne!(original.decision_id, replacement.decision_id);
+        for (replacement, expected) in [
+            (
+                decision(Some("b"), "2"),
+                vec!["candidate_changed", "policy_revision_changed"],
+            ),
+            (
+                rebuild(workspace_and_task),
+                vec!["workspace_changed", "task_changed"],
+            ),
+            (rebuild(runner_source), vec!["runner_selection_changed"]),
+        ] {
+            assert_eq!(original.stale_reasons(&replacement), expected);
+            assert_ne!(
+                original.decision_id, replacement.decision_id,
+                "{expected:?}"
+            );
+        }
     }
 }

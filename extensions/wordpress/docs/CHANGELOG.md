@@ -2,6 +2,22 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.8] - 2026-11-27
+
+### Fixed
+- converge WP Codebox caches to the extension release pin
+
+## [3.56.7] - 2026-11-26
+
+### Fixed
+- share the host Composer download cache into isolated gate homes
+- collect all managed PHPUnit suite counts in gate sidecars
+
+## [3.56.6] - 2026-11-24
+
+### Fixed
+- fail closed when a test/bench DB target is not the provisioned database
+
 ## [3.56.5] - 2026-11-23
 
 ### Fixed

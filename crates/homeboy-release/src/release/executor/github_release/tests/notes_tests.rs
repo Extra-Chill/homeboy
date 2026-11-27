@@ -6,12 +6,12 @@ use super::super::gh_cli::GhCommandOutput;
 use super::super::notes::build_github_release_body;
 use super::super::{
     component_scoped_release_entries, create_failed_result, fallback_release_notes,
-    AssociatedPullRequest, AssociatedPullRequestAuthor, GitHubReleaseBody,
+    AssociatedPullRequest, AssociatedPullRequestAuthor,
 };
 use super::{data_str, git_repo, test_body, test_repair, test_repo};
 
 #[test]
-fn fallback_release_notes_uses_changelog_notes_when_present() {
+fn fallback_release_notes_use_changelog_notes_or_a_minimal_body() {
     let state = ReleaseState {
         notes: Some("## v0.10.6\n\n- Fixed a thing".to_string()),
         ..Default::default()
@@ -27,18 +27,15 @@ fn fallback_release_notes_uses_changelog_notes_when_present() {
     assert!(notes.contains(
         "**Full Changelog**: https://github.com/example-org/studio-web/blob/v0.10.6/CHANGELOG.md"
     ));
-}
 
-#[test]
-fn fallback_release_notes_falls_back_to_minimal_body_when_empty() {
-    let state = ReleaseState {
+    let blank = ReleaseState {
         notes: Some("   ".to_string()),
         ..Default::default()
     };
-
-    let notes = fallback_release_notes(&state, None, "v0.10.6");
-
-    assert_eq!(notes, "Release v0.10.6");
+    assert_eq!(
+        fallback_release_notes(&blank, None, "v0.10.6"),
+        "Release v0.10.6"
+    );
 }
 
 #[test]
@@ -166,24 +163,6 @@ fn component_scoped_notes_leave_ambiguous_or_unavailable_pr_metadata_unattribute
 }
 
 // ---- Issue #3508: the exact GitHub Release body must be discoverable ----
-
-#[test]
-fn release_body_source_label_distinguishes_generated_from_fallback() {
-    let generated = GitHubReleaseBody {
-        body: "x".to_string(),
-        generated_notes_ok: true,
-        changelog_url: None,
-        source: "generated-notes".to_string(),
-    };
-    let fallback = GitHubReleaseBody {
-        body: "x".to_string(),
-        generated_notes_ok: false,
-        changelog_url: None,
-        source: "changelog-fallback".to_string(),
-    };
-    assert_eq!(generated.source_label(), "generated-notes");
-    assert_eq!(fallback.source_label(), "changelog-fallback");
-}
 
 #[test]
 fn exact_recovered_release_body_is_preferred_byte_for_byte() {

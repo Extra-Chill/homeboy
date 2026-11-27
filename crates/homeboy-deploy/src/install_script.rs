@@ -1,8 +1,7 @@
 //! Post-upload install steps executed as one remote script (#16807).
 //!
 //! Clean, extract, flatten, layout check, ownership, both chmod walks, verify,
-//! and cleanup used to be separate round trips. Each is now a fragment of one
-//! generated script that delimits every step on both streams and reports the
+//! and cleanup each run as a fragment of one generated script that delimits every step on both streams and reports the
 //! failing step, so a failure keeps the step, exit code, and output it had as
 //! its own remote command.
 

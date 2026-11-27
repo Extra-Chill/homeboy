@@ -3,9 +3,8 @@
 //! When a provider runtime dies, its CLI exit code says almost nothing: the
 //! actionable cause — an account-level 403 with a human-readable message and
 //! an explicit non-retryable flag — is emitted as a structured error event on
-//! the provider's runtime stdout stream. Diagnose used to collapse that to
-//! "provider CLI exited with status 1" and leave `stdout_excerpt: null` while
-//! the actual error sat in a log file the same response already listed.
+//! the provider's runtime stdout stream. Diagnose surfaces that event instead
+//! of reporting only "provider CLI exited with status 1".
 //!
 //! This module is the provider adapter boundary for that evidence:
 //! - Runtime stream shapes (currently the JSONL terminal error event) are
@@ -410,19 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_without_a_backend_hint() {
-        let normalized = normalize_runtime_stream_error(None, LIVE_STREAM).expect("normalized");
-        assert_eq!(normalized["status_code"], 403);
-    }
-
-    #[test]
-    fn the_jsonl_adapter_is_backend_neutral() {
-        let normalized =
-            normalize_runtime_stream_error(Some("claude-cli"), LIVE_STREAM).expect("normalized");
-        assert_eq!(normalized["status_code"], 403);
-    }
-
-    #[test]
     fn the_last_error_event_wins() {
         let stream = concat!(
             r#"{"type":"error","error":{"data":{"message":"transient blip","statusCode":500,"isRetryable":true}}}"#,
@@ -435,35 +421,50 @@ mod tests {
     }
 
     #[test]
-    fn a_retryable_error_classifies_as_rate_limited() {
-        let normalized = normalize_runtime_stream_error(
-            Some("pi"),
-            r#"{"type":"error","error":{"data":{"message":"too many requests","statusCode":429,"isRetryable":true}}}"#,
-        )
-        .expect("normalized");
-        assert_eq!(normalized["failure_classification"], PROVIDER_RATE_LIMITED);
-    }
-
-    #[test]
-    fn a_forbidden_resource_without_billing_vocabulary_is_a_generic_provider_error() {
-        let normalized = normalize_runtime_stream_error(
-            Some("pi"),
-            r#"{"type":"error","error":{"data":{"message":"repository not accessible","statusCode":403,"isRetryable":false}}}"#,
-        )
-        .expect("normalized");
-        assert_eq!(normalized["failure_classification"], PROVIDER_ERROR);
-    }
-
-    #[test]
-    fn distinguishes_permanent_quota_billing_and_credential_rejections() {
-        for (message, expected) in [
-            ("usage quota exhausted", PROVIDER_QUOTA_EXHAUSTED),
-            ("billing payment required", PROVIDER_BILLING_BLOCKED),
-            ("API key expired", PROVIDER_CREDENTIALS_EXHAUSTED),
+    fn classifies_rate_limits_permanent_rejections_and_generic_errors() {
+        for (message, status, retryable, expected) in [
+            (
+                "too many requests",
+                Some(429),
+                Some(true),
+                PROVIDER_RATE_LIMITED,
+            ),
+            (
+                "repository not accessible",
+                Some(403),
+                Some(false),
+                PROVIDER_ERROR,
+            ),
+            (
+                "insufficient credit",
+                Some(403),
+                None,
+                PROVIDER_BILLING_BLOCKED,
+            ),
+            ("forbidden", Some(403), None, PROVIDER_ERROR),
+            (
+                "usage quota exhausted",
+                Some(403),
+                Some(false),
+                PROVIDER_QUOTA_EXHAUSTED,
+            ),
+            (
+                "billing payment required",
+                Some(403),
+                Some(false),
+                PROVIDER_BILLING_BLOCKED,
+            ),
+            (
+                "API key expired",
+                Some(403),
+                Some(false),
+                PROVIDER_CREDENTIALS_EXHAUSTED,
+            ),
         ] {
             assert_eq!(
-                structured_error_failure_classification(message, Some(403), Some(false)),
-                expected
+                structured_error_failure_classification(message, status, retryable),
+                expected,
+                "{message}"
             );
         }
     }

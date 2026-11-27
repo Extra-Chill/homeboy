@@ -126,7 +126,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loop_run_record_serializes_golden_json() {
+    fn loop_records_round_trip_golden_json() {
         let record = LoopRunRecord {
             schema: LOOP_RUN_SCHEMA.to_string(),
             id: "loop-run-1".to_string(),
@@ -157,10 +157,7 @@ mod tests {
             serde_json::from_value::<LoopRunRecord>(golden).expect("deserialize"),
             record
         );
-    }
 
-    #[test]
-    fn loop_iteration_record_serializes_golden_json() {
         let record = LoopIterationRecord {
             schema: LOOP_ITERATION_SCHEMA.to_string(),
             id: "iteration-1".to_string(),
@@ -193,10 +190,7 @@ mod tests {
             serde_json::from_value::<LoopIterationRecord>(golden).expect("deserialize"),
             record
         );
-    }
 
-    #[test]
-    fn loop_evidence_record_serializes_golden_json() {
         let record = LoopEvidenceRecord {
             schema: LOOP_EVIDENCE_SCHEMA.to_string(),
             id: "evidence-1".to_string(),

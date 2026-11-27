@@ -110,210 +110,182 @@ const CANDIDATE_SELF_REFERENCE: &str = r#"{
     "bench": { "default_baseline_rig": "candidate" }
 }"#;
 
-mod cases {
-    use super::*;
+const CANDIDATE_WITHOUT_BENCH: &str = r#"{
+    "id": "candidate",
+    "components": { "homeboy": { "path": "/tmp/homeboy" } }
+}"#;
 
-    #[test]
-    fn test_expansion_rewrites_args_into_two_rig_comparison() {
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_WITH_BASELINE);
-            let args = make_args(vec!["candidate".to_string()], false, false, false);
-            let expansion = maybe_expand_default_baseline(&args.run)
-                .expect("dispatch ok")
-                .expect("expansion applied");
-            assert_eq!(
-                expansion.rig_ids,
-                vec!["homeboy-main".to_string(), "candidate".to_string()],
-                "baseline must come first (the reference); candidate second"
-            );
-        });
-    }
+/// One row of the dispatch behavior matrix.
+struct Case {
+    label: &'static str,
+    /// Candidate rig spec written to disk; `None` writes nothing, which
+    /// proves the helper short-circuits before `rig::load`.
+    fixture: Option<&'static str>,
+    rigs: &'static [&'static str],
+    baseline: bool,
+    ratchet: bool,
+    ignore_default_baseline: bool,
+    component: Option<&'static str>,
+}
 
-    #[test]
-    fn test_no_expansion_when_default_baseline_unset() {
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_WITHOUT_BASELINE);
-            let args = make_args(vec!["candidate".to_string()], false, false, false);
-            let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
-            assert!(
-                result.is_none(),
-                "rig without default_baseline_rig must not trigger expansion"
-            );
-        });
-    }
+const CASE: Case = Case {
+    label: "",
+    fixture: Some(CANDIDATE_WITH_BASELINE),
+    rigs: &["candidate"],
+    baseline: false,
+    ratchet: false,
+    ignore_default_baseline: false,
+    component: None,
+};
 
-    #[test]
-    fn test_no_expansion_when_no_bench_block() {
-        with_isolated_home(|home| {
-            let candidate_no_bench = r#"{
-            "id": "candidate",
-            "components": { "homeboy": { "path": "/tmp/homeboy" } }
-        }"#;
-            write_rig_fixture(home, "candidate", candidate_no_bench);
-            let args = make_args(vec!["candidate".to_string()], false, false, false);
-            let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
-            assert!(
-                result.is_none(),
-                "rig without bench block must not trigger expansion"
-            );
-        });
-    }
+fn expand(case: &Case) -> homeboy::core::Result<Option<Vec<String>>> {
+    with_isolated_home(|home| {
+        if let Some(json) = case.fixture {
+            write_rig_fixture(home, "candidate", json);
+        }
+        let mut args = make_args(
+            case.rigs.iter().map(|rig| rig.to_string()).collect(),
+            case.baseline,
+            case.ratchet,
+            case.ignore_default_baseline,
+        );
+        args.run.comp.component = case.component.map(str::to_string);
+        maybe_expand_default_baseline(&args.run)
+            .map(|expansion| expansion.map(|expansion| expansion.rig_ids))
+    })
+}
 
-    #[test]
-    fn test_ignore_default_baseline_flag_suppresses_expansion() {
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_WITH_BASELINE);
-            let args = make_args(vec!["candidate".to_string()], false, false, true);
-            let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
-            assert!(
-                result.is_none(),
-                "--ignore-default-baseline must short-circuit before rig::load"
-            );
-        });
-    }
+#[test]
+fn test_default_baseline_expands_single_rig_into_baseline_first_comparison() {
+    let cases = [
+        Case {
+            label: "single candidate with default_baseline_rig",
+            ..CASE
+        },
+        // Passing a component removes the matrix axis, so expansion applies.
+        Case {
+            label: "explicit component on a component-matrix rig",
+            fixture: Some(CANDIDATE_MATRIX_WITH_BASELINE),
+            component: Some("homeboy"),
+            ..CASE
+        },
+    ];
 
-    #[test]
-    fn test_baseline_flag_suppresses_expansion() {
-        // --baseline implies the user wants a deliberate single-rig run
-        // that writes a baseline. Auto-upgrading would silently bless the
-        // wrong rig. Even though the spec declares default_baseline_rig,
-        // skip expansion.
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_WITH_BASELINE);
-            let args = make_args(vec!["candidate".to_string()], true, false, false);
-            let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
-            assert!(result.is_none(), "--baseline must suppress expansion");
-        });
-    }
-
-    #[test]
-    fn test_ratchet_flag_suppresses_expansion() {
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_WITH_BASELINE);
-            let args = make_args(vec!["candidate".to_string()], false, true, false);
-            let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
-            assert!(result.is_none(), "--ratchet must suppress expansion");
-        });
-    }
-
-    #[test]
-    fn test_multi_rig_user_input_wins_over_spec() {
-        // User explicitly listed multiple rigs: do not consult the spec
-        // at all (no rig::load), and definitely don't rewrite. Explicit
-        // beats implicit.
-        let args = make_args(vec!["a".to_string(), "b".to_string()], false, false, false);
-        // No fixture written — confirms `rig::load` is never called.
-        let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
-        assert!(
-            result.is_none(),
-            "multi-rig user input must short-circuit before any rig::load"
+    for case in cases {
+        let rig_ids = expand(&case)
+            .unwrap_or_else(|e| panic!("{}: {}", case.label, e))
+            .unwrap_or_else(|| panic!("{}: expansion applied", case.label));
+        assert_eq!(
+            rig_ids,
+            vec!["homeboy-main".to_string(), "candidate".to_string()],
+            "{}: baseline must come first (the reference); candidate second",
+            case.label
         );
     }
+}
 
-    #[test]
-    fn test_component_matrix_suppresses_default_baseline_expansion() {
-        // A single-rig component matrix should fan out under one rig-state
-        // snapshot. Auto-upgrading it into a cross-rig comparison would
-        // change the command into a different axis before the matrix runner
-        // sees the spec.
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_MATRIX_WITH_BASELINE);
-            let args = make_args(vec!["candidate".to_string()], false, false, false);
-            let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
-            assert!(
-                result.is_none(),
-                "component matrix must remain a single-rig dispatch"
-            );
-        });
+#[test]
+fn test_default_baseline_expansion_is_suppressed() {
+    let cases = [
+        Case {
+            label: "rig without default_baseline_rig",
+            fixture: Some(CANDIDATE_WITHOUT_BASELINE),
+            ..CASE
+        },
+        Case {
+            label: "rig without bench block",
+            fixture: Some(CANDIDATE_WITHOUT_BENCH),
+            ..CASE
+        },
+        Case {
+            label: "--ignore-default-baseline",
+            ignore_default_baseline: true,
+            ..CASE
+        },
+        // --baseline writes a deliberate single-rig baseline; auto-upgrading
+        // would silently bless the wrong rig.
+        Case {
+            label: "--baseline",
+            baseline: true,
+            ..CASE
+        },
+        Case {
+            label: "--ratchet",
+            ratchet: true,
+            ..CASE
+        },
+        // A component matrix fans out under one rig-state snapshot and must
+        // stay a single-rig dispatch.
+        Case {
+            label: "component matrix",
+            fixture: Some(CANDIDATE_MATRIX_WITH_BASELINE),
+            ..CASE
+        },
+        // The opt-out short-circuits before the self-reference check so a
+        // misshapen spec does not block the escape hatch.
+        Case {
+            label: "self-reference with opt-out",
+            fixture: Some(CANDIDATE_SELF_REFERENCE),
+            ignore_default_baseline: true,
+            ..CASE
+        },
+        // Explicit multi-rig input wins over the spec without loading it.
+        Case {
+            label: "multi-rig user input",
+            fixture: None,
+            rigs: &["a", "b"],
+            ..CASE
+        },
+        Case {
+            label: "empty rig list",
+            fixture: None,
+            rigs: &[],
+            ..CASE
+        },
+    ];
+
+    for case in cases {
+        let result = expand(&case).unwrap_or_else(|e| panic!("{}: {}", case.label, e));
+        assert!(result.is_none(), "{} must not expand", case.label);
     }
+}
 
-    #[test]
-    fn test_explicit_component_still_allows_default_baseline_expansion() {
-        // Passing a component removes the matrix axis, so the existing
-        // default_baseline_rig compatibility path remains valid.
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_MATRIX_WITH_BASELINE);
-            let mut args = make_args(vec!["candidate".to_string()], false, false, false);
-            args.run.comp.component = Some("homeboy".to_string());
-            let expansion = maybe_expand_default_baseline(&args.run)
-                .expect("dispatch ok")
-                .expect("expansion applied");
-            assert_eq!(
-                expansion.rig_ids,
-                vec!["homeboy-main".to_string(), "candidate".to_string()]
-            );
-        });
-    }
+#[test]
+fn test_default_baseline_dispatch_rejects_bad_candidates() {
+    let cases = [
+        (
+            Case {
+                label: "self-reference loop",
+                fixture: Some(CANDIDATE_SELF_REFERENCE),
+                ..CASE
+            },
+            // Names the field, the rig and the opt-out flag.
+            &[
+                "default_baseline_rig",
+                "candidate",
+                "--ignore-default-baseline",
+            ][..],
+        ),
+        // A missing candidate bubbles the rig::load error instead of masking it.
+        (
+            Case {
+                label: "missing candidate rig",
+                fixture: None,
+                rigs: &["nonexistent-rig"],
+                ..CASE
+            },
+            &["Rig not found"][..],
+        ),
+    ];
 
-    #[test]
-    fn test_empty_rig_list_returns_none() {
-        // The bare `bench` (no --rig) path is dispatched in `run` before
-        // the expansion helper is consulted — confirm the helper is a
-        // no-op for that case so a future caller that flips the order
-        // doesn't surprise anyone.
-        let args = make_args(Vec::new(), false, false, false);
-        let result = maybe_expand_default_baseline(&args.run).expect("dispatch ok");
-        assert!(result.is_none(), "empty rig list must not expand");
-    }
-
-    #[test]
-    fn test_self_reference_loop_is_rejected() {
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_SELF_REFERENCE);
-            let args = make_args(vec!["candidate".to_string()], false, false, false);
-            let err = maybe_expand_default_baseline(&args.run)
-                .expect_err("self-reference must be rejected");
-            let msg = format!("{}", err);
+    for (case, fragments) in cases {
+        let msg = expand(&case).expect_err(case.label).to_string();
+        for fragment in fragments {
             assert!(
-                msg.contains("default_baseline_rig"),
-                "error message must call out the offending field; got: {}",
-                msg
+                msg.contains(fragment),
+                "{}: error must contain `{fragment}`; got: {msg}",
+                case.label
             );
-            assert!(
-                msg.contains("candidate"),
-                "error message must name the offending rig; got: {}",
-                msg
-            );
-            assert!(
-                msg.contains("--ignore-default-baseline"),
-                "error message must point users at the opt-out flag; got: {}",
-                msg
-            );
-        });
-    }
-
-    #[test]
-    fn test_self_reference_passes_through_with_opt_out() {
-        // A user who deliberately wants to bench the candidate alone can
-        // pass --ignore-default-baseline; the helper short-circuits
-        // before the self-reference check, so a misshapen spec doesn't
-        // block the escape hatch.
-        with_isolated_home(|home| {
-            write_rig_fixture(home, "candidate", CANDIDATE_SELF_REFERENCE);
-            let args = make_args(vec!["candidate".to_string()], false, false, true);
-            let result = maybe_expand_default_baseline(&args.run)
-                .expect("opt-out short-circuits before self-ref check");
-            assert!(result.is_none(), "opt-out must yield single-rig dispatch");
-        });
-    }
-
-    #[test]
-    fn test_missing_candidate_rig_surfaces_load_error() {
-        // When the candidate spec doesn't exist on disk, the helper
-        // bubbles the rig::load error rather than masking it. Keeps the
-        // failure surface for typos consistent with `bench --rig <typo>`
-        // pre-PR behavior.
-        with_isolated_home(|_home| {
-            let args = make_args(vec!["nonexistent-rig".to_string()], false, false, false);
-            let err = maybe_expand_default_baseline(&args.run).expect_err("missing rig must error");
-            let msg = format!("{}", err);
-            assert!(
-                msg.to_lowercase().contains("nonexistent-rig")
-                    || msg.to_lowercase().contains("not found")
-                    || msg.to_lowercase().contains("rig"),
-                "error must reference the missing rig; got: {}",
-                msg
-            );
-        });
+        }
     }
 }

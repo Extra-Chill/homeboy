@@ -1,94 +1,86 @@
 use super::super::*;
 
-#[test]
-fn agent_task_dispatch_requested_run_id_allows_global_flags_before_agent_task() {
-    assert_eq!(
-        agent_task_dispatch_requested_run_id(&[
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "dispatch".to_string(),
-            "--run-id=dispatch-run".to_string(),
-        ]),
-        Some("dispatch-run".to_string())
-    );
+fn args(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| value.to_string()).collect()
 }
 
 #[test]
-fn ensure_agent_task_dispatch_run_id_preserves_existing_id() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--run-id".to_string(),
-        "cook-run".to_string(),
-        "--repo".to_string(),
-        "homeboy".to_string(),
+fn ensure_agent_task_dispatch_run_id_keeps_existing_ids_and_injects_before_options() {
+    // (args, preferred isolation token, expected run id, args unchanged)
+    let cases = [
+        (
+            args(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--run-id",
+                "cook-run",
+                "--repo",
+                "homeboy",
+            ]),
+            None,
+            "cook-run",
+        ),
+        // An explicit --run-id always wins over the preferred isolation token.
+        (
+            args(&["homeboy", "agent-task", "cook", "--run-id", "explicit-run"]),
+            Some("iso-token"),
+            "explicit-run",
+        ),
+        // A materialized run-plan already carries its durable run id.
+        (
+            args(&[
+                "homeboy",
+                "agent-task",
+                "run-plan",
+                "--plan",
+                "@/runner/retry-plan.json",
+                "--record-run-id",
+                "retry-run",
+            ]),
+            None,
+            "retry-run",
+        ),
     ];
+    for (input, preferred, expected) in cases {
+        let (out, run_id) =
+            ensure_agent_task_dispatch_run_id_with(&input, preferred).expect("agent task args");
+        assert_eq!(run_id, expected);
+        assert_eq!(out, input);
+    }
 
-    let (out, run_id) = ensure_agent_task_dispatch_run_id(&args).expect("agent task args");
+    let unset = args(&["homeboy", "agent-task", "cook", "--repo", "homeboy"]);
+    for (preferred, generated) in [(Some("iso-token"), false), (None, true)] {
+        let (out, run_id) =
+            ensure_agent_task_dispatch_run_id_with(&unset, preferred).expect("agent task args");
+        if generated {
+            assert!(run_id.starts_with("agent-task-"), "{run_id}");
+        } else {
+            assert_eq!(run_id, "iso-token");
+        }
+        // `--run-id` is injected right after the `agent-task <action>` prefix,
+        // ahead of the dispatch options.
+        assert_eq!(
+            out,
+            args(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--run-id",
+                &run_id,
+                "--repo",
+                "homeboy"
+            ])
+        );
+    }
 
-    assert_eq!(out, args);
-    assert_eq!(run_id, "cook-run");
-}
-
-#[test]
-fn ensure_agent_task_dispatch_run_id_injects_id_before_dispatch_options() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--repo".to_string(),
-        "homeboy".to_string(),
-    ];
-
-    let (out, run_id) = ensure_agent_task_dispatch_run_id(&args).expect("agent task args");
-
-    assert!(run_id.starts_with("agent-task-"));
-    // `--run-id` is injected right after the `agent-task <action>` prefix,
-    // ahead of the dispatch options.
-    assert_eq!(out[0], "homeboy");
-    assert_eq!(out[1], "agent-task");
-    assert_eq!(out[2], "cook");
-    assert_eq!(out[3], "--run-id");
-    assert_eq!(out[4], run_id);
-    assert_eq!(out[5], "--repo");
-    assert_eq!(out[6], "homeboy");
-}
-
-#[test]
-fn ensure_agent_task_dispatch_run_id_with_uses_preferred_id_when_unset() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--repo".to_string(),
-        "homeboy".to_string(),
-    ];
-
-    let (out, run_id) =
-        ensure_agent_task_dispatch_run_id_with(&args, Some("iso-token")).expect("agent task args");
-
-    assert_eq!(run_id, "iso-token");
-    assert!(out.contains(&"--run-id".to_string()));
-    assert!(out.contains(&"iso-token".to_string()));
-}
-
-#[test]
-fn ensure_agent_task_dispatch_run_id_with_preserves_explicit_run_id() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--run-id".to_string(),
-        "explicit-run".to_string(),
-    ];
-
-    let (out, run_id) =
-        ensure_agent_task_dispatch_run_id_with(&args, Some("iso-token")).expect("agent task args");
-
-    // An explicit --run-id always wins over the preferred isolation token.
-    assert_eq!(run_id, "explicit-run");
-    assert_eq!(out, args);
+    assert!(ensure_agent_task_dispatch_run_id(&args(&[
+        "homeboy",
+        "agent-task",
+        "status",
+        "run-1"
+    ]))
+    .is_none());
 }
 
 #[test]
@@ -167,25 +159,6 @@ fn lab_cook_preserves_explicit_attempt_identity_for_drift_detection() {
 }
 
 #[test]
-fn ensure_agent_task_dispatch_run_id_with_uses_materialized_run_plan_id() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "run-plan".to_string(),
-        "--plan".to_string(),
-        "@/runner/retry-plan.json".to_string(),
-        "--record-run-id".to_string(),
-        "retry-run".to_string(),
-    ];
-
-    let (out, run_id) = ensure_agent_task_dispatch_run_id_with(&args, None)
-        .expect("materialized run-plan has a durable run id");
-
-    assert_eq!(run_id, "retry-run");
-    assert_eq!(out, args);
-}
-
-#[test]
 fn lifecycle_identity_preserves_materialized_run_plan_id() {
     let args = vec![
         "homeboy".to_string(),
@@ -205,55 +178,32 @@ fn lifecycle_identity_preserves_materialized_run_plan_id() {
 }
 
 #[test]
-fn dispatch_run_isolation_token_reuses_explicit_run_id() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "dispatch".to_string(),
-        "--run-id".to_string(),
-        "explicit-run".to_string(),
-    ];
-
+fn dispatch_run_isolation_token_reuses_or_generates_only_for_dispatch_commands() {
     assert_eq!(
-        agent_task_dispatch_run_isolation_token(&args),
+        agent_task_dispatch_run_isolation_token(&args(&[
+            "homeboy",
+            "agent-task",
+            "dispatch",
+            "--run-id",
+            "explicit-run",
+        ])),
         Some("explicit-run".to_string())
     );
-}
-
-#[test]
-fn dispatch_run_isolation_token_generates_for_unset_run_id() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--repo".to_string(),
-        "homeboy".to_string(),
-    ];
-
-    let token = agent_task_dispatch_run_isolation_token(&args).expect("token");
+    let token = agent_task_dispatch_run_isolation_token(&args(&[
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--repo",
+        "homeboy",
+    ]))
+    .expect("token");
     assert!(token.starts_with("agent-task-"));
-}
-
-#[test]
-fn dispatch_run_isolation_token_none_for_non_dispatch_commands() {
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "status".to_string(),
-        "run-1".to_string(),
-    ];
-
-    assert!(agent_task_dispatch_run_isolation_token(&args).is_none());
-}
-
-#[test]
-fn ensure_agent_task_dispatch_run_id_ignores_other_agent_task_commands() {
-    assert!(ensure_agent_task_dispatch_run_id(&[
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "status".to_string(),
-        "run-1".to_string(),
-    ])
+    assert!(agent_task_dispatch_run_isolation_token(&args(&[
+        "homeboy",
+        "agent-task",
+        "status",
+        "run-1",
+    ]))
     .is_none());
 }
 

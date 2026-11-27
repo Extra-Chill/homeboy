@@ -932,13 +932,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fuzz_compare_reports_same_when_candidate_matches_baseline() {
-        let baseline = snapshot(&envelope("baseline", 2, 2, 4, 4, &[], &[], true));
-        let candidate = snapshot(&envelope("candidate", 2, 2, 4, 4, &[], &[], true));
-        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
+    fn fuzz_compare_reports_no_deltas_when_candidate_matches_baseline() {
+        for severities in [&[][..], &["error"][..]] {
+            let baseline = snapshot(&envelope("baseline", 2, 2, 4, 4, &[], severities, true));
+            let candidate = snapshot(&envelope("candidate", 2, 2, 4, 4, &[], severities, true));
+            let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
 
-        assert!(regressions(&deltas).is_empty());
-        assert!(improvements(&deltas).is_empty());
+            assert!(deltas.new_findings.is_empty(), "{severities:?}");
+            assert!(deltas.resolved_findings.is_empty(), "{severities:?}");
+            assert!(regressions(&deltas).is_empty(), "{severities:?}");
+            assert!(improvements(&deltas).is_empty(), "{severities:?}");
+        }
     }
 
     #[test]
@@ -1030,18 +1034,6 @@ mod tests {
             vec!["fingerprint-1"]
         );
         assert!(improvements(&deltas).contains(&"resolved findings: 1".to_string()));
-    }
-
-    #[test]
-    fn fuzz_compare_reports_no_finding_deltas_when_findings_unchanged() {
-        let baseline = snapshot(&envelope("baseline", 0, 0, 0, 0, &[], &["error"], true));
-        let candidate = snapshot(&envelope("candidate", 0, 0, 0, 0, &[], &["error"], true));
-        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
-
-        assert!(deltas.new_findings.is_empty());
-        assert!(deltas.resolved_findings.is_empty());
-        assert!(regressions(&deltas).is_empty());
-        assert!(improvements(&deltas).is_empty());
     }
 
     /// A finding suppressed between baseline and candidate must not register

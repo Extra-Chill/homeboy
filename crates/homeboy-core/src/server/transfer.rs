@@ -949,232 +949,112 @@ mod tests {
     }
 
     #[test]
-    fn test_transfer() {
+    fn dry_run_reports_direction_method_and_effective_recursion() {
         with_isolated_home(|_| {
-            save_server("prod");
-
-            let (out, code) = transfer(&TransferConfig {
-                source: "./missing-artifact.zip".to_string(),
-                destination: "prod:/tmp/artifact.zip".to_string(),
-                recursive: false,
-                directory_contents: false,
-                compress: true,
-                dry_run: true,
-                exclude: Vec::new(),
-            })
-            .expect("dry run transfer");
-
-            assert_eq!(code, 0);
-            assert_eq!(out.direction, "push");
-            assert_eq!(out.method, "scp");
-            assert!(!out.recursive);
-            assert!(!out.effective_recursive);
-            assert!(out.compress);
-            assert!(out.dry_run);
-            assert!(out.success);
-        });
-    }
-
-    #[test]
-    fn dry_run_remote_to_remote_preserves_recursive_options() {
-        with_isolated_home(|_| {
-            save_server("old");
-            save_server("new");
-
-            let (out, code) = transfer(&TransferConfig {
-                source: "old:/var/www/uploads".to_string(),
-                destination: "new:/var/www/uploads".to_string(),
-                recursive: true,
-                directory_contents: false,
-                compress: true,
-                dry_run: true,
-                exclude: vec!["cache".to_string()],
-            })
-            .expect("dry run server transfer");
-
-            assert_eq!(code, 0);
-            assert_eq!(out.direction, "server-to-server");
-            assert_eq!(out.method, "tar-pipe");
-            assert!(out.recursive);
-            assert!(out.effective_recursive);
-            assert!(out.compress);
-            assert!(out.dry_run);
-        });
-    }
-
-    #[test]
-    fn transfer_serialization_preserves_requested_and_effective_recursion_across_directions() {
-        let cases = [
-            ("push", "scp", false, true),
-            ("push", "scp", true, true),
-            ("pull", "scp", true, true),
-            ("server-to-server", "tar-pipe", false, true),
-        ];
-
-        for (direction, method, recursive, effective_recursive) in cases {
-            let output = TransferOutput {
-                source: "source".to_string(),
-                destination: "destination".to_string(),
-                effective_source: "source".to_string(),
-                effective_destination: "destination".to_string(),
-                method: method.to_string(),
-                direction: direction.to_string(),
-                effective_recursive,
-                recursive,
-                scope: "recursive path".to_string(),
-                compress: false,
-                success: true,
-                error: None,
-                dry_run: true,
-            };
-
-            assert_eq!(
-                serde_json::to_string(&output).expect("serialize transfer output"),
-                format!(
-                    "{{\"source\":\"source\",\"destination\":\"destination\",\"effective_source\":\"source\",\"effective_destination\":\"destination\",\"method\":\"{method}\",\"direction\":\"{direction}\",\"effective_recursive\":{effective_recursive},\"recursive\":{recursive},\"scope\":\"recursive path\",\"compress\":false,\"success\":true,\"dry_run\":true}}"
-                )
-            );
-        }
-    }
-
-    #[test]
-    fn local_directory_push_implicitly_reports_effective_recursion() {
-        with_isolated_home(|_| {
-            save_server("prod");
+            for id in ["prod", "old", "new"] {
+                save_server(id);
+            }
             let fixture = tempfile::tempdir().expect("transfer fixture");
-            let source = fixture.path().join("directory");
-            std::fs::create_dir(&source).expect("source directory");
+            let local_directory = fixture.path().join("directory");
+            std::fs::create_dir(&local_directory).expect("source directory");
+            let local_directory = local_directory.to_string_lossy().into_owned();
 
-            let (out, code) = transfer(&TransferConfig {
-                source: source.to_string_lossy().into_owned(),
-                destination: "prod:/tmp/directory".to_string(),
-                recursive: false,
-                directory_contents: false,
-                compress: false,
-                dry_run: true,
-                exclude: Vec::new(),
-            })
-            .expect("dry run directory push");
+            // (source, destination, recursive, direction, method, effective recursion)
+            for (source, destination, recursive, direction, method, effective_recursive) in [
+                (
+                    "./missing-artifact.zip",
+                    "prod:/tmp/artifact.zip",
+                    false,
+                    "push",
+                    "scp",
+                    false,
+                ),
+                // A local directory push recurses implicitly.
+                (
+                    local_directory.as_str(),
+                    "prod:/tmp/directory",
+                    false,
+                    "push",
+                    "scp",
+                    true,
+                ),
+                (
+                    "prod:/var/www/uploads",
+                    "./uploads",
+                    true,
+                    "pull",
+                    "scp",
+                    true,
+                ),
+                (
+                    "old:/var/www/uploads",
+                    "new:/var/www/uploads",
+                    true,
+                    "server-to-server",
+                    "tar-pipe",
+                    true,
+                ),
+                (
+                    "old:/tmp/source.txt",
+                    "new:/tmp/destination.txt",
+                    false,
+                    "server-to-server",
+                    "cat-pipe",
+                    false,
+                ),
+                // A trailing slash on a server source recurses implicitly.
+                (
+                    "old:/var/www/uploads/",
+                    "new:/var/www/uploads",
+                    false,
+                    "server-to-server",
+                    "tar-pipe",
+                    true,
+                ),
+            ] {
+                let (out, code) = transfer(&TransferConfig {
+                    source: source.to_string(),
+                    destination: destination.to_string(),
+                    recursive,
+                    directory_contents: false,
+                    compress: true,
+                    dry_run: true,
+                    exclude: vec!["cache".to_string()],
+                })
+                .expect("dry run transfer");
 
-            assert_eq!(code, 0);
-            assert!(!out.recursive);
-            assert!(out.effective_recursive);
-            assert_eq!(out.scope, "recursive path");
+                assert_eq!(code, 0, "{source}");
+                assert!(out.success && out.dry_run, "{source}");
+                assert_eq!(out.direction, direction, "{source}");
+                assert_eq!(out.method, method, "{source}");
+                assert_eq!(out.recursive, recursive, "{source}");
+                assert_eq!(out.effective_recursive, effective_recursive, "{source}");
+            }
         });
     }
 
     #[test]
-    fn pull_preserves_explicit_recursion_in_dry_run() {
-        with_isolated_home(|_| {
-            save_server("prod");
+    fn transfer_output_serializes_requested_and_effective_recursion() {
+        let output = TransferOutput {
+            source: "source".to_string(),
+            destination: "destination".to_string(),
+            effective_source: "source".to_string(),
+            effective_destination: "destination".to_string(),
+            method: "scp".to_string(),
+            direction: "push".to_string(),
+            effective_recursive: true,
+            recursive: false,
+            scope: "recursive path".to_string(),
+            compress: false,
+            success: true,
+            error: None,
+            dry_run: true,
+        };
 
-            let (out, code) = transfer(&TransferConfig {
-                source: "prod:/var/www/uploads".to_string(),
-                destination: "./uploads".to_string(),
-                recursive: true,
-                directory_contents: false,
-                compress: false,
-                dry_run: true,
-                exclude: Vec::new(),
-            })
-            .expect("dry run pull");
-
-            assert_eq!(code, 0);
-            assert_eq!(out.direction, "pull");
-            assert!(out.recursive);
-            assert!(out.effective_recursive);
-        });
-    }
-
-    #[test]
-    fn non_recursive_server_transfer_dry_run_uses_execution_method() {
-        with_isolated_home(|_| {
-            save_server("old");
-            save_server("new");
-
-            let (out, code) = transfer(&TransferConfig {
-                source: "old:/tmp/source.txt".to_string(),
-                destination: "new:/tmp/destination.txt".to_string(),
-                recursive: false,
-                directory_contents: false,
-                compress: false,
-                dry_run: true,
-                exclude: Vec::new(),
-            })
-            .expect("dry run server transfer");
-
-            assert_eq!(code, 0);
-            assert_eq!(out.method, "cat-pipe");
-            assert!(!out.effective_recursive);
-        });
-    }
-
-    #[test]
-    fn trailing_slash_server_transfer_reports_effective_recursion_in_dry_run() {
-        with_isolated_home(|_| {
-            save_server("old");
-            save_server("new");
-
-            let (out, code) = transfer(&TransferConfig {
-                source: "old:/var/www/uploads/".to_string(),
-                destination: "new:/var/www/uploads".to_string(),
-                recursive: false,
-                directory_contents: false,
-                compress: false,
-                dry_run: true,
-                exclude: Vec::new(),
-            })
-            .expect("dry run server transfer");
-
-            assert_eq!(code, 0);
-            assert_eq!(out.method, "tar-pipe");
-            assert!(!out.recursive);
-            assert!(out.effective_recursive);
-        });
-    }
-
-    #[test]
-    fn sync_to_existing_destination_plans_directory_contents() {
-        with_isolated_home(|_| {
-            save_server("sandbox");
-
-            let (out, code) = transfer(&TransferConfig {
-                source: "local/existing-dir".to_string(),
-                destination: "sandbox:/existing/same-dir".to_string(),
-                recursive: true,
-                directory_contents: true,
-                compress: false,
-                dry_run: true,
-                exclude: Vec::new(),
-            })
-            .expect("dry run sync");
-
-            assert_eq!(code, 0);
-            assert_eq!(out.effective_source, "local/existing-dir");
-            assert_eq!(out.effective_destination, "sandbox:/existing/same-dir");
-        });
-    }
-
-    #[test]
-    fn sync_to_missing_destination_plans_directory_contents() {
-        with_isolated_home(|_| {
-            save_server("sandbox");
-
-            let (out, code) = transfer(&TransferConfig {
-                source: "local/existing-dir".to_string(),
-                destination: "sandbox:/missing/same-dir".to_string(),
-                recursive: true,
-                directory_contents: true,
-                compress: false,
-                dry_run: true,
-                exclude: Vec::new(),
-            })
-            .expect("dry run sync");
-
-            assert_eq!(code, 0);
-            assert_eq!(out.effective_source, "local/existing-dir");
-            assert_eq!(out.effective_destination, "sandbox:/missing/same-dir");
-        });
+        assert_eq!(
+            serde_json::to_string(&output).expect("serialize transfer output"),
+            "{\"source\":\"source\",\"destination\":\"destination\",\"effective_source\":\"source\",\"effective_destination\":\"destination\",\"method\":\"scp\",\"direction\":\"push\",\"effective_recursive\":true,\"recursive\":false,\"scope\":\"recursive path\",\"compress\":false,\"success\":true,\"dry_run\":true}"
+        );
     }
 
     #[cfg(unix)]
@@ -1332,32 +1212,22 @@ mod tests {
     }
 
     #[test]
-    fn transfer_identity_is_single_line_and_bounded() {
+    fn transfer_identity_and_failure_detail_are_single_line_bounded_and_utf8_safe() {
         let identity = bounded_identity(&format!("source\n{}", "x".repeat(200)));
-
         assert!(!identity.contains('\n'));
         assert!(identity.ends_with("..."));
         assert!(identity.len() <= 160);
-    }
 
-    #[test]
-    fn transfer_failure_detail_is_single_line_and_bounded() {
-        let detail = super::bounded_detail(&format!("failed\r\n{}", "x".repeat(2000)));
-
+        let detail = bounded_detail(&format!("failed\r\n{}", "x".repeat(2000)));
         assert!(!detail.contains(['\r', '\n']));
         assert!(detail.ends_with("..."));
         assert!(detail.len() <= 1024);
-    }
 
-    #[test]
-    fn bounded_transfer_text_preserves_utf8_boundaries() {
+        // Truncation lands inside a multi-byte character without panicking.
         let identity = bounded_identity(&format!("{}ézzz", "a".repeat(156)));
         let detail = bounded_detail(&format!("{}ézzz", "a".repeat(1020)));
-
-        assert!(identity.is_char_boundary(identity.len()));
         assert!(identity.ends_with("..."));
         assert!(identity.len() <= 160);
-        assert!(detail.is_char_boundary(detail.len()));
         assert!(detail.ends_with("..."));
         assert!(detail.len() <= 1024);
     }

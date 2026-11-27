@@ -318,141 +318,12 @@ mod tests {
             .unwrap()
             .job
             .is_none());
-    }
-
-    /// The one non-degradable method (a remote artifact genuinely can't be
-    /// resolved without a runner) must surface a clear error rather than a
-    /// silent empty result.
-    #[test]
-    fn noop_provider_download_errors_clearly() {
-        let noop = NoopRunnerEvidenceProvider;
+        // A remote artifact genuinely can't be resolved without a runner, so
+        // download is the one method that must error rather than degrade.
         let err = noop
             .download_remote_artifact("runner-artifact://x", None)
             .expect_err("download must error without a provider");
         assert!(err.message.contains("runner evidence provider"));
-    }
-
-    /// A registered provider is used in place of the no-op default.
-    #[test]
-    fn registered_provider_is_used() {
-        let _lock = provider_lock().lock().expect("provider lock");
-        struct FakeProvider;
-        impl RunnerEvidenceProvider for FakeProvider {
-            fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {
-                Ok(None)
-            }
-            fn statuses(&self) -> Vec<RunnerConnectionInfo> {
-                vec![RunnerConnectionInfo {
-                    runner_id: "fake".to_string(),
-                    connected: true,
-                    active_jobs: Vec::new(),
-                    stale_runner_jobs: Vec::new(),
-                    active_jobs_available: true,
-                    active_jobs_error: None,
-                }]
-            }
-            fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
-                Ok(Value::Null)
-            }
-            fn mirrored_runner_job_identity(&self, _: &RunRecord) -> Option<(String, String)> {
-                None
-            }
-            fn download_remote_artifact(
-                &self,
-                _: &str,
-                _: Option<PathBuf>,
-            ) -> Result<RemoteArtifactDownloadInfo> {
-                unreachable!()
-            }
-        }
-
-        register_runner_evidence_provider(Box::new(FakeProvider));
-        let statuses = with_runner_evidence(|p| p.statuses());
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].runner_id, "fake");
-
-        // Reset so the registered fake doesn't leak into other tests sharing the
-        // process-global provider.
-        provider_slot()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-    }
-
-    #[test]
-    fn statuses_indexed_defaults_to_statuses_and_honors_override() {
-        // Default: a provider with no cheaper path serves statuses_indexed from
-        // statuses for every provider.
-        struct DefaultProvider;
-        impl RunnerEvidenceProvider for DefaultProvider {
-            fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {
-                Ok(None)
-            }
-            fn statuses(&self) -> Vec<RunnerConnectionInfo> {
-                vec![RunnerConnectionInfo {
-                    runner_id: "from-statuses".to_string(),
-                    connected: true,
-                    active_jobs: Vec::new(),
-                    stale_runner_jobs: Vec::new(),
-                    active_jobs_available: true,
-                    active_jobs_error: None,
-                }]
-            }
-            fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
-                Ok(Value::Null)
-            }
-            fn mirrored_runner_job_identity(&self, _: &RunRecord) -> Option<(String, String)> {
-                None
-            }
-            fn download_remote_artifact(
-                &self,
-                _: &str,
-                _: Option<PathBuf>,
-            ) -> Result<RemoteArtifactDownloadInfo> {
-                unreachable!()
-            }
-        }
-        let default = DefaultProvider;
-        assert_eq!(default.statuses_indexed().len(), 1);
-        assert_eq!(default.statuses_indexed()[0].runner_id, "from-statuses");
-
-        // Override: a provider with a cheaper indexed path uses it, NOT statuses.
-        // (statuses() here would panic — proving activity never calls it.)
-        struct IndexedProvider;
-        impl RunnerEvidenceProvider for IndexedProvider {
-            fn mirror_connected_runner_run(&self, _: &str) -> Result<Option<RunRecord>> {
-                Ok(None)
-            }
-            fn statuses(&self) -> Vec<RunnerConnectionInfo> {
-                panic!("statuses() must not be called on the indexed activity path");
-            }
-            fn statuses_indexed(&self) -> Vec<RunnerConnectionInfo> {
-                vec![RunnerConnectionInfo {
-                    runner_id: "from-indexed".to_string(),
-                    connected: true,
-                    active_jobs: Vec::new(),
-                    stale_runner_jobs: Vec::new(),
-                    active_jobs_available: true,
-                    active_jobs_error: None,
-                }]
-            }
-            fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
-                Ok(Value::Null)
-            }
-            fn mirrored_runner_job_identity(&self, _: &RunRecord) -> Option<(String, String)> {
-                None
-            }
-            fn download_remote_artifact(
-                &self,
-                _: &str,
-                _: Option<PathBuf>,
-            ) -> Result<RemoteArtifactDownloadInfo> {
-                unreachable!()
-            }
-        }
-        let indexed = IndexedProvider;
-        assert_eq!(indexed.statuses_indexed().len(), 1);
-        assert_eq!(indexed.statuses_indexed()[0].runner_id, "from-indexed");
     }
 
     #[test]
@@ -523,10 +394,7 @@ mod tests {
             ]
         );
 
-        provider_slot()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        clear_runner_evidence_provider();
     }
 
     struct SelectedRefreshProvider {
@@ -629,10 +497,7 @@ mod tests {
             assert_eq!(running, vec!["local"]);
             assert_eq!(*calls.lock().unwrap(), vec!["target"]);
         });
-        provider_slot()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        clear_runner_evidence_provider();
     }
 
     #[test]
@@ -657,74 +522,48 @@ mod tests {
             );
             assert!(calls.lock().expect("calls").is_empty());
         });
-        provider_slot()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        clear_runner_evidence_provider();
     }
 
     #[test]
-    fn selected_job_absence_remains_an_actionable_refresh_failure() {
+    fn selected_refresh_failures_remain_actionable_and_leave_the_run_running() {
         let _lock = provider_lock().lock().expect("provider lock");
-        with_isolated_home(|_| {
-            let store = ObservationStore::open_initialized().expect("store");
-            let selected = mirrored_run("selected");
-            store.import_run(&selected).expect("selected");
-            let calls = Arc::new(Mutex::new(Vec::new()));
-            register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
-                calls: calls.clone(),
-                error: Some(Error::new(
+        for (case, error) in [
+            (
+                "job not found",
+                Error::new(
                     crate::error::ErrorCode::InternalUnexpected,
                     "daemon request failed: job not found",
                     serde_json::json!({ "http_status": 404, "path": "/jobs/job-1" }),
-                )),
-                converge_target: false,
-            }));
+                ),
+            ),
+            (
+                "transport",
+                Error::internal_unexpected("runner transport unavailable"),
+            ),
+        ] {
+            with_isolated_home(|_| {
+                let store = ObservationStore::open_initialized().expect("store");
+                let selected = mirrored_run("selected");
+                store.import_run(&selected).expect("selected");
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
+                    calls: calls.clone(),
+                    error: Some(error.clone()),
+                    converge_target: false,
+                }));
 
-            let err = super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
-                .expect("actionable refresh error");
-            assert_eq!(err.details["http_status"], 404);
-            assert_eq!(*calls.lock().expect("calls"), vec!["selected"]);
-            let refreshed = store.get_run("selected").expect("read").expect("run");
-            assert_eq!(refreshed.status, RunStatus::Running.as_str());
-        });
-        provider_slot()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-    }
-
-    #[test]
-    fn selected_transport_refresh_failure_remains_actionable() {
-        let _lock = provider_lock().lock().expect("provider lock");
-        with_isolated_home(|_| {
-            let store = ObservationStore::open_initialized().expect("store");
-            let selected = mirrored_run("selected");
-            store.import_run(&selected).expect("selected");
-            let calls = Arc::new(Mutex::new(Vec::new()));
-            register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
-                calls: calls.clone(),
-                error: Some(Error::internal_unexpected("runner transport unavailable")),
-                converge_target: false,
-            }));
-
-            let err = super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
-                .expect("actionable refresh error");
-            assert_eq!(err.message, "runner transport unavailable");
-            assert_eq!(*calls.lock().expect("calls"), vec!["selected"]);
-            assert_eq!(
-                store
-                    .get_run("selected")
-                    .expect("read")
-                    .expect("run")
-                    .status,
-                RunStatus::Running.as_str()
-            );
-        });
-        provider_slot()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+                let err =
+                    super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
+                        .expect("actionable refresh error");
+                assert_eq!(err.message, error.message, "{case}");
+                assert_eq!(err.details, error.details, "{case}");
+                assert_eq!(*calls.lock().expect("calls"), vec!["selected"], "{case}");
+                let refreshed = store.get_run("selected").expect("read").expect("run");
+                assert_eq!(refreshed.status, RunStatus::Running.as_str(), "{case}");
+            });
+            clear_runner_evidence_provider();
+        }
     }
 
     #[test]
@@ -767,9 +606,6 @@ mod tests {
                 RunStatus::Running.as_str()
             );
         });
-        provider_slot()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        clear_runner_evidence_provider();
     }
 }

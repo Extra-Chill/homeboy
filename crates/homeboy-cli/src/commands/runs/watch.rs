@@ -325,54 +325,27 @@ mod tests {
         )
     }
 
+    /// Terminal statuses end the watch with the status's exit code. A
+    /// reconciled ghost (`stale`) and a detached Lab handoff (`handed_off`,
+    /// #11107) must exit rather than hang, and must not claim success.
     #[test]
-    fn watch_reaches_terminal_pass_with_zero_exit() {
-        let poller = ScriptedPoller::new(&["running", "running", "pass"]);
-        let result = run_loop(&poller, &config(None)).expect("loop");
-        assert_eq!(result.conclusion, WatchConclusion::Terminal);
-        assert_eq!(result.poll_count, 3);
-
-        let (output, exit_code) = build_output("run-1", result, None);
-        assert_eq!(exit_code, 0);
-        assert!(output.terminal);
-        assert!(!output.timed_out);
-        assert_eq!(output.status, "pass");
-    }
-
-    #[test]
-    fn watch_fail_status_exits_nonzero() {
-        let poller = ScriptedPoller::new(&["running", "fail"]);
-        let result = run_loop(&poller, &config(None)).expect("loop");
-        let (output, exit_code) = build_output("run-1", result, None);
-        assert_eq!(exit_code, 1);
-        assert_eq!(output.status, "fail");
-    }
-
-    #[test]
-    fn watch_surfaces_stale_ghost_as_terminal_failure() {
-        // A reconciled ghost run settles to `stale`; the watch must exit, not
-        // hang, and report failure.
-        let poller = ScriptedPoller::new(&["running", "stale"]);
-        let result = run_loop(&poller, &config(None)).expect("loop");
-        assert_eq!(result.conclusion, WatchConclusion::Terminal);
-        let (output, exit_code) = build_output("run-1", result, None);
-        assert_eq!(exit_code, 1);
-        assert_eq!(output.status, "stale");
-    }
-
-    /// A detached Lab handoff settles to `handed_off`. The watch must exit
-    /// rather than hang — it used to hang, because the record was left
-    /// `running` forever (#11107) — and it must not report success: the
-    /// dispatch succeeded, the dispatched command proved nothing here.
-    #[test]
-    fn watch_surfaces_a_handed_off_dispatch_as_terminal_without_claiming_success() {
-        let poller = ScriptedPoller::new(&["running", "handed_off"]);
-        let result = run_loop(&poller, &config(None)).expect("loop");
-        assert_eq!(result.conclusion, WatchConclusion::Terminal);
-        let (output, exit_code) = build_output("run-1", result, None);
-        assert_eq!(exit_code, 1);
-        assert_eq!(output.status, "handed_off");
-        assert!(is_terminal_status("handed_off"));
+    fn watch_exits_on_terminal_status_with_its_exit_code() {
+        for (script, status, expected_exit) in [
+            (&["running", "running", "pass"][..], "pass", 0),
+            (&["running", "fail"][..], "fail", 1),
+            (&["running", "stale"][..], "stale", 1),
+            (&["running", "handed_off"][..], "handed_off", 1),
+        ] {
+            let poller = ScriptedPoller::new(script);
+            let result = run_loop(&poller, &config(None)).expect("loop");
+            assert_eq!(result.conclusion, WatchConclusion::Terminal, "{status}");
+            assert_eq!(result.poll_count, script.len() as u64, "{status}");
+            let (output, exit_code) = build_output("run-1", result, None);
+            assert_eq!(exit_code, expected_exit, "{status}");
+            assert!(output.terminal);
+            assert!(!output.timed_out);
+            assert_eq!(output.status, status);
+        }
     }
 
     #[test]
@@ -389,9 +362,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_status_is_treated_as_terminal_failure() {
-        assert!(is_terminal_status("definitely-not-a-status"));
-        assert_eq!(exit_code_for_status("definitely-not-a-status"), 1);
+    fn skipped_and_unknown_statuses_are_terminal() {
+        for (status, exit_code) in [("skipped", 0), ("definitely-not-a-status", 1)] {
+            assert!(is_terminal_status(status), "{status}");
+            assert_eq!(exit_code_for_status(status), exit_code, "{status}");
+        }
     }
 
     #[test]
@@ -452,11 +427,5 @@ mod tests {
         })
         .unwrap();
         assert_eq!(observed.status, "stale");
-    }
-
-    #[test]
-    fn skipped_status_exits_zero() {
-        assert!(is_terminal_status("skipped"));
-        assert_eq!(exit_code_for_status("skipped"), 0);
     }
 }

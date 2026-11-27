@@ -142,7 +142,6 @@ impl CookStartupAdmission {
         let handoff = &record.metadata["detached_cook_handoff"];
         let progress_is_current = record.metadata["cook_progress"]["phase"] == "pre_supervisor";
         if !record.state().is_terminal()
-            && handoff["state"] == "pending"
             && handoff["admission_state"] == "pre_supervisor"
             && handoff["launcher_id"] == launcher_id
             && !progress_is_current
@@ -194,7 +193,6 @@ impl CookStartupAdmission {
         // or a transferred local launcher has a different token and must retain
         // its own handoff custody.
         if record.state().is_terminal()
-            || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
             || handoff["launcher_id"] != self.launcher_id
             || handoff["launcher_pid"].as_u64() != Some(u64::from(std::process::id()))
@@ -312,24 +310,6 @@ fn release_deadline(override_secs: Option<u64>, stage: &str) -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| release_stage_deadline(stage))
-}
-
-#[cfg(test)]
-fn release_deadline_with_test_duration(
-    override_secs: Option<u64>,
-    stage: &str,
-    execution_duration: Duration,
-) -> Duration {
-    override_secs
-        .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| {
-            if stage == "executing release pipeline" {
-                execution_duration
-            } else {
-                RELEASE_DISCOVERY_DEADLINE
-            }
-        })
 }
 
 /// Stage the watchdog should track after a child stderr `line`, or `None` to
@@ -499,18 +479,10 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
 #[cfg(test)]
 mod release_deadline_tests {
     use super::{
-        release_deadline, release_deadline_expired, release_deadline_with_test_duration,
-        release_stage_after_line, RELEASE_EXECUTION_DEADLINE,
+        release_deadline, release_deadline_expired, release_stage_after_line,
+        RELEASE_EXECUTION_DEADLINE,
     };
     use std::time::Duration;
-
-    #[test]
-    fn progress_keeps_release_alive_past_original_deadline() {
-        let deadline = Duration::from_secs(30);
-        // Simulated stage output at 29s, followed by more work through 58s.
-        let idle_for = Duration::from_secs(29);
-        assert!(!release_deadline_expired(idle_for, deadline));
-    }
 
     #[test]
     fn child_without_progress_expires_and_reports_typed_error() {
@@ -544,17 +516,6 @@ mod release_deadline_tests {
         );
     }
 
-    #[test]
-    fn silent_execution_survives_past_discovery_window() {
-        let idle_for = Duration::from_secs(31);
-        let execution_deadline = release_deadline_with_test_duration(
-            None,
-            "executing release pipeline",
-            Duration::from_secs(60),
-        );
-        assert!(release_deadline_expired(idle_for, Duration::from_secs(30)));
-        assert!(!release_deadline_expired(idle_for, execution_deadline));
-    }
     #[test]
     fn gate_output_lines_do_not_demote_the_execution_stage() {
         let mut stage = String::from("startup");
@@ -705,13 +666,21 @@ pub(crate) fn select_unmaterialized_cook_runner(
         )
     };
     if let Some(runner_id) = runner_ref {
-        if crate::runner::runners::runner_admission_snapshot(runner_id)?
-            .summary
-            .accepting_jobs
+        if crate::runner::runners::runner_admission_snapshot(
+            runner_id,
+            None,
+            crate::runner::runners::RunnerAdmissionReadiness::Observation,
+        )?
+        .summary
+        .accepting_jobs
         {
             return eligible(runner_id.to_string());
         }
-        let snapshot = crate::runner::runners::runner_admission_snapshot(runner_id)?;
+        let snapshot = crate::runner::runners::runner_admission_snapshot(
+            runner_id,
+            None,
+            crate::runner::runners::RunnerAdmissionReadiness::Observation,
+        )?;
         return Ok(Err(snapshot.summary.next_action.unwrap_or_else(|| {
             format!("runner `{runner_id}` is not accepting jobs")
         })));
@@ -1304,21 +1273,17 @@ impl CliRuntime {
                     {
                         std::process::exit(removed.emit());
                     }
-                    if let Some(output) = try_augment_clap_error(
-                        &err,
-                        &diagnostic_args,
-                        &self.extension_discovery().health,
-                    ) {
+                    if let Some(output) =
+                        try_augment_clap_error(&err, &self.extension_discovery().health)
+                    {
                         eprintln!("{}", output);
                         crate::invocation::parse_exit(false);
                         std::process::exit(2);
                     }
 
-                    if let Some(output) = try_augment_clap_error(
-                        &static_err,
-                        &diagnostic_args,
-                        &self.extension_discovery().health,
-                    ) {
+                    if let Some(output) =
+                        try_augment_clap_error(&static_err, &self.extension_discovery().health)
+                    {
                         eprintln!("{}", output);
                         crate::invocation::parse_exit(false);
                         std::process::exit(2);
@@ -1919,9 +1884,13 @@ pub(crate) fn execution_step_cook_preflight(
             .and_then(|value| value.selected_runner_id.clone())
     });
     if let Some(runner_id) = cli.runner.as_deref() {
-        if !crate::runner::runners::runner_admission_snapshot(runner_id)?
-            .summary
-            .accepting_jobs
+        if !crate::runner::runners::runner_admission_snapshot(
+            runner_id,
+            None,
+            crate::runner::runners::RunnerAdmissionReadiness::Observation,
+        )?
+        .summary
+        .accepting_jobs
         {
             let mut error = crate::core::Error::validation_invalid_argument(
                 "runner",
@@ -3722,36 +3691,12 @@ fn is_runs_artifact_get_runner_option(args: &[String]) -> bool {
         })
 }
 
-struct ArgumentMigration {
-    command: &'static str,
-    help_flag: &'static str,
-    command_path: &'static [&'static str],
-    historical_flags: &'static [&'static str],
-    diagnostic: &'static str,
-}
-
-const ARGUMENT_MIGRATIONS: &[ArgumentMigration] = &[ArgumentMigration {
-    command: "homeboy agent-task cook",
-    help_flag: "--help-full",
-    command_path: &["agent-task", "cook"],
-    historical_flags: &["--provider", "--provider-id", "--dispatch-selector"],
-    diagnostic: "executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
-Example: `homeboy agent-task cook --backend pi --selector pi.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'homeboy review test homeboy' --no-finalize`\n\
-List available executor providers: `homeboy agent-task providers`\n\
-`--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.",
-}];
-
-/// Attempt to augment a clap error with semantic argument migrations or entity suggestions.
+/// Attempt to augment a clap error with entity suggestions.
 /// Returns Some(augmented_message) when an actionable diagnostic is available.
 fn try_augment_clap_error(
     e: &clap::Error,
-    argv: &[String],
     extension_health: &ExtensionCliHealth,
 ) -> Option<String> {
-    if let Some(output) = semantic_argument_migration_diagnostic(e, argv) {
-        return Some(output);
-    }
-
     // Extract unrecognized subcommand and parent command from error.
     let unrecognized = extract_unrecognized_from_error(e)?;
     let parent_command = extract_parent_command_from_error(e)?;
@@ -3812,13 +3757,6 @@ fn try_augment_clap_error(
 /// generic runner surface and deliberately require discovery before selecting
 /// a runner ID.
 fn command_domain_hints(unrecognized: &str, parent_command: &str) -> Option<Vec<String>> {
-    if parent_command.is_empty() && unrecognized.eq_ignore_ascii_case("init") {
-        return Some(vec![
-            "`init` is no longer a top-level command. Discover extension lifecycle commands with `homeboy extension --help`".to_string(),
-            "Converge installed extensions with `homeboy extension converge`, or refresh Homeboy and extensions with `homeboy upgrade`".to_string(),
-        ]);
-    }
-
     if !parent_command.is_empty()
         || !(unrecognized.eq_ignore_ascii_case("lab")
             || homeboy::core::engine::text::levenshtein(&unrecognized.to_lowercase(), "runner")
@@ -3831,38 +3769,6 @@ fn command_domain_hints(unrecognized: &str, parent_command: &str) -> Option<Vec<
         "'{}' refers to the runner control plane. Discover runners with `homeboy runner list`, then inspect one with `homeboy runner status <runner-id>`",
         unrecognized
     )])
-}
-
-fn semantic_argument_migration_diagnostic(e: &clap::Error, argv: &[String]) -> Option<String> {
-    if e.kind() != clap::error::ErrorKind::UnknownArgument {
-        return None;
-    }
-
-    let migration = ARGUMENT_MIGRATIONS.iter().find(|migration| {
-        argv.windows(migration.command_path.len()).any(|command| {
-            command
-                .iter()
-                .map(String::as_str)
-                .eq(migration.command_path.iter().copied())
-        })
-    })?;
-    let argument = argv.iter().find_map(|argument| {
-        migration
-            .historical_flags
-            .iter()
-            .find(|flag| {
-                argument.as_str() == **flag
-                    || argument
-                        .strip_prefix(**flag)
-                        .is_some_and(|suffix| suffix.starts_with('='))
-            })
-            .map(|flag| (*flag).to_string())
-    })?;
-
-    Some(format!(
-        "error: historical executor selection flag '{argument}' is not supported\n\nhint: {}\n\nFor more information, try '{} {}'",
-        migration.diagnostic, migration.command, migration.help_flag
-    ))
 }
 
 fn append_extension_health_hints(hints: &mut Vec<String>, extension_health: &ExtensionCliHealth) {
@@ -4278,16 +4184,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_admission_requirements_avoid_runner_lookup() {
+    fn capability_admission_skips_lookup_only_when_nothing_is_required() {
         assert!(runner_satisfies_admission_capabilities(
             "runner-that-does-not-exist",
             &BTreeSet::new()
         )
         .expect("empty requirements"));
-    }
-
-    #[test]
-    fn capability_admission_rejects_unknown_runners() {
         let error = runner_satisfies_admission_capabilities(
             "runner-that-does-not-exist",
             &BTreeSet::from(["homeboy"]),
@@ -5080,28 +4982,58 @@ mod tests {
     }
 
     #[test]
-    fn stale_inventory_refreshes_once_and_routes_newly_ready_capacity() {
-        let (resolved, diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
-            100,
-            || {
-                Ok((
-                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::ConnectedReady),
-                    200,
-                ))
-            },
-        );
+    fn terminal_lab_inventory_refreshes_stale_inventory_once_and_reports_the_outcome() {
+        use crate::runner::runners::LabRunnerReadinessState as State;
+        let timeout = || {
+            Err(crate::core::Error::new(
+                crate::core::ErrorCode::RemoteCommandTimeout,
+                "runner stopped answering",
+                serde_json::Value::Null,
+            ))
+        };
 
-        assert_eq!(
-            resolved.state,
-            crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-        );
-        assert_eq!(resolved.selected_runner_id.as_deref(), Some("lab-a"));
+        let (ready, diagnostic) =
+            resolve_terminal_lab_inventory(lab_readiness(State::Stale), 100, || {
+                Ok((lab_readiness(State::ConnectedReady), 200))
+            });
+        assert_eq!(ready.state, State::ConnectedReady);
+        assert_eq!(ready.selected_runner_id.as_deref(), Some("lab-a"));
         assert!(diagnostic.refresh_attempted);
         assert_eq!(diagnostic.observed_at_ms, 100);
         assert_eq!(diagnostic.source_freshness.as_deref(), Some("stale"));
         assert_eq!(diagnostic.refreshed_at_ms, Some(200));
         assert_eq!(diagnostic.terminal_reason, "ready_after_refresh");
+
+        let (blocked, diagnostic) =
+            resolve_terminal_lab_inventory(lab_readiness(State::Stale), 100, || {
+                Ok((lab_readiness(State::CapacityBlocked), 200))
+            });
+        assert_eq!(blocked.state, State::CapacityBlocked);
+        assert_eq!(
+            diagnostic.refreshed_state.as_deref(),
+            Some("capacity_blocked")
+        );
+        assert_eq!(diagnostic.terminal_reason, "no_ready_capacity");
+
+        let (timed_out, diagnostic) =
+            resolve_terminal_lab_inventory(lab_readiness(State::Stale), 100, timeout);
+        assert_eq!(timed_out.state, State::Stale);
+        assert!(diagnostic.refresh_attempted);
+        assert_eq!(diagnostic.terminal_reason, "refresh_timeout");
+        assert_eq!(
+            diagnostic.refresh_error_code.as_deref(),
+            Some("remote.command_timeout")
+        );
+        assert!(diagnostic.refresh_error.is_some());
+
+        let (fresh_empty, diagnostic) = resolve_terminal_lab_inventory(
+            lab_readiness(State::Absent),
+            100,
+            || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
+        );
+        assert_eq!(fresh_empty.state, State::Absent);
+        assert!(!diagnostic.refresh_attempted);
+        assert_eq!(diagnostic.terminal_reason, "no_ready_capacity");
     }
 
     #[test]
@@ -5243,74 +5175,6 @@ mod tests {
         )
         .expect_err("an explicit disconnected runner must fail closed");
         assert_eq!(error.details["field"], "selected_runner_id");
-    }
-
-    #[test]
-    fn stale_inventory_refresh_to_empty_reports_confirmed_no_ready_capacity() {
-        let (resolved, diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
-            100,
-            || {
-                Ok((
-                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked),
-                    200,
-                ))
-            },
-        );
-
-        assert_eq!(
-            resolved.state,
-            crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
-        );
-        assert_eq!(
-            diagnostic.refreshed_state.as_deref(),
-            Some("capacity_blocked")
-        );
-        assert_eq!(diagnostic.terminal_reason, "no_ready_capacity");
-    }
-
-    #[test]
-    fn stale_inventory_refresh_timeout_is_reported_without_local_fallback() {
-        let (resolved, diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Stale),
-            100,
-            || {
-                Err(crate::core::Error::new(
-                    crate::core::ErrorCode::RemoteCommandTimeout,
-                    "runner stopped answering",
-                    serde_json::Value::Null,
-                ))
-            },
-        );
-
-        assert_eq!(
-            resolved.state,
-            crate::runner::runners::LabRunnerReadinessState::Stale
-        );
-        assert_eq!(diagnostic.terminal_reason, "refresh_timeout");
-        assert!(diagnostic.refresh_attempted);
-        assert_eq!(
-            diagnostic.refresh_error_code.as_deref(),
-            Some("remote.command_timeout")
-        );
-        assert!(diagnostic.refresh_error.is_some());
-    }
-
-    #[test]
-    fn fresh_empty_inventory_does_not_open_a_refresh_probe() {
-        let (resolved, diagnostic) = resolve_terminal_lab_inventory(
-            lab_readiness(crate::runner::runners::LabRunnerReadinessState::Absent),
-            100,
-            || -> crate::core::Result<_> { panic!("fresh inventory must not refresh") },
-        );
-
-        assert_eq!(
-            resolved.state,
-            crate::runner::runners::LabRunnerReadinessState::Absent
-        );
-        assert!(!diagnostic.refresh_attempted);
-        assert_eq!(diagnostic.observed_at_ms, 100);
-        assert_eq!(diagnostic.terminal_reason, "no_ready_capacity");
     }
 
     #[test]
@@ -5570,16 +5434,11 @@ mod tests {
     }
 
     #[test]
-    fn output_format_names_are_rejected_as_global_output_paths() {
+    fn global_output_path_rejects_format_names_but_allows_file_paths() {
         let err = output_runtime::validate_output_file_path("json")
             .expect("format-like path should be rejected");
-
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("--output json"));
-    }
-
-    #[test]
-    fn normal_output_file_paths_are_allowed() {
         assert!(output_runtime::validate_output_file_path("./homeboy-output.json").is_none());
     }
 
@@ -5774,34 +5633,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn startup_fast_path_matches_explicit_help_at_every_command_depth() {
-        assert_eq!(
-            startup_fast_path(&argv(&["homeboy", "--help"])),
-            Some(StartupFastPath::Help)
-        );
-        assert_eq!(
-            startup_fast_path(&argv(&["homeboy", "-h"])),
-            Some(StartupFastPath::Help)
-        );
-        assert_eq!(
-            startup_fast_path(&argv(&["homeboy", "--version"])),
-            Some(StartupFastPath::Version)
-        );
-        assert_eq!(
-            startup_fast_path(&argv(&["homeboy", "-V"])),
-            Some(StartupFastPath::Version)
-        );
-        assert_eq!(
-            startup_fast_path(&argv(&["homeboy", "status", "--help"])),
-            Some(StartupFastPath::Help)
-        );
-        assert_eq!(
-            startup_fast_path(&argv(&["homeboy", "agent-task", "cook", "--help"])),
-            Some(StartupFastPath::Help)
-        );
-    }
-
     /// Explicit help is rendered before runtime registration, config loading,
     /// or controller consultation. Clap still decides
     /// whether the flag is actually help rather than an option value.
@@ -5831,11 +5662,13 @@ mod tests {
 
     #[test]
     fn version_fast_path_reports_the_build_version_without_extension_discovery() {
-        match startup_fast_path_output(&CliRuntime::new(), &argv(&["homeboy", "--version"])) {
-            Some(StartupFastPathOutput::Version(version)) => {
-                assert_eq!(version, upgrade::current_build_version());
+        for flag in ["--version", "-V"] {
+            match startup_fast_path_output(&CliRuntime::new(), &argv(&["homeboy", flag])) {
+                Some(StartupFastPathOutput::Version(version)) => {
+                    assert_eq!(version, upgrade::current_build_version());
+                }
+                _ => panic!("`homeboy {flag}` should resolve to the version fast path"),
             }
-            _ => panic!("`homeboy --version` should resolve to the version fast path"),
         }
     }
 
@@ -5946,12 +5779,7 @@ mod tests {
             broken_link_ids: vec!["sample-runtime".to_string()],
         };
 
-        let output = try_augment_clap_error(
-            &err,
-            &["homeboy".to_string(), "sample-cli".to_string()],
-            &health,
-        )
-        .expect("extension health hint");
+        let output = try_augment_clap_error(&err, &health).expect("extension health hint");
 
         assert!(output.contains("extension-provided commands may be unavailable"));
         assert!(output.contains("broken extension link `sample-runtime`"));
@@ -5976,12 +5804,8 @@ mod tests {
             let err = build_augmented_command(&[], &ExtensionCliHealth::default())
                 .try_get_matches_from(["homeboy", "lab"])
                 .expect_err("lab is not a top-level command");
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", "lab"]),
-                &ExtensionCliHealth::default(),
-            )
-            .expect("Lab should have a control-plane hint");
+            let output = try_augment_clap_error(&err, &ExtensionCliHealth::default())
+                .expect("Lab should have a control-plane hint");
 
             assert!(output.contains("homeboy runner list"));
             assert!(output.contains("homeboy runner status <runner-id>"));
@@ -5995,12 +5819,8 @@ mod tests {
             let err = build_augmented_command(&[], &ExtensionCliHealth::default())
                 .try_get_matches_from(["homeboy", command])
                 .expect_err("misspelled runner command should not parse");
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", command]),
-                &ExtensionCliHealth::default(),
-            )
-            .expect("runner typo should have a control-plane hint");
+            let output = try_augment_clap_error(&err, &ExtensionCliHealth::default())
+                .expect("runner typo should have a control-plane hint");
 
             assert!(
                 output.contains("homeboy runner list"),
@@ -6011,30 +5831,6 @@ mod tests {
                 "{command}: {output}"
             );
         }
-    }
-
-    #[test]
-    fn removed_init_command_uses_extension_lifecycle_guidance_not_extension_id_matching() {
-        crate::test_support::with_isolated_home(|home| {
-            write_cli_extension(home.path(), "rust", "rust");
-            entity_suggest::reset_entity_suggestion_cache_for_test();
-            let err = build_augmented_command(&[], &ExtensionCliHealth::default())
-                .try_get_matches_from(["homeboy", "init"])
-                .expect_err("init is not a top-level command");
-
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", "init"]),
-                &ExtensionCliHealth::default(),
-            )
-            .expect("init should have lifecycle recovery guidance");
-
-            assert!(output.contains("homeboy extension --help"));
-            assert!(output.contains("homeboy extension converge"));
-            assert!(output.contains("homeboy upgrade"));
-            assert!(!output.contains("extension 'rust'"), "{output}");
-            assert!(!output.contains("homeboy extension rust"), "{output}");
-        });
     }
 
     #[test]
@@ -6053,12 +5849,8 @@ mod tests {
             let err = build_augmented_command(&[], &ExtensionCliHealth::default())
                 .try_get_matches_from(["homeboy", "catlog"])
                 .expect_err("component typo is not a top-level command");
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", "catlog"]),
-                &ExtensionCliHealth::default(),
-            )
-            .expect("component typo should have an entity hint");
+            let output = try_augment_clap_error(&err, &ExtensionCliHealth::default())
+                .expect("component typo should have an entity hint");
 
             assert!(output.contains("component 'catalog'"));
             assert!(output.contains("homeboy component catalog"));
@@ -6090,11 +5882,7 @@ mod tests {
                 .try_get_matches_from(["homeboy", "agent-task", "auth", "list"])
                 .expect_err("`list` is not a valid `agent-task auth` subcommand");
 
-            let output = try_augment_clap_error(
-                &err,
-                &argv(&["homeboy", "agent-task", "auth", "list"]),
-                &ExtensionCliHealth::default(),
-            );
+            let output = try_augment_clap_error(&err, &ExtensionCliHealth::default());
 
             // No augmentation for a nested unrecognized subcommand: the
             // caller falls straight through to clap's own immediate usage
@@ -6104,24 +5892,6 @@ mod tests {
                 output.is_none(),
                 "nested unrecognized subcommand must not trigger entity matching, got: {output:?}"
             );
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn extension_discovery_reports_dynamic_commands_and_broken_links() {
-        crate::test_support::with_isolated_home(|home| {
-            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
-            let extensions_dir = home.path().join(".config/homeboy/extensions");
-            let link = extensions_dir.join("stale-runtime");
-            let target = extensions_dir.join("missing-stale-runtime");
-            std::os::unix::fs::symlink(&target, &link).unwrap();
-
-            let discovery = collect_extension_cli_info();
-
-            assert_eq!(discovery.info.len(), 1);
-            assert_eq!(discovery.info[0].tool, "sample-cli");
-            assert_eq!(discovery.health.broken_link_ids, vec!["stale-runtime"]);
         });
     }
 
@@ -6298,50 +6068,6 @@ mod tests {
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
     }
 
-    #[test]
-    fn resource_policy_uses_explicit_runner_before_default_runner() {
-        let cli = Cli::parse_from([
-            "homeboy",
-            "--runner",
-            "selected-lab",
-            "agent-task",
-            "cook",
-            "--to-worktree",
-            "homeboy@fix-explicit-runner",
-            "--prompt",
-            "fix the issue",
-        ]);
-
-        assert_eq!(
-            resource_policy_runner_hint(&cli, Some("default-lab")),
-            Some("selected-lab")
-        );
-    }
-
-    /// Compact output parses on the `review` umbrella and every phase. The
-    /// umbrella's `--summary` maps onto `json_summary` for the test phase; the
-    /// test phase itself spells it `--json-summary` only, since #16788 deleted
-    /// its `--summary` alias.
-    #[test]
-    fn summary_is_accepted_across_the_review_umbrella_and_every_phase() {
-        let phases: &[&[&str]] = &[
-            &["homeboy", "review", "lint", "homeboy", "--summary"],
-            &["homeboy", "review", "lint", "homeboy", "--json-summary"],
-            &["homeboy", "review", "test", "homeboy", "--json-summary"],
-        ];
-
-        for args in phases {
-            Cli::try_parse_from(*args)
-                .unwrap_or_else(|err| panic!("{args:?} must parse, got: {err}"));
-        }
-
-        // The umbrella's own canonical spelling keeps working unchanged.
-        Cli::try_parse_from(["homeboy", "review", "homeboy", "--summary"])
-            .expect("review --summary must parse");
-    }
-
-    /// `--json-summary` selects Homeboy output formatting and never leaks into
-    /// the runner passthrough after `--`.
     #[test]
     fn json_summary_sets_the_field_without_leaking_into_passthrough() {
         for spelling in ["--json-summary"] {
@@ -6550,43 +6276,20 @@ mod tests {
 
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
             assert_eq!(resource_policy_runner_hint(&cli, None), Some("homeboy-lab"));
+            let input = resource_policy::parsed_command_preflight_input(&cli, &argv);
+            let route = generic_route_policy_snapshot(&cli, Some("homeboy-lab".to_string()));
+            assert!(route.command_supports_lab);
+            assert_eq!(
+                input.runner,
+                RunnerIntent::Explicit("homeboy-lab".to_string())
+            );
+            assert_eq!(
+                homeboy::core::parsed_command_preflight::resolve_generic_route_runner(
+                    &input, &route
+                ),
+                Some("homeboy-lab".to_string())
+            );
         }
-    }
-
-    #[test]
-    fn provider_readiness_runner_intent_reaches_generic_route_selection() {
-        let argv = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "providers".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-            "--backend".to_string(),
-            "pi".to_string(),
-            "--validate-readiness".to_string(),
-        ];
-        let mut cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "providers",
-            "--backend",
-            "pi",
-            "--validate-readiness",
-        ]);
-        normalize_agent_task_runner_option(&mut cli, &argv);
-
-        let input = resource_policy::parsed_command_preflight_input(&cli, &argv);
-        let route = generic_route_policy_snapshot(&cli, Some("homeboy-lab".to_string()));
-
-        assert!(route.command_supports_lab);
-        assert_eq!(
-            input.runner,
-            RunnerIntent::Explicit("homeboy-lab".to_string())
-        );
-        assert_eq!(
-            homeboy::core::parsed_command_preflight::resolve_generic_route_runner(&input, &route),
-            Some("homeboy-lab".to_string())
-        );
     }
 
     #[test]

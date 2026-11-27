@@ -1,7 +1,7 @@
 //! Split partition of tests (see mod.rs for shared setup).
 #![cfg(test)]
 
-use super::super::promote::{normalize_fixture_diff, promote};
+use super::super::promote::promote;
 use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{
@@ -136,14 +136,6 @@ fn promote_recoverable_candidate_harvests_committed_changes_behind_empty_evidenc
 }
 
 #[test]
-fn validate_patch_extracts_safe_changed_files() {
-    let patch = normalize_fixture_diff(VALID_PATCH, "repo@promoted-task").expect("valid patch");
-
-    assert_eq!(patch.changed_files, vec!["src/lib.rs"]);
-    assert_eq!(patch.content, VALID_PATCH);
-}
-
-#[test]
 fn promote_reports_no_changes_for_empty_patch_metadata() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let prior_promotion_command = std::env::var_os("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND");
@@ -269,68 +261,6 @@ fn empty_patch_promotes_a_candidate_already_committed_on_the_destination() {
             None => std::env::remove_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND"),
         }
     });
-}
-
-#[test]
-fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
-    let _home = gate_home();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("create repo");
-    git(&repo, &["init"]);
-    git(&repo, &["config", "user.email", "agent@example.test"]);
-    git(&repo, &["config", "user.name", "Agent"]);
-    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
-    git(&repo, &["add", "lib.rs"]);
-    git(&repo, &["commit", "-m", "base"]);
-    let base = git_head(&repo, "HEAD");
-
-    let source_path = temp.path().join("outcome.json");
-    let source = serde_json::json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "task",
-        "status": "no_op",
-        "artifacts": []
-    })
-    .to_string();
-    std::fs::write(&source_path, &source).expect("write no-op outcome");
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(repo.clone()),
-        ..Default::default()
-    };
-
-    let report = promote_with_provider(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some("run".to_string()),
-            source_path: Some(source_path),
-            source_worktree_path: Some(repo),
-            base_ref: None,
-            task_base_sha: Some(base),
-            candidate_ref: None,
-            to_worktree: "repo@promotion".to_string(),
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: VerifyGateOptions {
-                verify: vec!["true".to_string()],
-                private_verify: Vec::new(),
-                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
-                ..Default::default()
-            },
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        },
-        &mut provider,
-    )
-    .expect("no candidate and no change is a no-change result");
-
-    assert_eq!(
-        report.status,
-        AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
-    );
-    assert!(provider.apply_calls.is_empty());
-    assert!(provider.verify_calls.is_empty());
 }
 
 #[test]

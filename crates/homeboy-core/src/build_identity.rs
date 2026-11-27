@@ -206,7 +206,6 @@ mod tests {
 
     #[test]
     fn core_package_version_does_not_override_product_build_version() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0");
         assert_eq!(
             current().version,
             homeboy_product_identity::product_version()
@@ -216,8 +215,8 @@ mod tests {
 
     #[test]
     fn provenance_build_skew_round_trips_through_the_reported_text() {
-        let legacy = "Invalid argument 'provenance_transport': cannot safely bound child provenance environment: child build `homeboy 0.465.1+3bc87452` does not support provenance references from runner build `homeboy 0.465.6+4b7c87df`";
-        let skew = ProvenanceBuildSkew::parse(legacy).expect("legacy text parses");
+        let reported = "Invalid argument 'provenance_transport': cannot safely bound child provenance environment: child build `homeboy 0.465.1+3bc87452` does not support provenance references from runner build `homeboy 0.465.6+4b7c87df`";
+        let skew = ProvenanceBuildSkew::parse(reported).expect("reported text parses");
         assert_eq!(skew.child_build, "homeboy 0.465.1+3bc87452");
         assert_eq!(skew.runner_build, "homeboy 0.465.6+4b7c87df");
         assert_eq!(

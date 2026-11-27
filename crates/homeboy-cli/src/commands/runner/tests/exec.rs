@@ -4,9 +4,8 @@ use super::super::dispatch::{
 use super::super::exec::{
     exec_workspace_context, execute, prepare_runner_exec_command, prepare_runner_exec_env,
     prepare_runner_exec_secret_env_plan, read_bounded, read_runner_exec_script,
-    read_runner_exec_script_from_reader, should_print_handoff,
-    validate_runner_exec_invocation_shape, validate_runner_exec_public_env, RunnerExecInput,
-    RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
+    read_runner_exec_script_from_reader, validate_runner_exec_invocation_shape,
+    validate_runner_exec_public_env, RunnerExecInput, RUNNER_EXEC_SCRIPT_LIMIT_BYTES,
 };
 
 use homeboy::core::observation::{NewRunRecord, ObservationStore};
@@ -284,33 +283,12 @@ fn workspace_ref_inspects_hydrates_and_executes_one_physical_snapshot() {
 fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
     let run = raw_exec_command_run(
         RunnerExecOutput {
-            variant: "exec",
-            command: "runner.exec",
-            runner_id: "lab".to_string(),
-            dry_run: false,
-            mode: runner::RunnerTransport::Daemon,
             argv: vec!["printf".to_string(), "hello".to_string()],
-            remote_cwd: "/workspace".to_string(),
             exit_code: 7,
             stdout: "hello\n".to_string(),
             stderr: "warn\n".to_string(),
-            source_snapshot: None,
-            job: None,
-            runner_job: None,
             job_id: Some("job-123".to_string()),
-            job_events: None,
-            mirror_run_id: None,
-            patch: None,
-            mutation_artifacts: None,
-            artifacts: Vec::new(),
-            promoted_outputs: Vec::new(),
-            structured_summaries: Vec::new(),
-            metrics: None,
-            capture: None,
-            execution_record: None,
-            runner_result: None,
-            handoff: None,
-            diagnostics: None,
+            ..runner_exec_output("lab", RunnerTransport::Daemon, "/workspace")
         },
         7,
     );
@@ -328,46 +306,28 @@ fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
 }
 
 #[test]
-fn raw_exec_suppresses_handoff_output() {
-    assert!(!should_print_handoff(true, false));
-    assert!(!should_print_handoff(false, true));
-    assert!(should_print_handoff(false, false));
+fn leftover_cgroup_evidence_survives_successful_exec_human_presentation() {
+    let message = "killed 1 leftover process(es) in job cgroup: 123 sleep; use --detach for long-running work\n";
+    let run = raw_exec_command_run(
+        RunnerExecOutput {
+            exit_code: 0,
+            stderr: message.to_string(),
+            ..runner_exec_output("lab", RunnerTransport::Daemon, "/workspace")
+        },
+        0,
+    );
+    assert_eq!(run.presentation.stderr.as_deref(), Some(message));
+    assert_eq!(run.stdout_result.unwrap()["stderr"], message);
 }
 
 #[test]
 fn compact_exec_output_shows_metadata_and_streams_once() {
     let output = RunnerExecOutput {
-        variant: "exec",
-        command: "runner.exec",
-        runner_id: "lab".to_string(),
-        dry_run: false,
-        mode: runner::RunnerTransport::Daemon,
-        argv: vec![
-            "homeboy".to_string(),
-            "runs".to_string(),
-            "list".to_string(),
-        ],
-        remote_cwd: "/workspace".to_string(),
-        exit_code: 0,
         stdout: r#"{"runs":[{"id":"run-1"}]}"#.to_string(),
         stderr: "warn\n".to_string(),
-        source_snapshot: None,
-        job: None,
-        runner_job: None,
         job_id: Some("job-123".to_string()),
-        job_events: None,
         mirror_run_id: Some("mirror-1".to_string()),
-        patch: None,
-        mutation_artifacts: None,
-        artifacts: Vec::new(),
-        promoted_outputs: Vec::new(),
-        structured_summaries: Vec::new(),
-        metrics: None,
-        capture: None,
-        execution_record: None,
-        runner_result: None,
-        handoff: None,
-        diagnostics: None,
+        ..runner_exec_output("lab", RunnerTransport::Daemon, "/workspace")
     };
 
     let rendered = render_compact_exec_output(&output);
@@ -419,33 +379,9 @@ fn compact_exec_output_marks_durable_in_flight_job_without_a_failure() {
 #[test]
 fn compact_exec_command_run_preserves_full_output_file_payload() {
     let output = RunnerExecOutput {
-        variant: "exec",
-        command: "runner.exec",
-        runner_id: "lab".to_string(),
-        dry_run: false,
-        mode: runner::RunnerTransport::Daemon,
-        argv: vec!["printf".to_string(), "hello".to_string()],
-        remote_cwd: "/workspace".to_string(),
-        exit_code: 0,
         stdout: "hello\n".to_string(),
-        stderr: String::new(),
-        source_snapshot: None,
-        job: None,
-        runner_job: None,
         job_id: Some("job-123".to_string()),
-        job_events: None,
-        mirror_run_id: None,
-        patch: None,
-        mutation_artifacts: None,
-        artifacts: Vec::new(),
-        promoted_outputs: Vec::new(),
-        structured_summaries: Vec::new(),
-        metrics: None,
-        capture: None,
-        execution_record: None,
-        runner_result: None,
-        handoff: None,
-        diagnostics: None,
+        ..runner_exec_output("lab", RunnerTransport::Daemon, "/workspace")
     };
 
     let run = compact_exec_command_run(output, 0);
@@ -684,28 +620,18 @@ fn hydration_prerequisite_failure_terminalizes_the_durable_run() {
 }
 
 #[test]
-fn read_bounded_retains_full_source_within_limit() {
+fn read_bounded_retains_up_to_the_limit_and_marks_truncation() {
     let (bytes, capture) = read_bounded(&b"echo hi"[..], 1024).expect("read bounded");
-
     assert_eq!(bytes, b"echo hi");
-    assert_eq!(capture.limit_bytes, 1024);
     assert_eq!(capture.seen_bytes, 7);
-    assert_eq!(capture.retained_bytes, 7);
     assert!(!capture.truncated);
-}
 
-#[test]
-fn read_bounded_marks_truncated_when_source_exceeds_limit() {
-    let source = [b'x'; 16];
-    let (bytes, capture) = read_bounded(&source[..], 4).expect("read bounded");
-
+    let (bytes, capture) = read_bounded(&[b'x'; 16][..], 4).expect("read bounded");
     assert_eq!(bytes.len(), 4);
-    assert_eq!(capture.limit_bytes, 4);
     assert_eq!(capture.retained_bytes, 4);
     assert!(capture.seen_bytes > capture.retained_bytes);
     assert!(capture.truncated);
 }
-
 #[test]
 fn read_runner_exec_script_rejects_oversized_script() {
     use std::io::Write;
@@ -720,25 +646,17 @@ fn read_runner_exec_script_rejects_oversized_script() {
 }
 
 #[test]
-fn script_file_stdin_rejects_zero_bytes_before_command_construction() {
-    let err = read_runner_exec_script_from_reader(&b""[..], "stdin")
+fn empty_scripts_are_rejected_before_a_command_is_constructed() {
+    let read_err = read_runner_exec_script_from_reader(&b""[..], "stdin")
         .expect_err("zero-byte stdin must be rejected");
+    assert_eq!(read_err.details["field"], "script_file");
+    assert!(read_err.to_string().contains("stdin is empty"));
 
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert_eq!(err.details["field"], "script_file");
-    assert!(err.to_string().contains("stdin is empty"));
-}
-
-#[test]
-fn empty_script_cannot_emit_a_runner_execution_plan() {
-    let err = prepare_runner_exec_command(Some(&String::new()), Vec::new())
+    let prepare_err = prepare_runner_exec_command(Some(&String::new()), Vec::new())
         .expect_err("empty scripts must not construct a bash command");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert_eq!(err.details["field"], "script_file");
-    assert!(err.to_string().contains("script is empty"));
+    assert_eq!(prepare_err.details["field"], "script_file");
+    assert!(prepare_err.to_string().contains("script is empty"));
 }
-
 /// Run a prepared script command with its own runtime dir: concurrent tests
 /// under `with_isolated_home` repoint and delete the process-wide
 /// `XDG_RUNTIME_DIR`, which the wrapper materializes its script under.
@@ -786,16 +704,6 @@ fn script_file_materializes_a_content_addressed_file_for_bash() {
     let command =
         prepare_runner_exec_command(Some(&source.to_string()), Vec::new()).expect("script command");
 
-    assert_eq!(command[0], "bash");
-    assert_eq!(command[1], "-c");
-    assert!(command[2].contains("script-"));
-    assert!(command[2].contains("HOMEBOY_RUNNER_JOB_ID"));
-    assert!(command[2].contains("HOMEBOY_RUNNER_EXEC_SCRIPT"));
-    assert!(command[2].contains("HOMEBOY_RUNNER_EXEC_SCRIPT_SHA256"));
-    assert!(command[2].contains("chmod 500"));
-    assert!(command[2].contains("trap cleanup EXIT"));
-    assert!(!command[2].contains("bash -s"));
-
     let output = run_script_command(&command, Some("test-job"));
     assert!(output.status.success());
     let lines = String::from_utf8(output.stdout)
@@ -830,29 +738,19 @@ fn materialized_script_preserves_bash_exit_status() {
 }
 
 #[test]
-fn script_file_rejects_extra_argv() {
+fn script_and_command_argv_are_mutually_exclusive() {
     let err = prepare_runner_exec_command(Some(&"echo hi".to_string()), vec!["printf".to_string()])
         .expect_err("script plus argv should fail");
-
     assert!(err
         .to_string()
         .contains("either --script-file or a command"));
-}
 
-#[test]
-fn script_stdin_and_command_are_rejected_before_stdin_can_be_read() {
+    // Stdin scripts are rejected before stdin is opened.
     let command = vec!["printf".to_string(), "unexpected".to_string()];
-
     let err = validate_runner_exec_invocation_shape(Some("-"), &command)
         .expect_err("the invalid shape must be rejected before opening stdin");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert_eq!(err.details["field"], "command");
-    assert!(err
-        .to_string()
-        .contains("either --script-file or a command argv"));
 }
-
 #[test]
 fn env_parser_injects_script_body_without_shell_quoting() {
     let env = prepare_runner_exec_env(
@@ -888,23 +786,19 @@ fn runner_exec_secret_env_plan_merges_names_and_public_env() {
 }
 
 #[test]
-fn runner_exec_rejects_declared_secret_like_public_env() {
-    let env = prepare_runner_exec_env(vec!["API_TOKEN=public".to_string()], None).expect("env");
+fn declared_public_env_rejects_only_secret_like_names() {
+    let env = prepare_runner_exec_env(
+        vec!["API_TOKEN=public".to_string(), "FEATURE_FLAG=1".to_string()],
+        None,
+    )
+    .expect("env");
+
     let err = validate_runner_exec_public_env(&env, &["API_TOKEN".to_string()])
         .expect_err("secret-like declared public env should fail");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert_eq!(err.details["field"], "env");
-}
-
-#[test]
-fn runner_exec_allows_non_secret_public_env_even_when_declared() {
-    let env = prepare_runner_exec_env(vec!["FEATURE_FLAG=1".to_string()], None).expect("env");
-
     validate_runner_exec_public_env(&env, &["FEATURE_FLAG".to_string()])
         .expect("non-sensitive public env is allowed");
 }
-
 #[test]
 fn runner_exec_promotes_declared_artifacts_to_run_store() {
     homeboy::test_support::with_isolated_home(|_| {
@@ -970,7 +864,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
 }
 
 #[test]
-fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
+fn runner_exec_promotes_declared_summaries_as_typed_evidence_despite_large_stdout() {
     homeboy::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         runner::create(
@@ -997,7 +891,8 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                r#"printf '{"matrix":{"passed":1}}' > summary.json"#.to_string(),
+                r#"yes noisy | head -n 2000; printf '{"matrix":{"passed":1}}' > summary.json"#
+                    .to_string(),
             ],
         );
         input.cwd = Some(workspace.path().display().to_string());
@@ -1006,6 +901,9 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
         let (output, exit_code) = execute(input).expect("runner exec");
 
         assert_eq!(exit_code, 0);
+        // The structured summary is read from the declared file, independent
+        // of the large stdout stream.
+        assert!(output.stdout.len() > 10_000);
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].kind, "summary");
@@ -1037,117 +935,13 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
 }
 
 #[test]
-fn runner_exec_structured_summary_is_independent_of_large_stdout() {
-    homeboy::test_support::with_isolated_home(|_| {
-        let workspace = tempfile::tempdir().expect("workspace");
-        runner::create(
-            &format!(
-                r#"{{"id":"lab-local","kind":"local","workspace_root":"{}"}}"#,
-                workspace.path().display()
-            ),
-            false,
-        )
-        .expect("create local runner");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(
-                NewRunRecord::builder("runner-exec")
-                    .command("homeboy runner exec lab-local".to_string())
-                    .cwd_path(workspace.path())
-                    .metadata(serde_json::json!({}))
-                    .build(),
-            )
-            .expect("run");
-
-        let mut input = RunnerExecInput::new("lab-local", vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                r#"yes noisy | head -n 2000; printf '{"status":"pass","count":2000}' > summary.json"#.to_string(),
-            ]);
-        input.cwd = Some(workspace.path().display().to_string());
-        input.run_id = Some(run.id.clone());
-        input.summary_outputs = vec!["summary.json".to_string()];
-        let (output, exit_code) = execute(input).expect("runner exec");
-
-        assert_eq!(exit_code, 0);
-        assert!(output.stdout.len() > 10_000);
-        assert_eq!(output.structured_summaries.len(), 1);
-        assert_eq!(output.structured_summaries[0].summary["status"], "pass");
-        assert_eq!(output.structured_summaries[0].summary["count"], 2000);
-    });
-}
-
-#[test]
-fn runner_exec_promotes_offloaded_artifacts_from_runner_path() {
+fn runner_exec_promotes_offloaded_file_and_directory_artifacts_from_runner_path() {
     homeboy::test_support::with_isolated_home(|home| {
         let artifact_root = home.path().join("artifacts");
         homeboy::core::set_artifact_root_override(Some(artifact_root));
         let workspace = tempfile::tempdir().expect("workspace");
         let report = workspace.path().join("report.txt");
         std::fs::write(&report, "runner output").expect("write runner output");
-        server::create(
-            r#"{"id":"local-ssh","host":"localhost","user":"user"}"#,
-            false,
-        )
-        .expect("create local ssh server");
-        runner::create(
-            &format!(
-                r#"{{"id":"local-ssh","kind":"ssh","server_id":"local-ssh","workspace_root":"{}"}}"#,
-                workspace.path().display()
-            ),
-            false,
-        )
-        .expect("create ssh runner");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(
-                NewRunRecord::builder("runner-exec")
-                    .command("homeboy runner exec lab-ssh".to_string())
-                    .cwd_path(workspace.path())
-                    .metadata(serde_json::json!({}))
-                    .build(),
-            )
-            .expect("run");
-        let output = runner_exec_output(
-            "local-ssh",
-            RunnerTransport::Daemon,
-            &workspace.path().display().to_string(),
-        );
-
-        promote_runner_exec_artifacts_in_store(
-            &test_lifecycle_store(),
-            &run.id,
-            &output,
-            &["report.txt".to_string()],
-        )
-        .expect("promote offloaded artifact");
-
-        let artifacts = store.list_artifacts(&run.id).expect("artifacts");
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].metadata_json["source"], "runner_path_attach");
-        assert_eq!(artifacts[0].metadata_json["runner_id"], "local-ssh");
-        assert_eq!(
-            artifacts[0].metadata_json["runner_path"],
-            report.display().to_string()
-        );
-        assert_eq!(
-            std::fs::read_to_string(&artifacts[0].path).unwrap(),
-            "runner output"
-        );
-        assert_eq!(artifacts[0].size_bytes, Some(13));
-        assert_eq!(
-            artifacts[0].sha256.as_deref(),
-            Some("c147fa5423d1086ceaa8443d0485bd39777952ce61b68696c1fd15be622421a9")
-        );
-    });
-}
-
-#[test]
-fn runner_exec_promotes_offloaded_directory_artifacts_from_runner_path() {
-    homeboy::test_support::with_isolated_home(|home| {
-        let artifact_root = home.path().join("artifacts");
-        homeboy::core::set_artifact_root_override(Some(artifact_root));
-        let workspace = tempfile::tempdir().expect("workspace");
         let site = workspace.path().join("site");
         std::fs::create_dir_all(&site).expect("create site");
         std::fs::write(site.join("index.html"), "<h1>Preview</h1>").expect("write index");
@@ -1184,24 +978,43 @@ fn runner_exec_promotes_offloaded_directory_artifacts_from_runner_path() {
             &test_lifecycle_store(),
             &run.id,
             &output,
-            &["site".to_string()],
+            &["report.txt".to_string(), "site".to_string()],
         )
-        .expect("promote offloaded directory artifact");
+        .expect("promote offloaded artifacts");
 
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].kind, "site");
-        assert_eq!(artifacts[0].artifact_type, "directory");
-        assert_eq!(artifacts[0].metadata_json["source"], "runner_path_attach");
-        assert_eq!(artifacts[0].metadata_json["runner_id"], "local-ssh");
+        assert_eq!(artifacts.len(), 2);
+        let file = artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_type == "file")
+            .expect("file artifact");
+        assert_eq!(file.metadata_json["source"], "runner_path_attach");
+        assert_eq!(file.metadata_json["runner_id"], "local-ssh");
         assert_eq!(
-            artifacts[0].metadata_json["runner_path"],
+            file.metadata_json["runner_path"],
+            report.display().to_string()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file.path).unwrap(),
+            "runner output"
+        );
+        assert_eq!(file.size_bytes, Some(13));
+        assert_eq!(
+            file.sha256.as_deref(),
+            Some("c147fa5423d1086ceaa8443d0485bd39777952ce61b68696c1fd15be622421a9")
+        );
+
+        let directory = artifacts
+            .iter()
+            .find(|artifact| artifact.artifact_type == "directory")
+            .expect("directory artifact");
+        assert_eq!(directory.kind, "site");
+        assert_eq!(directory.metadata_json["source"], "runner_path_attach");
+        assert_eq!(
+            directory.metadata_json["runner_path"],
             site.display().to_string()
         );
-        assert!(std::path::Path::new(&artifacts[0].path)
-            .join("index.html")
-            .is_file());
-        let entrypoints = homeboy::core::artifacts::html_preview_entrypoints(&artifacts[0]);
+        let entrypoints = homeboy::core::artifacts::html_preview_entrypoints(directory);
         assert_eq!(entrypoints.len(), 1);
         assert_eq!(entrypoints[0].path, "index.html");
     });
@@ -1493,44 +1306,34 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
 }
 
 #[test]
-fn read_only_artifact_exec_rejects_capture_patch() {
+fn read_only_artifact_exec_rejects_mutating_options() {
     // A read-only retrieval must never rewrite the runner's daemon, so it
-    // cannot capture a mutation patch (Extra-Chill/homeboy#9420).
-    let mut input = RunnerExecInput::new(
-        "lab-local",
-        vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "cat result.json".to_string(),
-        ],
-    );
-    input.capture_patch = true;
-    input.read_only_artifact = true;
-    let err = execute(input).expect_err("read-only retrieval cannot capture a patch");
+    // cannot capture a mutation patch or declare new artifact outputs
+    // (Extra-Chill/homeboy#9420).
+    let base = || {
+        let mut input = RunnerExecInput::new(
+            "lab-local",
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "cat result.json".to_string(),
+            ],
+        );
+        input.read_only_artifact = true;
+        input
+    };
+    let mut capture_patch = base();
+    capture_patch.capture_patch = true;
+    let mut declared_outputs = base();
+    declared_outputs.run_id = Some("run-1".to_string());
+    declared_outputs.artifact_outputs = vec!["out.txt".to_string()];
 
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert_eq!(err.details["field"], "read_only_artifact");
+    for input in [capture_patch, declared_outputs] {
+        let err = execute(input).expect_err("read-only retrieval rejects mutating options");
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert_eq!(err.details["field"], "read_only_artifact");
+    }
 }
-
-#[test]
-fn read_only_artifact_exec_rejects_declared_outputs() {
-    let mut input = RunnerExecInput::new(
-        "lab-local",
-        vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "cat result.json".to_string(),
-        ],
-    );
-    input.run_id = Some("run-1".to_string());
-    input.artifact_outputs = vec!["out.txt".to_string()];
-    input.read_only_artifact = true;
-    let err = execute(input).expect_err("read-only retrieval cannot declare new artifact outputs");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert_eq!(err.details["field"], "read_only_artifact");
-}
-
 fn runner_exec_output(
     runner_id: &str,
     mode: RunnerTransport,

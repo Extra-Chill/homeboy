@@ -1,7 +1,7 @@
 //! Compile-free admission check for focused `cargo test` gate filters.
 //!
-//! A focused Cargo gate whose filter selects no tests can never pass, and it
-//! used to be discovered only after a full provider run. Building the test
+//! A focused Cargo gate whose filter selects no tests can never pass, so it is
+//! refused before the provider runs rather than after. Building the test
 //! binaries at admission is too expensive, so this reads the Rust sources
 //! instead and refuses a filter only when it provably cannot be part of any
 //! test path that exists in the checkout.

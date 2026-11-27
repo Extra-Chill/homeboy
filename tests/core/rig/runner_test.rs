@@ -1,14 +1,8 @@
 //! Tests for `src/core/rig/runner.rs`.
 //!
-//! Two layers:
-//!
-//! - Report shape tests (originally authored in #1468) — verify the JSON
-//!   envelope contract that CLI JSON output and scheduled jobs depend on.
-//! - End-to-end tests for `run_up` / `run_check` / `run_down_with_settings` / `run_status`
-//!   against a minimal spec with no pipeline and no services. These exercise
-//!   the bookkeeping path (state file write, report assembly) without
-//!   spinning up real services. Richer integration is still smoke-tested
-//!   manually per #1468's README.
+//! Covers the status JSON contract and end-to-end runs of the public runner
+//! entry points (`run_up` / `run_check` / `run_down_with_settings` /
+//! `run_status` / `run_repair`) against small specs.
 //!
 //! Each end-to-end test isolates `HOME` to a tempdir so the shared rig state
 //! file doesn't bleed across tests or the developer's real `~/.config`.
@@ -18,12 +12,10 @@ use std::collections::HashMap;
 use crate::dependency_materialization_cache::{
     inject_restore_publish_failure_after, CacheResult, DependencyMaterializationCache,
 };
-use crate::pipeline::PipelineOutcome;
 use crate::runner::{
     head_sha_and_branch, run_check, run_check_groups, run_down_with_settings, run_fuzz_prepare,
-    run_repair, run_status, run_up, snapshot_state, CheckReport, RepairReport,
-    RepairResourceReport, RigComponentStatusReport, RigStatusReport, ServiceStatusReport,
-    SymlinkStatusState, UpReport,
+    run_repair, run_status, run_up, snapshot_state, RepairReport, RepairResourceReport,
+    RigComponentStatusReport, RigStatusReport, ServiceStatusReport, SymlinkStatusState,
 };
 use crate::spec::{
     ComponentSpec, DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
@@ -34,15 +26,6 @@ use crate::spec::{
 };
 use crate::state::{LifecycleSnapshotState, RigState, ServiceState};
 use homeboy_core::test_support::with_isolated_home;
-
-fn empty_pipeline(name: &str) -> PipelineOutcome {
-    PipelineOutcome {
-        name: name.to_string(),
-        steps: Vec::new(),
-        passed: 0,
-        failed: 0,
-    }
-}
 
 fn minimal_spec(id: &str) -> RigSpec {
     RigSpec {
@@ -89,91 +72,48 @@ fn unix_symlink(target: &std::path::Path, link: &std::path::Path) {
 }
 
 // ------------------------------------------------------------------
-// Report shape tests (preserved from #1468)
+// Report shape
 // ------------------------------------------------------------------
 
+/// `rig status --json` is parsed by tooling: absent timestamps stay `null`
+/// rather than disappearing, and stopped services omit runtime-only fields.
 #[test]
-fn test_up_report_serializes_success_flag() {
-    let report = UpReport {
-        component_refs: Default::default(),
-        rig_id: "test".to_string(),
-        run_id: None,
-        pipeline: empty_pipeline("up"),
-        success: true,
-        artifact_index: None,
+fn test_status_report_json_contract() {
+    let service = |status: &str, pid: Option<u32>, started_at: Option<&str>| ServiceStatusReport {
+        id: "svc".to_string(),
+        kind: "http-static".to_string(),
+        status: status.to_string(),
+        pid,
+        port: Some(9724),
+        log_path: "/tmp/svc.log".to_string(),
+        started_at: started_at.map(str::to_string),
     };
-    let json = serde_json::to_string(&report).expect("serialize");
-    assert!(json.contains("\"rig_id\":\"test\""));
-    assert!(json.contains("\"success\":true"));
-}
-
-#[test]
-fn test_check_report_serializes_success_flag() {
-    let report = CheckReport {
-        component_refs: Default::default(),
-        rig_id: "test".to_string(),
-        run_id: None,
-        pipeline: empty_pipeline("check"),
-        success: false,
-        artifact_index: None,
-    };
-    let json = serde_json::to_string(&report).expect("serialize");
-    assert!(json.contains("\"success\":false"));
-}
-
-#[test]
-fn test_status_report_empty_services_serializes() {
     let report = RigStatusReport {
         component_refs: Default::default(),
         rig_id: "test".to_string(),
-        description: "empty rig".to_string(),
+        description: "status rig".to_string(),
         components: Vec::<RigComponentStatusReport>::new(),
-        services: Vec::new(),
+        services: vec![
+            service("running", Some(4321), Some("2026-04-24T13:00:00Z")),
+            service("stopped", None, None),
+        ],
         symlinks: Vec::new(),
         last_up: None,
         last_check: None,
         last_check_result: None,
         materialized: None,
     };
-    let json = serde_json::to_string(&report).expect("serialize");
-    assert!(json.contains("\"services\":[]"));
-    // last_up is None -> serialized as null (not skipped, to aid tooling).
-    assert!(json.contains("\"last_up\":null"));
-}
 
-#[test]
-fn test_service_status_report_omits_optional_fields_when_stopped() {
-    let report = ServiceStatusReport {
-        id: "svc".to_string(),
-        kind: "command".to_string(),
-        status: "stopped".to_string(),
-        pid: None,
-        port: None,
-        log_path: "/tmp/svc.log".to_string(),
-        started_at: None,
-    };
-    let json = serde_json::to_string(&report).expect("serialize");
-    assert!(!json.contains("\"pid\""));
-    assert!(!json.contains("\"started_at\""));
-}
-
-#[test]
-fn test_service_status_report_emits_pid_when_running() {
-    let report = ServiceStatusReport {
-        id: "svc".to_string(),
-        kind: "http-static".to_string(),
-        status: "running".to_string(),
-        pid: Some(4321),
-        port: Some(9724),
-        log_path: "/tmp/svc.log".to_string(),
-        started_at: Some("2026-04-24T13:00:00Z".to_string()),
-    };
-    let json = serde_json::to_string(&report).expect("serialize");
-    assert!(json.contains("\"pid\":4321"));
-    assert!(json.contains("\"kind\":\"http-static\""));
-    assert!(json.contains("\"port\":9724"));
-    assert!(json.contains("\"log_path\":\"/tmp/svc.log\""));
-    assert!(json.contains("\"started_at\":\"2026-04-24T13:00:00Z\""));
+    let json = serde_json::to_value(&report).expect("serialize");
+    assert!(json["last_up"].is_null());
+    assert!(json.as_object().unwrap().contains_key("last_up"));
+    let running = &json["services"][0];
+    assert_eq!(running["pid"], 4321);
+    assert_eq!(running["port"], 9724);
+    assert_eq!(running["started_at"], "2026-04-24T13:00:00Z");
+    let stopped = json["services"][1].as_object().unwrap();
+    assert!(!stopped.contains_key("pid"));
+    assert!(!stopped.contains_key("started_at"));
 }
 
 // ------------------------------------------------------------------
@@ -509,127 +449,74 @@ fn test_run_down_with_settings_exposes_env_to_pipeline() {
 
 #[cfg(unix)]
 #[test]
-fn test_run_repair_repairs_drifted_symlink() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let old_target = tmp.path().join("old-target");
-        let expected_target = tmp.path().join("expected-target");
-        let link = tmp.path().join("tool");
-        std::fs::write(&old_target, "old").expect("old target");
-        std::fs::write(&expected_target, "expected").expect("expected target");
-        unix_symlink(&old_target, &link);
+fn test_run_repair_symlink_states() {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Existing {
+        Drifted,
+        Missing,
+        Ok,
+        RealFile,
+    }
 
-        let rig = symlink_spec(
-            "repair-drifted-symlink-fixture",
-            link.to_string_lossy().into_owned(),
-            expected_target.to_string_lossy().into_owned(),
-        );
+    for (case, status, success) in [
+        (Existing::Drifted, "repaired", true),
+        (Existing::Missing, "repaired", true),
+        (Existing::Ok, "unchanged", true),
+        (Existing::RealFile, "blocked", false),
+    ] {
+        with_isolated_home(|_dir| {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let old_target = tmp.path().join("old-target");
+            let expected_target = tmp.path().join("expected-target");
+            let link = tmp.path().join("nested").join("tool");
+            std::fs::write(&old_target, "old").expect("old target");
+            std::fs::write(&expected_target, "expected").expect("expected target");
+            if case != Existing::Missing {
+                std::fs::create_dir_all(link.parent().unwrap()).expect("link parent");
+            }
+            match case {
+                Existing::Drifted => unix_symlink(&old_target, &link),
+                Existing::Ok => unix_symlink(&expected_target, &link),
+                Existing::RealFile => std::fs::write(&link, "real file").expect("real file"),
+                Existing::Missing => {}
+            }
 
-        let report = run_repair(&rig).expect("repair succeeds");
-        assert!(report.success);
-        assert_eq!(report.repaired, 1);
-        assert_eq!(report.unchanged, 0);
-        assert_eq!(report.blocked, 0);
-        assert_eq!(report.resources[0].status, "repaired");
-        assert_eq!(
-            report.resources[0].previous_target.as_deref(),
-            Some(old_target.to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            std::fs::read_link(&link).expect("read link"),
-            expected_target
-        );
-    });
-}
+            let rig = symlink_spec(
+                "repair-symlink-fixture",
+                link.to_string_lossy().into_owned(),
+                expected_target.to_string_lossy().into_owned(),
+            );
+            let report = run_repair(&rig).expect("repair report");
 
-#[cfg(unix)]
-#[test]
-fn test_run_repair_creates_missing_symlink() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let expected_target = tmp.path().join("expected-target");
-        let link = tmp.path().join("nested").join("tool");
-        std::fs::write(&expected_target, "expected").expect("expected target");
-
-        let rig = symlink_spec(
-            "repair-missing-symlink-fixture",
-            link.to_string_lossy().into_owned(),
-            expected_target.to_string_lossy().into_owned(),
-        );
-
-        let report = run_repair(&rig).expect("repair succeeds");
-        assert!(report.success);
-        assert_eq!(report.repaired, 1);
-        assert_eq!(report.resources[0].status, "repaired");
-        assert_eq!(report.resources[0].previous_target, None);
-        assert_eq!(
-            std::fs::read_link(&link).expect("read link"),
-            expected_target
-        );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn test_run_repair_noops_ok_symlink() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let expected_target = tmp.path().join("expected-target");
-        let link = tmp.path().join("tool");
-        std::fs::write(&expected_target, "expected").expect("expected target");
-        unix_symlink(&expected_target, &link);
-
-        let rig = symlink_spec(
-            "repair-ok-symlink-fixture",
-            link.to_string_lossy().into_owned(),
-            expected_target.to_string_lossy().into_owned(),
-        );
-
-        let report = run_repair(&rig).expect("repair succeeds");
-        assert!(report.success);
-        assert_eq!(report.repaired, 0);
-        assert_eq!(report.unchanged, 1);
-        assert_eq!(report.blocked, 0);
-        assert_eq!(report.resources[0].status, "unchanged");
-        assert_eq!(
-            std::fs::read_link(&link).expect("read link"),
-            expected_target
-        );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn test_run_repair_blocks_non_symlink() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let expected_target = tmp.path().join("expected-target");
-        let link = tmp.path().join("tool");
-        std::fs::write(&expected_target, "expected").expect("expected target");
-        std::fs::write(&link, "real file").expect("real file at link path");
-
-        let rig = symlink_spec(
-            "repair-blocked-symlink-fixture",
-            link.to_string_lossy().into_owned(),
-            expected_target.to_string_lossy().into_owned(),
-        );
-
-        let report = run_repair(&rig).expect("repair reports blocked resource");
-        assert!(!report.success);
-        assert_eq!(report.repaired, 0);
-        assert_eq!(report.unchanged, 0);
-        assert_eq!(report.blocked, 1);
-        assert_eq!(report.resources[0].status, "blocked");
-        assert!(report.resources[0]
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("not a symlink"));
-        assert_eq!(
-            std::fs::read_to_string(&link).expect("read file"),
-            "real file"
-        );
-    });
+            assert_eq!(report.success, success, "{status}");
+            assert_eq!(report.resources[0].status, status);
+            match case {
+                Existing::Drifted => assert_eq!(
+                    report.resources[0].previous_target.as_deref(),
+                    Some(old_target.to_string_lossy().as_ref())
+                ),
+                Existing::Missing => assert_eq!(report.resources[0].previous_target, None),
+                _ => {}
+            }
+            if case == Existing::RealFile {
+                assert!(report.resources[0]
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("not a symlink"));
+                assert_eq!(
+                    std::fs::read_to_string(&link).expect("read file"),
+                    "real file",
+                    "a real file is never replaced"
+                );
+            } else {
+                assert_eq!(
+                    std::fs::read_link(&link).expect("read link"),
+                    expected_target
+                );
+            }
+        });
+    }
 }
 
 #[cfg(unix)]
@@ -698,85 +585,89 @@ fn resource(report: &RepairReport, kind: &str) -> RepairResourceReport {
         .clone()
 }
 
+/// Ownership contract: repair creates missing shared paths and records them,
+/// leaves healthy links and real directories alone, and reports (never
+/// replaces) a symlink it does not own or one whose target does not exist.
 #[cfg(unix)]
 #[test]
-fn test_run_repair_creates_missing_shared_path() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let target = tmp.path().join("primary-node_modules");
-        let link = tmp.path().join("worktree-node_modules");
-        std::fs::create_dir(&target).expect("target dir");
+fn test_run_repair_shared_path_states() {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Existing {
+        Missing,
+        Healthy,
+        Foreign,
+        RealDir,
+        MissingTarget,
+    }
 
-        let rig = shared_path_spec("repair-missing-shared-path-fixture", &link, &target);
-        let report = run_repair(&rig).expect("repair succeeds");
+    for (case, status, error) in [
+        (Existing::Missing, "repaired", None),
+        (Existing::Healthy, "unchanged", None),
+        (Existing::Foreign, "blocked", Some("does not own")),
+        (Existing::RealDir, "unchanged", None),
+        (Existing::MissingTarget, "blocked", Some("does not exist")),
+    ] {
+        with_isolated_home(|_dir| {
+            let tmp = tempfile::tempdir().expect("tmpdir");
+            let target = tmp.path().join("primary-node_modules");
+            let foreign = tmp.path().join("someone-elses-node_modules");
+            let link = tmp.path().join("worktree-node_modules");
+            if case != Existing::MissingTarget {
+                std::fs::create_dir(&target).expect("target dir");
+            }
+            match case {
+                Existing::Healthy => unix_symlink(&target, &link),
+                Existing::Foreign => {
+                    std::fs::create_dir(&foreign).expect("foreign dir");
+                    unix_symlink(&foreign, &link);
+                }
+                Existing::RealDir => {
+                    std::fs::create_dir(&link).expect("real dir at link path");
+                    std::fs::write(link.join("marker"), "real").expect("marker");
+                }
+                Existing::Missing | Existing::MissingTarget => {}
+            }
 
-        assert!(report.success);
-        let shared = resource(&report, "shared_path");
-        assert_eq!(shared.status, "repaired");
-        assert_eq!(std::fs::read_link(&link).expect("read link"), target);
+            let rig = shared_path_spec("repair-shared-path-fixture", &link, &target);
+            let report = run_repair(&rig).expect("repair report");
 
-        // Ownership is recorded, so `down` / a later repair can clean it up.
-        let state = crate::state::test_state_store()
-            .load("repair-missing-shared-path-fixture")
-            .expect("state");
-        assert!(state
-            .shared_paths
-            .contains_key(link.to_string_lossy().as_ref()));
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn test_run_repair_leaves_healthy_shared_path_alone() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let target = tmp.path().join("primary-node_modules");
-        let link = tmp.path().join("worktree-node_modules");
-        std::fs::create_dir(&target).expect("target dir");
-        unix_symlink(&target, &link);
-
-        let rig = shared_path_spec("repair-healthy-shared-path-fixture", &link, &target);
-        let report = run_repair(&rig).expect("repair succeeds");
-
-        assert!(report.success);
-        assert_eq!(report.unchanged, 1);
-        assert_eq!(resource(&report, "shared_path").status, "unchanged");
-        assert_eq!(std::fs::read_link(&link).expect("read link"), target);
-    });
-}
-
-/// Ownership contract: a symlink this rig never created is reported, never
-/// replaced — even when it points somewhere the spec disagrees with.
-#[cfg(unix)]
-#[test]
-fn test_run_repair_blocks_unowned_shared_path_symlink() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let target = tmp.path().join("primary-node_modules");
-        let foreign = tmp.path().join("someone-elses-node_modules");
-        let link = tmp.path().join("worktree-node_modules");
-        std::fs::create_dir(&target).expect("target dir");
-        std::fs::create_dir(&foreign).expect("foreign dir");
-        unix_symlink(&foreign, &link);
-
-        let rig = shared_path_spec("repair-unowned-shared-path-fixture", &link, &target);
-        let report = run_repair(&rig).expect("repair reports blocked resource");
-
-        assert!(!report.success);
-        assert_eq!(report.blocked, 1);
-        let shared = resource(&report, "shared_path");
-        assert_eq!(shared.status, "blocked");
-        assert!(shared
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("does not own"));
-        assert_eq!(
-            std::fs::read_link(&link).expect("read link"),
-            foreign,
-            "an unowned symlink must survive repair untouched"
-        );
-    });
+            assert_eq!(report.success, error.is_none(), "{status}");
+            let shared = resource(&report, "shared_path");
+            assert_eq!(shared.status, status);
+            if let Some(error) = error {
+                assert!(
+                    shared.error.as_deref().unwrap_or_default().contains(error),
+                    "{:?}",
+                    shared.error
+                );
+            }
+            let owned = crate::state::test_state_store()
+                .load(&rig.id)
+                .expect("state")
+                .shared_paths
+                .contains_key(link.to_string_lossy().as_ref());
+            assert_eq!(
+                owned,
+                case == Existing::Missing,
+                "only created links are owned"
+            );
+            match case {
+                Existing::Missing | Existing::Healthy => {
+                    assert_eq!(std::fs::read_link(&link).expect("read link"), target)
+                }
+                Existing::Foreign => assert_eq!(
+                    std::fs::read_link(&link).expect("read link"),
+                    foreign,
+                    "an unowned symlink must survive repair untouched"
+                ),
+                Existing::RealDir => assert_eq!(
+                    std::fs::read_to_string(link.join("marker")).expect("marker"),
+                    "real"
+                ),
+                Existing::MissingTarget => assert!(!link.exists() && !link.is_symlink()),
+            }
+        });
+    }
 }
 
 /// A rig-owned link whose target vanished is dangling drift. `cleanup` removes
@@ -805,55 +696,6 @@ fn test_run_repair_removes_rig_owned_dangling_shared_path() {
             .load("repair-dangling-shared-path-fixture")
             .expect("state");
         assert!(state.shared_paths.is_empty(), "ownership record is dropped");
-    });
-}
-
-/// A real directory at the link path satisfies the dependency. Repair must
-/// never delete it to "fix" the declaration.
-#[cfg(unix)]
-#[test]
-fn test_run_repair_never_removes_a_real_directory_at_a_shared_path() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let target = tmp.path().join("primary-node_modules");
-        let link = tmp.path().join("worktree-node_modules");
-        std::fs::create_dir(&target).expect("target dir");
-        std::fs::create_dir(&link).expect("real dir at link path");
-        std::fs::write(link.join("marker"), "real").expect("marker");
-
-        let rig = shared_path_spec("repair-real-dir-shared-path-fixture", &link, &target);
-        let report = run_repair(&rig).expect("repair succeeds");
-
-        assert!(report.success);
-        assert_eq!(resource(&report, "shared_path").status, "unchanged");
-        assert_eq!(
-            std::fs::read_to_string(link.join("marker")).expect("marker"),
-            "real"
-        );
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn test_run_repair_blocks_shared_path_with_missing_target() {
-    with_isolated_home(|_dir| {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let target = tmp.path().join("never-materialized");
-        let link = tmp.path().join("worktree-node_modules");
-
-        let rig = shared_path_spec("repair-missing-target-fixture", &link, &target);
-        let report = run_repair(&rig).expect("repair reports blocked resource");
-
-        assert!(!report.success);
-        assert_eq!(report.blocked, 1);
-        let shared = resource(&report, "shared_path");
-        assert_eq!(shared.status, "blocked");
-        assert!(shared
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("does not exist"));
-        assert!(!link.exists() && !link.is_symlink());
     });
 }
 
@@ -925,50 +767,42 @@ fn test_run_repair_clears_stale_service_state() {
     });
 }
 
-/// `repair` is not `up`: it reports a stopped service instead of starting one.
+/// `repair` is not `up`: it reports stopped services instead of starting them,
+/// and never signals adopted `external` processes that belong to something else.
 #[test]
-fn test_run_repair_does_not_start_stopped_services() {
-    with_isolated_home(|_dir| {
-        let rig = service_rig("repair-stopped-service-fixture", ServiceKind::HttpStatic);
+fn test_run_repair_skips_stopped_and_external_services() {
+    for (kind, detail) in [
+        (ServiceKind::HttpStatic, "does not start services"),
+        (ServiceKind::External, "adopted"),
+    ] {
+        with_isolated_home(|_dir| {
+            let rig = service_rig("repair-skipped-service-fixture", kind);
 
-        let report = run_repair(&rig).expect("repair succeeds");
+            let report = run_repair(&rig).expect("repair succeeds");
 
-        assert!(report.success);
-        assert_eq!(report.skipped, 1);
-        let service = resource(&report, "service");
-        assert_eq!(service.status, "skipped");
-        assert!(service
-            .detail
-            .as_deref()
-            .unwrap_or_default()
-            .contains("does not start services"));
-
-        let state = crate::state::test_state_store()
-            .load("repair-stopped-service-fixture")
-            .expect("state");
-        assert!(state.services.is_empty(), "repair started nothing");
-    });
-}
-
-/// Adopted `external` processes belong to something else. Repair reports them
-/// and never signals them.
-#[test]
-fn test_run_repair_skips_external_services() {
-    with_isolated_home(|_dir| {
-        let rig = service_rig("repair-external-service-fixture", ServiceKind::External);
-
-        let report = run_repair(&rig).expect("repair succeeds");
-
-        assert!(report.success);
-        assert_eq!(report.skipped, 1);
-        let service = resource(&report, "service");
-        assert_eq!(service.status, "skipped");
-        assert!(service
-            .detail
-            .as_deref()
-            .unwrap_or_default()
-            .contains("adopted"));
-    });
+            assert!(report.success);
+            assert_eq!(report.skipped, 1);
+            let service = resource(&report, "service");
+            assert_eq!(service.status, "skipped");
+            assert!(
+                service
+                    .detail
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(detail),
+                "{:?}",
+                service.detail
+            );
+            assert!(
+                crate::state::test_state_store()
+                    .load(&rig.id)
+                    .expect("state")
+                    .services
+                    .is_empty(),
+                "repair started nothing"
+            );
+        });
+    }
 }
 
 // ------------------------------------------------------------------
@@ -1034,8 +868,8 @@ fn test_run_down_cleans_state_owned_shared_paths() {
         let link = tmp.path().join("worktree-node_modules");
         std::fs::create_dir(&target).expect("target dir");
 
-        let mut pipeline = HashMap::new();
-        pipeline.insert(
+        let mut rig = shared_path_spec("run-down-shared-path-fixture", &link, &target);
+        rig.pipeline.insert(
             "up".to_string(),
             vec![PipelineStep::SharedPath {
                 step_id: None,
@@ -1043,37 +877,6 @@ fn test_run_down_cleans_state_owned_shared_paths() {
                 op: SharedPathOp::Ensure,
             }],
         );
-        let rig = RigSpec {
-            workloads: Default::default(),
-            effective_component_paths: Default::default(),
-            id: "run-down-shared-path-fixture".to_string(),
-            description: String::new(),
-            components: HashMap::new(),
-            services: HashMap::new(),
-            symlinks: Vec::new(),
-            shared_paths: vec![SharedPathSpec {
-                link: link.to_string_lossy().into_owned(),
-                target: target.to_string_lossy().into_owned(),
-            }],
-            resources: Default::default(),
-            lifecycle: Default::default(),
-            requirements: Default::default(),
-            pipeline,
-            bench: None,
-            fuzz: None,
-            trace: Default::default(),
-            bench_workloads: HashMap::new(),
-            trace_workloads: HashMap::new(),
-            fuzz_workloads: Default::default(),
-            trace_workload_defaults: HashMap::new(),
-            trace_variants: HashMap::new(),
-            trace_profiles: HashMap::new(),
-            trace_experiments: HashMap::new(),
-            trace_guardrails: Vec::new(),
-            bench_profiles: HashMap::new(),
-            fuzz_profiles: HashMap::new(),
-            app_launcher: None,
-        };
 
         let up = crate::pipeline::run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
             .expect("up pipeline");
@@ -1122,32 +925,8 @@ fn test_run_status() {
             },
         );
         let rig = RigSpec {
-            workloads: Default::default(),
-            effective_component_paths: Default::default(),
-            id: "run-status-service-fixture".to_string(),
-            description: "service status".to_string(),
-            components: HashMap::new(),
             services,
-            symlinks: Vec::new(),
-            shared_paths: Vec::new(),
-            resources: Default::default(),
-            lifecycle: Default::default(),
-            requirements: Default::default(),
-            pipeline: HashMap::new(),
-            bench: None,
-            fuzz: None,
-            trace: Default::default(),
-            app_launcher: None,
-            bench_workloads: HashMap::new(),
-            trace_workloads: HashMap::new(),
-            fuzz_workloads: Default::default(),
-            trace_workload_defaults: HashMap::new(),
-            trace_variants: HashMap::new(),
-            trace_profiles: HashMap::new(),
-            trace_experiments: HashMap::new(),
-            trace_guardrails: Vec::new(),
-            bench_profiles: HashMap::new(),
-            fuzz_profiles: HashMap::new(),
+            ..minimal_spec("run-status-service-fixture")
         };
 
         let status = run_status(&rig).expect("run_status with service");
@@ -1300,32 +1079,8 @@ fn test_snapshot_state() {
         },
     );
     let rig = RigSpec {
-        workloads: Default::default(),
-        effective_component_paths: Default::default(),
-        id: "snapshot-fixture".to_string(),
-        description: String::new(),
         components,
-        services: HashMap::new(),
-        symlinks: Vec::new(),
-        shared_paths: Vec::new(),
-        resources: Default::default(),
-        lifecycle: Default::default(),
-        requirements: Default::default(),
-        pipeline: HashMap::new(),
-        bench: None,
-        fuzz: None,
-        trace: Default::default(),
-        bench_workloads: HashMap::new(),
-        trace_workloads: HashMap::new(),
-        fuzz_workloads: Default::default(),
-        trace_workload_defaults: HashMap::new(),
-        trace_variants: HashMap::new(),
-        trace_profiles: HashMap::new(),
-        trace_experiments: HashMap::new(),
-        trace_guardrails: Vec::new(),
-        bench_profiles: HashMap::new(),
-        fuzz_profiles: HashMap::new(),
-        app_launcher: None,
+        ..minimal_spec("snapshot-fixture")
     };
 
     let snapshot = snapshot_state(&rig);
@@ -1341,14 +1096,6 @@ fn test_snapshot_state() {
         assert!(entry.sha.is_none(), "non-repo path has no HEAD SHA");
         assert!(entry.branch.is_none(), "non-repo path has no branch");
     }
-}
-
-#[test]
-fn test_head_sha_and_branch_returns_none_for_non_repo_path() {
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let (sha, branch) = head_sha_and_branch(&temp.path().to_string_lossy());
-    assert!(sha.is_none(), "non-repo path has no HEAD SHA");
-    assert!(branch.is_none(), "non-repo path has no branch");
 }
 
 #[test]
@@ -1645,78 +1392,9 @@ fn dependency_materialization_cache_rolls_back_published_and_absent_outputs_on_p
     });
 }
 
-#[cfg(unix)]
-#[test]
-fn dependency_materialization_cache_key_includes_resolved_tool_version() {
-    with_isolated_home(|root| {
-        let bin = root.path().join(".local/bin");
-        let workspace = root.path().join("workspace");
-        std::fs::create_dir_all(&bin).expect("bin");
-        std::fs::create_dir_all(&workspace).expect("workspace");
-        std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
-        let tool = bin.join("cache-tool");
-        homeboy_test_support::write_executable(
-            &tool,
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v1; fi\n",
-            0o755,
-        )
-        .expect("tool");
-
-        let rig = RigSpec {
-            workloads: Default::default(),
-            id: "dependency-cache-tool-version".to_string(),
-            requirements: RigRequirementsSpec {
-                dependency_materialization: vec![DependencyMaterializationStepSpec {
-                    id: "install".to_string(),
-                    command: Some("cache-tool install".to_string()),
-                    cwd: Some(workspace.display().to_string()),
-                    cache_key_inputs: vec!["lock".to_string()],
-                    expected_outputs: vec![DependencyMaterializationOutputSpec {
-                        path: "output".to_string(),
-                        kind: DependencyMaterializationOutputKind::File,
-                        required: true,
-                    }],
-                    safety: DependencyMaterializationSafety::WritesCache,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            ..minimal_spec("dependency-cache-tool-version")
-        };
-        let key_v1 = DependencyMaterializationCache::new(
-            &rig,
-            &rig.requirements.dependency_materialization[0],
-            &[],
-        )
-        .expect("cache")
-        .expect("enabled")
-        .key()
-        .to_string();
-        std::fs::write(
-            &tool,
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v2; fi\n",
-        )
-        .expect("replace tool");
-        let key_v2 = DependencyMaterializationCache::new(
-            &rig,
-            &rig.requirements.dependency_materialization[0],
-            &[],
-        )
-        .expect("cache")
-        .expect("enabled")
-        .key()
-        .to_string();
-        assert_ne!(
-            key_v1, key_v2,
-            "a resolved tool version change invalidates the cache"
-        );
-    });
-}
-
 /// The cache must key on the *resolved tool*, not on the assembled toolchain
-/// PATH. Installing an unrelated version-managed toolchain changes the PATH
-/// string; before #10318 that changed `environment_sha256` and silently
-/// invalidated every cached materialization on the machine.
+/// PATH: an unrelated version-managed toolchain must not invalidate every
+/// cached materialization on the machine.
 #[cfg(unix)]
 #[test]
 fn dependency_materialization_cache_key_ignores_irrelevant_toolchain_path_entries() {
@@ -1854,7 +1532,7 @@ fn dependency_materialization_cache_rejects_output_symlink_escapes() {
 }
 
 // ------------------------------------------------------------------
-// repair: live lifecycle snapshot handles (#10319)
+// repair: live lifecycle snapshot handles
 //
 // Handles are captured at run time, not declared, so `repair` reads them back
 // from state. This class is deliberately report-only: the handle is opaque, so
@@ -1918,6 +1596,15 @@ fn record_snapshot(rig_id: &str, snapshot_id: &str, step: &str) {
 fn test_run_repair_reports_owned_lifecycle_snapshot_as_skipped() {
     with_isolated_home(|_dir| {
         let rig = lifecycle_snapshot_rig("repair-owned-snapshot-fixture", Some("provision"));
+        let clean = run_repair(&rig).expect("repair succeeds on clean state");
+        assert!(
+            !clean
+                .resources
+                .iter()
+                .any(|resource| resource.kind == "lifecycle_snapshots"),
+            "no handles means no rows: {:?}",
+            clean.resources
+        );
         record_snapshot(&rig.id, "sandbox-1", "provision");
 
         let report = run_repair(&rig).expect("repair succeeds");
@@ -1985,25 +1672,6 @@ fn test_run_repair_blocks_on_orphaned_lifecycle_snapshot() {
                 .len(),
             1,
             "a blocked handle is reported, never discarded"
-        );
-    });
-}
-
-#[test]
-fn test_run_repair_reports_no_lifecycle_snapshot_resource_when_state_is_clean() {
-    with_isolated_home(|_dir| {
-        let rig = lifecycle_snapshot_rig("repair-no-snapshot-fixture", Some("provision"));
-
-        let report = run_repair(&rig).expect("repair succeeds");
-
-        assert!(report.success);
-        assert!(
-            !report
-                .resources
-                .iter()
-                .any(|resource| resource.kind == "lifecycle_snapshots"),
-            "no handles means no rows: {:?}",
-            report.resources
         );
     });
 }

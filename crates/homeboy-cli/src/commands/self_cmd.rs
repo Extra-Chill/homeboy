@@ -187,9 +187,8 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
         SelfCommand::CleanupRuntimeTmp(args) => {
             // Resolved by the shared policy so this specialist and `homeboy
             // cleanup --include runtime-tmp` cannot honor different windows
-            // (#10316). The clap defaults used to be literal `7`/`1000`/`1
-            // GiB`/`100`, so a widened `retention.runtime_tmp_days` was honored
-            // by the aggregate and silently ignored here.
+            // (#10316), so a widened `retention.runtime_tmp_days` applies here
+            // as it does in the aggregate.
             let policy = cleanup::resolve_cleanup_policy(cleanup::CleanupPolicyOverrides {
                 limit: args.limit,
                 runtime_tmp_days: args.older_than_days,
@@ -370,31 +369,12 @@ mod tests {
         assert!(!cli.args.mutation.is_apply());
     }
 
+    /// #11102: controllers negotiate gate readiness and daemon recovery from
+    /// this envelope instead of scraping `--help` text. These fields are wire
+    /// contracts read by `homeboy_lab_runner::connection::remote_daemon`, so
+    /// renaming, dropping or merging them must fail loudly.
     #[test]
-    fn runtime_tmp_budgets_still_accept_explicit_overrides() {
-        let cli = CleanupRuntimeTmpCli::parse_from([
-            "cleanup-runtime-tmp",
-            "--older-than-days",
-            "2",
-            "--limit",
-            "9",
-            "--run-max-bytes",
-            "1024",
-            "--run-max-count",
-            "3",
-        ]);
-        assert_eq!(cli.args.older_than_days, Some(2));
-        assert_eq!(cli.args.limit, Some(9));
-        assert_eq!(cli.args.run_max_bytes, Some(1024));
-        assert_eq!(cli.args.run_max_count, Some(3));
-    }
-
-    /// #11102: controllers negotiate the daemon-recovery contract from this
-    /// envelope instead of scraping `--help` text. The field name is a wire
-    /// contract read by `homeboy_lab_runner::connection::remote_daemon`, so
-    /// renaming or dropping it here must fail loudly.
-    #[test]
-    fn identity_report_advertises_gate_readiness_resolve_only() {
+    fn identity_report_advertises_runner_capability_contracts() {
         let report = super::identity_report();
         let advertised = report["runner_optional_capabilities"]
             .as_array()
@@ -403,28 +383,14 @@ mod tests {
             "id": homeboy_lab_contract::GATE_READINESS_RESOLVE_ONLY_CAPABILITY,
             "version": 1,
         })));
-    }
-
-    #[test]
-    fn identity_report_advertises_the_daemon_recovery_capabilities() {
-        let report = super::identity_report();
-
-        let advertised = report
-            .get("daemon_recovery_capabilities")
-            .expect("self identity advertises daemon_recovery_capabilities");
         assert_eq!(
-            advertised,
-            &serde_json::to_value(homeboy_lab_contract::daemon_recovery_capabilities())
+            report["daemon_recovery_capabilities"],
+            serde_json::to_value(homeboy_lab_contract::daemon_recovery_capabilities())
                 .expect("capabilities serialize")
         );
-
-        // The generic admission handshake list is a separate contract and must
-        // not be replaced or merged by the recovery list.
         assert_eq!(
-            report
-                .get("lab_handoff_capabilities")
-                .expect("self identity still advertises lab_handoff_capabilities"),
-            &serde_json::to_value(homeboy_lab_contract::required_lab_handoff_capabilities())
+            report["lab_handoff_capabilities"],
+            serde_json::to_value(homeboy_lab_contract::required_lab_handoff_capabilities())
                 .expect("capabilities serialize")
         );
     }

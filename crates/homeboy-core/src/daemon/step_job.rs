@@ -969,7 +969,9 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         StepPhase::Running => {
             let child = checkpoint.child.clone().expect("validated running child");
             job.progress(checkpoint.progress())?;
-            let cgroup = adopted_cgroup(&child);
+            // Recovery owns this job's named cgroup, not whichever cgroup a
+            // reused or migrated PID might currently inhabit.
+            let cgroup = JobCgroup::for_job(&job_id).ok().flatten();
             supervise_adopted(&child, cgroup.as_ref(), job)?;
             stop_finished_cgroup(&job_id, cgroup.as_ref());
             checkpoint.exit_code = recorded_step_exit_code(&job_id);
@@ -2350,23 +2352,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn detached_launch_failure_writes_typed_error() {
-        with_isolated_home(|home| {
-            let mut request = request("true", Default::default());
-            request.program = "/nonexistent/homeboy-detached".to_string();
-            let harness = step_harness(&request, home.path());
-            harness.start_via_controller_boundary().unwrap();
-            assert_eq!(
-                harness.wait_until_terminal().unwrap().status,
-                crate::api_jobs::JobStatus::Failed
-            );
-            let log = job_log(&harness);
-            assert!(log.contains("detached_launch_failed"), "{log}");
-            assert!(log.contains("spawn step program"), "{log}");
-        });
-    }
-
     /// #16273: a failed step names the child's own cause, not only its status.
     #[test]
     fn failed_step_names_the_cause_its_child_reported() {
@@ -2468,8 +2453,8 @@ mod tests {
                 name: "STEP_TEST_SECRET".to_string(),
                 owner: None,
             });
-            let request = request("test \"$STEP_TEST_SECRET\" = resolved-value", env);
-            let harness = step_harness(&request, home.path());
+            let resolved = request("test \"$STEP_TEST_SECRET\" = resolved-value", env);
+            let harness = step_harness(&resolved, home.path());
             harness.start_via_controller_boundary().unwrap();
             assert_eq!(
                 harness.wait_until_terminal().unwrap().status,
@@ -2482,16 +2467,12 @@ mod tests {
                 owner: None,
             });
             std::env::set_var("STEP_TEST_UNDECLARED_SECRET", "ambient");
-            let harness = step_harness(&request_with(&missing), home.path());
+            let harness = step_harness(&request("true", missing), home.path());
             harness.start_via_controller_boundary().unwrap();
             let job = harness.wait_until_terminal().unwrap();
             std::env::remove_var("STEP_TEST_UNDECLARED_SECRET");
             assert_eq!(job.status, crate::api_jobs::JobStatus::Failed);
         });
-    }
-
-    fn request_with(env: &EnvMaterializationPlan) -> StepJobRequest {
-        request("true", env.clone())
     }
 
     #[test]
@@ -3138,6 +3119,11 @@ mod tests {
                 assert!(pending[0].child.is_none());
                 assert_eq!(pending[0].outcome, StepTerminalOutcome::Failed);
                 assert!(pending[0].error.is_some());
+                if !before_spawn {
+                    let log = job_log(&harness);
+                    assert!(log.contains("detached_launch_failed"), "{log}");
+                    assert!(log.contains("spawn step program"), "{log}");
+                }
             }
         });
     }

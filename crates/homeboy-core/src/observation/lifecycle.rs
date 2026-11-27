@@ -236,7 +236,6 @@ pub fn run_owner_pid(run: &RunRecord) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observation::FindingListFilter;
     use crate::test_support::with_isolated_home;
     use std::fs;
 
@@ -257,18 +256,6 @@ mod tests {
 
     fn active_observation() -> ActiveObservation {
         ActiveObservation::start(run_record()).expect("active observation")
-    }
-
-    #[test]
-    fn merge_metadata_preserves_initial_and_overwrites_finish_keys() {
-        let merged = merge_metadata(
-            serde_json::json!({ "status": "running", "component": "homeboy" }),
-            serde_json::json!({ "status": "pass", "exit_code": 0 }),
-        );
-
-        assert_eq!(merged["component"], "homeboy");
-        assert_eq!(merged["status"], "pass");
-        assert_eq!(merged["exit_code"], 0);
     }
 
     fn running_run(metadata_json: serde_json::Value) -> RunRecord {
@@ -323,32 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn test_run_owner_pid() {
-        let run = running_run(serde_json::json!({
-            "homeboy_run_owner": { "pid": 1234 }
-        }));
-
-        assert_eq!(run_owner_pid(&run), Some(1234));
-    }
-
-    #[test]
-    fn test_start() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-
-            assert_eq!(observation.run().kind, "test");
-            assert_eq!(observation.run().status, "running");
-        });
-    }
-
-    #[test]
-    fn test_start_best_effort() {
-        with_isolated_home(|_| {
-            assert!(ActiveObservation::start_best_effort(run_record()).is_some());
-        });
-    }
-
-    #[test]
     fn test_start_with_stable_id() {
         with_isolated_home(|_| {
             let observation =
@@ -363,47 +324,71 @@ mod tests {
     }
 
     #[test]
-    fn test_try_finish_with_merged_metadata() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-            let run = observation
-                .try_finish_with_merged_metadata(
-                    RunStatus::Fail,
-                    serde_json::json!({ "status": "failed" }),
-                )
-                .expect("finish");
+    fn finish_variants_persist_status_and_merge_initial_metadata() {
+        type Finish = fn(&ActiveObservation, serde_json::Value);
+        let cases: [(&str, Finish, &str, bool); 5] = [
+            (
+                "finish",
+                |o, m| o.finish(RunStatus::Pass, Some(m)),
+                "pass",
+                false,
+            ),
+            (
+                "finish_error",
+                |o, m| o.finish_error(Some(m)),
+                "error",
+                false,
+            ),
+            (
+                "finish_with_merged_metadata",
+                |o, m| o.finish_with_merged_metadata(RunStatus::Pass, m),
+                "pass",
+                true,
+            ),
+            (
+                "finish_error_with_merged_metadata",
+                |o, m| o.finish_error_with_merged_metadata(m),
+                "error",
+                true,
+            ),
+            (
+                "try_finish_with_merged_metadata",
+                |o, m| {
+                    let run = o
+                        .try_finish_with_merged_metadata(RunStatus::Fail, m)
+                        .expect("finish");
+                    assert_eq!(run.status, "fail");
+                },
+                "fail",
+                true,
+            ),
+        ];
 
-            assert_eq!(run.status, "fail");
-            assert_eq!(run.metadata_json["phase"], "initial");
-            assert_eq!(run.metadata_json["status"], "failed");
-        });
-    }
+        for (name, finish, expected_status, merges) in cases {
+            with_isolated_home(|_| {
+                let observation = active_observation();
+                let run_id = observation.run_id().to_string();
+                finish(
+                    &observation,
+                    serde_json::json!({ "status": expected_status, "exit_code": 7 }),
+                );
 
-    #[test]
-    fn test_finish_with_merged_metadata_preserves_initial_command_context() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-            let run_id = observation.run_id().to_string();
-
-            observation.finish_with_merged_metadata(
-                RunStatus::Pass,
-                serde_json::json!({
-                    "status": "pass",
-                    "exit_code": 0,
-                }),
-            );
-
-            let run = ObservationStore::open_initialized()
-                .expect("store")
-                .get_run(&run_id)
-                .expect("read run")
-                .expect("run exists");
-
-            assert_eq!(run.status, "pass");
-            assert_eq!(run.metadata_json["phase"], "initial");
-            assert_eq!(run.metadata_json["status"], "pass");
-            assert_eq!(run.metadata_json["exit_code"], 0);
-        });
+                let run = ObservationStore::open_initialized()
+                    .expect("store")
+                    .get_run(&run_id)
+                    .expect("read run")
+                    .expect("run exists");
+                assert_eq!(run.status, expected_status, "{name}");
+                assert_eq!(run.metadata_json["status"], expected_status, "{name}");
+                assert_eq!(run.metadata_json["exit_code"], 7, "{name}");
+                let initial_phase = if merges {
+                    serde_json::json!("initial")
+                } else {
+                    serde_json::Value::Null
+                };
+                assert_eq!(run.metadata_json["phase"], initial_phase, "{name}");
+            });
+        }
     }
 
     #[test]
@@ -432,146 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_error_with_merged_metadata_sets_error_status() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-            let run_id = observation.run_id().to_string();
-
-            observation.finish_error_with_merged_metadata(serde_json::json!({
-                "status": "error",
-                "error": "simulated",
-            }));
-
-            let run = ObservationStore::open_initialized()
-                .expect("store")
-                .get_run(&run_id)
-                .expect("read run")
-                .expect("run exists");
-
-            assert_eq!(run.status, "error");
-            assert_eq!(run.metadata_json["phase"], "initial");
-            assert_eq!(run.metadata_json["status"], "error");
-            assert_eq!(run.metadata_json["error"], "simulated");
-        });
-    }
-
-    #[test]
-    fn test_store() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-
-            assert!(observation.store().status().expect("status").exists);
-        });
-    }
-
-    #[test]
-    fn test_run() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-
-            assert_eq!(observation.run().component_id.as_deref(), Some("homeboy"));
-        });
-    }
-
-    #[test]
-    fn test_run_id() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-
-            assert!(!observation.run_id().is_empty());
-        });
-    }
-
-    #[test]
-    fn test_component_id() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-
-            assert_eq!(observation.component_id(), Some("homeboy"));
-        });
-    }
-
-    #[test]
-    fn test_rig_id() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-
-            assert_eq!(observation.rig_id(), Some("studio"));
-        });
-    }
-
-    #[test]
-    fn test_initial_metadata() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-
-            assert_eq!(observation.initial_metadata()["status"], "running");
-        });
-    }
-
-    #[test]
-    fn test_finish() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-            let run_id = observation.run_id().to_string();
-            observation.finish(RunStatus::Pass, Some(serde_json::json!({ "exit_code": 0 })));
-
-            let run = observation
-                .store()
-                .get_run(&run_id)
-                .expect("read run")
-                .expect("run");
-            assert_eq!(run.status, "pass");
-            assert_eq!(run.metadata_json["exit_code"], 0);
-        });
-    }
-
-    #[test]
-    fn test_finish_error() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-            let run_id = observation.run_id().to_string();
-            observation.finish_error(Some(serde_json::json!({ "error": "boom" })));
-
-            let run = observation
-                .store()
-                .get_run(&run_id)
-                .expect("read run")
-                .expect("run");
-            assert_eq!(run.status, "error");
-            assert_eq!(run.metadata_json["error"], "boom");
-        });
-    }
-
-    #[test]
-    fn test_record_findings() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-            observation.record_findings(&[NewFindingRecord {
-                run_id: observation.run_id().to_string(),
-                tool: "test".to_string(),
-                rule: Some("rule".to_string()),
-                file: Some("src/lib.rs".to_string()),
-                line: Some(1),
-                severity: Some("error".to_string()),
-                fingerprint: Some("fingerprint".to_string()),
-                message: "message".to_string(),
-                fixable: Some(false),
-                metadata_json: serde_json::json!({}),
-            }]);
-
-            let findings = observation
-                .store()
-                .list_findings(FindingListFilter {
-                    run_id: Some(observation.run_id().to_string()),
-                    ..FindingListFilter::default()
-                })
-                .expect("findings");
-            assert_eq!(findings.len(), 1);
-        });
-    }
-
-    #[test]
     fn test_record_artifact_if_file() {
         with_isolated_home(|home| {
             let observation = active_observation();
@@ -579,6 +424,8 @@ mod tests {
             fs::write(&artifact, b"{}").expect("write artifact");
 
             observation.record_artifact_if_file("artifact", &artifact);
+            observation.record_artifact_if_file("missing", &home.path().join("missing.json"));
+            observation.record_artifact_if_file("directory", home.path());
 
             let artifacts = observation
                 .store()
@@ -586,17 +433,6 @@ mod tests {
                 .expect("artifacts");
             assert_eq!(artifacts.len(), 1);
             assert_eq!(artifacts[0].kind, "artifact");
-        });
-    }
-
-    #[test]
-    fn test_store_path() {
-        with_isolated_home(|_| {
-            let observation = active_observation();
-
-            assert!(observation
-                .store_path()
-                .ends_with(crate::paths::OBSERVATION_DB_FILENAME));
         });
     }
 }

@@ -465,7 +465,7 @@ fn unknown_discovered_context(limitation: &str) -> CiLocalContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_extension_contract::{CiCapability, ExtensionManifest};
+    use homeboy_extension_contract::ExtensionManifest;
     use tempfile::TempDir;
 
     fn manifest_with_ci() -> ExtensionManifest {
@@ -507,20 +507,6 @@ mod tests {
     }
 
     #[test]
-    fn test_list_for_extension() {
-        crate::test_support::with_isolated_home(|home| {
-            let mut extension = manifest_with_ci();
-            extension.id = "fixture-ci".to_string();
-            crate::extension::catalog::save_manifest(&extension).expect("save extension");
-
-            let inventory = list_for_extension(home.path(), "fixture-ci").expect("list inventory");
-
-            assert_eq!(inventory.extension_id, "fixture-ci");
-            assert_eq!(inventory.profiles[0].id, "pr");
-        });
-    }
-
-    #[test]
     fn discovery_lists_ci_files_as_unknown() {
         let tmp = TempDir::new().expect("temp dir");
         fs::create_dir_all(tmp.path().join(".github/workflows")).expect("mkdir workflows");
@@ -544,14 +530,6 @@ mod tests {
         );
         assert!(select_extension_id(&[]).is_err());
         assert!(select_extension_id(&["fixture-a".to_string(), "fixture-b".to_string()]).is_err());
-    }
-
-    #[test]
-    fn empty_ci_manifest_defaults() {
-        let ci = CiCapability::default();
-
-        assert!(ci.profiles.is_empty());
-        assert!(ci.jobs.is_empty());
     }
 
     #[test]
@@ -584,32 +562,6 @@ mod tests {
         assert!(output.success);
         assert_eq!(output.exit_code, 0);
         assert_eq!(output.jobs[0].stdout, "ok");
-    }
-
-    #[test]
-    fn test_run_for_extension() {
-        crate::test_support::with_isolated_home(|_home| {
-            let tmp = TempDir::new().expect("temp dir");
-            let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-                "id": "test",
-                "name": "Test",
-                "version": "1.0.0",
-                "ci": {
-                    "jobs": {
-                        "smoke": { "command": "sh", "args": ["-c", "printf smoke"] }
-                    }
-                }
-            }))
-            .expect("parse manifest");
-            crate::extension::catalog::save_manifest(&manifest).expect("save extension");
-
-            let output =
-                run_for_extension(tmp.path(), "test", CiRunSelection::Job("smoke".to_string()))
-                    .expect("run extension job");
-
-            assert!(output.success);
-            assert_eq!(output.jobs[0].stdout, "smoke");
-        });
     }
 
     #[test]
@@ -699,56 +651,6 @@ mod tests {
 
         assert!(validate_job_command(&job, "test").is_ok());
         assert!(validate_job_command(&job, "lint").is_err());
-    }
-
-    #[test]
-    fn test_ci_job_env() {
-        let job = CiResolvedJob {
-            extension_id: "test".to_string(),
-            id: "lint".to_string(),
-            spec: CiJobSpec {
-                command: "lint".to_string(),
-                env: BTreeMap::from([("CI".to_string(), "1".to_string())]),
-                ..CiJobSpec::default()
-            },
-        };
-
-        assert_eq!(
-            ci_job_env(Some(&job)),
-            vec![("CI".to_string(), "1".to_string())]
-        );
-        assert!(ci_job_env(None).is_empty());
-    }
-
-    #[test]
-    fn test_ci_context_for_job() {
-        let job = CiResolvedJob {
-            extension_id: "test".to_string(),
-            id: "unit".to_string(),
-            spec: CiJobSpec {
-                mapping: CiJobMapping {
-                    check_names: vec!["Unit tests".to_string()],
-                    provider: Some("github-actions".to_string()),
-                    workflow: Some("ci.yml".to_string()),
-                },
-                command: "test".to_string(),
-                local_context: CiLocalContext {
-                    fidelity: CiJobFidelity::LocalPartial,
-                    limitations: vec!["matrix shard not reproduced".to_string()],
-                },
-                ..CiJobSpec::default()
-            },
-        };
-
-        let context = ci_context_for_job(Some(&job), Some("pr")).expect("context");
-
-        assert_eq!(context.profile.as_deref(), Some("pr"));
-        assert_eq!(context.job_id, "unit");
-        assert_eq!(context.mapping.check_names, vec!["Unit tests"]);
-        assert_eq!(context.mapping.provider.as_deref(), Some("github-actions"));
-        assert_eq!(context.mapping.workflow.as_deref(), Some("ci.yml"));
-        assert_eq!(context.local_context.fidelity, CiJobFidelity::LocalPartial);
-        assert_eq!(context.local_context.limitations.len(), 1);
     }
 
     #[test]

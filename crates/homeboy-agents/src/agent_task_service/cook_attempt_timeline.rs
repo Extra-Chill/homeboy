@@ -125,6 +125,11 @@ pub fn cook_attempt_timeline(cook_id: &str) -> Result<Vec<CookAttemptTiming>> {
 }
 
 fn record_state(record: &crate::agent_task_lifecycle::AgentTaskRunRecord) -> String {
+    // A candidate latched recoverable while its gates still run is gating,
+    // not finished (#19108).
+    if crate::agent_task_lifecycle::live_gate_owner(record).is_some() {
+        return "gating".to_string();
+    }
     serde_json::to_value(record.state())
         .ok()
         .and_then(|state| state.as_str().map(str::to_string))

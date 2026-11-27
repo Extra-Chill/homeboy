@@ -167,33 +167,6 @@ mod tests {
     }
 
     #[test]
-    fn arg_editor_inserts_after_subcommand_child() {
-        let input = args(&["homeboy", "agent-task", "cook", "--repo", "homeboy"]);
-        let invocation = CommandInvocation::for_subcommand(&input, "agent-task").unwrap();
-        let action_index = invocation.child_index_matching(&["cook"]).unwrap();
-
-        let edited = ArgEditor::new(&input)
-            .insert_after(
-                action_index,
-                ["--run-id".to_string(), "generated".to_string()],
-            )
-            .into_args();
-
-        assert_eq!(
-            edited,
-            args(&[
-                "homeboy",
-                "agent-task",
-                "cook",
-                "--run-id",
-                "generated",
-                "--repo",
-                "homeboy",
-            ])
-        );
-    }
-
-    #[test]
     fn command_invocation_detects_subcommand_before_passthrough_only() {
         let input = args(&["homeboy", "lab", "exec", "--", "agent-task", "cook"]);
 

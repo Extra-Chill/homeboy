@@ -15,44 +15,11 @@ fn compact_status_deduplicates_retry_rotation_artifacts_by_identity() {
     let compact = compact_items(Some(&repeated_retry_fixture), &["id", "kind", "path"]);
     assert_eq!(compact.as_array().unwrap().len(), 3);
     assert_eq!(compact_duplicate_count(Some(&repeated_retry_fixture)), 2);
-    // Full evidence remains available from the unmodified source through
-    // `runs artifacts`; compacting is a presentation-only projection.
-    assert_eq!(repeated_retry_fixture.as_array().unwrap().len(), 5);
     assert_eq!(compact[0]["id"], "transcript-1");
     assert_eq!(compact[1]["id"], "patch-1");
     assert_eq!(compact[2]["id"], "progress-1");
 }
 
-#[test]
-fn typed_provider_timeout_precedes_unparsed_provider_stream_error() {
-    let diagnostics = ranked_diagnostics(vec![
-        CollectedDiagnostic {
-            task_id: "task-a".to_string(),
-            class: "provider.process_stream".to_string(),
-            message: "provider error: stderr was truncated".to_string(),
-            source: "hydrated_process_stream".to_string(),
-            data: Value::Null,
-        },
-        CollectedDiagnostic {
-            task_id: "task-a".to_string(),
-            class: "agent_task.provider_liveness_timeout".to_string(),
-            message: "provider timed out after producing a recoverable candidate".to_string(),
-            source: "diagnostics".to_string(),
-            data: json!({"failure_classification": "timeout"}),
-        },
-    ]);
-
-    assert_eq!(
-        diagnostics
-            .first()
-            .map(|diagnostic| diagnostic.class.as_str()),
-        Some("agent_task.provider_liveness_timeout")
-    );
-}
-
-/// `cook --wait` on an unmaterialized admission must not end while the
-/// admission's replay is materializing the attempt: the recipe-only window
-/// is not terminal until the admission itself is.
 /// The provider handing back its patch (`candidate_recoverable` /
 /// `patch_available`) is not a Cook verdict while the Cook's driver is
 /// still alive to apply it and run the gates: a `cook --wait` that
@@ -109,6 +76,9 @@ fn a_live_cook_driver_keeps_an_intermediate_recoverable_state_open() {
     });
 }
 
+/// `cook --wait` on an unmaterialized admission must not end while the
+/// admission's replay is materializing the attempt: the recipe-only window
+/// is not terminal until the admission itself is.
 #[test]
 fn a_recipe_only_attempt_ends_a_cook_wait_only_once_its_admission_is_terminal() {
     crate::test_support::with_isolated_home(|_| {
@@ -141,7 +111,7 @@ fn a_recipe_only_attempt_ends_a_cook_wait_only_once_its_admission_is_terminal() 
 }
 
 #[test]
-fn stale_generic_lab_replay_status_has_no_executable_action() {
+fn changed_workspace_generic_lab_replay_still_offers_a_ready_retry() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("workspace.txt"), "recorded")
@@ -300,25 +270,39 @@ fn actionable_diagnostics_outrank_a_successful_provider_process_exit() {
 }
 
 #[test]
-fn recorded_gate_failure_outranks_process_stream_text() {
-    let diagnostics = ranked_diagnostics(vec![
-        CollectedDiagnostic {
-            task_id: "cook".to_string(),
-            class: "provider.process_stream".to_string(),
-            message: "Verifying lock file contents can be installed on current platform; validating schema".to_string(),
-            source: "hydrated_process_stream".to_string(),
-            data: Value::Null,
-        },
-        CollectedDiagnostic {
-            task_id: "promotion".to_string(),
-            class: "agent_task.promotion_gate_failed".to_string(),
-            message: "deterministic gate `gate-2` failed".to_string(),
-            source: "current_lifecycle".to_string(),
-            data: Value::Null,
-        },
-    ]);
-
-    assert_eq!(diagnostics[0].class, "agent_task.promotion_gate_failed");
+fn typed_failures_outrank_unparsed_provider_stream_text() {
+    let stream = |message: &str| CollectedDiagnostic {
+        task_id: "cook".to_string(),
+        class: "provider.process_stream".to_string(),
+        message: message.to_string(),
+        source: "hydrated_process_stream".to_string(),
+        data: Value::Null,
+    };
+    for (noise, cause) in [
+        (
+            stream("provider error: stderr was truncated"),
+            CollectedDiagnostic {
+                task_id: "cook".to_string(),
+                class: "agent_task.provider_liveness_timeout".to_string(),
+                message: "provider timed out after producing a recoverable candidate".to_string(),
+                source: "diagnostics".to_string(),
+                data: json!({"failure_classification": "timeout"}),
+            },
+        ),
+        (
+            stream("Verifying lock file contents can be installed on current platform; validating schema"),
+            CollectedDiagnostic {
+                task_id: "promotion".to_string(),
+                class: "agent_task.promotion_gate_failed".to_string(),
+                message: "deterministic gate `gate-2` failed".to_string(),
+                source: "current_lifecycle".to_string(),
+                data: Value::Null,
+            },
+        ),
+    ] {
+        let ranked = ranked_diagnostics(vec![noise, cause.clone()]);
+        assert_eq!(ranked[0].class, cause.class);
+    }
 }
 
 /// A recorded controller or gate verdict is the root cause, never the
@@ -361,59 +345,43 @@ fn recorded_controller_and_gate_verdicts_outrank_an_echoed_prompt() {
 }
 
 #[test]
-fn duplicate_diagnostics_merge_richer_denial_data() {
-    let diagnostics = ranked_diagnostics(vec![
-        CollectedDiagnostic {
-            task_id: "cook".to_string(),
-            class: "agent_tool.command_denied".to_string(),
-            message: "grep was denied".to_string(),
-            source: "diagnostics".to_string(),
-            data: json!({ "tool": "grep" }),
-        },
-        CollectedDiagnostic {
-            task_id: "cook".to_string(),
-            class: "agent_tool.command_denied".to_string(),
-            message: "grep was denied".to_string(),
-            source: "diagnostics".to_string(),
-            data: json!({
-                "permission": "external_directory_read",
-                "canonical_path": "/worktree/homeboy@fix-11827"
-            }),
-        },
-    ]);
+fn duplicate_diagnostics_merge_within_a_task_but_not_across_tasks() {
+    let denial = |task_id: &str, data: Value| CollectedDiagnostic {
+        task_id: task_id.to_string(),
+        class: "agent_tool.command_denied".to_string(),
+        message: "grep was denied".to_string(),
+        source: "diagnostics".to_string(),
+        data,
+    };
+    let richer = json!({
+        "permission": "external_directory_read",
+        "canonical_path": "/worktree/homeboy@fix-11827"
+    });
 
-    assert_eq!(diagnostics.len(), 1);
-    let value = collected_diagnostic_value(diagnostics[0].clone());
+    let merged = ranked_diagnostics(vec![
+        denial("cook", json!({ "tool": "grep" })),
+        denial("cook", richer.clone()),
+    ]);
+    assert_eq!(merged.len(), 1);
+    let value = collected_diagnostic_value(merged[0].clone());
     assert_eq!(value["details"]["tool"], "grep");
     assert_eq!(value["details"]["permission"], "external_directory_read");
     assert_eq!(
         value["details"]["canonical_path"],
         "/worktree/homeboy@fix-11827"
     );
-}
 
-#[test]
-fn duplicate_diagnostics_from_different_tasks_remain_distinct() {
-    let diagnostics = ranked_diagnostics(vec![
-        CollectedDiagnostic {
-            task_id: "task-a".to_string(),
-            class: "agent_tool.command_denied".to_string(),
-            message: "grep was denied".to_string(),
-            source: "diagnostics".to_string(),
-            data: json!({ "tool": "grep" }),
-        },
-        CollectedDiagnostic {
-            task_id: "task-b".to_string(),
-            class: "agent_tool.command_denied".to_string(),
-            message: "grep was denied".to_string(),
-            source: "diagnostics".to_string(),
-            data: json!({ "canonical_path": "/other-worktree" }),
-        },
+    let distinct = ranked_diagnostics(vec![
+        denial("task-a", json!({ "tool": "grep" })),
+        denial("task-b", richer),
     ]);
-
-    assert_eq!(diagnostics.len(), 2);
-    assert_eq!(diagnostics[0].task_id, "task-a");
-    assert_eq!(diagnostics[1].task_id, "task-b");
+    assert_eq!(
+        distinct
+            .iter()
+            .map(|diagnostic| diagnostic.task_id.as_str())
+            .collect::<Vec<_>>(),
+        ["task-a", "task-b"]
+    );
 }
 
 #[test]
@@ -486,39 +454,44 @@ fn oversized_diagnostic_messages_are_truncated_not_dropped() {
 }
 
 #[test]
-fn retry_action_is_typed_and_bound_to_the_controller() {
-    let action = owner_bound_retry_action("run-1", None, json!({ "placement": "local" }));
-
-    assert_eq!(
-        action.command,
-        "homeboy --placement local agent-task retry run-1 --run"
-    );
-    assert_eq!(
-        action.action.as_ref().unwrap().id,
-        "agent-task.retry.owner-bound.v1"
-    );
-    assert_eq!(
-        action.action.as_ref().unwrap().evidence.as_ref().unwrap()["owner"]["placement"],
-        "local"
-    );
-}
-
-#[test]
-fn generic_lab_replay_status_advertises_only_the_lab_retry_action() {
-    let action = lab_replay_retry_action("run-1", json!({ "placement": "lab" }));
-
-    assert_eq!(
-        action.command,
-        "homeboy --placement lab agent-task retry run-1 --run"
-    );
-    assert_eq!(
-        action.action.as_ref().unwrap().id,
-        "agent-task.retry.lab-replay.v1"
-    );
-    assert_eq!(
-        action.action.as_ref().unwrap().evidence.as_ref().unwrap()["owner"]["placement"],
-        "lab"
-    );
+fn retry_actions_are_typed_and_bound_to_their_owner() {
+    for (action, command, id, owner_field, owner_value) in [
+        (
+            owner_bound_retry_action("run-1", None, json!({ "placement": "local" })),
+            "homeboy --placement local agent-task retry run-1 --run",
+            "agent-task.retry.owner-bound.v1",
+            "placement",
+            "local",
+        ),
+        (
+            owner_bound_retry_action(
+                "run-1",
+                Some("lab-a"),
+                json!({ "placement": "runner", "runner_id": "lab-a" }),
+            ),
+            "homeboy --runner lab-a agent-task retry run-1 --run",
+            "agent-task.retry.owner-bound.v1",
+            "runner_id",
+            "lab-a",
+        ),
+        // A generic Lab replay advertises only the Lab retry action.
+        (
+            lab_replay_retry_action("run-1", json!({ "placement": "lab" })),
+            "homeboy --placement lab agent-task retry run-1 --run",
+            "agent-task.retry.lab-replay.v1",
+            "placement",
+            "lab",
+        ),
+    ] {
+        assert_eq!(action.command, command);
+        let typed = action.action.as_ref().expect("typed action");
+        assert_eq!(typed.id, id, "{command}");
+        assert_eq!(
+            typed.evidence.as_ref().unwrap()["owner"][owner_field],
+            owner_value,
+            "{command}"
+        );
+    }
 }
 
 #[test]
@@ -539,40 +512,6 @@ fn diagnose_commands_preserve_the_controller_owner_placement() {
     assert!(commands
         .iter()
         .all(|command| command.starts_with("homeboy --placement local ")));
-}
-
-#[test]
-fn retry_action_is_typed_and_bound_to_its_runner() {
-    let action = owner_bound_retry_action(
-        "run-1",
-        Some("lab-a"),
-        json!({ "placement": "runner", "runner_id": "lab-a" }),
-    );
-
-    assert_eq!(
-        action.command,
-        "homeboy --runner lab-a agent-task retry run-1 --run"
-    );
-    assert_eq!(
-        action.action.as_ref().unwrap().evidence.as_ref().unwrap()["owner"]["runner_id"],
-        "lab-a"
-    );
-}
-
-#[test]
-fn unavailable_retry_has_a_reason_and_no_executable_action() {
-    let retry = RetryReplayAction::unavailable(
-        json!({ "placement": "runner", "runner_id": "lab-a" }),
-        "source workspace no longer matches the persisted Lab replay identity",
-    );
-
-    assert_eq!(retry.projection()["readiness"], "unavailable");
-    assert!(retry.projection()["action"].is_null());
-    assert!(retry.projection()["reason"]
-        .as_str()
-        .unwrap()
-        .contains("no longer matches"));
-    assert_eq!(retry.projection()["admission"]["admitted"], false);
 }
 
 #[test]

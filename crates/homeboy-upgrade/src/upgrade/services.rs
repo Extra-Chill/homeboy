@@ -185,39 +185,37 @@ mod tests {
     }
 
     #[test]
-    fn restart_command_prefers_explicit_command_over_systemd_unit() {
-        let svc = service("ingress", Some("homeboy-ingress"), Some("custom restart"));
-        assert_eq!(restart_command_for(&svc).as_deref(), Some("custom restart"));
+    fn restart_command_prefers_explicit_command_then_systemd_unit() {
+        for (unit, cmd, expected) in [
+            (
+                Some("homeboy-ingress"),
+                Some("custom restart"),
+                Some("custom restart"),
+            ),
+            (
+                Some("homeboy-ingress"),
+                None,
+                Some("systemctl restart homeboy-ingress"),
+            ),
+            (None, None, None),
+            (Some("   "), Some("  "), None),
+        ] {
+            let svc = service("ingress", unit, cmd);
+            assert_eq!(
+                restart_command_for(&svc).as_deref(),
+                expected,
+                "{unit:?} {cmd:?}"
+            );
+        }
     }
 
     #[test]
-    fn restart_command_falls_back_to_systemctl_for_unit() {
-        let svc = service("ingress", Some("homeboy-ingress"), None);
-        assert_eq!(
-            restart_command_for(&svc).as_deref(),
-            Some("systemctl restart homeboy-ingress")
-        );
-    }
-
-    #[test]
-    fn restart_command_is_none_without_unit_or_command() {
-        let svc = service("ingress", None, None);
-        assert!(restart_command_for(&svc).is_none());
-    }
-
-    #[test]
-    fn restart_command_ignores_blank_command_and_unit() {
-        let svc = service("ingress", Some("   "), Some("  "));
-        assert!(restart_command_for(&svc).is_none());
-    }
-
-    #[test]
-    fn restart_resident_services_records_successes_and_failures() {
-        // Service list provided via fixture, not hardcoded in production code.
+    fn restart_resident_services_records_successes_failures_and_unrunnable() {
         let services = vec![
             service("ingress", Some("homeboy-ingress"), None),
             service("broker", Some("homeboy-broker"), None),
             service("custom", None, Some("supervisorctl restart custom")),
+            service("orphan", None, None),
         ];
 
         let (restarted, pending) = restart_resident_services(&services, |cmd| {
@@ -233,7 +231,7 @@ mod tests {
         assert!(restarted.iter().any(|e| e.service_id == "ingress"));
         assert!(restarted.iter().any(|e| e.service_id == "custom"));
 
-        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.len(), 2);
         let failed = &pending[0];
         assert_eq!(failed.service_id, "broker");
         assert!(!failed.restarted);
@@ -242,29 +240,9 @@ mod tests {
             failed.detail.as_deref(),
             Some("Unit homeboy-broker not found")
         );
-    }
-
-    #[test]
-    fn restart_resident_services_marks_unrunnable_descriptor_pending() {
-        let services = vec![service("orphan", None, None)];
-
-        let (restarted, pending) = restart_resident_services(&services, |_| Ok(()));
-
-        assert!(restarted.is_empty());
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].service_id, "orphan");
-        assert!(pending[0]
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("cannot restart"));
-    }
-
-    #[test]
-    fn restart_resident_services_empty_list_is_noop() {
-        let (restarted, pending) = restart_resident_services(&[], |_| Ok(()));
-        assert!(restarted.is_empty());
-        assert!(pending.is_empty());
+        let orphan = &pending[1];
+        assert_eq!(orphan.service_id, "orphan");
+        assert!(orphan.detail.as_deref().unwrap().contains("cannot restart"));
     }
 
     #[test]

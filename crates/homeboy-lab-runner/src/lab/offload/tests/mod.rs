@@ -16,7 +16,6 @@ pub(super) use crate::{
     RunnerStaleDaemonWarning, RunnerTransport, RunnerTunnelMode,
     RunnerWorkspaceMaterializationPlan, RunnerWorkspaceSyncOutput,
 };
-pub(super) use homeboy_core::engine::command::{CaptureMetadata, CommandCaptureMetadata};
 pub(super) use homeboy_core::observation::{
     LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
 };

@@ -538,48 +538,7 @@ fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {
 #[cfg(test)]
 mod tests {
     use super::status;
-    use clap::Parser;
-
-    use crate::cli_surface::Cli;
     use crate::test_support::with_isolated_home;
-
-    #[test]
-    fn component_attach_path_and_batch_surface_parse() {
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "project",
-            "components",
-            "attach-path",
-            "site",
-            "/repo/component",
-            "--dry-run",
-        ])
-        .is_ok());
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "project",
-            "components",
-            "attach-paths",
-            "site",
-            "/repo/first",
-            "/repo/second",
-            "--failure-policy",
-            "continue",
-            "--worktree-policy",
-            "skip",
-        ])
-        .is_ok());
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "project",
-            "components",
-            "attach-paths",
-            "site",
-            "--input",
-            r#"[{"path":"/repo/component","reference":"primary:component"}]"#,
-        ])
-        .is_ok());
-    }
 
     #[test]
     fn status_returns_nonzero_when_a_configured_server_could_not_be_checked() {

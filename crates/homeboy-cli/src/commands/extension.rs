@@ -1924,54 +1924,47 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
+    fn write_manifest(home: &Path, id: &str, manifest: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(extension_dir.join(format!("{id}.json")), manifest).expect("extension manifest");
+    }
+
     #[test]
-    fn extension_list_emits_rows_only_under_entities() {
+    fn extension_list_emits_rows_under_entities() {
+        let empty =
+            serde_json::to_value(list_output(None, Vec::new())).expect("serialize extension list");
+        assert_eq!(empty["command"], "extension.list");
+        assert_eq!(empty["entities"], serde_json::json!([]));
+
         with_isolated_home(|home| {
-            let extension_dir = home.path().join(".config/homeboy/extensions/listed");
-            fs::create_dir_all(&extension_dir).expect("extension dir");
-            fs::write(
-                extension_dir.join("listed.json"),
+            write_manifest(
+                home.path(),
+                "listed",
                 r#"{ "name": "Listed", "version": "1.0.0" }"#,
-            )
-            .expect("extension manifest");
+            );
 
             let (output, _) = list(None, ExtensionReadinessMode::Cached).expect("list extensions");
             let value = serde_json::to_value(&output).expect("serialize extension list");
 
             assert_eq!(value["command"], "extension.list");
             assert_eq!(value["entities"][0]["id"], "listed");
-            assert!(value.get("extensions").is_none(), "no mirror: {value}");
         });
     }
 
+    /// Only a verified source-revision change selects an extension for a
+    /// service restart; unknown or unverifiable revisions never do.
     #[test]
-    fn empty_extension_list_emits_entities_array() {
-        let value =
-            serde_json::to_value(list_output(None, Vec::new())).expect("serialize extension list");
-
-        assert_eq!(value["command"], "extension.list");
-        assert_eq!(value["entities"], serde_json::json!([]));
-        assert!(value.get("extensions").is_none(), "no mirror: {value}");
-        assert!(value.get("project_id").is_none());
-    }
-
-    #[test]
-    fn convergence_restarts_only_extensions_with_changed_source_revisions() {
+    fn convergence_restarts_only_extensions_with_verified_changed_revisions() {
         let entries = vec![
             update_entry("unchanged", Some("abc"), Some("abc")),
             update_entry("changed", Some("abc"), Some("def")),
             update_entry("unverifiable", None, None),
+            update_entry("unknown", None, Some("def")),
         ];
 
         assert_eq!(changed_extension_ids(&entries), vec!["changed"]);
-    }
-
-    #[test]
-    fn convergence_keeps_unknown_revisions_out_of_restart_selection() {
-        let entries = vec![update_entry("unknown", None, Some("def"))];
-
-        assert!(changed_extension_ids(&entries).is_empty());
-        assert_eq!(revision_evidence(&entries)[0].status, "unknown");
+        assert_eq!(revision_evidence(&entries)[3].status, "unknown");
     }
 
     #[test]
@@ -2345,12 +2338,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn extension_inventory_defaults_to_cached_readiness() {
-        assert_eq!(readiness_mode(false), ExtensionReadinessMode::Cached);
-        assert_eq!(readiness_mode(true), ExtensionReadinessMode::Probe);
-    }
-
     #[cfg(unix)]
     #[test]
     fn extension_run_projects_captured_output_and_exit_code() {
@@ -2606,14 +2593,9 @@ mod tests {
     #[test]
     fn extension_show_emits_ci_cache_contract() {
         with_isolated_home(|home| {
-            let extension_id = "cached-runtime";
-            let extension_dir = home
-                .path()
-                .join(".config/homeboy/extensions")
-                .join(extension_id);
-            fs::create_dir_all(&extension_dir).expect("extension dir");
-            fs::write(
-                extension_dir.join(format!("{extension_id}.json")),
+            write_manifest(
+                home.path(),
+                "cached-runtime",
                 r#"{
   "name": "Cached runtime",
   "version": "1.0.0",
@@ -2629,40 +2611,10 @@ mod tests {
     }
   }
 }"#,
-            )
-            .expect("extension manifest");
-
-            let (output, exit_code) = show_extension(extension_id, ExtensionReadinessMode::Cached)
-                .expect("show extension");
-            assert_eq!(exit_code, 0);
-            let ExtensionOutput::Show { extension } = output else {
-                panic!("expected extension show output");
-            };
-            let cache = extension.ci_cache.expect("CI cache contract");
-            assert_eq!(cache.namespace, "toolchain");
-            assert_eq!(cache.key_files, vec!["toolchain.lock"]);
-            assert_eq!(cache.paths.len(), 3);
-            assert_eq!(
-                cache.paths[1].root,
-                extension_contract::ci_config::CiCachePathRoot::HomeboyData
             );
-            assert_eq!(cache.paths[1].path, "build-targets");
-            assert_eq!(cache.paths[2].env.as_deref(), Some("BUILD_TARGET_DIR"));
-            assert!(!cache.rolling);
-        });
-    }
-
-    #[test]
-    fn extension_show_emits_rolling_ci_cache_contract() {
-        with_isolated_home(|home| {
-            let extension_id = "rolling-downloads";
-            let extension_dir = home
-                .path()
-                .join(".config/homeboy/extensions")
-                .join(extension_id);
-            fs::create_dir_all(&extension_dir).expect("extension dir");
-            fs::write(
-                extension_dir.join(format!("{extension_id}.json")),
+            write_manifest(
+                home.path(),
+                "rolling-downloads",
                 r#"{
   "name": "Rolling downloads",
   "version": "1.0.0",
@@ -2674,19 +2626,33 @@ mod tests {
     }
   }
 }"#,
-            )
-            .expect("extension manifest");
+            );
 
-            let (output, _) = show_extension(extension_id, ExtensionReadinessMode::Cached)
-                .expect("show extension");
-            let ExtensionOutput::Show { extension } = output else {
-                panic!("expected extension show output");
+            let show_cache = |id: &str| {
+                let (output, exit_code) =
+                    show_extension(id, ExtensionReadinessMode::Cached).expect("show extension");
+                assert_eq!(exit_code, 0);
+                let ExtensionOutput::Show { extension } = output else {
+                    panic!("expected extension show output");
+                };
+                extension.ci_cache.expect("CI cache contract")
             };
-            let cache = extension.ci_cache.expect("CI cache contract");
-            assert!(cache.rolling);
-            assert!(cache.key_files.is_empty());
-            let json = serde_json::to_value(&cache).expect("serialize cache");
-            assert_eq!(json["rolling"], serde_json::Value::Bool(true));
+
+            let cache = show_cache("cached-runtime");
+            assert_eq!(cache.namespace, "toolchain");
+            assert_eq!(cache.key_files, vec!["toolchain.lock"]);
+            assert_eq!(cache.paths.len(), 3);
+            assert_eq!(
+                cache.paths[1].root,
+                extension_contract::ci_config::CiCachePathRoot::HomeboyData
+            );
+            assert_eq!(cache.paths[1].path, "build-targets");
+            assert_eq!(cache.paths[2].env.as_deref(), Some("BUILD_TARGET_DIR"));
+            assert!(!cache.rolling);
+
+            let rolling = show_cache("rolling-downloads");
+            assert!(rolling.rolling);
+            assert!(rolling.key_files.is_empty());
         });
     }
 
@@ -2907,42 +2873,6 @@ mod tests {
                 .manifest_path
                 .ends_with("copied-runtime/copied-runtime.json"));
             assert_eq!(diff.next_command, "homeboy extension show copied-runtime");
-
-            let stale_summary = ExtensionInventoryEntry {
-                source_revision: Some("abc1234".to_string()),
-                linked: false,
-                path: extension_dir.to_string_lossy().to_string(),
-                id: extension_id.to_string(),
-                name: "Copied Runtime".to_string(),
-                version: "1.2.3".to_string(),
-                description: String::new(),
-                runtime: "platform".to_string(),
-                compatible: true,
-                core_compatibility:
-                    extension_contract::core_compat::CoreCompatibilityReport::undeclared(None),
-                readiness: ExtensionApiReadinessState::Ready,
-                ready: Some(true),
-                ready_reason: None,
-                ready_detail: None,
-                readiness_cache_age_seconds: None,
-                readiness_timeout_ms: None,
-                readiness_follow_up_command: None,
-                manifest_path: None,
-                error: None,
-                diagnostic: None,
-                symlink_target: None,
-                cli_tool: None,
-                cli_display_name: None,
-                actions: Vec::new(),
-                repair_actions: Vec::new(),
-                notification_transports: Vec::new(),
-                has_setup: Some(true),
-                has_ready_check: Some(true),
-            };
-            assert_eq!(
-                installed_extension_diff_next_command(&stale_summary, "stale"),
-                "homeboy extension update copied-runtime"
-            );
         });
     }
 

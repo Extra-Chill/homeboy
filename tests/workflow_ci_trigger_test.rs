@@ -58,17 +58,32 @@ fn ci_pull_request_trigger_includes_edited_activity_type() {
     );
 }
 
-// Release lint/test gates must execute the same reviewed Homeboy Action
-// revision as PR CI. A floating tag can silently change the gate contract.
+fn gate_action_revision(workflow: &Value, job: &str) -> String {
+    workflow["jobs"][job]["steps"]
+        .as_sequence()
+        .unwrap_or_else(|| panic!("{job} declares steps"))
+        .iter()
+        .filter_map(|step| step["uses"].as_str())
+        .find_map(|uses| uses.strip_prefix("Extra-Chill/homeboy-action@"))
+        .unwrap_or_else(|| panic!("{job} runs the Homeboy Action"))
+        .to_string()
+}
+
+// Release lint/test gates must execute one reviewed Homeboy Action revision.
+// A floating tag, or the two gates drifting apart, silently changes the gate
+// contract between lint and test.
 #[test]
-fn release_quality_gates_use_the_ci_action_revision() {
+fn release_quality_gates_share_one_pinned_action_revision() {
     let workflow = release_workflow();
-    let yaml = serde_yml::to_string(&workflow).expect("serialize release workflow");
+    let lint = gate_action_revision(&workflow, "gate-lint");
+    let test = gate_action_revision(&workflow, "gate-test");
+    assert!(
+        lint.len() == 40 && lint.chars().all(|c| c.is_ascii_hexdigit()),
+        "release lint gate must pin a full commit SHA, got `{lint}`"
+    );
     assert_eq!(
-        yaml.matches("Extra-Chill/homeboy-action@f1805406709252e4ab25f983b3c72cdba113f2cf")
-            .count(),
-        2,
-        "release lint and test must use the pinned CI action revision"
+        lint, test,
+        "release lint and test gates must share one revision"
     );
 }
 

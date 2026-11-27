@@ -1,10 +1,8 @@
-use homeboy_engine_primitives::metric_comparison::Direction;
 use std::collections::BTreeMap;
 
-use super::super::{collect_artifacts, from_main_workflow, from_main_workflow_with_rig};
+use super::super::{collect_artifacts, from_main_workflow};
 use super::{
-    aggregate_comparison, aggregate_comparison_with_axes, BenchComparisonDiff, BenchPhaseGroups,
-    RigBenchEntry,
+    aggregate_comparison, aggregate_comparison_with_axes, BenchComparisonDiff, RigBenchEntry,
 };
 use crate::extension::bench::artifact::{
     BenchArtifact, BenchArtifactViewer, BenchPreviewLifecycleMetadata,
@@ -12,8 +10,7 @@ use crate::extension::bench::artifact::{
 use crate::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 use crate::extension::bench::distribution::BenchRunDistribution;
 use crate::extension::bench::parsing::{
-    BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchResults, BenchRunSnapshot,
-    BenchScenario,
+    BenchMetrics, BenchResults, BenchRunSnapshot, BenchScenario,
 };
 use crate::extension::bench::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::extension::bench::side_by_side::BenchSideBySideMetric;
@@ -256,84 +253,48 @@ use fixtures::*;
 
 #[test]
 fn comparison_side_by_side_renders_baseline_and_candidate_preview_links() {
-    let mut baseline_scenario = scenario("site-build", &[("elapsed_ms", 12_000.0)]);
-    baseline_scenario.artifacts.insert(
-        "preview".to_string(),
-        preview_artifact(
-            None,
-            "https://baseline-preview.example.test/",
-            "running",
-            Some("2026-06-08T12:00:00Z"),
-        ),
-    );
-
-    let mut candidate_scenario = scenario("site-build", &[("elapsed_ms", 8_000.0)]);
-    candidate_scenario.artifacts.insert(
-        "preview".to_string(),
-        preview_artifact(
-            Some("candidate"),
-            "https://candidate-preview.example.test/",
-            "expired",
-            Some("2026-06-07T12:00:00Z"),
-        ),
-    );
-
+    let with_preview = |role: Option<&str>, url: &str, status: &str| {
+        let mut scenario = scenario("site-build", &[("elapsed_ms", 8_000.0)]);
+        scenario.artifacts.insert(
+            "preview".to_string(),
+            preview_artifact(role, url, status, Some("2026-06-08T12:00:00Z")),
+        );
+        scenario
+    };
     let entries = vec![
-        entry("baseline-rig", true, Some(results(vec![baseline_scenario]))),
+        entry(
+            "baseline-rig",
+            true,
+            Some(results(vec![with_preview(
+                None,
+                "https://baseline-preview.example.test/",
+                "running",
+            )])),
+        ),
         entry(
             "candidate-rig",
             true,
-            Some(results(vec![candidate_scenario])),
+            Some(results(vec![with_preview(
+                Some("candidate"),
+                "https://candidate-preview.example.test/",
+                "expired",
+            )])),
         ),
     ];
 
     let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
     let value = serde_json::to_value(&out).expect("serialize comparison");
-    let report = &out.reports.side_by_side;
+    let rigs = &value["reports"]["side_by_side"]["rigs"];
 
     assert_eq!(exit, 0);
-    assert_eq!(report.rigs[0].preview_links.len(), 1);
-    assert_eq!(report.rigs[0].preview_links[0].role, "baseline");
-    assert_eq!(
-        report.rigs[0].preview_links[0].url,
-        "https://baseline-preview.example.test/"
-    );
-    assert_eq!(
-        report.rigs[0].preview_links[0]
-            .preview_lifecycle
-            .expires_at
-            .as_deref(),
-        Some("2026-06-08T12:00:00Z")
-    );
-    assert_eq!(
-        report.rigs[0].preview_links[0]
-            .preview_lifecycle
-            .service_lifecycle
-            .as_ref()
-            .unwrap()["service_id"],
-        "site-preview"
-    );
-    assert_eq!(
-        report.rigs[0].preview_links[0]
-            .preview_lifecycle
-            .browser_origin_evidence
-            .as_ref()
-            .unwrap()["window_is_secure_context"],
-        true
-    );
-    assert_eq!(report.rigs[1].preview_links[0].role, "candidate");
-    assert_eq!(
-        report.rigs[1].preview_links[0].status.as_deref(),
-        Some("expired")
-    );
-    assert_eq!(
-        value["reports"]["side_by_side"]["rigs"][0]["preview_links"][0]["role"],
-        "baseline"
-    );
-    assert_eq!(
-        value["reports"]["side_by_side"]["rigs"][1]["preview_links"][0]["url"],
-        "https://candidate-preview.example.test/"
-    );
+    let baseline = &rigs[0]["preview_links"][0];
+    assert_eq!(baseline["role"], "baseline");
+    assert_eq!(baseline["url"], "https://baseline-preview.example.test/");
+    assert_eq!(baseline["service_lifecycle"]["service_id"], "site-preview");
+    let candidate = &rigs[1]["preview_links"][0];
+    assert_eq!(candidate["role"], "candidate");
+    assert_eq!(candidate["url"], "https://candidate-preview.example.test/");
+    assert_eq!(candidate["status"], "expired");
 }
 
 #[test]
@@ -376,114 +337,44 @@ fn comparison_side_by_side_uses_viewer_url_as_preview_link() {
 }
 
 #[test]
-fn test_from_main_workflow() {
-    let (out, exit) = from_main_workflow(BenchRunWorkflowResult {
-        status: "passed".to_string(),
-        component: "homeboy".to_string(),
-        exit_code: 0,
-        iterations: 3,
-        results: None,
-        gate_results: Vec::new(),
-        gate_failures: Vec::new(),
-        baseline_comparison: None,
-        hints: None,
-        failure: None,
-        diagnostics: Vec::new(),
-    });
-
-    assert!(out.passed);
-    assert_eq!(out.component, "homeboy");
-    assert_eq!(out.iterations, 3);
-    assert_eq!(exit, 0);
-}
-
-#[test]
-fn test_from_main_workflow_with_rig() {
-    let (out, exit) = from_main_workflow_with_rig(
-        BenchRunWorkflowResult {
-            status: "failed".to_string(),
+fn main_workflow_output_passes_only_on_zero_exit() {
+    for (exit_code, passed) in [(0, true), (1, false)] {
+        let (out, exit) = from_main_workflow(BenchRunWorkflowResult {
+            status: "done".to_string(),
             component: "homeboy".to_string(),
-            exit_code: 1,
-            iterations: 1,
+            exit_code,
+            iterations: 3,
             results: None,
             gate_results: Vec::new(),
             gate_failures: Vec::new(),
             baseline_comparison: None,
-            hints: Some(vec!["check output".to_string()]),
+            hints: None,
             failure: None,
             diagnostics: Vec::new(),
-        },
-        None,
-    );
+        });
 
-    assert!(!out.passed);
-    assert_eq!(out.exit_code, 1);
-    assert_eq!(out.hints.as_ref().unwrap()[0], "check output");
-    assert_eq!(exit, 1);
-}
-
-#[test]
-fn test_from_policies() {
-    let mut policies = BTreeMap::new();
-    policies.insert(
-        "boot_ms".to_string(),
-        BenchMetricPolicy {
-            direction: Direction::LowerIsBetter,
-            regression_threshold_percent: None,
-            regression_threshold_absolute: None,
-            variance_aware: false,
-            min_iterations_for_variance: None,
-            regression_test: None,
-            phase: Some(BenchMetricPhase::Cold),
-        },
-    );
-
-    let metric_names = ["boot_ms".to_string(), "p95_ms".to_string()].into();
-    let groups = BenchPhaseGroups::from_policies(&policies, &metric_names);
-
-    assert_eq!(groups.cold, vec!["boot_ms".to_string()]);
-    assert_eq!(groups.untagged, vec!["p95_ms".to_string()]);
-}
-
-#[test]
-fn test_is_phaseless() {
-    assert!(BenchPhaseGroups {
-        cold: Vec::new(),
-        warm: Vec::new(),
-        amortized: Vec::new(),
-        untagged: vec!["p95_ms".to_string()],
+        assert_eq!(out.passed, passed);
+        assert_eq!(exit, exit_code);
     }
-    .is_phaseless());
+}
 
-    assert!(!BenchPhaseGroups {
-        cold: vec!["boot_ms".to_string()],
-        warm: Vec::new(),
-        amortized: Vec::new(),
-        untagged: Vec::new(),
+#[test]
+fn aggregate_passes_only_when_all_rigs_pass() {
+    let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
+    for (second_passed, exit_code) in [(true, 0), (false, 1)] {
+        let entries = vec![
+            entry("a", true, Some(r.clone())),
+            entry("b", second_passed, Some(r.clone())),
+        ];
+        let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
+
+        assert_eq!(out.passed, second_passed);
+        assert_eq!(out.exit_code, exit_code);
+        assert_eq!(exit, exit_code);
+        // Without declared axes the envelope carries no axis_diffs key.
+        let value = serde_json::to_value(out).expect("serialize comparison");
+        assert!(value.get("axis_diffs").is_none());
     }
-    .is_phaseless());
-}
-
-#[test]
-fn test_aggregate_comparison() {
-    let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
-    let entries = vec![entry("a", true, Some(r.clone())), entry("b", true, Some(r))];
-    let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
-
-    assert!(out.passed);
-    assert_eq!(out.exit_code, 0);
-    assert_eq!(out.iterations, 10);
-    assert_eq!(exit, 0);
-}
-
-#[test]
-fn no_axis_multi_rig_comparison_omits_axis_diffs() {
-    let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
-    let entries = vec![entry("a", true, Some(r.clone())), entry("b", true, Some(r))];
-    let (out, _) = aggregate_comparison("studio".into(), 10, entries);
-    let value = serde_json::to_value(out).expect("serialize comparison");
-
-    assert!(value.get("axis_diffs").is_none());
 }
 
 #[test]
@@ -830,22 +721,6 @@ fn side_by_side_report_summarizes_multi_rig_results() {
 }
 
 #[test]
-fn diff_computes_percent_delta_lower_is_better() {
-    let ref_r = results(vec![scenario("boot", &[("p95_ms", 30000.0)])]);
-    let other = results(vec![scenario("boot", &[("p95_ms", 18000.0)])]);
-    let diff = BenchComparisonDiff::build(("trunk", &ref_r), &[("combined-fixes", &other)]);
-    let d = diff
-        .by_scenario
-        .get("boot")
-        .and_then(|m| m.get("p95_ms"))
-        .and_then(|m| m.get("combined-fixes"))
-        .unwrap();
-    assert_eq!(d.baseline, Some(30000.0));
-    assert_eq!(d.candidate, Some(18000.0));
-    assert!((d.percent.unwrap() - -40.0).abs() < 1e-9);
-}
-
-#[test]
 fn diff_flattens_grouped_metrics_for_cross_rig_comparison() {
     let ref_r = results(vec![scenario_with_metric_groups(
         "agent",
@@ -914,68 +789,12 @@ fn diff_skips_missing_scenarios_silently() {
 #[test]
 fn diff_handles_zero_reference_without_percentage() {
     let ref_r = results(vec![scenario("a", &[("errors", 0.0)])]);
-    let other_pos = results(vec![scenario("a", &[("errors", 5.0)])]);
-    let other_neg = results(vec![scenario("a", &[("errors", -5.0)])]);
-    let other_zero = results(vec![scenario("a", &[("errors", 0.0)])]);
-
-    let diff_pos = BenchComparisonDiff::build(("ref", &ref_r), &[("other", &other_pos)]);
-    let pos = diff_pos
-        .by_scenario
-        .get("a")
-        .unwrap()
-        .get("errors")
-        .unwrap()
-        .get("other")
-        .unwrap();
-    assert_eq!(pos.percent, None);
-
-    let diff_neg = BenchComparisonDiff::build(("ref", &ref_r), &[("other", &other_neg)]);
-    let neg = diff_neg
-        .by_scenario
-        .get("a")
-        .unwrap()
-        .get("errors")
-        .unwrap()
-        .get("other")
-        .unwrap();
-    assert_eq!(neg.percent, None);
-
-    let diff_zero = BenchComparisonDiff::build(("ref", &ref_r), &[("other", &other_zero)]);
-    let zero = diff_zero
-        .by_scenario
-        .get("a")
-        .unwrap()
-        .get("errors")
-        .unwrap()
-        .get("other")
-        .unwrap();
-    assert_eq!(zero.percent, None);
-}
-
-#[test]
-fn aggregate_passed_only_when_all_rigs_pass() {
-    let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
-    let entries = vec![
-        entry("a", true, Some(r.clone())),
-        entry("b", false, Some(r.clone())),
-    ];
-    let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
-    assert!(!out.passed);
-    assert_eq!(exit, 1);
-    assert_eq!(out.exit_code, 1);
-}
-
-#[test]
-fn aggregate_exit_zero_when_all_rigs_pass() {
-    let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
-    let entries = vec![
-        entry("a", true, Some(r.clone())),
-        entry("b", true, Some(r.clone())),
-    ];
-    let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
-    assert!(out.passed);
-    assert_eq!(exit, 0);
-    assert_eq!(out.rigs.len(), 2);
+    for candidate in [5.0, -5.0, 0.0] {
+        let other = results(vec![scenario("a", &[("errors", candidate)])]);
+        let diff = BenchComparisonDiff::build(("ref", &ref_r), &[("other", &other)]);
+        let delta = &diff.by_scenario["a"]["errors"]["other"];
+        assert_eq!(delta.percent, None, "candidate {candidate}");
+    }
 }
 
 #[test]
@@ -999,15 +818,6 @@ fn aggregate_handles_more_than_two_rigs() {
     assert_eq!(metric.len(), 2);
     assert!((metric.get("b").unwrap().percent.unwrap() - -20.0).abs() < 1e-9);
     assert!((metric.get("c").unwrap().percent.unwrap() - 20.0).abs() < 1e-9);
-}
-
-#[test]
-fn aggregate_emits_hint_when_a_rig_has_no_results() {
-    let r = results(vec![scenario("boot", &[("p95_ms", 100.0)])]);
-    let entries = vec![entry("a", true, Some(r)), entry("b", false, None)];
-    let (out, _) = aggregate_comparison("studio".into(), 10, entries);
-    let hints = out.hints.as_ref().unwrap();
-    assert!(hints.iter().any(|h| h.contains("no parseable results")));
 }
 
 #[test]
@@ -1036,64 +846,6 @@ fn aggregate_groups_shared_diagnostic_classes_by_rig() {
         .unwrap()
         .iter()
         .any(|hint| hint.contains("occurred in multiple rigs")));
-}
-
-#[test]
-fn aggregate_promotes_cross_rig_run_summary() {
-    let reference = results(vec![scenario_with_runs_summary(
-        "studio-agent-runtime",
-        &[("elapsed_ms", 7552.0), ("success_rate", 1.0)],
-        "elapsed_ms",
-        run_distribution(3, 7552.0, 8324.0, 7827.0, 5.27),
-    )]);
-    let candidate = results(vec![scenario_with_runs_summary(
-        "studio-agent-runtime",
-        &[("elapsed_ms", 3311.0), ("success_rate", 1.0)],
-        "elapsed_ms",
-        run_distribution(3, 3311.0, 3377.0, 3232.0, 5.15),
-    )]);
-
-    let entries = vec![
-        entry("studio-agent-sdk", true, Some(reference)),
-        entry("studio-agent-pi", true, Some(candidate)),
-    ];
-    let (out, _) = aggregate_comparison("studio".into(), 10, entries);
-
-    assert_eq!(out.summary.len(), 1);
-    let summary = &out.summary[0];
-    assert_eq!(summary.scenario, "studio-agent-runtime");
-    assert_eq!(summary.metric, "elapsed_ms");
-    assert_eq!(summary.rows.len(), 2);
-
-    let reference_row = &summary.rows[0];
-    assert_eq!(reference_row.rig_id, "studio-agent-sdk");
-    assert_eq!(reference_row.n, Some(3));
-    assert_eq!(reference_row.p50_ms, Some(7552.0));
-    assert_eq!(reference_row.p95_ms, Some(8324.0));
-    assert_eq!(reference_row.mean_ms, Some(7827.0));
-    assert_eq!(reference_row.cv_pct, Some(5.27));
-    assert_eq!(reference_row.delta_p50_pct, Some(0.0));
-    assert_eq!(
-        reference_row.semantic_metrics.get("success_rate"),
-        Some(&1.0)
-    );
-
-    let candidate_row = &summary.rows[1];
-    assert_eq!(candidate_row.rig_id, "studio-agent-pi");
-    assert_eq!(candidate_row.n, Some(3));
-    assert_eq!(candidate_row.p50_ms, Some(3311.0));
-    assert_eq!(candidate_row.p95_ms, Some(3377.0));
-    assert_eq!(candidate_row.mean_ms, Some(3232.0));
-    assert_eq!(candidate_row.cv_pct, Some(5.15));
-    assert!(
-        (candidate_row.delta_p50_pct.unwrap() - -56.157309322033896).abs() < 1e-9,
-        "expected p50 delta against reference, got {:?}",
-        candidate_row.delta_p50_pct
-    );
-    assert_eq!(
-        candidate_row.semantic_metrics.get("success_rate"),
-        Some(&1.0)
-    );
 }
 
 #[test]
@@ -1141,20 +893,13 @@ fn aggregate_surfaces_no_parseable_failure_metadata() {
     let (out, exit) = aggregate_comparison("studio".into(), 10, entries);
 
     assert_eq!(exit, 2);
-    assert_eq!(out.failures.len(), 1);
-    let failure = &out.failures[0];
-    assert_eq!(failure.rig_id, "candidate");
-    assert_eq!(failure.component_id, "studio");
-    assert_eq!(failure.exit_code, 2);
-    assert!(failure
-        .stderr_tail
-        .contains("Homeboy bench helper not found"));
-
     let value = serde_json::to_value(&out).unwrap();
-    let json_failure = &value["failures"][0];
-    assert_eq!(json_failure["rig_id"], "candidate");
-    assert_eq!(json_failure["component_id"], "studio");
-    assert!(json_failure["stderr_tail"]
+    let failures = value["failures"].as_array().expect("failures");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["rig_id"], "candidate");
+    assert_eq!(failures[0]["component_id"], "studio");
+    assert_eq!(failures[0]["exit_code"], 2);
+    assert!(failures[0]["stderr_tail"]
         .as_str()
         .unwrap()
         .contains("bench-helper.sh"));

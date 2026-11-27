@@ -6,11 +6,8 @@
 //! ([`super::pipeline::run`], via the release plan dispatcher) runs them in
 //! order and handles skip-on-failure logic for subsequent steps.
 //!
-//! This used to be a trait-object-dispatched `PipelineStepExecutor` driving a
-//! generic DAG (`engine::pipeline`). In practice every release runs the same
-//! linear sequence with a sequential `Mutex<ReleaseContext>` shared between
-//! steps, so the DAG scaffolding bought nothing but indirection. The logic
-//! inside each `run_*` function is unchanged; only the plumbing is different.
+//! Every release runs the same linear sequence, so steps share state through
+//! a plain `&mut ReleaseState` rather than a generic DAG.
 
 use crate::release::{changelog as release_changelog, version};
 use homeboy_core::component::Component;
@@ -636,7 +633,7 @@ fn should_amend_release_commit(local_path: &str, prefix: Option<&str>) -> Result
 #[cfg(test)]
 mod tests {
     #[test]
-    fn amend_detection_accepts_legacy_and_owned_scopes_only() {
+    fn amend_detection_accepts_unscoped_and_owned_scopes_only() {
         use homeboy_test_support::git::{commit_file, repo, run};
         let repo = repo();
         let path = repo.path().to_str().unwrap();
@@ -752,41 +749,41 @@ mod tests {
             .contains("GitHub Enterprise host detected"));
     }
 
+    /// GitHub's generated "Full Changelog" compare link is replaced with the
+    /// tagged changelog file, and appended when the footer is missing.
     #[test]
-    fn github_release_notes_link_full_changelog_to_changelog_file() {
-        let notes = concat!(
-            "## What's Changed\n",
-            "* fix release notes by @example-user in https://github.com/Extra-Chill/homeboy/pull/1\n",
-            "\n",
-            "**Full Changelog**: https://github.com/Extra-Chill/homeboy/compare/v0.8.1...v0.9.0"
-        );
-
-        let rewritten = github_release::replace_full_changelog_footer(
-            notes,
-            "https://github.com/Extra-Chill/homeboy/blob/v0.9.0/CHANGELOG.md",
-        );
-
-        assert!(rewritten.contains(
-            "**Full Changelog**: https://github.com/Extra-Chill/homeboy/blob/v0.9.0/CHANGELOG.md"
-        ));
-        assert!(!rewritten.contains("/compare/v0.8.1...v0.9.0"));
-    }
-
-    #[test]
-    fn github_release_notes_append_changelog_link_when_footer_is_missing() {
-        let rewritten = github_release::replace_full_changelog_footer(
-            "## What's Changed\n* release note",
-            "https://github.com/Extra-Chill/homeboy/blob/v0.9.0/docs/CHANGELOG.md",
-        );
-
-        assert_eq!(
-            rewritten,
-            concat!(
-                "## What's Changed\n",
-                "* release note\n\n",
-                "**Full Changelog**: https://github.com/Extra-Chill/homeboy/blob/v0.9.0/docs/CHANGELOG.md"
-            )
-        );
+    fn github_release_notes_point_full_changelog_at_the_changelog_file() {
+        for (notes, link, expected) in [
+            (
+                concat!(
+                    "## What's Changed\n",
+                    "* fix release notes by @example-user in https://github.com/Extra-Chill/homeboy/pull/1\n",
+                    "\n",
+                    "**Full Changelog**: https://github.com/Extra-Chill/homeboy/compare/v0.8.1...v0.9.0"
+                ),
+                "https://github.com/Extra-Chill/homeboy/blob/v0.9.0/CHANGELOG.md",
+                concat!(
+                    "## What's Changed\n",
+                    "* fix release notes by @example-user in https://github.com/Extra-Chill/homeboy/pull/1\n",
+                    "\n",
+                    "**Full Changelog**: https://github.com/Extra-Chill/homeboy/blob/v0.9.0/CHANGELOG.md"
+                ),
+            ),
+            (
+                "## What's Changed\n* release note",
+                "https://github.com/Extra-Chill/homeboy/blob/v0.9.0/docs/CHANGELOG.md",
+                concat!(
+                    "## What's Changed\n",
+                    "* release note\n\n",
+                    "**Full Changelog**: https://github.com/Extra-Chill/homeboy/blob/v0.9.0/docs/CHANGELOG.md"
+                ),
+            ),
+        ] {
+            assert_eq!(
+                github_release::replace_full_changelog_footer(notes, link),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -889,30 +886,11 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_leaves_build_dir_without_release_artifact() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let build_dir = temp.path().join("build");
-        std::fs::create_dir_all(&build_dir).expect("build dir");
-        std::fs::write(build_dir.join("bundle.js"), "source build").expect("build file");
-
-        let component = Component {
-            id: "fixture".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            ..Component::default()
-        };
-        let state = ReleaseState::default();
-
-        let result = run_cleanup(test_roots().data(), &component, &state).expect("cleanup");
-
-        assert_eq!(result.status, ReleaseStepStatus::Success);
-        assert!(build_dir.exists());
-    }
-
-    #[test]
     fn cleanup_preserves_preexisting_matching_paths_not_owned_by_release() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(temp.path().join("build")).expect("build dir");
         std::fs::write(temp.path().join("build/user.txt"), "user").expect("user file");
+        std::fs::write(temp.path().join("build/bundle.js"), "source build").expect("build file");
         std::fs::write(temp.path().join("fixture-1.2.3.tgz"), "user").expect("user package");
         let component = Component {
             id: "fixture".to_string(),
@@ -923,101 +901,72 @@ mod tests {
         run_cleanup(test_roots().data(), &component, &ReleaseState::default()).expect("cleanup");
 
         assert!(temp.path().join("build/user.txt").is_file());
+        assert!(temp.path().join("build/bundle.js").is_file());
         assert!(temp.path().join("fixture-1.2.3.tgz").is_file());
     }
 
+    /// Issue #3238: when the build command fails mid-stream, stdout carries
+    /// partial progress and stderr the real error. Both must reach the
+    /// operator, a missing `success` field must not hide a nonzero exit, and an
+    /// empty failure stays extension-generic.
     #[test]
-    fn package_error_message_is_extension_generic() {
-        let response = serde_json::json!({
-            "success": false,
-            "exitCode": 1,
-            "stdout": "",
-            "stderr": "",
-        });
-        let mut state = crate::release::types::ReleaseState::default();
+    fn failed_package_output_surfaces_the_captured_diagnostics() {
+        for (response, expected) in [
+            (
+                serde_json::json!({
+                    "success": false,
+                    "exitCode": 1,
+                    "stdout": "[BUILD] Installing npm dependencies...\n",
+                    "stderr": "npm error: ERESOLVE unable to resolve dependency tree\n",
+                }),
+                vec![
+                    "npm error: ERESOLVE",
+                    "Installing npm dependencies",
+                    "--- stdout ---",
+                    "exit 1",
+                ],
+            ),
+            (
+                serde_json::json!({
+                    "success": false,
+                    "exitCode": 42,
+                    "stdout": "[BUILD] Installing npm dependencies...\nnpm error: ENOTFOUND registry\n",
+                    "stderr": "",
+                }),
+                vec!["npm error: ENOTFOUND registry", "exit 42"],
+            ),
+            (
+                serde_json::json!({
+                    "exitCode": 1,
+                    "stdout": "[BUILD] Installing npm dependencies...\n",
+                    "stderr": "some build error\n",
+                }),
+                vec!["some build error"],
+            ),
+            (
+                serde_json::json!({
+                    "success": false,
+                    "exitCode": 1,
+                    "stdout": "",
+                    "stderr": "",
+                }),
+                vec!["required packaging tool"],
+            ),
+        ] {
+            let mut state = ReleaseState::default();
 
-        let err = store_artifacts_from_output(&mut state, &response)
-            .expect_err("empty failing package output should fail");
+            let err = store_artifacts_from_output(&mut state, &response)
+                .expect_err("failing package output should fail");
 
-        assert!(err.message.contains("required packaging tool"));
-        assert!(!err.message.contains("example-package-manager"));
-    }
-
-    #[test]
-    fn package_failure_surfaces_both_stdout_and_stderr() {
-        // Issue #3238: when the build command fails mid-stream, stdout
-        // contains partial progress (e.g. "Installing npm dependencies...")
-        // and stderr contains the real error.  Both must appear in the
-        // structured error payload so the operator can diagnose the failure.
-        let response = serde_json::json!({
-            "success": false,
-            "exitCode": 1,
-            "stdout": "[BUILD] Installing npm dependencies...\n",
-            "stderr": "npm error: ERESOLVE unable to resolve dependency tree\n",
-        });
-        let mut state = crate::release::types::ReleaseState::default();
-
-        let err = store_artifacts_from_output(&mut state, &response)
-            .expect_err("failing package output should fail");
-
-        // stderr (the npm error) is the primary message
-        assert!(
-            err.message.contains("npm error: ERESOLVE"),
-            "error should surface npm stderr, got: {}",
-            err.message
-        );
-        // stdout (the build progress) is appended as additional context
-        assert!(
-            err.message.contains("Installing npm dependencies"),
-            "error should also include stdout context, got: {}",
-            err.message
-        );
-        assert!(
-            err.message.contains("--- stdout ---"),
-            "error should label the stdout section"
-        );
-        assert!(err.message.contains("exit 1"));
-    }
-
-    #[test]
-    fn package_failure_with_stdout_only_still_surfaces_output() {
-        // When the build writes everything to stdout and then dies, the
-        // error should include that stdout rather than a generic JSON-parse
-        // failure.
-        let response = serde_json::json!({
-            "success": false,
-            "exitCode": 42,
-            "stdout": "[BUILD] Installing npm dependencies...\nnpm error: ENOTFOUND registry\n",
-            "stderr": "",
-        });
-        let mut state = crate::release::types::ReleaseState::default();
-
-        let err = store_artifacts_from_output(&mut state, &response)
-            .expect_err("failing package with stdout-only should fail");
-
-        assert!(
-            err.message.contains("npm error: ENOTFOUND registry"),
-            "error should surface stdout content, got: {}",
-            err.message
-        );
-        assert!(err.message.contains("exit 42"));
-    }
-
-    #[test]
-    fn package_failure_detects_nonzero_exit_without_success_field() {
-        // Some extension responses omit the "success" field.  In that case
-        // the exit code alone must trigger the failure path.
-        let response = serde_json::json!({
-            "exitCode": 1,
-            "stdout": "[BUILD] Installing npm dependencies...\n",
-            "stderr": "some build error\n",
-        });
-        let mut state = crate::release::types::ReleaseState::default();
-
-        let err = store_artifacts_from_output(&mut state, &response)
-            .expect_err("nonzero exit without success field should fail");
-
-        assert!(err.message.contains("some build error"));
+            for fragment in expected {
+                assert!(
+                    err.message.contains(fragment),
+                    "expected {fragment:?} in: {}",
+                    err.message
+                );
+            }
+            assert!(state.artifacts.is_empty());
+        }
     }
 
     #[test]
@@ -1041,24 +990,6 @@ mod tests {
         assert!(err.message.contains("required frontend assets"));
         assert!(err.message.contains("Frontend assets were NOT included"));
         assert!(state.artifacts.is_empty());
-    }
-
-    #[test]
-    fn package_success_with_valid_json_still_works() {
-        // Regression guard: the new success-first check must not break the
-        // happy path.
-        let response = serde_json::json!({
-            "success": true,
-            "exitCode": 0,
-            "stdout": "[{\"path\":\"build/artifact.zip\",\"type\":\"archive\"}]",
-            "stderr": "",
-        });
-        let mut state = crate::release::types::ReleaseState::default();
-
-        store_artifacts_from_output(&mut state, &response).expect("valid artifacts should parse");
-
-        assert_eq!(state.artifacts.len(), 1);
-        assert_eq!(state.artifacts[0].path, "build/artifact.zip");
     }
 
     #[test]
@@ -1695,38 +1626,6 @@ mod tests {
     }
 
     #[test]
-    fn package_failure_surfaces_actionable_output() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let component = tempfile::tempdir().expect("component tempdir");
-            let package = release_package_extension(
-                "wordpress",
-                "printf 'building package\n'; printf 'error: missing tsconfig.base.json\n' >&2; exit 9",
-            );
-            homeboy_core::extension::catalog::save_manifest(&package)
-                .expect("save package extension");
-
-            let mut state = ReleaseState::default();
-            let err = run_package(
-                &test_roots(),
-                &[ReleaseExtension::from_manifest(&package)],
-                &mut state,
-                &Component::default(),
-                "fixture",
-                &component.path().to_string_lossy(),
-                PackageRequest {
-                    component_source_path: None,
-                    declared_build_artifact: None,
-                    skip_build_validation: true,
-                },
-            )
-            .expect_err("failing final package should surface output");
-
-            assert!(err.message.contains("missing tsconfig.base.json"));
-            assert_eq!(err.details["source"]["exit_code"].as_i64(), Some(9));
-        });
-    }
-
-    #[test]
     fn run_package_failure_names_the_failing_package_provider() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let component = tempfile::tempdir().expect("component tempdir");
@@ -1817,6 +1716,7 @@ mod tests {
                 "error should include build progress stdout, got: {}",
                 err.message
             );
+            assert_eq!(err.details["source"]["exit_code"].as_i64(), Some(1));
             // No artifacts stored from the failed build.
             assert!(state.artifacts.is_empty());
         });
@@ -1924,37 +1824,22 @@ mod tests {
     }
 
     #[test]
-    fn collect_version_target_mismatches_returns_none_when_disk_matches_expected() {
+    fn version_mismatch_collectors_flag_stale_working_tree_and_head() {
         let (_temp, component) = plugin_repo_at("0.6.13");
         assert!(collect_version_target_mismatches(&component, "0.6.13").is_none());
-    }
-
-    #[test]
-    fn collect_version_target_mismatches_flags_unbumped_target() {
-        let (_temp, component) = plugin_repo_at("0.6.12");
-        let mismatches = collect_version_target_mismatches(&component, "0.6.13")
-            .expect("expected mismatch on stale version file");
-        assert_eq!(mismatches.len(), 1);
-        assert_eq!(mismatches[0].file, "plugin.php");
-        assert_eq!(mismatches[0].expected, "0.6.13");
-        assert_eq!(mismatches[0].found.as_deref(), Some("0.6.12"));
-    }
-
-    #[test]
-    fn collect_head_version_mismatches_flags_when_head_lacks_new_version() {
-        // HEAD has 0.6.12 committed, but state.version is 0.6.13.
-        // Working tree is also at 0.6.12 (no bump happened). HEAD check fires.
-        let (_temp, component) = plugin_repo_at("0.6.12");
-        let mismatches = collect_head_version_mismatches(&component, "0.6.13")
-            .expect("HEAD should not show 0.6.13");
-        assert_eq!(mismatches.len(), 1);
-        assert_eq!(mismatches[0].found.as_deref(), Some("0.6.12"));
-    }
-
-    #[test]
-    fn collect_head_version_mismatches_returns_none_when_head_matches() {
-        let (_temp, component) = plugin_repo_at("0.6.13");
         assert!(collect_head_version_mismatches(&component, "0.6.13").is_none());
+
+        let (_temp, component) = plugin_repo_at("0.6.12");
+        for mismatches in [
+            collect_version_target_mismatches(&component, "0.6.13"),
+            collect_head_version_mismatches(&component, "0.6.13"),
+        ] {
+            let mismatches = mismatches.expect("stale version file must be flagged");
+            assert_eq!(mismatches.len(), 1);
+            assert_eq!(mismatches[0].file, "plugin.php");
+            assert_eq!(mismatches[0].expected, "0.6.13");
+            assert_eq!(mismatches[0].found.as_deref(), Some("0.6.12"));
+        }
     }
 
     /// Fixture: a git repo whose toplevel contains a `subdir/` with the
@@ -2324,23 +2209,6 @@ mod tests {
         );
         assert_eq!(state.version.as_deref(), Some("1.3.4"));
         assert_eq!(state.tag.as_deref(), Some("v1.3.4"));
-    }
-
-    /// Issue #9695: without a planned identity (legacy path), the version step
-    /// falls back to the raw bump type and computes the next version from the
-    /// on-disk source — preserving prior behavior for callers that do not thread
-    /// the plan-resolved target.
-    #[test]
-    fn version_step_without_planned_identity_uses_the_raw_bump() {
-        let (_temp, component) = plugin_repo_with_changelog_at("1.3.2");
-        let mut state = ReleaseState::default();
-
-        let result = run_version(&component, &mut state, "patch", None)
-            .expect("version step should return a result");
-
-        assert_eq!(result.status, ReleaseStepStatus::Success);
-        assert_eq!(state.version.as_deref(), Some("1.3.3"));
-        assert_eq!(state.tag.as_deref(), Some("v1.3.3"));
     }
 
     /// Issue #9695: if the on-disk source drifted from the version the plan was

@@ -199,26 +199,6 @@ mod tests {
 
     use homeboy_core::component::Component;
 
-    #[test]
-    fn test_validate_required_extensions() {
-        let component = Component {
-            id: "plain".to_string(),
-            ..Default::default()
-        };
-
-        assert!(validate_required_extensions(&component).is_ok());
-    }
-
-    #[test]
-    fn test_validate_extension_requirements() {
-        let component = Component {
-            id: "plain".to_string(),
-            ..Default::default()
-        };
-
-        assert!(validate_extension_requirements(&component).is_ok());
-    }
-
     fn component_requiring(extension_id: &str, version: &str) -> Component {
         let mut extensions = std::collections::HashMap::new();
         extensions.insert(

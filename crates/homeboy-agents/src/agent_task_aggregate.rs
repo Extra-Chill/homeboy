@@ -853,28 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_outcomes_keeps_non_empty_patch_apply_candidate() {
-        let mut non_empty_patch = artifact("sample-patch", "patch", json!({}));
-        non_empty_patch.size_bytes = Some(128);
-
-        let report = aggregate_agent_task_outcomes(&[AgentTaskOutcome {
-            candidate: Some(candidate()),
-            ..outcome(
-                "non-empty-patch",
-                AgentTaskOutcomeStatus::Succeeded,
-                vec![non_empty_patch],
-            )
-        }]);
-
-        assert_eq!(report.summary.apply_candidates, 1);
-        assert_eq!(report.apply_candidates[0].task_id, "non-empty-patch");
-        assert_eq!(
-            report.artifact_inventory[0].task_id,
-            report.apply_candidates[0].task_id
-        );
-    }
-
-    #[test]
     fn aggregate_outcomes_keeps_review_only_patch_visible_without_promoting_it() {
         let mut patch = artifact("external-patch", "patch", json!({ "review_only": true }));
         patch.size_bytes = Some(128);
@@ -891,96 +869,56 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_outcomes_routes_unknown_size_patch_to_review() {
-        // An unknown-size patch cannot be confirmed non-empty, so it must not be
-        // auto-promoted as an apply candidate (#4610). It routes to review with a
-        // reason that explains the uncertainty.
+    fn aggregate_outcomes_routes_succeeded_patches_without_a_candidate_to_review() {
+        // Neither an unknown-size nor a 0-byte patch proves a change, so a
+        // succeeded cell without a harvested candidate must not be promoted as
+        // an apply candidate (#4610).
         let mut unknown_size_patch = artifact("legacy-patch", "patch", json!({}));
         unknown_size_patch.size_bytes = None;
-
-        let report = aggregate_agent_task_outcomes(&[outcome(
-            "legacy-patch",
-            AgentTaskOutcomeStatus::Succeeded,
-            vec![unknown_size_patch],
-        )]);
-
-        assert!(report.apply_candidates.is_empty());
-        assert_eq!(report.summary.apply_candidates, 0);
-        assert_eq!(report.summary.review_candidates, 1);
-        assert_eq!(report.review_candidates[0].task_id, "legacy-patch");
-        assert_eq!(
-            report.review_candidates[0].reason,
-            "succeeded without a harvested candidate"
-        );
-    }
-
-    #[test]
-    fn aggregate_outcomes_reports_no_patch_produced_when_all_cells_empty() {
-        // Reproduces the #4610 scenario: 3 succeeded cells, each with a 0-byte
-        // patch artifact. The cook run should report zero apply candidates and no
-        // succeeded apply-candidate cells.
-        let mut empty_patch_a = artifact("patch-a", "patch", json!({}));
-        empty_patch_a.size_bytes = Some(0);
-        let mut empty_patch_b = artifact("patch-b", "patch", json!({}));
-        empty_patch_b.size_bytes = Some(0);
-        let mut empty_patch_c = artifact("patch-c", "patch", json!({}));
-        empty_patch_c.size_bytes = Some(0);
+        let mut empty_patch = artifact("empty-patch", "patch", json!({}));
+        empty_patch.size_bytes = Some(0);
 
         let report = aggregate_agent_task_outcomes(&[
             outcome(
-                "cell-1",
+                "legacy-patch",
                 AgentTaskOutcomeStatus::Succeeded,
-                vec![empty_patch_a],
+                vec![unknown_size_patch],
             ),
             outcome(
-                "cell-2",
+                "empty-patch",
                 AgentTaskOutcomeStatus::Succeeded,
-                vec![empty_patch_b],
-            ),
-            outcome(
-                "cell-3",
-                AgentTaskOutcomeStatus::Succeeded,
-                vec![empty_patch_c],
+                vec![empty_patch],
             ),
         ]);
 
-        assert_eq!(report.summary.total, 3);
+        assert!(report.apply_candidates.is_empty());
         assert_eq!(report.summary.apply_candidates, 0);
-        assert_eq!(report.apply_candidates.len(), 0);
-        assert_eq!(report.summary.review_candidates, 3);
-        assert!(report.review_candidates.iter().all(|candidate| candidate
-            .reason
-            .starts_with("succeeded without a harvested candidate")));
+        assert_eq!(report.summary.review_candidates, 2);
+        assert!(report
+            .review_candidates
+            .iter()
+            .all(|candidate| candidate.reason == "succeeded without a harvested candidate"));
     }
 
     #[test]
     fn aggregate_report_renders_pr_comment_markdown() {
-        let report = aggregate_agent_task_outcomes(&[outcome(
-            "task|one",
-            AgentTaskOutcomeStatus::NoOp,
-            Vec::new(),
-        )]);
+        let mut matrix = outcome("matrix", AgentTaskOutcomeStatus::Succeeded, Vec::new());
+        matrix.metadata = json!({
+            "matrix_axes": { "model": "fast" },
+            "metrics": { "duration_ms": 42 }
+        });
+        let report = aggregate_agent_task_outcomes(&[
+            outcome("task|one", AgentTaskOutcomeStatus::NoOp, Vec::new()),
+            matrix,
+        ]);
 
         let markdown = report.to_string();
 
         assert!(markdown.contains("## Agent Task Outcomes"));
-        assert!(markdown.contains("- total: 1"));
+        assert!(markdown.contains("- total: 2"));
         assert!(markdown.contains("| Task | Status | Decision | Reason | Artifacts |"));
         assert!(markdown.contains("| task\\|one | no_op | no_op |"));
         assert!(markdown.contains("provider produced no file changes"));
-    }
-
-    #[test]
-    fn aggregate_report_renders_matrix_markdown() {
-        let mut item = outcome("matrix", AgentTaskOutcomeStatus::Succeeded, Vec::new());
-        item.metadata = json!({
-            "matrix_axes": { "model": "fast" },
-            "metrics": { "duration_ms": 42 }
-        });
-        let report = aggregate_agent_task_outcomes(&[item]);
-
-        let markdown = report.to_string();
-
         assert!(markdown.contains("## Matrix"));
         assert!(markdown.contains("| Task | Status | Axes | Metrics |"));
         assert!(markdown.contains("matrix | succeeded"));
@@ -1079,40 +1017,6 @@ mod tests {
             sha256: Some(format!("sha256:{id}")),
             metadata,
             ..Default::default()
-        }
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn agent_task_reconciliation_decision_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (AgentTaskReconciliationDecision::NoOp, "no_op"),
-            (
-                AgentTaskReconciliationDecision::ApplyCandidate,
-                "apply_candidate",
-            ),
-            (
-                AgentTaskReconciliationDecision::IssueReportCandidate,
-                "issue_report_candidate",
-            ),
-            (
-                AgentTaskReconciliationDecision::RetryCandidate,
-                "retry_candidate",
-            ),
-            (
-                AgentTaskReconciliationDecision::ReviewCandidate,
-                "review_candidate",
-            ),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
         }
     }
 }

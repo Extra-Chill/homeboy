@@ -66,7 +66,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extension_source_update_flattens_legacy_json_fields() {
+    fn update_entry_flattens_source_update_into_top_level_fields() {
         let entry = UpdateEntry {
             extension_id: "wordpress".to_string(),
             old_version: "1.0.0".to_string(),

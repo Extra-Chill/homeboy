@@ -139,6 +139,7 @@ persisted default that would silently apply to every future sweep.
 - `default_backend` — Optional default agent-task backend.
 - `secrets` — Secret sources keyed by secret name.
 - `rotation` — Global provider rotation policy. Per-plan `options.rotation` and per-task `metadata.provider_rotation` take precedence.
+- `local_execution` — Whether agent tasks may execute locally on this controller: `allowed` (default) or `denied`. When `denied`, any agent-task admission whose placement selects local execution (`--placement local`, or `lab-or-local` / `auto` falling back to local) is rejected before admission; `auto` never falls back to local. Runner-resident execution on a Lab runner is unaffected. Set with `homeboy config set /agent_task/local_execution denied`.
 
 ### `AgentTaskSecretSource`
 

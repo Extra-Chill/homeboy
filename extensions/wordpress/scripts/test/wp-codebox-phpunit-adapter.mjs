@@ -17,7 +17,11 @@ import { createTimeoutLineRedactor, recipeRunProjection, readBoundedText, wpCode
 import { configuredWpCodeboxPhpunitTimeoutSeconds } from '../lib/wp-codebox-phpunit-timeout.mjs';
 import { configuredWpCodeboxRuntimeCrashGraceSeconds, createWpCodeboxRuntimeCrashDetector } from '../lib/wp-codebox-runtime-crash.mjs';
 import { applyLocalWorkspaceDependenciesBeforePrepare } from '../lib/local-workspace-prepare.mjs';
+import { assertIsolatedDatabaseTarget } from '../lib/wordpress-database-isolation-guard.mjs';
 
+import { createPhpunitSuiteResults, readPhpunitSuiteResults } from '../lib/phpunit-suite-results.mjs';
+
+const recordSuiteResults = createPhpunitSuiteResults(process.env.HOMEBOY_TEST_RESULTS_FILE);
 const require = createRequire(import.meta.url);
 const { preflightWpCodeboxCommand } = require('../../lib/wp-codebox-runtime-selection.js');
 
@@ -43,6 +47,14 @@ const SCOPED_ZERO_TEST_CAUSES = new Set(['changed_file_filter_mismatch', 'change
 const MANAGED_DEFAULT_SUITE_TEST_DIRECTORY = 'tests';
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
+// Fail closed before anything is prepared or installed: a DB target from the
+// host environment, bench_env, or wp_config_defines would install the test site
+// into that database instead of the one this runner provisions (#18886).
+assertIsolatedDatabaseTarget({
+  environment: process.env,
+  settings,
+  allowedEnvironmentNames: declaredDatabaseAdministrationEnvironmentNames(settings),
+}, 'WordPress PHPUnit runner');
 const discoveryOnly = process.env.HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY === '1';
 const phpunitTimeoutSeconds = configuredWpCodeboxPhpunitTimeoutSeconds(process.env, settings);
 const runtimeCrashGraceSeconds = configuredWpCodeboxRuntimeCrashGraceSeconds(process.env, settings);
@@ -375,6 +387,7 @@ async function runHostSuite(suite) {
   const logPath = path.join(suiteArtifacts, 'phpunit.log');
   const execution = spawnSync(binary, ['--configuration', suite.config], {
     cwd: pluginSourceDirectory,
+    env: environmentWithoutDatabaseAdministration(),
     encoding: 'utf8',
     timeout: phpunitTimeoutSeconds * 1000,
     maxBuffer: 64 * 1024 * 1024,
@@ -383,6 +396,7 @@ async function runHostSuite(suite) {
   await writeFile(logPath, output);
 
   const summary = parseHostPhpunitSummary(output);
+  await recordSuiteResults(summary);
   await writeFile(
     path.join(suiteArtifacts, 'wp-codebox-phpunit-results.json'),
     `${JSON.stringify({ schema: 'wp-codebox/phpunit-results/v1', suite: suite.name, runtime: 'host', summary }, null, 2)}\n`,
@@ -1117,6 +1131,10 @@ function requireDatabaseServiceCapability(service) {
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
+function declaredDatabaseAdministrationEnvironmentNames(configuration) {
+  const secretEnv = configuration?.wp_codebox_database_service?.secret_env;
+  return isObject(secretEnv) ? Object.values(secretEnv).filter((name) => typeof name === 'string') : [];
+}
 function environmentWithoutDatabaseAdministration() {
   const environment = { ...process.env };
   for (const name of databaseService?.secretEnv || []) {
@@ -1261,7 +1279,16 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
 }
 async function parsePublishedArtifacts(published) {
   if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
-    runScript('parse-test-results.sh', [published.directory]);
+    const destination = process.env.HOMEBOY_TEST_RESULTS_FILE;
+    const scratch = `${destination}.${process.pid}.suite`;
+    process.env.HOMEBOY_TEST_RESULTS_FILE = scratch;
+    try {
+      runScript('parse-test-results.sh', [published.directory]);
+      await recordSuiteResults(await readPhpunitSuiteResults(scratch));
+    } finally {
+      process.env.HOMEBOY_TEST_RESULTS_FILE = destination;
+      await unlink(scratch).catch(() => {});
+    }
   }
   if (process.env.HOMEBOY_TEST_FAILURES_FILE || published.failuresPath) {
     const requestedFailuresPath = process.env.HOMEBOY_TEST_FAILURES_FILE;

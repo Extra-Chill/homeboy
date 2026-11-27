@@ -73,6 +73,11 @@ pub(crate) struct LabJobExtensionOverlay {
     pub(crate) source_revision: Option<String>,
     pub(crate) content_hash: String,
     pub(crate) shared_assets: Vec<LabJobExtensionSharedAsset>,
+    /// HOME-relative runtime paths the extension declares for isolated HOMEs
+    /// (`isolated_home_paths`). The job's private HOME links each one to the
+    /// runner account's HOME, matching the local Cook gate (#17754).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) isolated_home_paths: Vec<String>,
 }
 
 /// A root-manifest asset staged alongside one extension's isolated Lab overlay.
@@ -111,9 +116,26 @@ fn materialize_lab_job_extension_overlay_snapshots(
     extension_ids: &[String],
 ) -> Result<Vec<LabJobExtensionOverlay>> {
     let mut overlays = Vec::new();
+    let workspace_root = if extension_ids.is_empty() {
+        ""
+    } else {
+        runner.workspace_root.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace_root",
+                "Lab job extension overlays require runner.workspace_root for the hydrated extension cache",
+                Some(runner.id.clone()),
+                None,
+            )
+        })?
+    };
     for id in extension_ids {
         let manifest = homeboy_core::extension::catalog::load_extension(id)?;
-        let source_path = manifest.extension_path.ok_or_else(|| {
+        if let Some(warning) =
+            homeboy_core::extension::lifecycle::linked_extension_source_divergence(id)
+        {
+            eprintln!("WARNING: {}", warning.attributed_message());
+        }
+        let source_path = manifest.extension_path.clone().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "extensions",
                 format!("Lab extension `{id}` has no source path"),
@@ -123,35 +145,42 @@ fn materialize_lab_job_extension_overlay_snapshots(
         })?;
         let source = PathBuf::from(&source_path);
         let content_hash = extension_source_content_hash(&source)?;
-        let remote_path = format!(
-            "{}/extensions/{}/{}",
-            runtime_root.trim_end_matches('/'),
-            sanitize_ref(id),
-            &content_hash[..16]
-        );
-        sync_controller_snapshot(
-            runner,
-            &RunnerExtensionMaterializationPlan {
-                id: id.clone(),
-                source_path: source_path.clone(),
-                synced_source_path: remote_path.clone(),
-                content_hash: content_hash.clone(),
-            },
-        )?;
         let resolved_source = source.canonicalize().map_err(|error| {
             Error::internal_io(
                 error.to_string(),
                 Some(format!("resolve Lab extension source `{id}`")),
             )
         })?;
-        let mut shared_assets = Vec::new();
+        let mut asset_sources = Vec::new();
         for (asset_path, asset_source) in
             homeboy_core::extension::lifecycle::shared_assets_for_extension_source(&resolved_source)
         {
-            if !asset_source.is_dir() {
-                continue;
+            if asset_source.is_dir() {
+                let asset_hash = extension_source_content_hash(&asset_source)?;
+                asset_sources.push((asset_path, asset_source, asset_hash));
             }
-            let asset_hash = extension_source_content_hash(&asset_source)?;
+        }
+        let cache_key = lab_extension_cache_key(&content_hash, &asset_sources);
+        let remote_path = lab_extension_cache_path(workspace_root, id, &cache_key);
+        let setup_command = manifest
+            .runtime()
+            .and_then(|runtime| runtime.setup_command.clone().map(|cmd| (cmd, runtime)))
+            .map(|(cmd, runtime)| (cmd, runtime.entrypoint.clone().unwrap_or_default()));
+        ensure_lab_extension_cache(
+            runner,
+            &LabExtensionCacheBuild {
+                id,
+                source_path: &source_path,
+                content_hash: &content_hash,
+                entry: &remote_path,
+                shared_assets: &asset_sources,
+            },
+            setup_command
+                .as_ref()
+                .map(|(cmd, entrypoint)| (cmd.as_str(), entrypoint.as_str())),
+        )?;
+        let mut shared_assets = Vec::new();
+        for (asset_path, asset_source, asset_hash) in asset_sources {
             let remote_path = format!(
                 "{}/shared-assets/{}/{}",
                 runtime_root.trim_end_matches('/'),
@@ -172,6 +201,17 @@ fn materialize_lab_job_extension_overlay_snapshots(
                 remote_path,
             });
         }
+        let isolated_home_paths = manifest
+            .isolated_home_paths
+            .iter()
+            .filter(|path| {
+                homeboy_extension_contract::manifest::validate_isolated_home_paths(
+                    std::slice::from_ref(*path),
+                )
+                .is_ok()
+            })
+            .cloned()
+            .collect();
         overlays.push(LabJobExtensionOverlay {
             id: id.clone(),
             source_path,
@@ -179,9 +219,197 @@ fn materialize_lab_job_extension_overlay_snapshots(
             source_revision: git_revision(&source),
             content_hash,
             shared_assets,
+            isolated_home_paths,
         });
     }
     Ok(overlays)
+}
+
+/// Marker written inside a hydrated cache entry once the extension's own
+/// `setup_command` has succeeded there. Every job that reuses the entry touches
+/// it, so its mtime is the entry's last use for retention.
+const LAB_EXTENSION_CACHE_READY: &str = ".homeboy-lab-extension-ready";
+/// Cache entries unused for this many days are reclaimed when a new revision
+/// of the same extension is hydrated.
+const LAB_EXTENSION_CACHE_RETENTION_DAYS: u32 = 7;
+
+/// Runner-wide, content-addressed home of one extension revision.
+///
+/// Extension snapshots carry only tracked source, so installed dependencies
+/// (`vendor/`, `node_modules/`) never cross the wire. A Lab job therefore
+/// links to an entry the runner hydrated with the extension's own
+/// `setup_command`, exactly as `homeboy extension install` does for the
+/// runner's global install. The entry is keyed by the controller content hash,
+/// so concurrent jobs on different revisions still see distinct sources
+/// (Extra-Chill/homeboy#19196).
+pub(crate) fn lab_extension_cache_path(
+    workspace_root: &str,
+    id: &str,
+    content_hash: &str,
+) -> String {
+    format!(
+        "{}/_lab_workspaces/extension-cache/{}/{}",
+        workspace_root.trim_end_matches('/'),
+        sanitize_ref(id),
+        &content_hash[..16]
+    )
+}
+
+/// One extension revision to hydrate, with the shared assets its root
+/// manifest declares (path relative to the extensions root, source, hash).
+struct LabExtensionCacheBuild<'a> {
+    id: &'a str,
+    source_path: &'a str,
+    content_hash: &'a str,
+    entry: &'a str,
+    shared_assets: &'a [(String, PathBuf, String)],
+}
+
+/// The cache key covers the extension and every shared asset it is hydrated
+/// beside, so a changed asset gets a fresh, re-verified build.
+fn lab_extension_cache_key(content_hash: &str, assets: &[(String, PathBuf, String)]) -> String {
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
+    hasher.update(content_hash.as_bytes());
+    for (path, _, hash) in assets {
+        hasher.update([0]);
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Make `build.entry` a ready, hydrated extension entry.
+///
+/// A ready entry is reused without uploading. Otherwise a unique build
+/// directory is laid out like an installed extensions root: the extension at
+/// `<build>/<id>` and each declared shared asset at `<build>/<asset>`, so
+/// `setup_command` sees the same siblings `homeboy extension install` gives
+/// it. Setup runs in `<build>/<id>`, which stays the entry's permanent
+/// location because setup may bake absolute paths. The entry is published
+/// with `ln -sn`, which fails instead of replacing when another job won the
+/// race; the loser discards its build.
+fn ensure_lab_extension_cache(
+    runner: &Runner,
+    build: &LabExtensionCacheBuild<'_>,
+    setup: Option<(&str, &str)>,
+) -> Result<()> {
+    let entry = build.entry.trim_end_matches('/');
+    let (_, ready) = exec(
+        &runner.id,
+        runner_raw_shell(lab_extension_cache_probe_command(entry)),
+    )?;
+    if ready == 0 {
+        return Ok(());
+    }
+    let build_root = format!("{entry}.build-{}", uuid::Uuid::new_v4().simple());
+    let extension_dir = format!("{build_root}/{}", sanitize_ref(build.id));
+    sync_controller_snapshot(
+        runner,
+        &RunnerExtensionMaterializationPlan {
+            id: build.id.to_string(),
+            source_path: build.source_path.to_string(),
+            synced_source_path: extension_dir.clone(),
+            content_hash: build.content_hash.to_string(),
+        },
+    )?;
+    for (asset_path, asset_source, asset_hash) in build.shared_assets {
+        sync_controller_snapshot(
+            runner,
+            &RunnerExtensionMaterializationPlan {
+                id: format!("{}-{asset_path}", build.id),
+                source_path: asset_source.display().to_string(),
+                synced_source_path: format!("{build_root}/{asset_path}"),
+                content_hash: asset_hash.clone(),
+            },
+        )?;
+    }
+    let setup = setup.map(|(command, entrypoint)| {
+        homeboy_engine_primitives::template::render(
+            command,
+            &[
+                ("extension_path", extension_dir.as_str()),
+                ("entrypoint", entrypoint),
+            ],
+        )
+    });
+    let (output, exit_code) = exec(
+        &runner.id,
+        runner_raw_shell(lab_extension_cache_publish_command(
+            entry,
+            &build_root,
+            &extension_dir,
+            setup.as_deref(),
+        ))
+        .with_env(runner.env.clone()),
+    )?;
+    if exit_code != 0 {
+        return Err(Error::validation_invalid_argument(
+            "extensions",
+            format!(
+                "failed to hydrate Lab extension `{}` on the runner: {}",
+                build.id,
+                tail_lines(&runner_exec_detail(&output), 40)
+            ),
+            Some(entry.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn tail_lines(text: &str, count: usize) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    lines[lines.len().saturating_sub(count)..].join("\n")
+}
+
+fn lab_extension_cache_probe_command(entry: &str) -> String {
+    let ready = shell::quote_path(&format!("{entry}/{LAB_EXTENSION_CACHE_READY}"));
+    format!("test -f {ready} && touch {ready}")
+}
+
+fn lab_extension_cache_publish_command(
+    entry: &str,
+    build_root: &str,
+    extension_dir: &str,
+    setup: Option<&str>,
+) -> String {
+    let parent = Path::new(entry)
+        .parent()
+        .and_then(Path::to_str)
+        .expect("extension cache entry has a UTF-8 parent");
+    let setup = setup
+        .map(|command| format!("(cd \"$ext\" && {command}) >&2\n"))
+        .unwrap_or_default();
+    format!(
+        "set -eu\nentry={entry}\nbuild={build}\next={ext}\nparent={parent}\n\
+{setup}\
+touch \"$ext\"/{ready}\n\
+if ! ln -sn \"$ext\" \"$entry\" 2>/dev/null; then\n\
+  test -f \"$entry\"/{ready} || {{ echo \"extension cache entry $entry exists but is not ready\" >&2; exit 1; }}\n\
+  rm -rf \"$build\"\n\
+fi\n\
+# Reclaim builds unused for {days} days, crashed builds older than a day, then dangling entries.\n\
+for dir in \"$parent\"/*.build-*; do\n\
+  [ -d \"$dir\" ] || continue\n\
+  [ \"$dir\" = \"$build\" ] && continue\n\
+  marker=$(find \"$dir\" -mindepth 2 -maxdepth 2 -name {ready} 2>/dev/null | head -n 1)\n\
+  if [ -n \"$marker\" ]; then\n\
+    [ -n \"$(find \"$marker\" -mtime +{days} 2>/dev/null)\" ] && rm -rf \"$dir\"\n\
+  else\n\
+    [ -n \"$(find \"$dir\" -maxdepth 0 -mtime +1 2>/dev/null)\" ] && rm -rf \"$dir\"\n\
+  fi\n\
+done\n\
+for link in \"$parent\"/*; do\n\
+  if [ -L \"$link\" ] && [ ! -e \"$link\" ]; then rm -f \"$link\"; fi\n\
+done\n",
+        entry = shell::quote_path(entry),
+        build = shell::quote_path(build_root),
+        ext = shell::quote_path(extension_dir),
+        parent = shell::quote_path(parent),
+        ready = LAB_EXTENSION_CACHE_READY,
+        days = LAB_EXTENSION_CACHE_RETENTION_DAYS,
+    )
 }
 
 fn lab_job_extension_overlay_command(
@@ -221,7 +449,8 @@ fn lab_job_extension_overlay_command(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let links = [extension_links, shared_asset_links]
+    let home_path_links = lab_job_isolated_home_path_links(runtime_root, overlays);
+    let links = [extension_links, shared_asset_links, home_path_links]
         .into_iter()
         .filter(|links| !links.is_empty())
         .collect::<Vec<_>>()
@@ -230,6 +459,36 @@ fn lab_job_extension_overlay_command(
         "set -eu\nruntime={runtime}\n# A job gets only its declared extensions; runner-global config may contain mutable links.\nmkdir -p \"$runtime/home/.config/homeboy/extensions\"\n{links}\n",
         runtime = shell::quote_path(runtime_root),
     )
+}
+
+/// Link each declared `isolated_home_paths` entry from the runner account's
+/// HOME into the job HOME. The overlay script runs before the job swaps HOME,
+/// so `$HOME` here is the runner's own. Like the local gate, a path is linked
+/// only when the runner has it as a directory and the job HOME has nothing there.
+fn lab_job_isolated_home_path_links(
+    runtime_root: &str,
+    overlays: &[LabJobExtensionOverlay],
+) -> String {
+    let mut seen = std::collections::BTreeSet::new();
+    overlays
+        .iter()
+        .flat_map(|overlay| overlay.isolated_home_paths.iter())
+        .filter(|path| seen.insert((*path).clone()))
+        .map(|path| {
+            let target = format!("{}/home/{path}", runtime_root.trim_end_matches('/'));
+            let parent = Path::new(&target)
+                .parent()
+                .and_then(Path::to_str)
+                .expect("isolated home path target has a UTF-8 parent");
+            format!(
+                "if [ -n \"${{HOME:-}}\" ] && [ -d \"$HOME\"/{rel} ] && [ ! -e {target} ] && [ ! -L {target} ]; then mkdir -p {parent}; ln -s \"$(cd \"$HOME\"/{rel} && pwd -P)\" {target}; fi",
+                rel = shell::quote_path(path),
+                parent = shell::quote_path(parent),
+                target = shell::quote_path(&target),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn lab_job_shared_asset_target(runtime_root: &str, asset_path: &str) -> String {
@@ -251,22 +510,178 @@ mod lab_job_overlay_tests {
             source_revision: Some(hash.to_string()),
             content_hash: hash.to_string(),
             shared_assets: Vec::new(),
+            isolated_home_paths: Vec::new(),
         }
     }
 
     #[test]
-    fn concurrent_extension_snapshots_build_private_content_addressed_registries() {
-        let first = overlay("fixture", "/runner/jobs/a", "aaaaaaaaaaaaaaaa");
-        let second = overlay("fixture", "/runner/jobs/b", "bbbbbbbbbbbbbbbb");
-        let first_command = lab_job_extension_overlay_command("/runner/jobs/a", &[first.clone()]);
-        let second_command = lab_job_extension_overlay_command("/runner/jobs/b", &[second.clone()]);
+    fn declared_isolated_home_paths_link_runner_home_into_job_home() {
+        let mut wordpress = overlay("wordpress", "/runner/jobs/a", "aaaaaaaaaaaaaaaa");
+        wordpress.isolated_home_paths = vec![
+            ".cache/homeboy/wp-codebox".to_string(),
+            ".wordpress-playground".to_string(),
+        ];
+        let mut other = overlay("other", "/runner/jobs/a", "bbbbbbbbbbbbbbbb");
+        other.isolated_home_paths = vec![".wordpress-playground".to_string()];
+        let command = lab_job_extension_overlay_command("/runner/jobs/a", &[wordpress, other]);
 
-        assert_ne!(first.remote_path, second.remote_path);
-        assert!(first_command.contains(&first.remote_path));
-        assert!(second_command.contains(&second.remote_path));
-        assert!(!first_command.contains("$HOME/.config/homeboy"));
-        assert!(!second_command.contains("$HOME/.config/homeboy"));
-        assert!(!first_command.contains("cp -a"));
+        assert!(command.contains("/runner/jobs/a/home/.cache/homeboy/wp-codebox"));
+        assert!(command.contains("\"$HOME\"/'.cache/homeboy/wp-codebox' && pwd -P"));
+        assert!(!command.contains("$HOME/.config/homeboy"));
+        assert_eq!(
+            command
+                .matches("\"$HOME\"/'.wordpress-playground' && pwd -P")
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_home_path_links_resolve_against_runner_home_and_keep_existing_entries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runner_home = root.path().join("runner-home");
+        let cache = runner_home.join(".cache/homeboy/wp-codebox/source");
+        std::fs::create_dir_all(&cache).expect("runner cache");
+        std::fs::create_dir_all(runner_home.join(".wordpress-playground")).expect("archive cache");
+        let runtime = root.path().join("job/extension-runtime");
+        let existing = runtime.join("home/.wordpress-playground");
+        std::fs::create_dir_all(&existing).expect("existing job entry");
+        let mut wordpress = overlay("wordpress", runtime.to_str().unwrap(), "aaaaaaaaaaaaaaaa");
+        wordpress.isolated_home_paths = vec![
+            ".cache/homeboy/wp-codebox".to_string(),
+            ".wordpress-playground".to_string(),
+            ".missing/dir".to_string(),
+        ];
+        let script = lab_job_isolated_home_path_links(runtime.to_str().unwrap(), &[wordpress]);
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("set -eu\n{script}\n"))
+            .env("HOME", &runner_home)
+            .status()
+            .expect("run link script");
+        assert!(status.success());
+
+        let linked = runtime.join("home/.cache/homeboy/wp-codebox");
+        assert!(std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::canonicalize(&linked).unwrap(),
+            std::fs::canonicalize(runner_home.join(".cache/homeboy/wp-codebox")).unwrap()
+        );
+        assert!(linked.join("source").is_dir());
+        assert!(!std::fs::symlink_metadata(&existing)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!runtime.join("home/.missing").exists());
+    }
+
+    fn run_sh(script: &str) -> bool {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .status()
+            .expect("run script")
+            .success()
+    }
+
+    /// A build laid out like an installed extensions root: `<build>/wordpress`
+    /// beside a declared shared asset `<build>/agent-runtimes`.
+    fn make_build(entry: &Path, nonce: &str) -> (PathBuf, PathBuf) {
+        let build = PathBuf::from(format!("{}.build-{nonce}", entry.display()));
+        let ext = build.join("wordpress");
+        std::fs::create_dir_all(&ext).expect("extension dir");
+        std::fs::create_dir_all(build.join("agent-runtimes")).expect("shared asset dir");
+        std::fs::write(ext.join("composer.json"), "{}").expect("source file");
+        (build, ext)
+    }
+
+    fn publish(entry: &Path, build: &(PathBuf, PathBuf), setup: Option<&str>) -> bool {
+        run_sh(&lab_extension_cache_publish_command(
+            entry.to_str().unwrap(),
+            build.0.to_str().unwrap(),
+            build.1.to_str().unwrap(),
+            setup,
+        ))
+    }
+
+    #[test]
+    fn extension_cache_publish_hydrates_once_beside_shared_assets_and_race_losers_discard() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry = root
+            .path()
+            .join("extension-cache/wordpress/aaaaaaaaaaaaaaaa");
+        let entry_str = entry.to_str().unwrap();
+        assert!(!run_sh(&lab_extension_cache_probe_command(entry_str)));
+
+        let winner = make_build(&entry, "one");
+        let setup = "test -d ../agent-runtimes && mkdir -p vendor && touch vendor/autoload.php";
+        assert!(publish(&entry, &winner, Some(setup)));
+        assert!(std::fs::symlink_metadata(&entry)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(entry.join("vendor/autoload.php").is_file());
+        assert!(run_sh(&lab_extension_cache_probe_command(entry_str)));
+
+        let loser = make_build(&entry, "two");
+        assert!(publish(&entry, &loser, Some(setup)));
+        assert!(!loser.0.exists(), "race loser discards its build");
+        assert_eq!(
+            std::fs::canonicalize(&entry).unwrap(),
+            std::fs::canonicalize(&winner.1).unwrap()
+        );
+    }
+
+    #[test]
+    fn extension_cache_failed_setup_publishes_nothing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry = root
+            .path()
+            .join("extension-cache/wordpress/bbbbbbbbbbbbbbbb");
+        let build = make_build(&entry, "one");
+        assert!(!publish(&entry, &build, Some("exit 7")));
+        assert!(std::fs::symlink_metadata(&entry).is_err());
+        assert!(!run_sh(&lab_extension_cache_probe_command(
+            entry.to_str().unwrap()
+        )));
+    }
+
+    #[test]
+    fn extension_cache_publish_reclaims_stale_builds_and_dangling_entries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("extension-cache/wordpress");
+        let old_entry = parent.join("cccccccccccccccc");
+        let stale = make_build(&old_entry, "old");
+        std::fs::write(stale.1.join(LAB_EXTENSION_CACHE_READY), "").unwrap();
+        std::os::unix::fs::symlink(&stale.1, &old_entry).unwrap();
+        let crashed = make_build(&parent.join("dddddddddddddddd"), "crashed");
+        let recent_entry = parent.join("eeeeeeeeeeeeeeee");
+        let recent = make_build(&recent_entry, "recent");
+        std::fs::write(recent.1.join(LAB_EXTENSION_CACHE_READY), "").unwrap();
+        std::os::unix::fs::symlink(&recent.1, &recent_entry).unwrap();
+        assert!(run_sh(&format!(
+            "touch -t 202001010000 {} {}",
+            shell::quote_path(
+                &stale
+                    .1
+                    .join(LAB_EXTENSION_CACHE_READY)
+                    .display()
+                    .to_string()
+            ),
+            shell::quote_path(&crashed.0.display().to_string()),
+        )));
+
+        let entry = parent.join("ffffffffffffffff");
+        let build = make_build(&entry, "new");
+        assert!(publish(&entry, &build, None));
+        assert!(entry.join(LAB_EXTENSION_CACHE_READY).is_file());
+        assert!(!stale.0.exists() && std::fs::symlink_metadata(&old_entry).is_err());
+        assert!(!crashed.0.exists());
+        assert!(recent_entry.join(LAB_EXTENSION_CACHE_READY).is_file());
     }
 }
 
@@ -1045,17 +1460,6 @@ mod tests {
     }
 
     #[test]
-    fn extension_materialization_uses_daemon_admission() {
-        let command_options = runner_exec_options(&runner(), None, vec!["homeboy".to_string()]);
-        let shell_options = runner_raw_shell("mkdir -p /tmp/extension".to_string());
-
-        assert!(command_options.raw_exec);
-        assert!(!command_options.allow_diagnostic_ssh);
-        assert!(shell_options.raw_exec);
-        assert!(!shell_options.allow_diagnostic_ssh);
-    }
-
-    #[test]
     fn remote_git_materialization_installs_or_replaces_by_runner_state() {
         let runner = runner();
         let request = RunnerExtensionMaterializationRequest {
@@ -1074,7 +1478,7 @@ mod tests {
             &request,
             &mut |_runner_id, options| {
                 commands.push(options.command.clone());
-                Ok((output(), if commands.len() == 1 { 0 } else { 0 }))
+                Ok((output(), 0))
             },
         )
         .expect("materializes");
@@ -1200,11 +1604,11 @@ mod tests {
     }
 
     #[test]
-    fn controller_snapshot_ignores_appledouble_metadata() {
+    fn controller_snapshot_excludes_non_source_metadata_from_hash_and_sync() {
         let workspace = tempfile::tempdir().expect("runner workspace");
         let mut runner = runner();
         runner.workspace_root = Some(workspace.path().to_string_lossy().to_string());
-        let source = tempfile::tempdir().expect("extension source");
+        let source = tempfile::tempdir().expect("installed extension");
         let rules = source
             .path()
             .join("node_modules/eslint-plugin-jest/lib/rules");
@@ -1212,13 +1616,21 @@ mod tests {
         fs::write(source.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
         fs::write(rules.join("consistent-test-it.js"), "module.exports = {};")
             .expect("JavaScript rule");
+        fs::create_dir_all(source.path().join("fixtures")).expect("fixtures");
+        fs::write(source.path().join("fixtures/.source-url"), "fixture").expect("nested source");
         let hash_without_metadata =
             extension_source_content_hash(source.path()).expect("source hash");
+        // AppleDouble sidecars anywhere, and install-local provenance at the root.
         fs::write(rules.join("._consistent-test-it.js"), b"\0\x05\x16\x07ATTR")
             .expect("AppleDouble metadata");
-        let hash_with_metadata = extension_source_content_hash(source.path()).expect("source hash");
+        for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
+            fs::write(source.path().join(generated), "generated").expect("generated metadata");
+        }
 
-        assert_eq!(hash_with_metadata, hash_without_metadata);
+        assert_eq!(
+            extension_source_content_hash(source.path()).expect("source hash"),
+            hash_without_metadata
+        );
 
         let request = RunnerExtensionMaterializationRequest {
             id: "nodejs".to_string(),
@@ -1235,69 +1647,16 @@ mod tests {
             &mut |_runner_id, _options| Ok((output(), 0)),
         )
         .expect("materializes");
-        let synced_rules = Path::new(&provenance.synced_source_path)
-            .join("node_modules/eslint-plugin-jest/lib/rules");
+        let synced = Path::new(&provenance.synced_source_path);
+        let synced_rules = synced.join("node_modules/eslint-plugin-jest/lib/rules");
 
+        assert!(synced.join("nodejs.json").exists());
+        assert!(synced.join("fixtures/.source-url").exists());
         assert!(synced_rules.join("consistent-test-it.js").exists());
         assert!(!synced_rules.join("._consistent-test-it.js").exists());
-    }
-
-    #[test]
-    fn controller_snapshot_of_installed_directory_excludes_generated_metadata() {
-        let workspace = tempfile::tempdir().expect("runner workspace");
-        let mut runner = runner();
-        runner.workspace_root = Some(workspace.path().to_string_lossy().to_string());
-        let source = tempfile::tempdir().expect("installed extension");
-        fs::write(source.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
-        fs::create_dir_all(source.path().join("fixtures")).expect("fixtures");
-        fs::write(source.path().join("fixtures/.source-url"), "fixture").expect("nested source");
-        let hash_without_metadata =
-            extension_source_content_hash(source.path()).expect("source hash");
-        for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
-            fs::write(source.path().join(generated), "generated").expect("generated metadata");
-        }
-
-        assert_eq!(
-            extension_source_content_hash(source.path()).expect("source hash"),
-            hash_without_metadata
-        );
-
-        let request = RunnerExtensionMaterializationRequest {
-            id: "rust".to_string(),
-            revision: "abc123".to_string(),
-            source: RunnerExtensionMaterializationSource::ControllerSnapshot {
-                local_path: source.path().to_path_buf(),
-            },
-        };
-        let provenance = materialize_runner_extension_with_exec(
-            &runner,
-            "homeboy",
-            None,
-            &request,
-            &mut |_runner_id, _options| Ok((output(), 0)),
-        )
-        .expect("materializes");
-        let synced = Path::new(&provenance.synced_source_path);
-
-        assert!(synced.join("rust.json").exists());
-        assert!(synced.join("fixtures/.source-url").exists());
         for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
             assert!(!synced.join(generated).exists(), "{generated} was synced");
         }
-    }
-
-    #[test]
-    fn staged_extension_cleanup_removes_nested_appledouble_metadata() {
-        let staged = tempfile::tempdir().expect("staged extension");
-        let rules = staged.path().join("node_modules/plugin/rules");
-        fs::create_dir_all(&rules).expect("rules directory");
-        fs::write(rules.join("rule.js"), "module.exports = {};").expect("JavaScript rule");
-        fs::write(rules.join("._rule.js"), b"\0\x05\x16\x07ATTR").expect("AppleDouble metadata");
-
-        remove_appledouble_files(staged.path()).expect("clean staged extension");
-
-        assert!(rules.join("rule.js").exists());
-        assert!(!rules.join("._rule.js").exists());
     }
 
     #[test]
@@ -1338,22 +1697,6 @@ mod tests {
     }
 
     #[test]
-    fn controller_snapshot_plan_uses_content_hash_slot() {
-        let dir = tempfile::tempdir().expect("extension source");
-        std::fs::write(dir.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
-        std::fs::write(dir.path().join("run.sh"), "echo hi\n").expect("source");
-
-        let plan = plan_controller_snapshot_extension("/runner/ws/", "rust", dir.path())
-            .expect("snapshot plan");
-
-        assert_eq!(plan.id, "rust");
-        assert!(plan
-            .synced_source_path
-            .starts_with("/runner/ws/_lab_workspaces/dev-extensions/rust/"));
-        assert!(plan.synced_source_path.ends_with('/'));
-    }
-
-    #[test]
     fn materialization_can_use_explicit_command_env() {
         let runner = runner();
         let request = RunnerExtensionMaterializationRequest {
@@ -1387,12 +1730,8 @@ mod tests {
     }
 
     #[test]
-    fn isolated_lab_nodejs_overlay_stages_root_assets_for_project_tests() {
+    fn linked_lab_overlay_stages_root_assets_for_flat_and_nested_extension_roots() {
         check_linked_overlay_root(false);
-    }
-
-    #[test]
-    fn nested_root_linked_lab_materialization() {
         check_linked_overlay_root(true);
     }
 
@@ -1653,6 +1992,74 @@ mod tests {
             for handle in handles {
                 handle.join().expect("extension job");
             }
+        });
+    }
+
+    #[test]
+    fn lab_job_overlays_link_one_hydrated_cache_entry_with_setup_dependencies() {
+        crate::test_support::with_isolated_home(|home| {
+            let runner_root = tempfile::tempdir().expect("runner root");
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-extension-hydrate","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let counter = runner_root.path().join("setup-count");
+            let source = home.path().join(".config/homeboy/extensions/fixture");
+            fs::create_dir_all(&source).expect("extension source");
+            fs::write(
+                source.join("fixture.json"),
+                format!(
+                    r#"{{"id":"fixture","name":"Fixture","version":"1.0.0","executable":{{"runtime":{{"setup_command":"test -f {{{{extension_path}}}}/../fixture-assets/asset.txt && mkdir -p {{{{extension_path}}}}/vendor && touch {{{{extension_path}}}}/vendor/autoload.php && printf x >> {}"}}}}}}"#,
+                    counter.display()
+                ),
+            )
+            .expect("extension manifest");
+            let extensions_root = source.parent().unwrap();
+            fs::write(
+                extensions_root.join("homeboy-extension-root.json"),
+                r#"{"shared_assets":["fixture-assets"]}"#,
+            )
+            .expect("root manifest");
+            fs::create_dir_all(extensions_root.join("fixture-assets")).expect("shared asset");
+            fs::write(extensions_root.join("fixture-assets/asset.txt"), "asset\n").expect("asset");
+            let runner = crate::load("lab-extension-hydrate").expect("runner");
+
+            let mut remote_paths = Vec::new();
+            for job in ["job-a", "job-b"] {
+                let runtime_root = runner_root
+                    .path()
+                    .join(format!("_lab_workspaces/{job}-homeboy-artifacts/runtime"));
+                let overlays = materialize_lab_job_extension_overlay_snapshots(
+                    &runner,
+                    &runtime_root.display().to_string(),
+                    &["fixture".to_string()],
+                )
+                .expect("stage overlay");
+                assert!(Command::new("sh")
+                    .arg("-c")
+                    .arg(lab_job_extension_overlay_command(
+                        &runtime_root.display().to_string(),
+                        &overlays,
+                    ))
+                    .status()
+                    .expect("link overlay")
+                    .success());
+                assert!(runtime_root
+                    .join("home/.config/homeboy/extensions/fixture/vendor/autoload.php")
+                    .is_file());
+                remote_paths.push(overlays[0].remote_path.clone());
+            }
+            assert_eq!(remote_paths[0], remote_paths[1]);
+            assert!(remote_paths[0].contains("/_lab_workspaces/extension-cache/fixture/"));
+            assert_eq!(
+                fs::read_to_string(&counter).unwrap(),
+                "x",
+                "setup runs once per revision"
+            );
         });
     }
 }

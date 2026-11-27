@@ -469,15 +469,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unmatched_resolver_preserves_route_less_behavior() {
-        crate::test_support::with_isolated_home(|_| {
-            install_resolver("resolver-test", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"unmatched\"}'");
-            assert_eq!(resolve_installed().unwrap(), None);
-        });
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn ambient_start_failures_preserve_route_less_behavior() {
         crate::test_support::with_isolated_home(|_| {
             install_resolver_command("resolver-test", vec!["/definitely/not/a/resolver"]);
@@ -561,6 +552,11 @@ mod tests {
             assert_eq!(
                 route.route,
                 Some(NotificationRoute::new("synthetic.completed", "chosen-route").unwrap())
+            );
+            assert_eq!(route.evidence.classification, "explicit");
+            assert_eq!(
+                route.evidence.transport.as_deref(),
+                Some("synthetic.completed")
             );
         });
     }
@@ -752,21 +748,6 @@ mod tests {
             let error = resolve_installed_with_evidence().unwrap_err();
             assert!(error.to_string().contains("invalid missing context"));
             assert!(!error.to_string().contains("opaque-destination"));
-        });
-    }
-
-    #[test]
-    fn explicit_and_environment_context_have_distinct_evidence() {
-        crate::test_support::with_isolated_home(|_| {
-            install_resolver("resolver-test", "exit 9");
-            let explicit =
-                resolve_from_cli_or_env_with_evidence(Some("synthetic.completed"), Some("route"))
-                    .expect("explicit route");
-            assert_eq!(explicit.evidence.classification, "explicit");
-            assert_eq!(
-                explicit.evidence.transport.as_deref(),
-                Some("synthetic.completed")
-            );
         });
     }
 

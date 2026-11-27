@@ -311,9 +311,6 @@ struct BaselineFacts {
     failure_fingerprint: String,
     #[serde(default)]
     failure_records: Vec<String>,
-    /// Retained for compatibility with previously recorded baseline facts.
-    #[serde(default)]
-    diagnostic_fingerprint: Option<String>,
     package_artifacts: Vec<AgentTaskGatePackageArtifactProvenance>,
     #[serde(default)]
     output_tail: String,
@@ -352,15 +349,6 @@ impl BaselineFacts {
                 records.dedup();
                 records
             },
-            diagnostic_fingerprint: Some(failure_fingerprint(
-                gate.exit_code,
-                "",
-                "",
-                gate.failure_evidence
-                    .as_ref()
-                    .map(|e| e.diagnostics.as_slice())
-                    .unwrap_or_default(),
-            )),
             package_artifacts: gate.environment.package_artifacts.clone(),
             output_tail: format!("{}\n{}", gate.stdout, gate.stderr)
                 .chars()
@@ -719,7 +707,7 @@ pub(crate) fn admit_base_gates(
     let results = crate::agent_task_promotion::with_gate_supervision(
         gates.declared_supervision(),
         || {
-            with_detached_base_checkout(root, &workspace, base_sha, component.as_deref(), |base| {
+            with_detached_base_checkout(root, &workspace, base_sha, |base| {
                 // Repro gates already ran on this base before dispatch, and a
                 // base failure never excuses them, so admission skips them.
                 // Bench gates compare base and candidate themselves (#18869).
@@ -972,7 +960,6 @@ pub(crate) fn compare_gate_failures_to_verified_base(
         repository_root,
         gate_workspace,
         base_sha,
-        component_id,
         |baseline_gate_workspace| {
             let unresolved_gates = || {
                 promotion
@@ -1284,7 +1271,6 @@ pub(crate) fn with_detached_base_checkout<T>(
     repository_root: &std::path::Path,
     gate_workspace: &std::path::Path,
     base_sha: &str,
-    component_id: Option<&str>,
     run: impl FnOnce(&std::path::Path) -> Result<T>,
 ) -> Result<T> {
     let repository_root = repository_root.canonicalize().map_err(|error| {
@@ -2177,14 +2163,7 @@ mod tests {
                         .lines()
                         .count()
                 };
-                assert_eq!(
-                    runs(),
-                    if accepted || name == "regression" {
-                        1
-                    } else {
-                        2
-                    }
-                );
+                assert_eq!(runs(), if accepted { 1 } else { 2 });
                 if accepted {
                     assert!(second.deterministic_gates[0]
                         .baseline_comparison

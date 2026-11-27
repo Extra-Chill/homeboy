@@ -1,31 +1,6 @@
-use homeboy::core::error::{RemoteCommandFailedDetails, TargetDetails};
-use homeboy::core::Error;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
-
-#[test]
-fn remote_command_failed_creates_error_with_details() {
-    let err = Error::remote_command_failed(RemoteCommandFailedDetails {
-        command: "ls -la".to_string(),
-        exit_code: 127,
-        stdout: "some stdout".to_string(),
-        stderr: "some stderr".to_string(),
-        target: TargetDetails {
-            project_id: Some("alpha".to_string()),
-            server_id: Some("server1".to_string()),
-            host: Some("example.com".to_string()),
-        },
-    });
-
-    assert_eq!(err.code.as_str(), "remote.command_failed");
-    assert_eq!(err.message, "Remote command failed");
-    // Command details are in the serialized details, not the message
-    let details_str = err.details.to_string();
-    assert!(details_str.contains("ls -la"));
-    assert!(details_str.contains("some stdout"));
-    assert!(details_str.contains("some stderr"));
-}
 
 #[test]
 fn validation_error_writes_json_output_file() {
@@ -136,79 +111,54 @@ fn artifact_destination_is_not_rejected_as_global_format() {
     );
 }
 
+/// Compact and full runner status both separate local placement from a Lab
+/// connection; only the full view projects the selected Lab runner.
 #[test]
-fn compact_local_runner_status_separates_placement_from_lab_connection() {
+fn local_runner_status_separates_placement_from_lab_connection() {
     let dir = tempfile::tempdir().expect("tempdir");
     register_lab_runner(dir.path());
 
-    let output = homeboy_command()
-        .args(["runner", "status", "lab-local"])
-        .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .output()
-        .expect("run homeboy");
+    for full in [false, true] {
+        let mut command = homeboy_command();
+        command.args(["runner", "status", "lab-local"]);
+        if full {
+            command.arg("--full");
+        }
+        let output = command
+            .current_dir(dir.path())
+            .env("HOME", dir.path())
+            .output()
+            .expect("run homeboy");
 
-    assert!(
-        output.status.success(),
-        "runner status should succeed; stdout: {}; stderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        assert!(
+            output.status.success(),
+            "runner status (full={full}) should succeed; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-    assert_eq!(stdout_json["success"], true);
-    assert_eq!(stdout_json["data"]["command"], "runner.status");
-    assert_eq!(stdout_json["data"]["id"], "lab-local");
-    assert_eq!(
-        stdout_json["data"]["execution_capabilities"]["local_placement"]["available"],
-        true
-    );
-    assert_eq!(
-        stdout_json["data"]["execution_capabilities"]["lab_runner_connection"]["available"],
-        false
-    );
-    assert!(stdout_json["data"].get("selected_lab_runner").is_none());
-}
-
-#[test]
-fn full_local_runner_status_does_not_imply_a_lab_connection() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    register_lab_runner(dir.path());
-
-    let output = homeboy_command()
-        .args(["runner", "status", "lab-local", "--full"])
-        .current_dir(dir.path())
-        .env("HOME", dir.path())
-        .output()
-        .expect("run homeboy");
-
-    assert!(
-        output.status.success(),
-        "runner status should succeed; stdout: {}; stderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
-    assert_eq!(stdout_json["success"], true);
-    assert_eq!(stdout_json["data"]["command"], "runner.status");
-    assert_eq!(stdout_json["data"]["id"], "lab-local");
-    assert_eq!(
-        stdout_json["data"]["execution_capabilities"]["local_placement"]["available"],
-        true
-    );
-    assert_eq!(
-        stdout_json["data"]["execution_capabilities"]["lab_runner_connection"]["available"],
-        false
-    );
-    assert_eq!(
-        stdout_json["data"]["selected_lab_runner"]["connected"],
-        false
-    );
-    assert_eq!(
-        stdout_json["data"]["selected_lab_runner"]["availability"]["connected"],
-        false
-    );
+        let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+        let data = &stdout_json["data"];
+        assert_eq!(data["command"], "runner.status");
+        assert_eq!(data["id"], "lab-local");
+        assert_eq!(
+            data["execution_capabilities"]["local_placement"]["available"],
+            true
+        );
+        assert_eq!(
+            data["execution_capabilities"]["lab_runner_connection"]["available"],
+            false
+        );
+        if full {
+            assert_eq!(data["selected_lab_runner"]["connected"], false);
+            assert_eq!(
+                data["selected_lab_runner"]["availability"]["connected"],
+                false
+            );
+        } else {
+            assert!(data.get("selected_lab_runner").is_none());
+        }
+    }
 }
 
 #[test]

@@ -578,55 +578,40 @@ mod tests {
 
     /// A recorded session means the runner already has its one daemon, so
     /// placement only re-establishes the transport to it. The full `connect`,
-    /// which can start or restart a daemon, is never reached.
+    /// which can start or restart a daemon, is reached only when there is no
+    /// recorded session or the recorded daemon is unreachable.
     #[test]
-    fn placement_with_a_recorded_session_calls_ensure_transport_not_connect() {
-        let ensured = std::cell::Cell::new(0);
-        connection::reach_runner_with(
-            "homeboy-lab",
-            |_| Ok(true),
-            |runner_id| {
-                assert_eq!(runner_id, "homeboy-lab");
-                ensured.set(ensured.get() + 1);
-                Ok(())
-            },
-            |_| panic!("a runner with a recorded session must never reach the full connect"),
-        )
-        .expect("transport re-established");
-        assert_eq!(ensured.get(), 1);
-    }
-
-    /// Only a runner with no daemon session at all falls back to `connect`.
-    #[test]
-    fn an_unreachable_recorded_daemon_falls_back_to_connect() {
-        let connected = std::cell::Cell::new(0);
-        connection::reach_runner_with(
-            "homeboy-lab",
-            |_| Ok(true),
-            |_| Err(transport_failure(connection::TransportFailure::Unreachable)),
-            |_| {
-                connected.set(connected.get() + 1);
-                Ok(())
-            },
-        )
-        .expect("connect brings the runner's one daemon back");
-        assert_eq!(connected.get(), 1);
-    }
-
-    #[test]
-    fn placement_without_any_session_falls_back_to_connect() {
-        let connected = std::cell::Cell::new(0);
-        connection::reach_runner_with(
-            "homeboy-lab",
-            |_| Ok(false),
-            |_| panic!("there is no recorded daemon to re-establish a transport to"),
-            |_| {
-                connected.set(connected.get() + 1);
-                Ok(())
-            },
-        )
-        .expect("connected");
-        assert_eq!(connected.get(), 1);
+    fn placement_reaches_connect_only_without_a_reachable_recorded_daemon() {
+        // (has session, transport result, expected ensures, expected connects)
+        for (has_session, transport_unreachable, ensures, connects) in [
+            (true, false, 1, 0),
+            (true, true, 1, 1),
+            (false, false, 0, 1),
+        ] {
+            let ensured = std::cell::Cell::new(0);
+            let connected = std::cell::Cell::new(0);
+            connection::reach_runner_with(
+                "homeboy-lab",
+                |_| Ok(has_session),
+                |runner_id| {
+                    assert_eq!(runner_id, "homeboy-lab");
+                    ensured.set(ensured.get() + 1);
+                    if transport_unreachable {
+                        Err(transport_failure(connection::TransportFailure::Unreachable))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| {
+                    connected.set(connected.get() + 1);
+                    Ok(())
+                },
+            )
+            .expect("runner reached");
+            let case = (has_session, transport_unreachable);
+            assert_eq!(ensured.get(), ensures, "{case:?}");
+            assert_eq!(connected.get(), connects, "{case:?}");
+        }
     }
 
     fn transport_failure(failure: connection::TransportFailure) -> homeboy_core::error::Error {

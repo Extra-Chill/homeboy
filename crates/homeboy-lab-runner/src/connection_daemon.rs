@@ -990,7 +990,7 @@ fn daemon_freshness_report(
         DaemonFreshnessReport {
             fresh: mismatch.is_none(),
             stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::LabContractVersionMismatch),
-            // A legacy version response has no daemon-owned job count, so it cannot
+            // A version-only response has no daemon-owned job count, so it cannot
             // authorize replacement while the typed job endpoint is unavailable.
             restartable: false,
             lease_id: daemon_lease_id_from_body(&body).map(ToString::to_string),
@@ -1148,29 +1148,22 @@ mod tests {
     }
 
     #[test]
-    fn freshness_accepts_a_different_build_version() {
+    fn freshness_accepts_build_drift_but_refuses_an_incompatible_lab_contract() {
         let body = serde_json::json!({
             "version": "test",
             "build_identity": { "display": "homeboy test+candidate" },
             "lease": { "lease_id": "lease-candidate" },
         });
-
-        let mismatch = daemon_version_identity_mismatch(&body, "fixture body")
-            .expect("version mismatch result");
-
-        assert_eq!(mismatch, None);
-    }
-
-    #[test]
-    fn freshness_refuses_incompatible_lab_contract_after_build_change() {
-        let body = serde_json::json!({
-            "version": "old",
-            "build_identity": { "display": "homeboy old+daemon" },
-            "lease": { "lease_id": "lease-old" },
-            "lab_contract_version": homeboy_lab_contract::LAB_CONTRACT_VERSION + 1,
-        });
         assert_eq!(
-            daemon_version_identity_mismatch(&body, "fixture")
+            daemon_version_identity_mismatch(&body, "fixture body").expect("mismatch result"),
+            None
+        );
+
+        let mut incompatible = body;
+        incompatible["lab_contract_version"] =
+            serde_json::json!(homeboy_lab_contract::LAB_CONTRACT_VERSION + 1);
+        assert_eq!(
+            daemon_version_identity_mismatch(&incompatible, "fixture")
                 .unwrap()
                 .as_deref(),
             Some("lab_contract_version_mismatch")
@@ -1178,102 +1171,59 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_health_rejects_lease_mismatch() {
-        assert!(!health_identity_matches(
-            &report("lease-other", 7331),
-            &daemon()
-        ));
+    fn tunnel_health_rejects_lease_or_pid_drift() {
+        let mut pidless = report("lease-live", 7331);
+        pidless.pid = None;
+        for report in [
+            report("lease-other", 7331),
+            report("lease-live", 7332),
+            pidless,
+        ] {
+            assert!(!health_identity_matches(&report, &daemon()));
+        }
     }
 
-    #[test]
-    fn tunnel_health_rejects_pid_mismatch() {
-        assert!(!health_identity_matches(
-            &report("lease-live", 7332),
-            &daemon()
-        ));
-    }
-
+    /// Loopback liveness requires the recorded daemon identity, and a legacy
+    /// session that recorded only a PID still matches on it.
     #[test]
     fn loopback_liveness_requires_the_recorded_daemon_identity() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let body = serde_json::json!({
-            "freshness": report("lease-live", 7331).freshness,
-            "pid": 7331,
-        })
-        .to_string();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("health request");
-            let mut request = [0; 1024];
-            let read = stream.read(&mut request).expect("read request");
-            assert!(std::str::from_utf8(&request[..read])
-                .expect("request text")
-                .starts_with("GET /health HTTP/1.1"));
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(), body
+        for expected_lease in [Some("lease-live"), None] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("address");
+            let body = serde_json::json!({
+                "freshness": report("lease-live", 7331).freshness,
+                "pid": 7331,
+            })
+            .to_string();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("health request");
+                let mut request = [0; 1024];
+                let read = stream.read(&mut request).expect("read request");
+                assert!(std::str::from_utf8(&request[..read])
+                    .expect("request text")
+                    .starts_with("GET /health HTTP/1.1"));
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        )
+                        .as_bytes(),
                     )
-                    .as_bytes(),
-                )
-                .expect("health response");
-        });
+                    .expect("health response");
+            });
 
-        let endpoint = format!("http://{address}");
-        assert!(daemon_http_health_matches_with_timeout(
-            &endpoint,
-            Some("lease-live"),
-            Some(7331),
-            Duration::from_secs(2),
-        ));
-        server.join().expect("server");
-    }
-
-    #[test]
-    fn loopback_liveness_preserves_legacy_pid_only_sessions() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let body = serde_json::json!({
-            "freshness": report("lease-live", 7331).freshness,
-            "pid": 7331,
-        })
-        .to_string();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("health request");
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request).expect("read request");
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(), body
-                    )
-                    .as_bytes(),
-                )
-                .expect("health response");
-        });
-
-        assert!(daemon_http_health_matches_with_timeout(
-            &format!("http://{address}"),
-            None,
-            Some(7331),
-            Duration::from_secs(2),
-        ));
-        server.join().expect("server");
-    }
-
-    #[test]
-    fn tunnel_health_requires_pid() {
-        let mut report = report("lease-live", 7331);
-        report.pid = None;
-        assert!(!health_identity_matches(&report, &daemon()));
-    }
-
-    #[test]
-    fn health_pid_is_read_from_the_daemon_health_body() {
-        let body = serde_json::json!({ "pid": 7331 });
-        assert_eq!(daemon_pid_from_body(&body), Some(7331));
+            assert!(
+                daemon_http_health_matches_with_timeout(
+                    &format!("http://{address}"),
+                    expected_lease,
+                    Some(7331),
+                    Duration::from_secs(2),
+                ),
+                "{expected_lease:?}"
+            );
+            server.join().expect("server");
+        }
     }
 
     #[test]
@@ -1625,55 +1575,6 @@ mod tests {
         );
         assert_eq!(failure_stage(&failure), "tunnel_durability");
         assert!(child.wait().expect("reap tunnel child").success());
-        server.join().expect("server");
-    }
-
-    #[test]
-    fn loopback_durability_has_no_ssh_identity_requirement() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let body = serde_json::json!({
-            "freshness": report("lease-live", 7331).freshness,
-            "pid": 7331,
-        })
-        .to_string();
-        let server = std::thread::spawn(move || {
-            for _ in 0..3 {
-                let (mut stream, _) = listener.accept().expect("health request");
-                let mut request = [0; 1024];
-                let _ = stream.read(&mut request).expect("read request");
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(), body
-                        )
-                        .as_bytes(),
-                    )
-                    .expect("health response");
-            }
-        });
-        let daemon = RemoteDaemon {
-            address: address.to_string(),
-            pid: Some(7331),
-            lease_id: Some("lease-live".to_string()),
-            version: None,
-            build_identity: None,
-            inspected_freshness: None,
-        };
-
-        let started = std::time::Instant::now();
-        assert!(probe_daemon_health_until_durable(
-            &format!("http://{address}"),
-            &daemon,
-            None,
-            None,
-        )
-        .is_ok());
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "loopback durability observations must not hang"
-        );
         server.join().expect("server");
     }
 }

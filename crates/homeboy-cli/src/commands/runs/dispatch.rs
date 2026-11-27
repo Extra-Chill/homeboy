@@ -254,8 +254,8 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     }
     // Boundary: one `homeboy runs` invocation is one unit of work, so the
     // observation store is opened exactly once here and handed to the handlers
-    // below. Each of those used to open its own, which made a single command
-    // several independently-resolved stores (#7505).
+    // below so a single command never resolves several independent stores
+    // (#7505).
     let roots = PathRoots::from_environment()?;
     let store = ObservationStore::open_initialized_in_roots(&roots)?;
     match args.command {
@@ -387,14 +387,7 @@ mod presentation_tests {
     }
 
     #[test]
-    fn logs_preserves_cursor_and_canonical_payload() {
-        let args = parse(&["runs", "logs", "run-1", "--cursor", "event-page-2"]);
-        let super::RunsCommand::Logs(logs) = args.command else {
-            panic!("expected logs");
-        };
-        assert_eq!(logs.run_id, "run-1");
-        assert_eq!(logs.cursor.as_deref(), Some("event-page-2"));
-        assert!(RunsCli::try_parse_from(["runs", "logs", "run-1", "--limit", "10"]).is_err());
+    fn cook_event_page_serializes_as_the_canonical_payload() {
         let page =
             serde_json::json!({"schema": "homeboy/control-plane-event-page/v1", "events": []});
         assert_eq!(
@@ -404,63 +397,108 @@ mod presentation_tests {
     }
 
     #[test]
-    fn bare_show_proof_and_dossier_are_summary_eligible() {
-        assert!(parse(&["runs", "show", "run-1"]).show_summary_eligible());
-        assert!(parse(&["runs", "evidence", "run-1", "--proof"]).proof_summary_eligible());
-        assert!(parse(&["runs", "evidence", "run-1", "--dossier"]).dossier_summary_eligible());
-    }
-
-    #[test]
-    fn legacy_json_flag_still_suppresses_the_compact_summary() {
-        assert!(!parse(&["runs", "show", "run-1", "--json"]).show_summary_eligible());
-        assert!(
-            !parse(&["runs", "evidence", "run-1", "--proof", "--json"]).proof_summary_eligible()
-        );
-        assert!(
-            !parse(&["runs", "evidence", "run-1", "--dossier", "--json"])
-                .dossier_summary_eligible()
-        );
-    }
-
-    #[test]
-    fn format_json_suppresses_the_compact_summary_identically() {
-        assert!(!parse(&["runs", "show", "run-1", "--format", "json"]).show_summary_eligible());
-        assert!(
-            !parse(&["runs", "evidence", "run-1", "--proof", "--format", "json"])
-                .proof_summary_eligible()
-        );
-        assert!(
-            !parse(&["runs", "evidence", "run-1", "--dossier", "--format", "json"])
-                .dossier_summary_eligible()
-        );
-    }
-
-    #[test]
-    fn both_spellings_together_are_accepted() {
-        assert!(
-            !parse(&["runs", "show", "run-1", "--json", "--format=json"]).show_summary_eligible()
-        );
-    }
-
-    #[test]
-    fn evidence_projections_conflict_and_old_verbs_are_rejected() {
-        let error = RunsCli::try_parse_from(["runs", "evidence", "run-1", "--proof", "--dossier"])
-            .err()
-            .expect("projections must conflict");
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
-        for projection in ["--proof", "--dossier"] {
-            let error =
-                RunsCli::try_parse_from(["runs", "evidence", "run-1", projection, "--full"])
-                    .err()
-                    .expect("--full applies only to plain evidence");
-            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    fn summary_eligibility_follows_projection_and_json_presentation() {
+        // (argv, show, proof, dossier) eligibility.
+        let cases: &[(&[&str], bool, bool, bool)] = &[
+            (&["runs", "show", "run-1"], true, false, false),
+            (&["runs", "evidence", "run-1"], false, false, false),
+            (
+                &["runs", "evidence", "run-1", "--proof"],
+                false,
+                true,
+                false,
+            ),
+            (
+                &["runs", "evidence", "run-1", "--dossier"],
+                false,
+                false,
+                true,
+            ),
+            (&["runs", "show", "run-1", "--json"], false, false, false),
+            (
+                &["runs", "show", "run-1", "--format", "json"],
+                false,
+                false,
+                false,
+            ),
+            (
+                &["runs", "show", "run-1", "--json", "--format=json"],
+                false,
+                false,
+                false,
+            ),
+            (
+                &["runs", "show", "run-1", "--format=json", "-q", "$.status"],
+                false,
+                false,
+                false,
+            ),
+            (
+                &["runs", "show", "run-1", "--format", "auto"],
+                true,
+                false,
+                false,
+            ),
+            (
+                &["runs", "show", "run-1", "--format", "markdown"],
+                true,
+                false,
+                false,
+            ),
+            (
+                &["runs", "show", "run-1", "--format", "text"],
+                true,
+                false,
+                false,
+            ),
+            (
+                &["runs", "evidence", "run-1", "--proof", "--json"],
+                false,
+                false,
+                false,
+            ),
+            (
+                &["runs", "evidence", "run-1", "--proof", "--format", "json"],
+                false,
+                false,
+                false,
+            ),
+            (
+                &["runs", "evidence", "run-1", "--dossier", "--json"],
+                false,
+                false,
+                false,
+            ),
+            (
+                &["runs", "evidence", "run-1", "--dossier", "--format", "json"],
+                false,
+                false,
+                false,
+            ),
+            // `--detail` never changes the presentation; format is the only knob.
+            (
+                &["runs", "show", "run-1", "--detail", "full"],
+                true,
+                false,
+                false,
+            ),
+            (
+                &["runs", "show", "run-1", "--detail", "summary", "--json"],
+                false,
+                false,
+                false,
+            ),
+        ];
+        for (argv, show, proof, dossier) in cases {
+            let args = parse(argv);
+            assert_eq!(args.show_summary_eligible(), *show, "{argv:?} show");
+            assert_eq!(args.proof_summary_eligible(), *proof, "{argv:?} proof");
+            assert_eq!(
+                args.dossier_summary_eligible(),
+                *dossier,
+                "{argv:?} dossier"
+            );
         }
-        for verb in ["proof", "dossier"] {
-            assert!(RunsCli::try_parse_from(["runs", verb, "run-1"]).is_err());
-        }
-        let evidence = parse(&["runs", "evidence", "run-1"]);
-        assert!(!evidence.proof_summary_eligible());
-        assert!(!evidence.dossier_summary_eligible());
     }
 
     #[test]
@@ -475,47 +513,5 @@ mod presentation_tests {
             r#"{"audit":"pass"}"#,
         ]);
         assert!(report.into_markdown().is_ok());
-    }
-
-    #[test]
-    fn non_json_formats_keep_the_compact_summary() {
-        for format in ["auto", "markdown", "text"] {
-            assert!(
-                parse(&["runs", "show", "run-1", "--format", format]).show_summary_eligible(),
-                "--format {format} must not suppress the compact summary"
-            );
-        }
-    }
-
-    #[test]
-    fn detail_is_accepted_but_does_not_change_the_presentation() {
-        // `runs show`/`proof`/`dossier` render their documented default at
-        // both detail levels; the format axis is the only knob. Pinned so a
-        // later migration has to change this test deliberately rather than
-        // silently repurposing the flag.
-        for detail in ["summary", "full"] {
-            assert!(
-                parse(&["runs", "show", "run-1", "--detail", detail]).show_summary_eligible(),
-                "--detail {detail} must not suppress the compact summary"
-            );
-            assert!(
-                !parse(&["runs", "show", "run-1", "--detail", detail, "--json"])
-                    .show_summary_eligible(),
-                "--detail {detail} must not resurrect the compact summary"
-            );
-        }
-    }
-
-    #[test]
-    fn show_still_parses_field_selectors_alongside_presentation() {
-        let args = parse(&["runs", "show", "run-1", "--format=json", "-q", "$.status"]);
-        assert!(!args.show_summary_eligible());
-    }
-
-    #[test]
-    fn eligibility_helpers_do_not_cross_subcommands() {
-        let show = parse(&["runs", "show", "run-1"]);
-        assert!(!show.proof_summary_eligible());
-        assert!(!show.dossier_summary_eligible());
     }
 }

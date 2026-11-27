@@ -634,25 +634,18 @@ mod tests {
     }
 
     #[test]
-    fn attachment_remote_path_overrides_portable_remote_path() {
+    fn remote_path_precedence_is_override_then_attachment_then_portable() {
         let repo = repo_with_portable_remote_path("../wp-content/plugins/fixture");
-        let project = project_with_attachment(
-            Some("wp-content/plugins/fixture"),
-            repo.path().to_string_lossy().to_string(),
+        let local_path = repo.path().to_string_lossy().to_string();
+        let mut project =
+            project_with_attachment(Some("wp-content/plugins/fixture"), local_path.clone());
+        assert_eq!(
+            resolve_project_component(&project, "fixture")
+                .expect("component")
+                .remote_path,
+            "wp-content/plugins/fixture"
         );
 
-        let component = resolve_project_component(&project, "fixture").expect("component");
-
-        assert_eq!(component.remote_path, "wp-content/plugins/fixture");
-    }
-
-    #[test]
-    fn component_overrides_still_win_over_attachment_remote_path() {
-        let repo = repo_with_portable_remote_path("portable/plugins/fixture");
-        let mut project = project_with_attachment(
-            Some("attachment/plugins/fixture"),
-            repo.path().to_string_lossy().to_string(),
-        );
         project.component_overrides.insert(
             "fixture".to_string(),
             ProjectComponentOverrides {
@@ -660,35 +653,31 @@ mod tests {
                 ..Default::default()
             },
         );
-
-        let component = resolve_project_component(&project, "fixture").expect("component");
-
-        assert_eq!(component.remote_path, "override/plugins/fixture");
+        assert_eq!(
+            resolve_project_component(&project, "fixture")
+                .expect("component")
+                .remote_path,
+            "override/plugins/fixture"
+        );
     }
 
     #[test]
-    fn project_resolution_uses_standalone_extract_command_as_fallback() {
+    fn standalone_component_config_fills_gaps_below_project_overrides() {
         with_isolated_home(|home| {
             let repo = repo_with_portable_remote_path("wp-content/plugins/fixture");
             let registered_repo = repo_with_portable_remote_path("wp-content/plugins/fixture");
-            let components_dir = home
-                .path()
-                .join(".config")
-                .join("homeboy")
-                .join("components");
-            std::fs::create_dir_all(&components_dir).expect("components dir");
-            std::fs::write(
-                components_dir.join("fixture.json"),
+            write_standalone_component(
+                home,
+                "fixture",
                 serde_json::json!({
                     "local_path": registered_repo.path(),
                     "extract_command": "unzip -o {{artifact}} && rm {{artifact}}",
                     "remote_url": "https://github.com/example/fixture.git"
-                })
-                .to_string(),
-            )
-            .expect("standalone component config");
+                }),
+            );
 
-            let project = project_with_attachment(None, repo.path().to_string_lossy().to_string());
+            let mut project =
+                project_with_attachment(None, repo.path().to_string_lossy().to_string());
 
             let component = resolve_project_component(&project, "fixture").expect("component");
 
@@ -701,31 +690,7 @@ mod tests {
                 component.remote_url.as_deref(),
                 Some("https://github.com/example/fixture.git")
             );
-        });
-    }
 
-    #[test]
-    fn project_overrides_win_over_standalone_extract_command() {
-        with_isolated_home(|home| {
-            let repo = repo_with_portable_remote_path("wp-content/plugins/fixture");
-            let components_dir = home
-                .path()
-                .join(".config")
-                .join("homeboy")
-                .join("components");
-            std::fs::create_dir_all(&components_dir).expect("components dir");
-            std::fs::write(
-                components_dir.join("fixture.json"),
-                serde_json::json!({
-                    "local_path": repo.path(),
-                    "extract_command": "unzip -o {{artifact}} && rm {{artifact}}"
-                })
-                .to_string(),
-            )
-            .expect("standalone component config");
-
-            let mut project =
-                project_with_attachment(None, repo.path().to_string_lossy().to_string());
             project.component_overrides.insert(
                 "fixture".to_string(),
                 ProjectComponentOverrides {
@@ -733,9 +698,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-
             let component = resolve_project_component(&project, "fixture").expect("component");
-
             assert_eq!(
                 component.extract_command.as_deref(),
                 Some("custom-extract {{artifact}}")
@@ -822,22 +785,35 @@ mod tests {
         assert_eq!(bound.cli_path.as_deref(), Some("project-cli"));
     }
 
+    /// A missing checkout without a GitHub standalone `remote_url` keeps the
+    /// original missing-`local_path` error instead of a release fallback.
     #[test]
-    fn status_resolution_reports_missing_component_local_path() {
-        let project = project_with_attachment(
-            Some("wp-content/plugins/fixture"),
-            "/tmp/homeboy-missing-component-path".to_string(),
-        );
+    fn missing_local_path_without_github_remote_reports_the_missing_path() {
+        for standalone in [
+            None,
+            Some(serde_json::json!({ "remote_url": "https://gitlab.com/example/fixture.git" })),
+        ] {
+            with_isolated_home(|home| {
+                if let Some(config) = &standalone {
+                    write_standalone_component(home, "fixture", config.clone());
+                }
+                let project = project_with_attachment(
+                    Some("wp-content/plugins/fixture"),
+                    "/tmp/homeboy-missing-component-path".to_string(),
+                );
 
-        let err = resolve_project_component(&project, "fixture").expect_err("missing local_path");
+                let err =
+                    resolve_project_component(&project, "fixture").expect_err("missing local_path");
 
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("missing local_path"));
-        assert!(err.hints.iter().any(|hint| {
-            hint.message.contains(
-                "Component 'fixture' local_path '/tmp/homeboy-missing-component-path' does not exist",
-            )
-        }));
+                assert_eq!(err.code.as_str(), "validation.invalid_argument");
+                assert!(err.message.contains("missing local_path"));
+                assert!(err.hints.iter().any(|hint| {
+                    hint.message.contains(
+                        "Component 'fixture' local_path '/tmp/homeboy-missing-component-path' does not exist",
+                    )
+                }));
+            });
+        }
     }
 
     /// The resolved attachment `local_path` must be normalized to the *same*
@@ -909,208 +885,104 @@ mod tests {
         .expect("write standalone component config");
     }
 
-    #[test]
-    fn checkout_less_resolution_keeps_the_original_error_without_a_standalone_entry() {
-        with_isolated_home(|_home| {
-            let project = project_with_attachment(
-                Some("wp-content/plugins/fixture"),
-                "/tmp/homeboy-14782-missing-no-standalone".to_string(),
-            );
-
-            let err = resolve_project_component(&project, "fixture")
-                .expect_err("no fallback is possible");
-
-            assert_eq!(err.code.as_str(), "validation.invalid_argument");
-            assert!(err.message.contains("missing local_path"));
-        });
-    }
-
-    #[test]
-    fn checkout_less_resolution_keeps_the_original_error_for_a_non_github_remote_url() {
-        with_isolated_home(|home| {
-            write_standalone_component(
-                home,
-                "fixture",
-                serde_json::json!({ "remote_url": "https://gitlab.com/example/fixture.git" }),
-            );
-            let project = project_with_attachment(
-                Some("wp-content/plugins/fixture"),
-                "/tmp/homeboy-14782-missing-non-github".to_string(),
-            );
-
-            let err = resolve_project_component(&project, "fixture")
-                .expect_err("a non-GitHub remote_url cannot resolve without a checkout");
-
-            assert_eq!(err.code.as_str(), "validation.invalid_argument");
-            assert!(err.message.contains("missing local_path"));
-        });
-    }
-
     #[cfg(unix)]
     fn write_fake_binary(path: &std::path::Path, script: &str) {
         homeboy_test_support::write_executable(path, script, 0o755).expect("write fake binary");
     }
 
+    /// Checkout-less resolution (#14782) fetches the portable `homeboy.json`
+    /// from the GitHub Release and applies the same remote_path precedence as
+    /// local discovery (#244), while preserving the declared local_path that
+    /// downstream checkout guards key off.
     #[cfg(unix)]
     #[test]
-    fn checkout_less_resolution_resolves_via_release_when_remote_url_is_github() {
-        with_isolated_home(|home| {
-            write_standalone_component(
-                home,
-                "fixture",
-                serde_json::json!({
-                    "remote_url": "https://github.com/Extra-Chill-Test/checkout-less-fixture.git"
-                }),
-            );
-            let project =
-                project_with_attachment(None, "/tmp/homeboy-14782-checkout-less".to_string());
-
-            let bin_dir = home.path().join("fake-bin");
-            std::fs::create_dir_all(&bin_dir).expect("bin dir");
-            write_fake_binary(
-                &bin_dir.join("gh"),
-                "#!/bin/sh\necho fake-test-token\nexit 0\n",
-            );
-            write_fake_binary(
-                &bin_dir.join("curl"),
-                "#!/bin/sh\n\
-                 cat > /dev/null 2>&1\n\
-                 for arg in \"$@\"; do last=\"$arg\"; done\n\
-                 case \"$last\" in\n\
-                 \x20\x20*releases/latest*) printf '%s' '{\"tag_name\":\"v1.2.3\"}'; printf '\\n200' ;;\n\
-                 \x20\x20*homeboy.json*) printf '%s' '{\"id\":\"fixture\",\"remote_path\":\"wp-content/plugins/fixture\",\"build_artifact\":\"dist/fixture.zip\"}'; printf '\\n200' ;;\n\
-                 \x20\x20*) printf '\\n404' ;;\n\
-                 esac\n",
-            );
-            let existing = std::env::var_os("PATH").unwrap_or_default();
-            let mut new_path = bin_dir.as_os_str().to_os_string();
-            new_path.push(":");
-            new_path.push(existing);
-            let _path = EnvVarGuard::set("PATH", new_path);
-
-            let component = resolve_project_component(&project, "fixture")
-                .expect("resolves via the release fallback without a checkout");
-
-            assert_eq!(component.id, "fixture");
-            assert_eq!(component.remote_path, "wp-content/plugins/fixture");
-            assert_eq!(
-                component.build_artifact.as_deref(),
-                Some("dist/fixture.zip")
-            );
-            // The attachment's declared (nonexistent) local_path is preserved,
-            // not overwritten by anything discovered from the release — every
-            // checkout-touching guard downstream keys off this being absent.
-            assert_eq!(component.local_path, "/tmp/homeboy-14782-checkout-less");
-        });
-    }
-
-    /// Checkout-less mirror of `attachment_remote_path_overrides_portable_remote_path`
-    /// (#244). The portable `homeboy.json` fetched from the GitHub Release declares
-    /// the exact `../wp-content/plugins/fixture` shape that made this precedence
-    /// worth testing in the first place; the attachment declares the corrected
-    /// value and an *empty* `local_path`, so resolution must take the
-    /// checkout-less branch rather than the local-discovery one this precedence
-    /// was previously only proven on.
-    #[cfg(unix)]
-    #[test]
-    fn checkout_less_resolution_honours_attachment_remote_path_override() {
-        with_isolated_home(|home| {
-            write_standalone_component(
-                home,
-                "fixture",
-                serde_json::json!({
-                    "remote_url": "https://github.com/Extra-Chill-Test/checkout-less-fixture-2.git"
-                }),
-            );
-            let project = project_with_attachment(
+    fn checkout_less_resolution_resolves_via_release_with_local_precedence() {
+        for (index, (portable, attachment, override_remote_path, expected)) in [
+            (
+                "wp-content/plugins/fixture",
+                None,
+                None,
+                "wp-content/plugins/fixture",
+            ),
+            (
+                "../wp-content/plugins/fixture",
                 Some("wp-content/plugins/fixture"),
-                "/tmp/homeboy-14782-checkout-less-override".to_string(),
-            );
-
-            let bin_dir = home.path().join("fake-bin");
-            std::fs::create_dir_all(&bin_dir).expect("bin dir");
-            write_fake_binary(
-                &bin_dir.join("gh"),
-                "#!/bin/sh\necho fake-test-token\nexit 0\n",
-            );
-            write_fake_binary(
-                &bin_dir.join("curl"),
-                "#!/bin/sh\n\
-                 cat > /dev/null 2>&1\n\
-                 for arg in \"$@\"; do last=\"$arg\"; done\n\
-                 case \"$last\" in\n\
-                 \x20\x20*releases/latest*) printf '%s' '{\"tag_name\":\"v1.2.3\"}'; printf '\\n200' ;;\n\
-                 \x20\x20*homeboy.json*) printf '%s' '{\"id\":\"fixture\",\"remote_path\":\"../wp-content/plugins/fixture\",\"build_artifact\":\"dist/fixture.zip\"}'; printf '\\n200' ;;\n\
-                 \x20\x20*) printf '\\n404' ;;\n\
-                 esac\n",
-            );
-            let existing = std::env::var_os("PATH").unwrap_or_default();
-            let mut new_path = bin_dir.as_os_str().to_os_string();
-            new_path.push(":");
-            new_path.push(existing);
-            let _path = EnvVarGuard::set("PATH", new_path);
-
-            let component = resolve_project_component(&project, "fixture")
-                .expect("resolves via the release fallback with the attachment override");
-
-            assert_eq!(component.remote_path, "wp-content/plugins/fixture");
-        });
-    }
-
-    /// Checkout-less mirror of `component_overrides_still_win_over_attachment_remote_path`
-    /// (#244): a project `component_overrides` entry must still beat the
-    /// attachment's `remote_path` when resolution took the checkout-less branch,
-    /// exactly as it does on the local-discovery branch.
-    #[cfg(unix)]
-    #[test]
-    fn checkout_less_resolution_component_overrides_still_win_over_attachment_remote_path() {
-        with_isolated_home(|home| {
-            write_standalone_component(
-                home,
-                "fixture",
-                serde_json::json!({
-                    "remote_url": "https://github.com/Extra-Chill-Test/checkout-less-fixture-3.git"
-                }),
-            );
-            let mut project = project_with_attachment(
+                None,
+                "wp-content/plugins/fixture",
+            ),
+            (
+                "portable/plugins/fixture",
                 Some("attachment/plugins/fixture"),
-                "/tmp/homeboy-14782-checkout-less-precedence".to_string(),
-            );
-            project.component_overrides.insert(
-                "fixture".to_string(),
-                ProjectComponentOverrides {
-                    remote_path: Some("override/plugins/fixture".to_string()),
-                    ..Default::default()
-                },
-            );
+                Some("override/plugins/fixture"),
+                "override/plugins/fixture",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            with_isolated_home(|home| {
+                write_standalone_component(
+                    home,
+                    "fixture",
+                    serde_json::json!({
+                        "remote_url": format!(
+                            "https://github.com/Extra-Chill-Test/checkout-less-fixture-{index}.git"
+                        )
+                    }),
+                );
+                let local_path = format!("/tmp/homeboy-14782-checkout-less-{index}");
+                let mut project = project_with_attachment(attachment, local_path.clone());
+                if let Some(remote_path) = override_remote_path {
+                    project.component_overrides.insert(
+                        "fixture".to_string(),
+                        ProjectComponentOverrides {
+                            remote_path: Some(remote_path.to_string()),
+                            ..Default::default()
+                        },
+                    );
+                }
 
-            let bin_dir = home.path().join("fake-bin");
-            std::fs::create_dir_all(&bin_dir).expect("bin dir");
-            write_fake_binary(
-                &bin_dir.join("gh"),
-                "#!/bin/sh\necho fake-test-token\nexit 0\n",
-            );
-            write_fake_binary(
-                &bin_dir.join("curl"),
-                "#!/bin/sh\n\
-                 cat > /dev/null 2>&1\n\
-                 for arg in \"$@\"; do last=\"$arg\"; done\n\
-                 case \"$last\" in\n\
-                 \x20\x20*releases/latest*) printf '%s' '{\"tag_name\":\"v1.2.3\"}'; printf '\\n200' ;;\n\
-                 \x20\x20*homeboy.json*) printf '%s' '{\"id\":\"fixture\",\"remote_path\":\"portable/plugins/fixture\",\"build_artifact\":\"dist/fixture.zip\"}'; printf '\\n200' ;;\n\
-                 \x20\x20*) printf '\\n404' ;;\n\
-                 esac\n",
-            );
-            let existing = std::env::var_os("PATH").unwrap_or_default();
-            let mut new_path = bin_dir.as_os_str().to_os_string();
-            new_path.push(":");
-            new_path.push(existing);
-            let _path = EnvVarGuard::set("PATH", new_path);
+                let bin_dir = home.path().join("fake-bin");
+                std::fs::create_dir_all(&bin_dir).expect("bin dir");
+                write_fake_binary(
+                    &bin_dir.join("gh"),
+                    "#!/bin/sh\necho fake-test-token\nexit 0\n",
+                );
+                let manifest = serde_json::json!({
+                    "id": "fixture",
+                    "remote_path": portable,
+                    "build_artifact": "dist/fixture.zip"
+                });
+                write_fake_binary(
+                    &bin_dir.join("curl"),
+                    &format!(
+                        "#!/bin/sh\n\
+                         cat > /dev/null 2>&1\n\
+                         for arg in \"$@\"; do last=\"$arg\"; done\n\
+                         case \"$last\" in\n\
+                         \x20\x20*releases/latest*) printf '%s' '{{\"tag_name\":\"v1.2.3\"}}'; printf '\\n200' ;;\n\
+                         \x20\x20*homeboy.json*) printf '%s' '{manifest}'; printf '\\n200' ;;\n\
+                         \x20\x20*) printf '\\n404' ;;\n\
+                         esac\n"
+                    ),
+                );
+                let existing = std::env::var_os("PATH").unwrap_or_default();
+                let mut new_path = bin_dir.as_os_str().to_os_string();
+                new_path.push(":");
+                new_path.push(existing);
+                let _path = EnvVarGuard::set("PATH", new_path);
 
-            let component = resolve_project_component(&project, "fixture")
-                .expect("resolves via the release fallback with a component override");
+                let component = resolve_project_component(&project, "fixture")
+                    .expect("resolves via the release fallback without a checkout");
 
-            assert_eq!(component.remote_path, "override/plugins/fixture");
-        });
+                assert_eq!(component.id, "fixture");
+                assert_eq!(component.remote_path, expected, "case {index}");
+                assert_eq!(
+                    component.build_artifact.as_deref(),
+                    Some("dist/fixture.zip")
+                );
+                assert_eq!(component.local_path, local_path);
+            });
+        }
     }
 }

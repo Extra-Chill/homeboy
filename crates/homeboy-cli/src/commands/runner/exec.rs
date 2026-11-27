@@ -16,6 +16,7 @@ use super::super::CmdResult;
 #[derive(Debug, Clone)]
 pub(super) struct RunnerExecInput {
     pub runner_id: String,
+    pub max_queue_wait: Option<Duration>,
     pub command: Vec<String>,
     pub cwd: Option<String>,
     pub sync_workspace: Option<String>,
@@ -38,6 +39,8 @@ pub(super) struct RunnerExecInput {
     pub summary_outputs: Vec<String>,
     pub read_only_artifact: bool,
     pub raw: bool,
+    pub detach: bool,
+    pub allow_concurrent: bool,
     pub extension_env_providers: Vec<String>,
 }
 
@@ -45,6 +48,7 @@ impl RunnerExecInput {
     pub(super) fn new(runner_id: impl Into<String>, command: Vec<String>) -> Self {
         Self {
             runner_id: runner_id.into(),
+            max_queue_wait: None,
             command,
             cwd: None,
             sync_workspace: None,
@@ -67,6 +71,8 @@ impl RunnerExecInput {
             summary_outputs: Vec::new(),
             read_only_artifact: false,
             raw: false,
+            detach: false,
+            allow_concurrent: false,
             extension_env_providers: Vec::new(),
         }
     }
@@ -75,6 +81,7 @@ impl RunnerExecInput {
 pub(super) fn execute(input: RunnerExecInput) -> CmdResult<RunnerExecOutput> {
     let RunnerExecInput {
         runner_id,
+        max_queue_wait,
         command,
         cwd,
         sync_workspace,
@@ -97,6 +104,8 @@ pub(super) fn execute(input: RunnerExecInput) -> CmdResult<RunnerExecOutput> {
         summary_outputs,
         read_only_artifact,
         raw,
+        detach,
+        allow_concurrent,
         extension_env_providers,
     } = input;
     validate_runner_exec_invocation_shape(script_file.as_deref(), &command)?;
@@ -166,12 +175,14 @@ pub(super) fn execute(input: RunnerExecInput) -> CmdResult<RunnerExecOutput> {
         lab_runner_workload: None,
         run_id,
         run_id_owns_generic_exec: true,
-        detach_after_handoff: false,
+        detach_after_handoff: detach,
+        allow_concurrent,
         mirror_evidence: !read_only_artifact,
         print_handoff: should_print_handoff(raw, read_only_artifact),
         read_only_artifact_access: read_only_artifact,
     };
     let mut request = runner::RunnerExecRequest::new(runner_id, options);
+    request.max_queue_wait = max_queue_wait;
     request.sync_workspace = sync_workspace;
     request.workspace_ref = workspace_ref;
     request.hydrate_deps = hydrate_deps;
@@ -193,7 +204,7 @@ fn normalize_extension_env_providers(extension_ids: Vec<String>) -> Vec<String> 
     providers
 }
 
-pub(super) fn should_print_handoff(raw: bool, read_only_artifact: bool) -> bool {
+fn should_print_handoff(raw: bool, read_only_artifact: bool) -> bool {
     !raw && !read_only_artifact
 }
 

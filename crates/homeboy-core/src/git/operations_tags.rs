@@ -181,8 +181,8 @@ pub fn fetch_origin(path: &str) -> Result<()> {
 /// shallow, unshallows it so `git merge-base --is-ancestor` can be computed
 /// accurately. It is intentionally best-effort: a missing network or remote is
 /// not fatal here, because the downstream guard still runs against whatever
-/// local history exists and remains correct — it just no longer refuses a tag
-/// that was only missing because tags were never fetched.
+/// local history exists and remains correct; fetching only keeps it from
+/// refusing a tag that was missing because tags were never fetched.
 pub fn fetch_tags(path: &str) -> Result<()> {
     if !super::is_git_repo(path) {
         return Ok(());
@@ -371,6 +371,7 @@ mod is_ancestor_tests {
         let (_remote, clone, pushed) = remote_and_clone();
         let path = clone.path().to_str().unwrap();
 
+        fetch_origin(path).expect("fetch origin should succeed");
         // Existing branch resolves to the pushed commit.
         assert_eq!(
             remote_branch_commit(path, "main").unwrap().as_deref(),
@@ -378,12 +379,5 @@ mod is_ancestor_tests {
         );
         // A branch that does not exist on the remote returns None.
         assert_eq!(remote_branch_commit(path, "does-not-exist").unwrap(), None);
-    }
-
-    #[test]
-    fn test_fetch_origin() {
-        let (_remote, clone, _pushed) = remote_and_clone();
-        // A plain fetch against a healthy remote must succeed.
-        fetch_origin(clone.path().to_str().unwrap()).expect("fetch origin should succeed");
     }
 }

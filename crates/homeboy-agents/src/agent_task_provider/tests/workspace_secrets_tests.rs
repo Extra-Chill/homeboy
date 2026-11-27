@@ -2,91 +2,58 @@ use super::common::request;
 use super::*;
 
 #[test]
-fn provider_workspace_materialization_declares_cwd_git_checkout_requirement() {
-    let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
-    provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
-        cwd: Some(WorkspaceCwdMode::GitCheckout.to_string()),
-        requires_git: None,
-        write_scope: None,
-        artifact_paths: Vec::new(),
-        spec: None,
-        mounts: Vec::new(),
-        apply_back: AgentTaskRuntimeApplyBack::default(),
-        extra: BTreeMap::new(),
-    });
-
-    assert!(provider_requires_cwd_git_checkout_with_providers(
-        &[provider],
-        "test",
-        None
-    ));
-}
-
-#[test]
-fn provider_workspace_materialization_declares_requires_git_requirement() {
-    let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
-    provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
-        cwd: None,
-        requires_git: Some(true),
-        write_scope: Some("artifacts".to_string()),
-        artifact_paths: vec!["provider-artifacts".to_string()],
-        spec: None,
-        mounts: Vec::new(),
-        apply_back: AgentTaskRuntimeApplyBack::default(),
-        extra: BTreeMap::new(),
-    });
-
-    assert!(provider_requires_cwd_git_checkout_with_providers(
-        &[provider],
-        "test",
-        None
-    ));
-}
-
-#[test]
-fn provider_apply_back_contract_declares_git_checkout_requirement() {
-    let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
-    provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
-        apply_back: AgentTaskRuntimeApplyBack {
-            requires_git_checkout: Some(true),
-            strategy: Some(AgentTaskApplyBackStrategy::MutationArtifacts.to_string()),
-            mutation_artifacts: vec![AgentTaskRuntimeMutationArtifact {
-                name: "patch".to_string(),
-                path: "outputs.runtime.artifacts.patch".to_string(),
-                kind: Some("patch".to_string()),
-                semantic_key: Some("workspace.patch".to_string()),
-                apply_method: Some("git_apply".to_string()),
-            }],
-        },
-        ..AgentTaskProviderWorkspaceMaterialization::default()
-    });
-
-    assert!(provider_requires_cwd_git_checkout_with_providers(
-        &[provider],
-        "test",
-        None
-    ));
-}
-
-#[test]
-fn provider_workspace_materialization_ignores_unselected_provider() {
-    let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
-    provider.workspace_materialization = Some(AgentTaskProviderWorkspaceMaterialization {
-        cwd: Some(WorkspaceCwdMode::GitCheckout.to_string()),
-        requires_git: None,
-        write_scope: None,
-        artifact_paths: Vec::new(),
-        spec: None,
-        mounts: Vec::new(),
-        apply_back: AgentTaskRuntimeApplyBack::default(),
-        extra: BTreeMap::new(),
-    });
-
-    assert!(!provider_requires_cwd_git_checkout_with_providers(
-        &[provider],
-        "other",
-        None
-    ));
+fn selected_provider_materialization_declares_git_checkout_requirement() {
+    let apply_back = AgentTaskRuntimeApplyBack {
+        requires_git_checkout: Some(true),
+        strategy: Some(AgentTaskApplyBackStrategy::MutationArtifacts.to_string()),
+        mutation_artifacts: vec![AgentTaskRuntimeMutationArtifact {
+            name: "patch".to_string(),
+            path: "outputs.runtime.artifacts.patch".to_string(),
+            ..AgentTaskRuntimeMutationArtifact::default()
+        }],
+    };
+    for (materialization, backend, expected) in [
+        (
+            AgentTaskProviderWorkspaceMaterialization {
+                cwd: Some(WorkspaceCwdMode::GitCheckout.to_string()),
+                ..AgentTaskProviderWorkspaceMaterialization::default()
+            },
+            "test",
+            true,
+        ),
+        (
+            AgentTaskProviderWorkspaceMaterialization {
+                requires_git: Some(true),
+                write_scope: Some("artifacts".to_string()),
+                ..AgentTaskProviderWorkspaceMaterialization::default()
+            },
+            "test",
+            true,
+        ),
+        (
+            AgentTaskProviderWorkspaceMaterialization {
+                apply_back,
+                ..AgentTaskProviderWorkspaceMaterialization::default()
+            },
+            "test",
+            true,
+        ),
+        (
+            AgentTaskProviderWorkspaceMaterialization {
+                cwd: Some(WorkspaceCwdMode::GitCheckout.to_string()),
+                ..AgentTaskProviderWorkspaceMaterialization::default()
+            },
+            "other",
+            false,
+        ),
+    ] {
+        let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
+        provider.workspace_materialization = Some(materialization);
+        assert_eq!(
+            provider_requires_cwd_git_checkout_with_providers(&[provider], backend, None),
+            expected
+        );
+    }
 }
 
 #[test]

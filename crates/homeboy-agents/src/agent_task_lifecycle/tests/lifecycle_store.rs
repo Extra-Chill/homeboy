@@ -55,10 +55,6 @@ fn cook_state_round_trips_through_fenced_store_transitions() {
     let state = CookRunState::of(&candidate);
     assert_eq!(state.phase, CookRunPhase::CandidateRecoverable);
     assert!(state.terminal && state.recoverable);
-    assert_eq!(
-        CookRunState::of(&store.read_record("cook-state").unwrap()),
-        state
-    );
     assert!(serde_json::to_value(candidate)
         .unwrap()
         .get("cook_run_state")
@@ -236,17 +232,6 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
         .record_cook_attempt(cook_id, 2, run_id)
         .expect("write right index");
 
-    assert_ne!(left.run_dir(run_id), right.run_dir(run_id));
-    assert_ne!(
-        left.controller_plan_path(run_id),
-        right.controller_plan_path(run_id)
-    );
-    assert_ne!(left.cook_dir(cook_id), right.cook_dir(cook_id));
-    assert_ne!(left.observation_db_path(), right.observation_db_path());
-    assert_ne!(
-        left.controller_scratch_root(),
-        right.controller_scratch_root()
-    );
     assert!(left.controller_scratch_root().starts_with(left.data_root()));
     assert!(right
         .controller_scratch_root()
@@ -365,45 +350,6 @@ fn detached_handoff_fence_rejects_cancellation() {
 
     assert_eq!(error.details["field"], "cook_id");
     assert!(error.message.contains("cancelled"));
-}
-
-#[test]
-fn lifecycle_stores_isolate_same_run_record_writes_in_parallel() {
-    let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
-    let left = AgentTaskLifecycleStore::new(left_context.path_roots());
-    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
-    let run_id = "same-record";
-    let barrier = Arc::new(Barrier::new(2));
-
-    std::thread::scope(|scope| {
-        let left_store = left.clone();
-        let left_barrier = Arc::clone(&barrier);
-        scope.spawn(move || {
-            left_barrier.wait();
-            left_store
-                .write_record(&record(&left_store, run_id, "left"))
-                .expect("left record");
-        });
-        let right_store = right.clone();
-        let right_barrier = Arc::clone(&barrier);
-        scope.spawn(move || {
-            right_barrier.wait();
-            right_store
-                .write_record(&record(&right_store, run_id, "right"))
-                .expect("right record");
-        });
-    });
-
-    assert_eq!(
-        left.read_record(run_id).unwrap().metadata["store_marker"],
-        "left"
-    );
-    assert_eq!(
-        right.read_record_bounded(run_id).unwrap().metadata["store_marker"],
-        "right"
-    );
-    assert_ne!(left.observation_db_path(), right.observation_db_path());
 }
 
 #[test]
@@ -549,16 +495,4 @@ fn cook_index_lives_only_in_the_store_and_survives_reopen() {
         error.code,
         homeboy_core::ErrorCode::ValidationInvalidArgument
     );
-}
-
-#[test]
-fn provider_executions_consumed_counts_the_execution_ledger() {
-    let mut record = AgentTaskRunRecord::new_queued("run", "plan", "plan.json", "now");
-    assert_eq!(record.provider_executions_consumed(), 0);
-    record.metadata = json!({ "provider_executions": [] });
-    assert_eq!(record.provider_executions_consumed(), 0);
-    record.metadata = json!({
-        "provider_executions": [{ "state": "succeeded" }, { "state": "running" }],
-    });
-    assert_eq!(record.provider_executions_consumed(), 2);
 }

@@ -1,5 +1,5 @@
 use homeboy_engine_primitives::content_hash;
-use homeboy_upgrade::release_slot::materialize_script;
+use homeboy_upgrade::upgrade::release_slot::materialize_script;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -1829,7 +1829,12 @@ fn reconciled_refresh_admission_in_roots(
     let admission = reconciled_refresh_admission_with(
         runner_id,
         super::connection::reconcile_status,
-        super::runner_admission_snapshot_for_status,
+        |status| {
+            super::runner_admission_snapshot_for_status(
+                status,
+                super::RunnerAdmissionReadiness::Observation,
+            )
+        },
     )?;
     if admission
         .status
@@ -1840,7 +1845,10 @@ fn reconciled_refresh_admission_in_roots(
         let runner = load(runner_id)?;
         if runner.settings.service_managed {
             let upgrade_status = super::connection::pre_describe_upgrade_status(&admission.status)?;
-            let upgrade = super::runner_admission_snapshot_for_status(upgrade_status);
+            let upgrade = super::runner_admission_snapshot_for_status(
+                upgrade_status,
+                super::RunnerAdmissionReadiness::Observation,
+            );
             if !upgrade.summary.safe_to_rotate {
                 return Err(Error::validation_invalid_argument(
                     "upgrade_ownership",
@@ -2482,8 +2490,8 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<bool> {
     let script = materialize_script(tag, &release_binaries_dir(root));
     // The daemon prefetch and `homeboy upgrade` both acquire from this
     // controller; serialize them so the upgrade reuses an in-flight download.
-    homeboy_upgrade::release_slot::with_acquisition_lock(
-        &homeboy_upgrade::release_slot::binaries_dir()?,
+    homeboy_upgrade::upgrade::release_slot::with_acquisition_lock(
+        &homeboy_upgrade::upgrade::release_slot::binaries_dir()?,
         &format!("runner-{runner_id}"),
         || {
             let transport = refresh_transport_in_roots(&runner)?;
@@ -2500,9 +2508,7 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<bool> {
                     output.stderr.trim()
                 )));
             }
-            Ok(homeboy_upgrade::release_slot::reused_release_cache(
-                &output.stdout,
-            ))
+            Ok(homeboy_upgrade::upgrade::release_slot::reused_release_cache(&output.stdout))
         },
     )
 }

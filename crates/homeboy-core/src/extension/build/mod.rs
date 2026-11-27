@@ -761,7 +761,7 @@ fn execute_uncached_build_component(
             .timeout(Some(build_timeout))
             .passthrough(false)
             .stderr_passthrough(true)
-            // Legacy env var for backward compat with existing build scripts
+            // WordPress build validation reads the component path from HOMEBOY_PLUGIN_PATH.
             .env("HOMEBOY_PLUGIN_PATH", &comp.local_path);
         for (key, value) in build_env(changed_since, changed_scope.as_ref()) {
             runner = runner.env(&key, &value);
@@ -1241,26 +1241,21 @@ mod tests {
     }
 
     #[test]
-    fn provider_changed_scope_falls_back_to_full_for_invalid_json() {
-        let decision =
-            provider_scope_decision("origin/main", Some("fixture".to_string()), "not-json");
+    fn provider_changed_scope_falls_back_to_full_for_unusable_output() {
+        for (output, reason) in [
+            ("not-json", "valid JSON"),
+            (
+                r#"{"outcome":"maybe","reason":"uncertain"}"#,
+                "unknown outcome",
+            ),
+        ] {
+            let decision =
+                provider_scope_decision("origin/main", Some("fixture".to_string()), output);
 
-        assert!(matches!(decision.outcome, BuildChangedScopeOutcome::Full));
-        assert_eq!(decision.report.outcome, "full");
-        assert!(decision.report.reason.contains("valid JSON"));
-    }
-
-    #[test]
-    fn provider_changed_scope_falls_back_to_full_for_unknown_outcome() {
-        let decision = provider_scope_decision(
-            "origin/main",
-            Some("fixture".to_string()),
-            r#"{"outcome":"maybe","reason":"uncertain"}"#,
-        );
-
-        assert!(matches!(decision.outcome, BuildChangedScopeOutcome::Full));
-        assert_eq!(decision.report.outcome, "full");
-        assert!(decision.report.reason.contains("unknown outcome"));
+            assert!(matches!(decision.outcome, BuildChangedScopeOutcome::Full));
+            assert_eq!(decision.report.outcome, "full");
+            assert!(decision.report.reason.contains(reason), "{output}");
+        }
     }
 
     #[test]

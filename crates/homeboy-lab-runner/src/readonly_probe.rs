@@ -266,37 +266,34 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_probe_is_distinguished_from_a_timeout() {
-        clear_degradations();
-
-        assert!(record_probe_outcome(
-            "runner_homeboy_identity",
-            Some("homeboy-lab"),
-            Instant::now(),
-            Duration::from_secs(15),
-            &output(
-                false,
-                "Homeboy interrupted by signal 15; terminated child process group"
+    fn probe_outcome_classifies_cancellation_separately_and_ignores_healthy_probes() {
+        let cases = [
+            (
+                output(
+                    false,
+                    "Homeboy interrupted by signal 15; terminated child process group",
+                ),
+                Some(REASON_PROBE_INTERRUPTED),
             ),
-        ));
+            (output(false, ""), None),
+        ];
 
-        let degradations = take_degradations();
-        assert_eq!(degradations.len(), 1);
-        assert_eq!(degradations[0].reason_code, REASON_PROBE_INTERRUPTED);
-    }
-
-    #[test]
-    fn a_healthy_probe_records_nothing() {
-        clear_degradations();
-
-        assert!(!record_probe_outcome(
-            "runner_homeboy_identity",
-            Some("homeboy-lab"),
-            Instant::now(),
-            Duration::from_secs(15),
-            &output(false, ""),
-        ));
-        assert!(take_degradations().is_empty());
+        for (probe_output, expected) in cases {
+            clear_degradations();
+            let recorded = record_probe_outcome(
+                "runner_homeboy_identity",
+                Some("homeboy-lab"),
+                Instant::now(),
+                Duration::from_secs(15),
+                &probe_output,
+            );
+            let reasons: Vec<_> = take_degradations()
+                .into_iter()
+                .map(|degradation| degradation.reason_code)
+                .collect();
+            assert_eq!(recorded, expected.is_some());
+            assert_eq!(reasons, expected.into_iter().collect::<Vec<_>>());
+        }
     }
 
     #[test]

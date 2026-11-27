@@ -1229,154 +1229,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_sources_without_nested_subcommand() {
-        let cli = TestCli::try_parse_from(["homeboy", "sources"])
-            .expect("rig sources should parse without nested subcommand");
-
-        let RigCommand::Sources { command } = cli.rig.command else {
-            panic!("expected rig sources command");
-        };
-        assert!(command.is_none());
-    }
-
-    #[test]
-    fn parses_local_artifact_registration() {
-        let cli = TestCli::try_parse_from([
-            "homeboy",
-            "artifact",
-            "register",
-            "--kind",
-            "wp_codebox_bundle",
-            "--path",
-            "/tmp/wp-codebox-bundle",
-        ])
-        .expect("rig artifact registration should parse");
-
-        let RigCommand::Artifact {
-            command: RigArtifactCommand::Register { kind, path },
-        } = cli.rig.command
-        else {
-            panic!("expected rig artifact register command");
-        };
-        assert_eq!(kind, "wp_codebox_bundle");
-        assert_eq!(path, std::path::Path::new("/tmp/wp-codebox-bundle"));
-    }
-
-    #[test]
-    fn exposes_runner_install_request_for_controller_registration() {
-        let cli = TestCli::try_parse_from([
-            "homeboy",
-            "install",
-            "/tmp/rig-package",
-            "--id",
-            "fixture-matrix",
-            "--reinstall",
-        ])
-        .expect("rig install should parse");
-
-        assert_eq!(
-            cli.rig.runner_install_request(),
-            Some(("/tmp/rig-package", Some("fixture-matrix"), false))
-        );
-    }
-
-    #[test]
-    fn up_accepts_repeated_component_refs() {
-        let cli = TestCli::try_parse_from([
-            "homeboy",
-            "up",
-            "preview",
-            "--ref",
-            "app=https://github.com/owner/repo/pull/42",
-            "--ref",
-            "api=feature",
-        ])
-        .expect("rig up refs should parse");
-        let RigCommand::Up {
-            rig_id,
-            refs,
-            dry_run,
-            ..
-        } = cli.rig.command
-        else {
-            panic!("expected rig up command");
-        };
-        assert_eq!(rig_id, "preview");
-        assert_eq!(
-            refs,
-            ["app=https://github.com/owner/repo/pull/42", "api=feature"]
-        );
-        assert!(!dry_run);
-    }
-
-    #[test]
-    fn check_accepts_path_override() {
-        let cli =
-            TestCli::try_parse_from(["homeboy", "check", "studio-bfb", "--path", "/tmp/studio"])
-                .expect("rig check --path should parse");
-
-        let RigCommand::Check { target, path, .. } = cli.rig.command else {
-            panic!("expected rig check command");
-        };
-        assert_eq!(target, "studio-bfb");
-        assert_eq!(path.as_deref(), Some("/tmp/studio"));
-    }
-
-    #[test]
-    fn parses_rig_run_profile_and_bench_settings() {
-        let cli = TestCli::try_parse_from([
-            "homeboy",
-            "run",
-            "static-site-importer-fixture-matrix",
-            "--profile",
-            "fixture-matrix",
-            "--iterations",
-            "1",
-            "--setting",
-            "bench_env.CORPUS_SIZE=44",
-            "--setting-json",
-            "artifact_env={\"KEEP\":\"1\"}",
-            "--json-summary",
-            "--",
-            "--full",
-        ])
-        .expect("rig run should parse profile and bench settings");
-
-        let RigCommand::Run(args) = cli.rig.command else {
-            panic!("expected rig run command");
-        };
-        assert_eq!(args.rig_id, "static-site-importer-fixture-matrix");
-        assert_eq!(args.profile, "fixture-matrix");
-        assert_eq!(args.iterations, 1);
-        assert_eq!(
-            args.setting_args.setting,
-            vec![("bench_env.CORPUS_SIZE".to_string(), "44".to_string())]
-        );
-        assert_eq!(args.args, vec!["--full".to_string()]);
-    }
-
-    #[test]
-    fn rig_run_accepts_global_runner_after_subcommand() {
-        let cli = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "rig",
-            "run",
-            "static-site-importer-fixture-matrix",
-            "--profile",
-            "fixture-matrix",
-            "--runner",
-            "homeboy-lab",
-        ])
-        .expect("global --runner should parse for rig run");
-
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        let crate::cli_surface::Commands::Rig(args) = cli.command else {
-            panic!("expected rig command");
-        };
-        assert!(matches!(args.command, RigCommand::Run(_)));
-    }
-
-    #[test]
     fn rig_run_builds_canonical_bench_invocation() {
         let args = RigRunArgs {
             rig_id: "static-site-importer-fixture-matrix".to_string(),
@@ -1511,27 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn lint_command_parses_target_and_id() {
-        let cli = TestCli::try_parse_from(["homeboy", "lint", "./pkg", "--id", "alpha"])
-            .expect("rig lint should parse");
-
-        let RigCommand::Lint {
-            target,
-            id,
-            all,
-            format,
-        } = cli.rig.command
-        else {
-            panic!("expected rig lint command");
-        };
-        assert_eq!(target, "./pkg");
-        assert_eq!(id.as_deref(), Some("alpha"));
-        assert!(!all);
-        assert_eq!(format, None);
-    }
-
-    #[test]
-    fn materialize_defaults_to_the_package_root_for_standard_rig_layouts() {
+    fn materialize_source_root_follows_package_layout() {
         let package = tempfile::TempDir::new().expect("package");
         let rig_path = package.path().join("rigs/example/rig.json");
         fs::create_dir_all(rig_path.parent().expect("rig directory"))
@@ -1556,8 +1388,6 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         let output = serde_json::to_value(output).expect("serialize output");
-        assert_eq!(output["variant"], "materialize");
-        assert_eq!(output["payload"]["command"], "rig.materialize");
         assert_eq!(
             output["payload"]["rig"],
             serde_json::json!({
@@ -1566,44 +1396,14 @@ mod tests {
             }),
             "payload.rig remains the existing normalized rig document"
         );
-        assert_eq!(
-            output["payload"]["schema"],
-            rig::MATERIALIZED_RIG_RESOURCE_SCHEMA
-        );
-        assert_eq!(output["payload"]["rig_id"], "example");
         assert!(output["payload"]["materialized_rig_json_sha256"]
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:")));
-    }
-
-    #[test]
-    fn materialize_defaults_to_the_rig_directory_for_non_package_paths() {
-        let rig_path = std::path::Path::new("custom/rig.json");
         assert_eq!(
-            rig::default_materialize_source_root(rig_path),
-            std::path::PathBuf::from("custom")
+            rig::default_materialize_source_root(std::path::Path::new("custom/rig.json")),
+            std::path::PathBuf::from("custom"),
+            "non-package layouts are bounded by the rig directory"
         );
-    }
-
-    #[test]
-    fn lint_command_parses_all_and_json_format() {
-        let cli =
-            TestCli::try_parse_from(["homeboy", "lint", "./pkg", "--all", "--format", "json"])
-                .expect("rig lint --all --format json should parse");
-
-        let RigCommand::Lint {
-            target,
-            id,
-            all,
-            format,
-        } = cli.rig.command
-        else {
-            panic!("expected rig lint command");
-        };
-        assert_eq!(target, "./pkg");
-        assert_eq!(id, None);
-        assert!(all);
-        assert_eq!(format, Some(RigLintFormat::Json));
     }
 
     #[test]

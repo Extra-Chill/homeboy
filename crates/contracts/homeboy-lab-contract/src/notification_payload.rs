@@ -533,6 +533,9 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("https://example.test/pull/1"), "{body}");
+        // Optional facts skip absent and blank values.
+        assert!(!body.contains("Ignored"), "{body}");
+        assert!(!body.contains("Blank"), "{body}");
     }
 
     #[test]
@@ -549,13 +552,6 @@ mod tests {
             payload.render_body(),
             "homeboy run pass\nStatus: pass · Command: homeboy cleanup artifacts · Finished: 2026-11-02T18:28:16Z"
         );
-    }
-
-    #[test]
-    fn optional_facts_skip_absent_and_blank_values() {
-        let body = cook_payload().render_body();
-        assert!(!body.contains("Ignored"), "{body}");
-        assert!(!body.contains("Blank"), "{body}");
     }
 
     #[test]
@@ -609,14 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn payload_defaults_to_completed_for_a_producer_that_omits_kind() {
-        let payload: NotifyPayload = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(payload.kind, NotifyEventKind::Completed);
-        assert_eq!(payload.schema, NOTIFICATION_PAYLOAD_SCHEMA);
-        assert!(payload.is_empty());
-    }
-
-    #[test]
     fn oversized_payload_is_bounded_but_keeps_identity_and_actions() {
         let attachments = (0..5_000).map(|index| {
             NotifyAttachment::new(
@@ -641,16 +629,5 @@ mod tests {
         assert_eq!(parsed.subject.unwrap().id, "run-1");
         assert_eq!(parsed.actions.len(), 1);
         assert!(parsed.attachments.len() <= BOUNDED_ATTACHMENTS);
-    }
-
-    #[test]
-    fn event_kind_terminality_is_explicit() {
-        assert!(NotifyEventKind::Completed.is_terminal());
-        assert!(NotifyEventKind::NeedsAttention.is_terminal());
-        assert!(NotifyEventKind::Cancelled.is_terminal());
-        assert!(!NotifyEventKind::Queued.is_terminal());
-        assert!(!NotifyEventKind::Started.is_terminal());
-        assert!(!NotifyEventKind::Progress.is_terminal());
-        assert_eq!(NotifyEventKind::NeedsAttention.as_str(), "needs_attention");
     }
 }

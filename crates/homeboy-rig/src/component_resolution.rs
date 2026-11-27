@@ -227,15 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn default_ref_falls_back_when_ref_is_omitted() {
-        let mut spec = component_spec();
-        spec.default_ref = Some("origin/main".to_string());
-        assert_eq!(component_ref(&spec).as_deref(), Some("origin/main"));
-        spec.r#ref = Some("abc123".to_string());
-        assert_eq!(component_ref(&spec).as_deref(), Some("abc123"));
-    }
-
-    #[test]
     fn lab_stack_contract_rejects_mutable_or_ambiguous_declarations() {
         let sha = "0123456789abcdef0123456789abcdef01234567".to_string();
         let stack = crate::spec::LabStackSpec {

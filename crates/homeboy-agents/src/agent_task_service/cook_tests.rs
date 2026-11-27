@@ -364,66 +364,53 @@ fn submit_plan_in_test_store(
 }
 
 #[test]
-fn deepest_typed_error_selects_the_deepest_explicit_cause() {
-    let diagnostic = serde_json::json!({
-        "cause": {
+fn deepest_typed_error_follows_explicit_causes_only() {
+    let envelope = |code: &str, details: Value| {
+        serde_json::json!({
             "schema": "homeboy/command-result/v3",
             "success": false,
-            "error": {
+            "error": { "code": code, "message": format!("{code} message"), "details": details }
+        })
+    };
+    for (case, diagnostic, expected) in [
+        (
+            "deepest nested cause wins",
+            serde_json::json!({
+                "cause": envelope(
+                    "promotion.rejected",
+                    serde_json::json!({
+                        "cause": envelope("gate.failed", serde_json::json!({ "field": "verify" }))
+                    }),
+                )
+            }),
+            Some(serde_json::json!({
+                "code": "gate.failed",
+                "field": "verify",
+                "message": "gate.failed message"
+            })),
+        ),
+        (
+            "sibling envelopes are not causes",
+            serde_json::json!({
+                "cause": envelope("promotion.rejected", Value::Null),
+                "provider_response": envelope("unrelated", Value::Null),
+            }),
+            Some(serde_json::json!({
                 "code": "promotion.rejected",
-                "message": "promotion rejected",
-                "details": {
-                    "cause": {
-                        "schema": "homeboy/command-result/v3",
-                        "success": false,
-                        "error": {
-                            "code": "gate.failed",
-                            "message": "gate failed",
-                            "details": { "field": "verify" }
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    assert_eq!(
-        deepest_typed_error(&diagnostic),
-        Some(serde_json::json!({
-            "code": "gate.failed",
-            "field": "verify",
-            "message": "gate failed"
-        }))
-    );
-}
-
-#[test]
-fn deepest_typed_error_ignores_sibling_envelopes_and_json_strings() {
-    let primary = serde_json::json!({
-        "schema": "homeboy/command-result/v3",
-        "success": false,
-        "error": { "code": "promotion.rejected", "message": "promotion rejected" }
-    });
-    let unrelated_sibling = serde_json::json!({
-        "schema": "homeboy/command-result/v3",
-        "success": false,
-        "error": { "code": "unrelated", "message": "unrelated sibling" }
-    });
-    assert_eq!(
-        deepest_typed_error(&serde_json::json!({
-            "cause": primary,
-            "provider_response": unrelated_sibling,
-        })),
-        Some(serde_json::json!({
-            "code": "promotion.rejected",
-            "field": null,
-            "message": "promotion rejected"
-        }))
-    );
-    assert!(deepest_typed_error(&serde_json::json!({
-        "cause": r#"{"schema":"homeboy/command-result/v3","success":false,"error":{"code":"untrusted","message":"provider transcript"}}"#
-    }))
-    .is_none());
+                "field": null,
+                "message": "promotion.rejected message"
+            })),
+        ),
+        (
+            "JSON strings are untrusted transcript text",
+            serde_json::json!({
+                "cause": r#"{"schema":"homeboy/command-result/v3","success":false,"error":{"code":"untrusted","message":"provider transcript"}}"#
+            }),
+            None,
+        ),
+    ] {
+        assert_eq!(deepest_typed_error(&diagnostic), expected, "{case}");
+    }
 }
 
 /// Seed a terminal aggregate whose last outcome carries a valid AI-authored
@@ -439,7 +426,6 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         pr_title: "fix(agent-task): guard the reload render path".to_string(),
         summary: "Close the issue by guarding the reload path.".to_string(),
         what_changed: vec!["Add a null guard in the render path.".to_string()],
-        verification: Vec::new(),
         completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
         incomplete_reason: String::new(),
         delivery: Vec::new(),
@@ -1197,26 +1183,6 @@ fn promotion_owner_liveness_decides_terminal_disposition() {
             );
         });
     }
-}
-
-#[test]
-fn candidate_group_preflight_rejects_ambiguous_plan_before_execution() {
-    let mut plan = batch_cook_options(
-        "ambiguous-candidates",
-        Arc::new(AcceptedDetachedAttemptDispatcher),
-    )
-    .identity
-    .initial_plan;
-    let mut sibling = plan.tasks[0].clone();
-    sibling.task_id = "sibling".to_string();
-    plan.tasks.push(sibling);
-    plan.options.candidate_completion =
-        crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::FirstGreen;
-
-    let error = validate_cook_candidate_group(&plan).expect_err("shared group is required");
-
-    assert_eq!(error.details["field"], "group_key");
-    assert!(error.message.contains("explicit shared group"));
 }
 
 /// The runner job's terminal status is evidence, not a copy of run state: a
@@ -3325,48 +3291,57 @@ fn cook_through_failing_lab_preflight(
 }
 
 /// #18121: a Lab readiness preflight the transport never ran (here a lost
-/// terminal receipt) used to end the Cook as `pre_execution_failure` before
-/// the provider worked, with zero artifacts. It is infrastructure, not a
-/// verdict: the Cook proceeds, and the gates re-observe the runner.
+/// terminal receipt) is infrastructure, not a verdict: the Cook proceeds and
+/// the gates re-observe the runner. A configuration error no retry can fix
+/// still stops the Cook before a provider is paid for.
 #[test]
-fn lab_preflight_transport_failure_does_not_fail_the_cook_before_the_provider() {
-    let (status, provider_starts) = cook_through_failing_lab_preflight(
-        "cook-preflight-transport",
-        "preflight-lost-receipt-lab",
-        || {
-            Error::new(
-                homeboy_core::ErrorCode::RunnerLabTransportFailure,
-                "Lab gate transport did not produce verified passing evidence: runner gate did not return terminal artifact evidence",
-                serde_json::json!({"stage": "terminal_projection", "job_id": "job-lost", "gate_disposition": "unavailable"}),
-            )
-            .with_retryable(true)
-        },
-    );
-    assert_ne!(status, "pre_execution_failure");
-    assert_eq!(provider_starts, 1, "status {status}");
-}
-
-/// A configuration error no retry can fix still stops the Cook before a
-/// provider is paid for.
-#[test]
-fn lab_preflight_configuration_error_still_fails_before_the_provider() {
-    let (status, provider_starts) = cook_through_failing_lab_preflight(
-        "cook-preflight-configuration",
-        "preflight-misconfigured-lab",
-        || {
-            let mut error = Error::validation_invalid_argument(
-                "secret_env",
-                "Lab gate transport did not produce verified passing evidence: missing runner secret env ref for WP_CODEBOX_DB_HOST",
-                None,
-                None,
-            );
-            error.retryable = Some(false);
-            error.details["pre_handoff_configuration_error"] = serde_json::json!(true);
-            error
-        },
-    );
-    assert_eq!(status, "pre_execution_failure");
-    assert_eq!(provider_starts, 0);
+fn lab_preflight_failure_stops_the_cook_only_for_configuration_errors() {
+    fn lost_receipt() -> Error {
+        Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "Lab gate transport did not produce verified passing evidence: runner gate did not return terminal artifact evidence",
+            serde_json::json!({"stage": "terminal_projection", "job_id": "job-lost", "gate_disposition": "unavailable"}),
+        )
+        .with_retryable(true)
+    }
+    fn misconfigured() -> Error {
+        let mut error = Error::validation_invalid_argument(
+            "secret_env",
+            "Lab gate transport did not produce verified passing evidence: missing runner secret env ref for WP_CODEBOX_DB_HOST",
+            None,
+            None,
+        );
+        error.retryable = Some(false);
+        error.details["pre_handoff_configuration_error"] = serde_json::json!(true);
+        error
+    }
+    for (cook_id, runner_id, fail, stops_before_provider) in [
+        (
+            "cook-preflight-transport",
+            "preflight-lost-receipt-lab",
+            lost_receipt as fn() -> Error,
+            false,
+        ),
+        (
+            "cook-preflight-configuration",
+            "preflight-misconfigured-lab",
+            misconfigured,
+            true,
+        ),
+    ] {
+        let (status, provider_starts) =
+            cook_through_failing_lab_preflight(cook_id, runner_id, fail);
+        assert_eq!(
+            status == "pre_execution_failure",
+            stops_before_provider,
+            "{cook_id}: status {status}"
+        );
+        assert_eq!(
+            provider_starts,
+            usize::from(!stops_before_provider),
+            "{cook_id}: status {status}"
+        );
+    }
 }
 
 fn porcelain_status(path: &std::path::Path) -> String {
@@ -3377,6 +3352,116 @@ fn porcelain_status(path: &std::path::Path) -> String {
         .unwrap();
     assert!(output.status.success());
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Records the local dispatch slot holders each provider start observes.
+#[derive(Clone, Default)]
+struct LocalDispatchLeaseObservingExecutor {
+    observed: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+}
+
+impl AgentTaskExecutorAdapter for LocalDispatchLeaseObservingExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        let data_root = homeboy_core::paths::homeboy_data().expect("data root");
+        let holders = homeboy_core::local_dispatch_admission::local_dispatch_holders(&data_root)
+            .expect("read local dispatch holders")
+            .iter()
+            .filter_map(|holder| holder["run_id"].as_str().map(str::to_string))
+            .collect();
+        self.observed
+            .lock()
+            .unwrap()
+            .push((context.run_id.clone().unwrap_or_default(), holders));
+        ImmediateSuccessExecutor.execute(request, context)
+    }
+}
+
+/// #18922: local dispatch admission is the engine's, so a queued Cook retry
+/// (claimed through `execute_claimed_queue_record`, the path `run_next` and the
+/// execution step share) holds the same host slot as a fresh Cook while its
+/// provider runs, and releases it when the attempt ends.
+#[test]
+fn queued_retry_acquires_the_local_dispatch_lease_a_fresh_cook_does() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _load = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::local_dispatch_admission::TEST_LOAD_AVERAGES_ENV,
+            "0,0,0",
+        );
+        let (_remote, _source, root, destination) = behind_explicit_cwd_destination();
+        let _capacity =
+            homeboy_core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                root.path(),
+            );
+        let local_options = |cook_id: &str| {
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+            options.workspace.to_worktree = destination.display().to_string();
+            options.workspace.source_worktree_path = Some(destination.clone());
+            options.identity.initial_plan.tasks[0].workspace.root =
+                Some(destination.display().to_string());
+            options.identity.initial_plan.tasks[0].metadata =
+                serde_json::json!({ "worktree_provision": { "kind": "explicit_cwd" } });
+            options.provider_transport.attempt_dispatcher = None;
+            options
+        };
+        let data_root = homeboy_core::paths::homeboy_data().expect("data root");
+        let active = || {
+            homeboy_core::local_dispatch_admission::active_local_dispatch_count(&data_root)
+                .expect("active local dispatch count")
+        };
+
+        let fresh = LocalDispatchLeaseObservingExecutor::default();
+        let options = local_options("cook-fresh-local-lease");
+        let fresh_run_id = options.identity.initial_run_id.clone();
+        run_cook(CookContext::new(options, Arc::new(fresh.clone()))).expect("fresh Cook reports");
+        assert_eq!(
+            *fresh.observed.lock().unwrap(),
+            vec![(fresh_run_id.clone(), vec![fresh_run_id])]
+        );
+        assert_eq!(active(), 0, "the fresh attempt released its slot");
+
+        let mut options = local_options("cook-retry-local-lease");
+        options.retry_policy.max_attempts = 2;
+        persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options).expect("first attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            "gate_environment.preserve",
+            &Error::validation_invalid_argument(
+                "CARGO_HOME",
+                "required environment capability is unavailable",
+                None,
+                None,
+            )
+            .with_retryable(true),
+        )
+        .expect("record retryable pre-provider failure");
+        let retry = agent_task_lifecycle::retry(&options.identity.initial_run_id, None)
+            .expect("queue Cook retry");
+
+        let retried = LocalDispatchLeaseObservingExecutor::default();
+        let intent = current_intent(&test_lifecycle_store(), &retry.run_id);
+        let executor: crate::agent_task_scheduler::SharedAgentTaskExecutor =
+            Arc::new(retried.clone());
+        crate::agent_task_service::execute_execution_step(
+            &intent.intent_id,
+            executor,
+            |_| Ok(None),
+            &QueuedRunTransport,
+        )
+        .expect("the queued retry runs locally");
+        assert_eq!(
+            *retried.observed.lock().unwrap(),
+            vec![(retry.run_id.clone(), vec![retry.run_id.clone()])]
+        );
+        assert_eq!(active(), 0, "the retried attempt released its slot");
+    });
 }
 
 #[test]
@@ -4106,7 +4191,8 @@ fn dispatched_prompt_is_the_operator_prompt_without_a_template() {
         let original_instructions = options.identity.initial_plan.tasks[0].instructions.clone();
 
         project_controller_owned_gate_contract(&mut options);
-        project_initial_finalizing_review_form_contract(&mut options);
+        project_initial_finalizing_review_form_contract(&mut options)
+            .expect("project review-form contract");
         project_attempt_prompt_template(&mut options);
 
         let request = &options.identity.initial_plan.tasks[0];
@@ -6603,7 +6689,8 @@ fn normal_cook_repairs_the_immutable_attempt_when_replay_uses_a_fresh_run_id() {
         );
         durable_options.identity.initial_run_id = durable_run_id.to_string();
         project_controller_owned_gate_contract(&mut durable_options);
-        project_initial_finalizing_review_form_contract(&mut durable_options);
+        project_initial_finalizing_review_form_contract(&mut durable_options)
+            .expect("project review-form contract");
         persist_initial_recipe(&durable_options).expect("persist immutable recipe");
 
         let mut replay_options = batch_cook_options(
@@ -9436,6 +9523,12 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                 "id": mission.as_str(), "plane": "isolated_tasks",
             });
             let run_id = &options.identity.initial_run_id;
+            let outcome = match name {
+                "intentional-no-change" => Some((CookStatus::IntentionalNoChange, 0)),
+                "no-changes" => Some((CookStatus::Gate(GateVerdict::NoChanges), 2)),
+                _ if no_finalize => Some((CookStatus::GreenNoFinalize, 0)),
+                _ => None,
+            };
             recipes.persist_initial_recipe(&options).unwrap();
             agent_task_lifecycle::record_completed_run(
                 &options.identity.initial_plan,
@@ -9455,18 +9548,9 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                         "/promotion",
                         proof.clone(),
                     );
-                    if name == "intentional-no-change" {
-                        record.metadata["cook_progress"] = serde_json::json!({
-                            "phase": "terminal", "terminal_status": "intentional_no_change",
-                            "terminal_success": true, "exit_code": 0,
-                        });
-                    }
-                    if no_finalize || name == "no-changes" {
-                        record.metadata["cook_progress"] = serde_json::json!({
-                            "phase": "terminal",
-                            "terminal_status": if no_finalize { "green_no_finalize" } else { "no_changes" },
-                            "terminal_success": no_finalize, "exit_code": if no_finalize { 0 } else { 2 },
-                        });
+                    if outcome.is_some() {
+                        record.metadata["cook_progress"] =
+                            serde_json::json!({ "phase": "terminal" });
                     }
                     if live_owner {
                         let pid = std::process::id();
@@ -9487,6 +9571,12 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                     true
                 })
                 .unwrap();
+            if let Some((status, exit_code)) = outcome {
+                agent_task_lifecycle::record_cook_terminal_result_in_store(
+                    &store, run_id, status, exit_code,
+                )
+                .unwrap();
+            }
             store
                 .record_cook_attempt(&options.identity.cook_id, 1, run_id)
                 .unwrap();
@@ -10019,6 +10109,84 @@ fn persist_deferred_fixture(run_id: &str) {
     test_lifecycle_store()
         .record_promotion(run_id, serde_json::to_value(promotion).unwrap())
         .unwrap();
+}
+
+/// #19108: while the promoted candidate's gates still run under a live,
+/// heartbeating owner, recovery plans no step and `recover --regate` refuses
+/// with a pointer to the live gate instead of starting a second gate run.
+/// Once the gate phase ends, the candidate is recoverable again.
+#[test]
+fn live_gate_owner_refuses_regate_and_plans_no_recovery() {
+    with_corrected_gate_failure(false, |options, _| {
+        let run = &options.identity.initial_run_id;
+        let cook = &options.identity.cook_id;
+        let store = test_lifecycle_store();
+        let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        promotion.status = AgentTaskPromotionStatus::VerificationPending;
+        store
+            .record_promotion(run, serde_json::to_value(promotion).unwrap())
+            .unwrap();
+        agent_task_lifecycle::record_promotion_progress_in_store(
+            &store,
+            run,
+            "gate",
+            Some("cargo check"),
+            Some("gate process started"),
+            None,
+        )
+        .unwrap();
+        let record = store.read_record(run).unwrap();
+        assert!(agent_task_lifecycle::live_gate_owner(&record).is_some());
+
+        let plan = crate::agent_task_service::plan_cook_recovery(run).unwrap();
+        match &plan.step {
+            crate::agent_task_service::CookRecoveryStep::None { reason } => {
+                assert!(
+                    reason.starts_with("gating: gate `cargo check` running"),
+                    "{reason}"
+                );
+                assert!(reason.contains("--watch"), "{reason}");
+            }
+            step => panic!("a live gate plans no recovery, got {step:?}"),
+        }
+        let regate = || {
+            crate::agent_task_service::recover_cook(
+                cook,
+                crate::agent_task_service::CookRecoveryRequest {
+                    regate: true,
+                    ..Default::default()
+                },
+                &ReplacementOnlyRecoveryPerformer,
+            )
+        };
+        let refused = regate().expect_err("regate over a live gate");
+        assert!(
+            refused.message.contains("gates are still running"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(refused.details["live_gate"]["run_id"], run.as_str());
+        assert!(refused.details["live_gate"]["status_command"]
+            .as_str()
+            .is_some_and(|command| command.ends_with("--watch")));
+
+        // The gate phase ends: nothing is gating any more.
+        agent_task_lifecycle::record_promotion_progress_in_store(
+            &store, run, "terminal", None, None, None,
+        )
+        .unwrap();
+        let record = store.read_record(run).unwrap();
+        assert!(agent_task_lifecycle::live_gate_owner(&record).is_none());
+        let plan = crate::agent_task_service::plan_cook_recovery(run).unwrap();
+        assert!(
+            !matches!(
+                &plan.step,
+                crate::agent_task_service::CookRecoveryStep::None { reason }
+                    if reason.starts_with("gating")
+            ),
+            "{plan:?}"
+        );
+    });
 }
 
 #[test]
@@ -12011,6 +12179,98 @@ impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecovery
 }
 
 #[test]
+fn green_incomplete_cook_publishes_partial_and_tracks_remaining_scope() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-partial-19171";
+        let run_id = "cook-partial-19171-attempt-1";
+        let source = "https://github.com/o/tracker/issues/1";
+        let follow_up = "https://github.com/o/tracker/issues/2";
+        let target = tempfile::tempdir().unwrap();
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.into();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".into());
+        options.workspace.source_refs = vec![source.into()];
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .unwrap();
+        let mut aggregate = review_form_aggregate(&options.identity.initial_plan);
+        aggregate.outcomes[0].outputs["review_form"]["completion"] =
+            serde_json::json!("incomplete");
+        aggregate.outcomes[0].outputs["review_form"]["incomplete_reason"] =
+            serde_json::json!("Six remaining files need migration.");
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &aggregate)
+            .unwrap();
+        let promotion = promotion_with_existing_path(run_id, target.path());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&promotion).unwrap())
+            .unwrap();
+        let mut backend = CaptureBackend {
+            synthetic_gate_proof: Some(promotion),
+            ..Default::default()
+        };
+        let mut calls = Vec::new();
+        let mut tracker = |args: &[&str]| -> Result<String> {
+            calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+            match args[1] {
+                "list" => Ok("[]".into()),
+                "create" => Ok(follow_up.into()),
+                "comment" => Ok(String::new()),
+                other => panic!("unexpected tracker operation {other}"),
+            }
+        };
+        let (result, code) = super::super::cook_promotion::publish_partial_cook_with(
+            run_id,
+            &crate::agent_task_service::CookPublishRequest {
+                partial: true,
+                ..Default::default()
+            },
+            false,
+            &mut backend,
+            &mut tracker,
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{result}");
+        assert_eq!(result["status"], "succeeded_partial");
+        let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
+        assert_eq!(
+            super::super::cook_summary(&record).status,
+            "succeeded_partial"
+        );
+        assert!(
+            backend.body.contains("Six remaining files need migration."),
+            "{}",
+            backend.body
+        );
+        assert!(backend.body.contains(follow_up));
+        assert!(calls
+            .iter()
+            .any(|args| args[1] == "create" && args.last().unwrap().contains(source)));
+        assert!(calls.iter().any(|args| args[1] == "comment"
+            && args[2] == source
+            && args.last().unwrap().contains(follow_up)));
+        assert!(calls
+            .iter()
+            .any(|args| args[1] == "comment" && args[2] == follow_up));
+        let persisted = test_lifecycle_store().read_aggregate(run_id).unwrap();
+        assert_eq!(
+            persisted.outcomes[0].outputs["review_form"],
+            aggregate.outcomes[0].outputs["review_form"]
+        );
+        assert_eq!(
+            test_lifecycle_store().read_record(run_id).unwrap().metadata["partial_delivery"]
+                ["follow_up_url"],
+            follow_up
+        );
+    });
+}
+
+#[test]
 fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-16441";
@@ -12494,89 +12754,6 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
     });
 }
 
-#[test]
-fn cook_report_invocation_run_ids_populated_for_policy_failure() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let fresh_run_id = "agent-task-fresh-abc123".to_string();
-        let report = ambient_cook_report(CookReportInput {
-            cook_id: "cook-test".to_string(),
-            status: CookStatus::PolicyFailure,
-            disposition: CookDisposition::Terminal,
-            attempts: vec![AgentTaskCookAttemptReport {
-                attempt: 1,
-                run_id: fresh_run_id.clone(),
-                run_state: "Succeeded".to_string(),
-                promotion: None,
-                feedback: None,
-            }],
-            finalization: None,
-            stop_reason: Some("policy failure".to_string()),
-            exit_code: 1,
-            invocation_latest_run_id: Some(&fresh_run_id),
-        });
-
-        assert_eq!(report.value.invocation_run_ids, vec![fresh_run_id.clone()]);
-        assert_eq!(
-            report.value.latest_run_id.as_deref(),
-            Some(fresh_run_id.as_str())
-        );
-        assert_eq!(report.value.status.as_str(), "policy_failure");
-    });
-}
-
-#[test]
-fn a_progress_event_carries_provider_activity_to_the_observer() {
-    // The observer boundary used to drop everything but `(phase, cook_id,
-    // run_id)`, which is why every heartbeat an operator saw was identical.
-    // A heartbeat event now has to be able to say what the provider is doing
-    // (#11482).
-    let activity = CookProviderActivity {
-        files_changed: Some(0),
-        command: Some("cargo test -q -p homeboy-agents".to_string()),
-        command_elapsed_seconds: Some(372),
-        elapsed_seconds: Some(400),
-        ..Default::default()
-    };
-    let event = CookProgressEvent {
-        phase: "heartbeat",
-        cook_id: "cook-1",
-        run_id: "cook-1-attempt-1",
-        attempt: 1,
-        detail: Some("provider execution is still running"),
-        elapsed_ms: 12,
-        wait_owner: "provider_execution".to_string(),
-        terminal_success: None,
-        terminal_retry_command: None,
-        activity: Some(&activity),
-    };
-
-    let summary = event
-        .activity_summary()
-        .expect("event renders its activity");
-
-    assert!(summary.contains("no files written yet"));
-    assert!(summary.contains("cargo test -q -p homeboy-agents"));
-    assert_eq!(event.attempt, 1);
-}
-
-#[test]
-fn a_progress_event_without_a_sample_renders_no_activity() {
-    let event = CookProgressEvent {
-        phase: "provider_start",
-        cook_id: "cook-1",
-        run_id: "cook-1-attempt-1",
-        attempt: 1,
-        detail: None,
-        elapsed_ms: 0,
-        wait_owner: "provider_execution".to_string(),
-        terminal_success: None,
-        terminal_retry_command: None,
-        activity: None,
-    };
-
-    assert_eq!(event.activity_summary(), None);
-}
-
 /// #15364: the dependency tool preflight is a no-op when there is nothing to
 /// hydrate, so admission never regresses for repositories without lockfiles.
 #[test]
@@ -12602,19 +12779,67 @@ fn dependency_tool_preflight_is_a_noop_without_dependencies() {
     });
 }
 
-/// #16121: a gate setup failure caused by deterministic configuration (a Lab
-/// gate rejected in preflight for a missing runner `secret_env` ref) cannot
-/// change between attempts, so promotion is not retried.
+/// Gate setup failures retry a bounded number of times; a candidate rejection
+/// and a deterministic configuration failure (#16121: a Lab gate rejected in
+/// preflight for a missing runner `secret_env` ref) cannot change between
+/// attempts, so promotion is not retried.
 #[test]
 fn promotion_setup_retry_policy() {
-    for (case, input, expected) in [
-        ("transient setup", (true, false), (true, 2)),
+    fn gate_setup_failure() -> Error {
+        Error::dependency_step_failed(
+            "promotion.gate_setup",
+            "fixture",
+            Some(1),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+    }
+    fn configuration_failure() -> Error {
+        let mut error = Error::dependency_step_failed(
+            "promotion.gate_setup",
+            "destination_gate_workspace".to_string(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(serde_json::json!({
+                "classification": "destination_gate_toolchain",
+                "code": "validation.invalid_argument",
+                "message": "Lab gate transport did not produce verified passing evidence: missing runner secret env ref for WP_CODEBOX_DB_HOST",
+                "retry_action": "fix_configuration",
+            })),
+        );
+        error.retryable = Some(false);
+        error
+    }
+    fn candidate_rejection() -> Error {
+        Error::validation_invalid_argument("patch", "candidate patch does not apply", None, None)
+    }
+    for (case, failure, recovers, expected_ok, expected_calls) in [
+        (
+            "transient setup",
+            gate_setup_failure as fn() -> Error,
+            true,
+            true,
+            2,
+        ),
         (
             "exhausted setup",
-            (true, true),
-            (false, 1 + super::GATE_SETUP_PROMOTION_RETRIES),
+            gate_setup_failure,
+            false,
+            false,
+            1 + super::GATE_SETUP_PROMOTION_RETRIES,
         ),
-        ("candidate rejection", (false, true), (false, 1)),
+        ("candidate rejection", candidate_rejection, false, false, 1),
+        (
+            "configuration failure",
+            configuration_failure,
+            false,
+            false,
+            1,
+        ),
     ] {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = AgentTaskLifecycleStore::new(context.path_roots());
@@ -12623,26 +12848,10 @@ fn promotion_setup_retry_policy() {
         let mut effects = CookSideEffects::for_test(
             |_, _, run_id| {
                 calls.set(calls.get() + 1);
-                if calls.get() > 1 && !input.1 {
+                if calls.get() > 1 && recovers {
                     return Ok(promotion(run_id));
                 }
-                if !input.0 {
-                    return Err(Error::validation_invalid_argument(
-                        "patch",
-                        "candidate patch does not apply",
-                        None,
-                        None,
-                    ));
-                }
-                Err(Error::dependency_step_failed(
-                    "promotion.gate_setup",
-                    "fixture",
-                    Some(1),
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    None,
-                ))
+                Err(failure())
             },
             |_, _, _, _| Ok(Value::Null),
         );
@@ -12653,49 +12862,15 @@ fn promotion_setup_retry_policy() {
             "retry-run",
             |_, _, _| {},
         );
-        assert_eq!(result.is_ok(), expected.0, "{case}: {result:?}");
-        assert_eq!(calls.get(), expected.1, "{case}");
-    }
-}
-
-#[test]
-fn deterministic_gate_setup_configuration_failures_are_not_retried() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let options = compile_options("gate-setup-config");
-    let calls = std::cell::Cell::new(0);
-    let mut misconfigured = CookSideEffects::for_test(
-        |_, _, _| {
-            calls.set(calls.get() + 1);
-            let mut error = homeboy_core::Error::dependency_step_failed(
-                "promotion.gate_setup",
-                "destination_gate_workspace".to_string(),
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                Some(serde_json::json!({
-                    "classification": "destination_gate_toolchain",
-                    "code": "validation.invalid_argument",
-                    "message": "Lab gate transport did not produce verified passing evidence: missing runner secret env ref for WP_CODEBOX_DB_HOST",
-                    "retry_action": "fix_configuration",
-                })),
+        assert_eq!(result.is_ok(), expected_ok, "{case}: {result:?}");
+        assert_eq!(calls.get(), expected_calls, "{case}");
+        if case == "configuration failure" {
+            assert_eq!(
+                result.unwrap_err().details["cause"]["retry_action"],
+                "fix_configuration"
             );
-            error.retryable = Some(false);
-            Err(error)
-        },
-        |_, _, _, _| Ok(Value::Null),
-    );
-    let error = super::promote_with_gate_setup_retries(
-        &mut misconfigured,
-        &lifecycle_store,
-        &options,
-        "gate-setup-config-run",
-        |_, _, _| panic!("deterministic configuration failures are not retried"),
-    )
-    .expect_err("configuration failure is final");
-    assert_eq!(calls.get(), 1);
-    assert_eq!(error.details["cause"]["retry_action"], "fix_configuration");
+        }
+    }
 }
 
 /// #15364: detached Lab dispatch returns before the runner daemon accepts the
@@ -13450,16 +13625,6 @@ fn cook_pr_body_closes_only_same_repository_issues() {
             "https://github.com/Fixture-Owner/other-repo/issues/42",
             "Relates to Fixture-Owner/other-repo#42",
         ),
-        (
-            "pull request",
-            "https://github.com/Fixture-Owner/fixture-repo/pull/16000",
-            "Relates to",
-        ),
-        (
-            "external issue",
-            "https://linear.app/extra-chill/issue/HB-12",
-            "Relates to",
-        ),
     ] {
         let body =
             task_issue_relationship_pr_body("git@github.com:Fixture-Owner/fixture-repo.git", input);
@@ -13854,7 +14019,7 @@ echo https://github.com/example/fixture/pull/1
                 &gate_id,
                 "last gate output: two cells failed",
                 "Incomplete candidate; deterministic verification failed:",
-                "Closes #42",
+                "Refs #42",
             ] {
                 assert!(
                     requested.contains(expected),

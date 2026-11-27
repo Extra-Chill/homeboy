@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_ref_preflight_reports_all_failures_in_component_order_before_materialization() {
+    fn multi_ref_preflight_reports_every_failure_deterministically_before_materialization() {
         let alpha = Component {
             id: "alpha".to_string(),
             local_path: "/definitely/missing/alpha".to_string(),
@@ -1078,36 +1078,23 @@ mod tests {
 
         let error = preflight_exact_refs(&[(&zebra, "zebra-ref"), (&alpha, "alpha-ref")])
             .expect_err("every required ref must be checked before preflight returns red");
-        let alpha = error
+        let alpha_at = error
             .message
             .find("component 'alpha' ref 'alpha-ref'")
             .expect("alpha failure");
-        let zebra = error
+        let zebra_at = error
             .message
             .find("component 'zebra' ref 'zebra-ref'")
             .expect("zebra failure");
-
         assert!(
-            alpha < zebra,
+            alpha_at < zebra_at,
             "multi-ref errors must be deterministic regardless of caller ordering: {}",
             error.message
         );
-    }
 
-    #[test]
-    fn multi_ref_preflight_rejects_duplicate_component_ids_before_any_checkout() {
-        let component = Component {
-            id: "duplicate".to_string(),
-            local_path: "/definitely/missing/duplicate".to_string(),
-            ..Component::default()
-        };
-
-        let error = preflight_exact_refs(&[(&component, "first"), (&component, "second")])
+        let error = preflight_exact_refs(&[(&alpha, "first"), (&alpha, "second")])
             .expect_err("ambiguous component refs must fail before materialization");
-
-        assert!(error
-            .message
-            .contains("component 'duplicate' appears 2 times"));
+        assert!(error.message.contains("component 'alpha' appears 2 times"));
     }
 
     #[test]

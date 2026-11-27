@@ -1042,16 +1042,26 @@ mod tests {
                 .expect("read admitted run")
                 .expect("admitted run")
                 .metadata_json;
-            thread::sleep(Duration::from_millis(1200));
-            let store = ObservationStore::open_initialized().expect("observation store");
-            let run = store
-                .latest_run(homeboy::core::observation::RunListFilter {
-                    kind: Some("runner_refresh_homeboy".to_string()),
-                    limit: Some(1),
-                    ..homeboy::core::observation::RunListFilter::default()
-                })
-                .expect("list refresh runs")
-                .expect("refresh run");
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let run = loop {
+                let run = progress
+                    .admission
+                    .store
+                    .get_run(&progress.admission.run_id)
+                    .expect("read refresh run")
+                    .expect("refresh run");
+                let heartbeat = &run.metadata_json["progress"];
+                if heartbeat["heartbeat"] == true
+                    && heartbeat["elapsed_seconds"]
+                        .as_u64()
+                        .is_some_and(|elapsed| elapsed >= 1)
+                {
+                    break run;
+                }
+                assert!(std::time::Instant::now() < deadline,
+                    "waiting for persisted refresh heartbeat with elapsed_seconds >= 1; observed {heartbeat}");
+                thread::sleep(Duration::from_millis(10));
+            };
             let heartbeat = &run.metadata_json["progress"];
             assert_eq!(heartbeat["phase"], "refresh");
             assert_eq!(heartbeat["heartbeat"], serde_json::Value::Bool(true));

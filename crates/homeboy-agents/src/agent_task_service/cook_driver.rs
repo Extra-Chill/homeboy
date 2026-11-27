@@ -13,7 +13,11 @@ pub struct CookRuntime<'a> {
     side_effects: CookSideEffects<'a>,
     durable_observer: &'a CookProgressObserver<'a>,
     replay_keeps_recorded_transport: bool,
+    workflow_instance: Option<String>,
 }
+
+/// How often a workflow-step Cook re-drives a non-terminal Cook.
+const WORKFLOW_STEP_COOK_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 impl<'a> CookRuntime<'a> {
     fn new(
@@ -30,7 +34,16 @@ impl<'a> CookRuntime<'a> {
             side_effects,
             durable_observer,
             replay_keeps_recorded_transport: false,
+            workflow_instance: None,
         }
+    }
+
+    /// Run as a step of workflow `instance`. The workflow owns this process,
+    /// its cancellation and its deadline, so the Cook is re-driven until its
+    /// disposition is terminal instead of returning an in-flight report.
+    pub fn as_workflow_step(mut self, instance: Option<String>) -> Self {
+        self.workflow_instance = instance;
+        self
     }
 
     /// Replaying an existing attempt keeps the attempt transport recorded in
@@ -188,16 +201,80 @@ impl CookService {
             mut side_effects,
             durable_observer,
             replay_keeps_recorded_transport,
+            workflow_instance,
         } = runtime;
-        run_cook_with_runtime(
-            request,
-            executor,
-            store,
-            lifecycle_store,
-            &mut side_effects,
-            durable_observer,
-            replay_keeps_recorded_transport,
+        drive_until_terminal(
+            workflow_instance.is_some(),
+            || {
+                run_cook_with_runtime(
+                    request.clone(),
+                    executor.clone(),
+                    store,
+                    lifecycle_store,
+                    &mut side_effects,
+                    durable_observer,
+                    replay_keeps_recorded_transport,
+                )
+                .map(|result| {
+                    let disposition = result.value.disposition;
+                    (result, disposition)
+                })
+            },
+            || std::thread::sleep(WORKFLOW_STEP_COOK_POLL_INTERVAL),
         )
+    }
+}
+
+/// Re-drive only the already-admitted Cook. Non-workflow callers keep their
+/// one-report contract; workflow steps wait for a terminal disposition.
+fn drive_until_terminal<T>(
+    workflow_step: bool,
+    mut drive: impl FnMut() -> Result<(T, CookDisposition)>,
+    mut wait: impl FnMut(),
+) -> Result<T> {
+    loop {
+        let (report, disposition) = drive()?;
+        if !workflow_step || disposition.is_terminal() {
+            return Ok(report);
+        }
+        wait();
+    }
+}
+
+#[cfg(test)]
+mod workflow_step_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_step_cook_waits_until_terminal() {
+        let mut calls = 0;
+        let mut waits = 0;
+        let outcome = drive_until_terminal(
+            true,
+            || {
+                calls += 1;
+                Ok(if calls == 1 {
+                    (("queued", 75), CookDisposition::InFlight)
+                } else {
+                    (("succeeded", 0), CookDisposition::Terminal)
+                })
+            },
+            || waits += 1,
+        )
+        .unwrap();
+        assert_eq!(outcome, ("succeeded", 0));
+        assert_eq!((calls, waits), (2, 1));
+    }
+
+    #[test]
+    fn foreground_cook_keeps_its_in_flight_report() {
+        let report = drive_until_terminal(
+            false,
+            || Ok((("queued", 75), CookDisposition::InFlight)),
+            || panic!("a foreground caller must not wait"),
+        )
+        .unwrap();
+        assert_eq!(report, ("queued", 75));
     }
 }
 
@@ -381,7 +458,7 @@ pub(crate) fn settle_undriven_cook(
     }
     let status = super::cook_projections::terminal_fallback_status(state.execution_state);
     let failed = state.execution_state != homeboy_lifecycle_contract::RunExecutionState::Succeeded;
-    if !record.metadata["cook_progress"]["exit_code"].is_i64() {
+    if super::CookOutcome::from_run_metadata(&record.metadata).is_none() {
         agent_task_lifecycle::record_cook_outcome_in_store(
             lifecycle,
             &record.run_id,
@@ -680,7 +757,7 @@ pub(super) fn run_cook_reported(
             if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
                 lifecycle_store,
                 run_id,
-                result.value.status.as_str(),
+                result.value.status,
                 result.exit_code,
             )
             .and_then(|_| store.settle_continuations_driven_inline(&result.value.cook_id))

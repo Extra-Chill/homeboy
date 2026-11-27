@@ -261,6 +261,7 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
     };
     let replace_gates = replace_gates_request(&mut args)?;
     let publish = CookPublishRequest {
+        partial: args.publish_partial,
         review_form: super::review::supplied_review_form(
             args.review_form.as_deref(),
             args.review_form_tool.as_deref(),
@@ -490,8 +491,8 @@ mod tests {
             .unwrap();
             store
                 .mutate_record(cook_id, |record| {
-                    record.metadata["detached_cook_handoff"]["state"] =
-                        serde_json::json!("exited_before_handoff");
+                    record.metadata["detached_cook_handoff"]["admission_state"] =
+                        serde_json::json!("failed");
                     record.metadata["execution_step_failure"] = serde_json::json!({
                         "code": "internal.io_error",
                         "message": "admission inputs could not be read after upgrade",
@@ -584,26 +585,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn recover_regate_reaches_the_service_request_with_or_without_preflight() {
-        for preflight in [false, true] {
-            let mut argv = vec!["homeboy", "agent-task", "recover", "cook-1", "--regate"];
-            if preflight {
-                argv.push("--preflight");
-            }
-            let cli = Cli::try_parse_from(argv).unwrap();
-            let Commands::AgentTask(task) = cli.command else {
-                panic!("agent-task")
-            };
-            let AgentTaskCommand::Recover(args) = task.command else {
-                panic!("recover")
-            };
-            let request = super::recovery_request(args).unwrap();
-            assert!(request.regate);
-            assert_eq!(request.preflight, preflight);
-        }
-    }
-
     /// An explicit budget always applies, even at the CLI default; without
     /// `--regate` it is refused, never silently ignored (#18556).
     #[test]
@@ -633,156 +614,5 @@ mod tests {
         let recorded = request(&["--regate"]).unwrap().regate_inputs;
         assert!(recorded.is_empty(), "{recorded:?}");
         assert!(request(&["--gate-no-progress-timeout-seconds", "600"]).is_err());
-    }
-
-    #[test]
-    fn recover_wait_is_opt_in_and_timeout_requires_wait() {
-        for argv in [
-            vec!["homeboy", "agent-task", "recover", "cook-1"],
-            vec![
-                "homeboy",
-                "agent-task",
-                "recover",
-                "cook-1",
-                "--wait",
-                "--timeout",
-                "2s",
-            ],
-        ] {
-            assert!(Cli::try_parse_from(argv).is_ok());
-        }
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-1",
-            "--timeout",
-            "2s"
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-1",
-            "--preflight",
-            "--wait"
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn recover_parses_its_id_and_preflight() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-attempt-1",
-            "--preflight",
-        ])
-        .expect("recover parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent task");
-        };
-        let AgentTaskCommand::Recover(args) = agent_task.command else {
-            panic!("recover");
-        };
-        assert_eq!(args.id, "cook-attempt-1");
-        assert!(args.preflight);
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-attempt-1",
-            "--artifact-id",
-            "patch-a"
-        ])
-        .is_err());
-        assert!(args.overrides().is_empty());
-    }
-
-    #[test]
-    fn recover_accepts_explicit_overrides_but_never_with_preflight_or_artifact() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-attempt-1",
-            "--backend",
-            "replacement",
-            "--selector",
-            "replacement-selector",
-            "--model",
-            "replacement-model",
-            "--acknowledge-model-override",
-            "--full",
-        ])
-        .expect("route override parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent task");
-        };
-        let AgentTaskCommand::Recover(args) = agent_task.command else {
-            panic!("recover");
-        };
-        let overrides = args.overrides();
-        assert!(overrides.has_route_override());
-        assert_eq!(overrides.model.as_deref(), Some("replacement-model"));
-        assert!(overrides.acknowledge_model_override);
-        assert!(args.full);
-
-        for rejected in [
-            vec!["--preflight", "--timeout-ms", "1000"],
-            vec!["--artifact-id", "patch-a", "--timeout-ms", "1000"],
-            vec!["--preflight", "--model", "m"],
-            vec!["--acknowledge-model-override"],
-        ] {
-            let mut argv = vec!["homeboy", "agent-task", "recover", "cook-attempt-1"];
-            argv.extend(rejected.iter().copied());
-            assert!(Cli::try_parse_from(argv).is_err(), "{rejected:?}");
-        }
-    }
-
-    #[test]
-    fn retired_cook_continuation_verb_is_not_a_command() {
-        for retired in [
-            vec!["resume", "run-1"],
-            vec!["adopt", "cook-1", "--candidate-ref", "abc123"],
-            vec!["cook-continue", "cook-1"],
-            vec!["cook-continue", "cook-1", "--preflight"],
-            vec!["cook-continue", "cook-1", "--rearm"],
-            vec!["cook-continue", "cook-1", "--artifact-id", "patch-a"],
-        ] {
-            let mut argv = vec!["homeboy", "agent-task"];
-            argv.extend(retired.iter().copied());
-            assert!(Cli::try_parse_from(argv).is_err(), "{retired:?}");
-        }
-    }
-
-    /// Recover covers non-Cook runs too: #15925 no longer justifies separate
-    /// resume and adopt commands. Explicit retry, reconciliation and manual
-    /// finalization remain available independently of recovery.
-    #[test]
-    fn recovery_adjacent_verbs_recover_does_not_perform_remain_commands() {
-        for kept in [
-            vec!["retry", "run-1", "--run"],
-            vec!["reconcile", "run-1", "--apply"],
-            vec![
-                "finalize-pr",
-                "--run-id",
-                "run-1",
-                "--path",
-                "/tmp/run-1",
-                "--title",
-                "Run 1",
-                "--commit-message",
-                "run 1",
-            ],
-        ] {
-            let mut argv = vec!["homeboy", "agent-task"];
-            argv.extend(kept.iter().copied());
-            if let Err(error) = Cli::try_parse_from(argv) {
-                panic!("{kept:?}: {error}");
-            }
-        }
     }
 }

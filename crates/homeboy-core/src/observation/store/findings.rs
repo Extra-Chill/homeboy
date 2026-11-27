@@ -287,102 +287,70 @@ mod tests {
     }
 
     #[test]
-    fn test_record_finding() {
+    fn recorded_findings_round_trip_through_the_run_and_tool_filter() {
         with_isolated_home(|_| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let run = store.start_run(new_run()).expect("start");
+            let other = store.start_run(new_run()).expect("other run");
+            store
+                .record_finding(&new_finding(&other.id, "unrelated"))
+                .expect("other finding");
 
-            let finding = store
+            let single = store
                 .record_finding(&new_finding(&run.id, "security"))
                 .expect("finding");
-
-            assert_eq!(finding.rule.as_deref(), Some("security"));
-        });
-    }
-
-    #[test]
-    fn test_record_findings() {
-        with_isolated_home(|_| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run()).expect("start");
-
-            let findings = store
-                .record_findings(&[
-                    new_finding(&run.id, "security"),
-                    new_finding(&run.id, "i18n"),
-                ])
+            let batch = store
+                .record_findings(&[new_finding(&run.id, "i18n"), new_finding(&run.id, "perf")])
                 .expect("findings");
+            assert_eq!(single.rule.as_deref(), Some("security"));
+            assert_eq!(batch.len(), 2);
 
-            assert_eq!(findings.len(), 2);
-            assert_eq!(findings[0].rule.as_deref(), Some("security"));
-            assert_eq!(findings[1].rule.as_deref(), Some("i18n"));
+            let mut rules: Vec<_> = store
+                .list_findings(FindingListFilter {
+                    run_id: Some(run.id),
+                    tool: Some("lint".to_string()),
+                    ..FindingListFilter::default()
+                })
+                .expect("list")
+                .into_iter()
+                .filter_map(|finding| finding.rule)
+                .collect();
+            rules.sort();
+            assert_eq!(rules, vec!["i18n", "perf", "security"]);
         });
     }
 
     #[test]
-    fn test_record_findings_rejects_unknown_run_before_insert() {
-        with_isolated_home(|_| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-
-            let result = store.record_findings(&[
-                new_finding("missing-run", "security"),
-                new_finding("missing-run", "i18n"),
-            ]);
-
-            assert!(result.is_err());
-            let findings = store
-                .list_findings(FindingListFilter::default())
-                .expect("list");
-            assert!(findings.is_empty());
-        });
-    }
-
-    #[test]
-    fn test_record_findings_requires_one_run_per_batch() {
+    fn invalid_finding_batches_are_rejected_before_any_insert() {
         with_isolated_home(|_| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
             let first = store.start_run(new_run()).expect("first run");
             let second = store.start_run(new_run()).expect("second run");
 
-            let result = store.record_findings(&[
-                new_finding(&first.id, "security"),
-                new_finding(&second.id, "i18n"),
-            ]);
-
-            assert!(result.is_err());
-            let findings = store
-                .list_findings(FindingListFilter::default())
-                .expect("list");
-            assert!(findings.is_empty());
-        });
-    }
-
-    #[test]
-    fn test_list_findings() {
-        with_isolated_home(|_| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store.start_run(new_run()).expect("start");
-            store
-                .record_findings(&[
-                    new_finding(&run.id, "security"),
-                    new_finding(&run.id, "i18n"),
-                ])
-                .expect("findings");
-
-            let findings = store
-                .list_findings(FindingListFilter {
-                    run_id: Some(run.id),
-                    tool: Some("lint".to_string()),
-                    ..FindingListFilter::default()
-                })
-                .expect("list");
-
-            assert_eq!(findings.len(), 2);
+            for (case, batch) in [
+                (
+                    "unknown run",
+                    vec![
+                        new_finding("missing-run", "security"),
+                        new_finding("missing-run", "i18n"),
+                    ],
+                ),
+                (
+                    "mixed runs",
+                    vec![
+                        new_finding(&first.id, "security"),
+                        new_finding(&second.id, "i18n"),
+                    ],
+                ),
+            ] {
+                assert!(store.record_findings(&batch).is_err(), "{case}");
+                let findings = store
+                    .list_findings(FindingListFilter::default())
+                    .expect("list");
+                assert!(findings.is_empty(), "{case}");
+            }
         });
     }
 }

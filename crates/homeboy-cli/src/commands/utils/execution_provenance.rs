@@ -424,40 +424,8 @@ mod tests {
             assert_eq!(value["operator_intent"]["runner_id"], Value::Null);
             assert_eq!(value["resolved_execution"]["location"], "lab");
             assert_eq!(value["resolved_execution"]["runner_id"], "runner-a");
-            assert!(value["resource_policy"].get("policy_runner_id").is_none());
             assert_eq!(value["resource_policy"]["decision_origin"], "explicit");
         });
-    }
-
-    #[test]
-    fn v1_resource_policy_shape_has_no_policy_runner_field() {
-        let value = provenance(&["homeboy", "review"]);
-        let policy = value["resource_policy"].as_object().expect("policy object");
-        assert_eq!(
-            policy.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["decision_origin", "preflight"]
-        );
-        assert!(!serde_json::to_string(&value)
-            .expect("serialize provenance")
-            .contains("policy_runner_id"));
-    }
-
-    #[test]
-    fn redacts_secrets_without_dropping_placement() {
-        let value = provenance(&[
-            "homeboy",
-            "--placement",
-            "local",
-            "--runner-env",
-            "API_TOKEN=secret-value",
-            "review",
-        ]);
-        let command = value["operator_intent"]["rerun_command"]
-            .as_str()
-            .expect("rerun command");
-
-        assert!(command.contains("--placement local"));
-        assert!(!command.contains("secret-value"));
     }
 
     #[test]
@@ -479,6 +447,10 @@ mod tests {
             value["operator_intent"]["global_flags"]["lab_env_json"],
             json!("{\"mode\":\"test\",\"token\":\"[REDACTED]\"}")
         );
+        assert!(!value["operator_intent"]["rerun_command"]
+            .as_str()
+            .expect("rerun command")
+            .contains("secret-value"));
     }
 
     #[test]

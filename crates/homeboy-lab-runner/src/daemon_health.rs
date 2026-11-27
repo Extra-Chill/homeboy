@@ -49,8 +49,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_stale_daemon_transport_failures() {
-        let err = Error::new(
+    fn classifies_daemon_transport_failures_with_their_job_context() {
+        let stale = Error::new(
             ErrorCode::InternalUnexpected,
             "runner daemon request failed",
             serde_json::json!({
@@ -61,46 +61,43 @@ mod tests {
                 }
             }),
         );
-
-        assert_eq!(
-            runner_daemon_health_failure(&err),
-            Some(RunnerDaemonHealthFailure {
-                reason: "runner daemon health check failed: runner daemon request failed"
-                    .to_string(),
-                runner_id: None,
-                job_id: None,
-            })
-        );
-    }
-
-    #[test]
-    fn includes_in_flight_daemon_job_context() {
-        let err = Error::new(
+        let in_flight = Error::new(
             ErrorCode::InternalUnexpected,
-            "query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)",
+            "query runner daemon: connect failed",
             serde_json::json!({
                 "runner_id": "homeboy-lab",
                 "job_id": "job-123",
                 "daemon_transport_error": { "kind": "connect" },
             }),
         );
-
-        assert_eq!(
-            runner_daemon_health_failure(&err),
-            Some(RunnerDaemonHealthFailure {
-                reason: "runner daemon health check failed: query runner daemon: error sending request for url (http://127.0.0.1:63534/jobs/id)"
-                    .to_string(),
-                runner_id: Some("homeboy-lab".to_string()),
-                job_id: Some("job-123".to_string()),
-            })
-        );
-    }
-
-    #[test]
-    fn does_not_classify_unrelated_internal_errors_as_daemon_health() {
-        let err =
+        let unrelated =
             Error::internal_unexpected("query runner daemon: workspace sync failed unexpectedly");
 
-        assert_eq!(runner_daemon_health_failure(&err), None);
+        for (name, err, expected) in [
+            (
+                "stale transport without context",
+                stale,
+                Some(RunnerDaemonHealthFailure {
+                    reason: "runner daemon health check failed: runner daemon request failed"
+                        .to_string(),
+                    runner_id: None,
+                    job_id: None,
+                }),
+            ),
+            (
+                "in-flight job context",
+                in_flight,
+                Some(RunnerDaemonHealthFailure {
+                    reason:
+                        "runner daemon health check failed: query runner daemon: connect failed"
+                            .to_string(),
+                    runner_id: Some("homeboy-lab".to_string()),
+                    job_id: Some("job-123".to_string()),
+                }),
+            ),
+            ("unrelated internal error", unrelated, None),
+        ] {
+            assert_eq!(runner_daemon_health_failure(&err), expected, "{name}");
+        }
     }
 }

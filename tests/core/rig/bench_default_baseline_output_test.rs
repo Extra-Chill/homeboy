@@ -25,54 +25,17 @@ fn write_rig_with_default_baseline(
     .expect("write rig");
 }
 
-#[test]
-fn default_baseline_expansion_records_metadata_on_comparison_output() {
-    with_isolated_home(|home| {
-        write_bench_extension(home);
-        let baseline_component = tempfile::TempDir::new().expect("baseline component");
-        let candidate_component = tempfile::TempDir::new().expect("candidate component");
-        write_rig(
-            home,
-            "studio-agent-sdk",
-            "studio",
-            baseline_component.path(),
-        );
-        write_rig_with_default_baseline(
-            home,
-            "studio-bfb",
-            "studio",
-            candidate_component.path(),
-            "studio-agent-sdk",
-        );
-
-        let (output, exit_code) = run(run_args(
-            None,
-            vec!["studio-bfb".to_string()],
-            vec!["rig-slow".to_string()],
-        ))
-        .expect("default baseline expansion should run as comparison");
-
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::Comparison(result) => {
-                let expansion = result
-                    .default_baseline_expansion
-                    .expect("expansion metadata");
-                assert_eq!(expansion.baseline_rig, "studio-agent-sdk");
-                assert_eq!(expansion.candidate_rig, "studio-bfb");
-                assert_eq!(
-                    expansion.execution_order,
-                    vec!["studio-agent-sdk".to_string(), "studio-bfb".to_string()]
-                );
-                assert_eq!(expansion.opt_out_flag, "--ignore-default-baseline");
-            }
-            _ => panic!("expected comparison output"),
-        }
-    });
+fn expansion_metadata() -> BenchDefaultBaselineExpansion {
+    BenchDefaultBaselineExpansion {
+        baseline_rig: "studio-agent-sdk".to_string(),
+        candidate_rig: "studio-bfb".to_string(),
+        execution_order: vec!["studio-agent-sdk".to_string(), "studio-bfb".to_string()],
+        opt_out_flag: "--ignore-default-baseline",
+    }
 }
 
 #[test]
-fn default_baseline_expansion_metadata_survives_json_summary() {
+fn default_baseline_expansion_metadata_is_emitted_on_comparison_and_summary_output() {
     with_isolated_home(|home| {
         write_bench_extension(home);
         let baseline_component = tempfile::TempDir::new().expect("baseline component");
@@ -91,53 +54,46 @@ fn default_baseline_expansion_metadata_survives_json_summary() {
             "studio-agent-sdk",
         );
 
-        let mut args = run_args(
-            None,
-            vec!["studio-bfb".to_string()],
-            vec!["rig-slow".to_string()],
-        );
-        args.run.json_summary = true;
-        let (output, exit_code) = run(args).expect("default baseline summary should run");
+        for json_summary in [false, true] {
+            let mut args = run_args(
+                None,
+                vec!["studio-bfb".to_string()],
+                vec!["rig-slow".to_string()],
+            );
+            args.run.json_summary = json_summary;
+            let (output, exit_code) =
+                run(args).expect("default baseline expansion should run as comparison");
 
-        assert_eq!(exit_code, 0);
-        match output {
-            BenchOutput::ComparisonSummary(result) => {
-                let value = serde_json::to_value(result).expect("serialize summary");
-                assert_eq!(
-                    value["default_baseline_expansion"]["baseline_rig"],
-                    "studio-agent-sdk"
-                );
-                assert_eq!(
-                    value["default_baseline_expansion"]["candidate_rig"],
-                    "studio-bfb"
-                );
-                assert_eq!(
-                    value["default_baseline_expansion"]["execution_order"],
-                    serde_json::json!(["studio-agent-sdk", "studio-bfb"])
-                );
-                assert_eq!(
-                    value["default_baseline_expansion"]["opt_out_flag"],
-                    "--ignore-default-baseline"
-                );
-            }
-            _ => panic!("expected comparison summary output"),
+            assert_eq!(exit_code, 0);
+            let value = match output {
+                BenchOutput::Comparison(result) if !json_summary => {
+                    serde_json::to_value(result).expect("serialize comparison")
+                }
+                BenchOutput::ComparisonSummary(result) if json_summary => {
+                    serde_json::to_value(result).expect("serialize summary")
+                }
+                _ => panic!("unexpected output shape for json_summary={json_summary}"),
+            };
+            assert_eq!(
+                value["default_baseline_expansion"],
+                serde_json::json!({
+                    "baseline_rig": "studio-agent-sdk",
+                    "candidate_rig": "studio-bfb",
+                    "execution_order": ["studio-agent-sdk", "studio-bfb"],
+                    "opt_out_flag": "--ignore-default-baseline",
+                }),
+                "json_summary={json_summary}"
+            );
         }
     });
 }
 
 #[test]
 fn default_baseline_expansion_notice_names_order_and_opt_out() {
-    let metadata = BenchDefaultBaselineExpansion {
-        baseline_rig: "studio-agent-sdk".to_string(),
-        candidate_rig: "studio-bfb".to_string(),
-        execution_order: vec!["studio-agent-sdk".to_string(), "studio-bfb".to_string()],
-        opt_out_flag: "--ignore-default-baseline",
-    };
+    let metadata = expansion_metadata();
 
     let notice = default_baseline_notice(&metadata);
 
-    assert!(notice.contains("studio-agent-sdk"), "got: {notice}");
-    assert!(notice.contains("studio-bfb"), "got: {notice}");
     assert!(
         notice.contains("studio-agent-sdk -> studio-bfb"),
         "got: {notice}"
@@ -150,12 +106,7 @@ fn default_baseline_expansion_notice_names_order_and_opt_out() {
 
 #[test]
 fn default_baseline_failure_summary_marks_implicit_baseline() {
-    let metadata = BenchDefaultBaselineExpansion {
-        baseline_rig: "studio-agent-sdk".to_string(),
-        candidate_rig: "studio-bfb".to_string(),
-        execution_order: vec!["studio-agent-sdk".to_string(), "studio-bfb".to_string()],
-        opt_out_flag: "--ignore-default-baseline",
-    };
+    let metadata = expansion_metadata();
     let entries = vec![
         RigBenchEntry {
             rig_id: "studio-agent-sdk".to_string(),
@@ -211,12 +162,7 @@ fn default_baseline_failure_summary_marks_implicit_baseline() {
 
 #[test]
 fn default_baseline_early_error_hint_names_requested_rig() {
-    let metadata = BenchDefaultBaselineExpansion {
-        baseline_rig: "studio-agent-sdk".to_string(),
-        candidate_rig: "studio-bfb".to_string(),
-        execution_order: vec!["studio-agent-sdk".to_string(), "studio-bfb".to_string()],
-        opt_out_flag: "--ignore-default-baseline",
-    };
+    let metadata = expansion_metadata();
     let error = crate::core::Error::rig_pipeline_failed(
         "studio-agent-sdk",
         "check",

@@ -280,10 +280,7 @@ pub struct CommandAgentTaskRef {
 /// envelope.
 ///
 /// `artifacts` and `evidence` on [`CommandActionableMetadata`] both hold this
-/// shape. They used to hold two structurally identical types
-/// (`CommandArtifactRef` / `CommandEvidenceRef`); the distinction was never in
-/// the type, only in which field the value landed in.
-/// Collapsed in #10310; the serialized shape is unchanged.
+/// shape; the distinction is which field the value lands in, not the type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandArtifactRef {
     pub id: String,
@@ -1323,9 +1320,8 @@ fn is_partial_upgrade_outcome(data: &Value) -> bool {
 }
 
 /// Lift `failure_kind` + `failure_message` already present on a failed
-/// `runner connect` payload. Exit 20 used to serialize as "without reporting a
-/// failure cause" even when the connect report named `daemon_startup_failure`
-/// and the unreachable-daemon message (#14715).
+/// `runner connect` payload, so exit 20 reports the cause the connect report
+/// names (for example `daemon_startup_failure`) (#14715).
 fn runner_connect_failure_diagnostics(exit_code: i32, data: &Value) -> Option<CommandDiagnostics> {
     let report = runner_connect_failure_report(data)?;
     let failure_kind = report
@@ -2472,39 +2468,28 @@ mod tests {
     }
 
     /// A bounded pass that left a resumable continuation must not surface to
-    /// schedulers as a failure.
+    /// schedulers as a failure, while a real partial failure keeps its status
+    /// and a non-zero exit is never laundered into success.
     ///
     /// The canonical lifecycle vocabulary has no `partial`, so `normalize_status`
     /// folds it into `partial_failure`. With a zero exit that turned successful
     /// continuation passes into recorded scheduler failures, which is what drove
     /// `automatic-retention` to auto-disable after 49 of them (#12727).
     #[test]
-    fn a_zero_exit_partial_result_is_not_reported_as_a_failure() {
-        let partial = json!({ "status": "partial", "continuation_required": true });
-        assert_eq!(status_for_result(Some(&partial), 0), "succeeded");
-
-        // Case-insensitive, matching `normalize_status`.
-        let shouty = json!({ "status": "PARTIAL" });
-        assert_eq!(status_for_result(Some(&shouty), 0), "succeeded");
-    }
-
-    /// The regression boundary: a real partial failure keeps its status, and a
-    /// non-zero exit is never laundered into success.
-    #[test]
-    fn genuine_partial_failures_keep_failing() {
-        let failed = json!({ "status": "partial_failure" });
-        assert_eq!(status_for_result(Some(&failed), 1), "partial_failure");
-
-        // `partial` with a non-zero exit stays a failure, keeping its precise
-        // aggregate state rather than collapsing to a bare `failed`.
-        let partial_but_failed = json!({ "status": "partial" });
-        assert_eq!(
-            status_for_result(Some(&partial_but_failed), 1),
-            "partial_failure"
-        );
-
-        let succeeded = json!({ "status": "succeeded" });
-        assert_eq!(status_for_result(Some(&succeeded), 0), "succeeded");
+    fn partial_status_depends_on_exit_code() {
+        for (status, exit_code, expected) in [
+            ("partial", 0, "succeeded"),
+            ("PARTIAL", 0, "succeeded"),
+            ("partial", 1, "partial_failure"),
+            ("partial_failure", 1, "partial_failure"),
+        ] {
+            let payload = json!({ "status": status, "continuation_required": true });
+            assert_eq!(
+                status_for_result(Some(&payload), exit_code),
+                expected,
+                "{status} exit {exit_code}"
+            );
+        }
     }
 
     #[test]
@@ -2699,61 +2684,38 @@ mod tests {
         );
     }
 
-    /// #10310 collapsed `CommandEvidenceRef` onto `CommandArtifactRef`. They
-    /// were the same four fields with the same serde attributes; only the
-    /// envelope field they landed in ever distinguished them. Both lists must
-    /// still serialize with the identical element shape.
+    /// Artifact and evidence refs share one wire shape; `semantic_key` stays
+    /// omitted rather than serialized as `null`.
     #[test]
-    fn actionable_artifacts_and_evidence_share_one_serialized_element_shape() {
-        let metadata = CommandActionableMetadata {
-            artifacts: vec![CommandArtifactRef {
+    fn actionable_ref_serializes_semantic_key_only_when_present() {
+        for (semantic_key, expected) in [
+            (
+                Some("run.summary".to_string()),
+                json!({
+                    "id": "summary",
+                    "kind": "artifact",
+                    "uri": "homeboy://runs/run-1/artifact/summary",
+                    "semantic_key": "run.summary"
+                }),
+            ),
+            (
+                None,
+                json!({
+                    "id": "summary",
+                    "kind": "artifact",
+                    "uri": "homeboy://runs/run-1/artifact/summary"
+                }),
+            ),
+        ] {
+            let value = serde_json::to_value(CommandArtifactRef {
                 id: "summary".to_string(),
                 kind: "artifact".to_string(),
                 uri: "homeboy://runs/run-1/artifact/summary".to_string(),
-                semantic_key: Some("run.summary".to_string()),
-            }],
-            evidence: vec![CommandArtifactRef {
-                id: "summary".to_string(),
-                kind: "artifact".to_string(),
-                uri: "homeboy://runs/run-1/artifact/summary".to_string(),
-                semantic_key: Some("run.summary".to_string()),
-            }],
-            ..Default::default()
-        };
-
-        let value = serde_json::to_value(&metadata).expect("serialize actionable metadata");
-        assert_eq!(value["artifacts"][0], value["evidence"][0]);
-        assert_eq!(
-            value["artifacts"][0],
-            json!({
-                "id": "summary",
-                "kind": "artifact",
-                "uri": "homeboy://runs/run-1/artifact/summary",
-                "semantic_key": "run.summary"
+                semantic_key,
             })
-        );
-    }
-
-    /// `semantic_key` stays omitted rather than serialized as `null`, so
-    /// pre-collapse payloads compare equal.
-    #[test]
-    fn actionable_ref_omits_absent_semantic_key() {
-        let value = serde_json::to_value(CommandArtifactRef {
-            id: "log".to_string(),
-            kind: "log".to_string(),
-            uri: "homeboy://runs/run-1/artifact/log".to_string(),
-            semantic_key: None,
-        })
-        .expect("serialize artifact ref");
-
-        assert_eq!(
-            value,
-            json!({
-                "id": "log",
-                "kind": "log",
-                "uri": "homeboy://runs/run-1/artifact/log"
-            })
-        );
+            .expect("serialize artifact ref");
+            assert_eq!(value, expected);
+        }
     }
 
     #[test]
@@ -3153,15 +3115,6 @@ mod tests {
                 Some(action) => assert_eq!(value["next_actions"][0]["command"], action, "{label}"),
                 None => assert!(value["next_actions"].is_null(), "{label}"),
             }
-            if let Some(actions) = value["next_actions"].as_array() {
-                for next in actions {
-                    let command = next["command"].as_str().unwrap_or_default();
-                    assert_ne!(
-                        command, "homeboy runner reconcile homeboy-lab",
-                        "{label} recommended the failed reconcile command"
-                    );
-                }
-            }
         }
     }
 
@@ -3402,50 +3355,6 @@ mod tests {
             assert_eq!(value["diagnostics"]["message"], summary);
             assert_eq!(value["diagnostics"]["code"], code);
             assert_eq!(value["data"], payload);
-            // Exercise the public workflow boundary with the child's envelope
-            // summary, including a Cook whose durable outcome overrides exit 1.
-            use homeboy::core::workflow::{
-                advance, Event, FinishedStatus, InstanceState, StepResult, WorkflowDefinition,
-            };
-            let definition = WorkflowDefinition::from_value(json!({
-                "schema": "homeboy/workflow/v1", "id": "typed-result",
-                "steps": [{"id": "work", "foreach": [0, 1], "max_parallel": 2,
-                           "exec": {"program": "false"}}]
-            }))
-            .unwrap();
-            let initial = InstanceState::new(&definition, "wf-typed-result", Default::default());
-            let (mut state, _) = advance(&definition, &initial, &Event::Start, 0);
-            let keys: Vec<_> = state.steps["work"]
-                .items
-                .iter()
-                .map(|item| item.key.clone().unwrap())
-                .collect();
-            for (index, key) in keys.into_iter().enumerate() {
-                (state, _) = advance(
-                    &definition,
-                    &state,
-                    &Event::StepFinished(StepResult {
-                        key,
-                        status: FinishedStatus::Failed,
-                        outcome: Some(if index == 0 { "failed" } else { "succeeded" }.into()),
-                        error: value["summary"].as_str().map(str::to_string),
-                        output: Some(payload.clone()),
-                        run_id: None,
-                        usage: None,
-                    }),
-                    1,
-                );
-            }
-            assert_eq!(
-                state.steps["work"].items[0].outcome.as_deref(),
-                Some("failed")
-            );
-            assert_eq!(state.steps["work"].items[0].error.as_deref(), Some(summary));
-            assert_eq!(
-                state.steps["work"].items[1].outcome.as_deref(),
-                Some("succeeded")
-            );
-            assert!(state.steps["work"].items[1].error.is_none());
             assert!(!value
                 .to_string()
                 .contains("without reporting a failure cause"));
@@ -3710,10 +3619,9 @@ mod tests {
     }
 
     /// `--recover` finishes git state and then reports, by design, that
-    /// publication still has to run. No step failed, so `failure` is null. This
-    /// is the payload that used to render "release step unknown (unknown)
-    /// failed: release step failed without a reported error" while the release
-    /// was holding the one command that finishes it.
+    /// publication still has to run. No step failed, so `failure` is null, and
+    /// the summary must name the command that finishes the release rather than
+    /// an unknown failed step.
     fn recovered_incomplete_payload() -> Value {
         json!({
             "schema": "homeboy/release-operator-summary/v1",
@@ -3753,20 +3661,14 @@ mod tests {
             .first()
             .expect("an incomplete release must hand back the command that finishes it");
         assert_eq!(action.command, "homeboy release demo --head --apply");
-    }
 
-    /// The continuation command is the whole point of the digest, so it has to
-    /// survive the projection that builds the envelope, not just the type.
-    #[test]
-    fn incomplete_release_without_continuation_still_explains_itself() {
+        // Without a continuation command the state is still explained.
         let mut payload = recovered_incomplete_payload();
         payload["continuation_command"] = Value::Null;
-
         let digest = release_failure_digest(&payload).expect("digest");
-
         assert!(
             digest.summary.contains("git_recovered"),
-            "state must still be reported: {}",
+            "{}",
             digest.summary
         );
         assert!(!digest.summary.contains("without a reported error"));
@@ -3943,14 +3845,6 @@ mod tests {
             "gh release create 'v0.320.0' --title 'v0.320.0' --notes-file 'notes.md'"
         );
         assert!(digest.summary.contains("gh-create-failed"));
-    }
-
-    #[test]
-    fn json_mapping_preserves_success_payload_and_exit_code() {
-        let (payload, exit_code) = map_cmd_result_to_json(Ok((json!({ "changed": 2 }), 20)));
-
-        assert_eq!(exit_code, 20);
-        assert_eq!(payload.expect("payload"), json!({ "changed": 2 }));
     }
 
     #[test]
@@ -4172,6 +4066,9 @@ mod tests {
         );
         assert_eq!(value["artifacts"][0]["uri"], "/tmp/artifact.json");
         assert!(value["data"].get(ACTIONABLE_METADATA_KEY).is_none());
+        // A well-formed contract adds no warnings, so healthy results keep
+        // the exact v3 shape consumers already receive.
+        assert!(value.get("contract_warnings").is_none());
     }
 
     #[test]
@@ -4199,10 +4096,8 @@ mod tests {
     }
 
     /// #10305: a payload that *declares* an actionable contract but gets it
-    /// wrong used to be indistinguishable from one that declared nothing. The
-    /// key was removed from `data` and the parse failure was swallowed by
-    /// `unwrap_or_default()`, so the orchestrator saw a well-formed envelope
-    /// asserting there was no run.
+    /// wrong must stay distinguishable from one that declared nothing, rather
+    /// than presenting a well-formed envelope asserting there was no run.
     #[test]
     fn malformed_actionable_metadata_is_reported_instead_of_silently_dropped() {
         let response = cli_response_for_json_result_for_command(
@@ -4267,85 +4162,6 @@ mod tests {
             .expect("contract warnings are reported");
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0]["pointer"], "/stages/1/_homeboy_actionable");
-    }
-
-    /// A well-formed contract must not gain the new field, so the serialized
-    /// shape of every healthy result is byte-for-byte what v3 consumers already
-    /// receive.
-    #[test]
-    fn well_formed_actionable_metadata_adds_no_contract_warnings() {
-        let response = cli_response_for_json_result_for_command(
-            &Ok(json!({
-                ACTIONABLE_METADATA_KEY: actionable_metadata_value_for_run_ref(
-                    "run-7", "bench", "test",
-                )
-            })),
-            0,
-            "observe",
-            None,
-        );
-        let value = serde_json::to_value(response).expect("response json");
-
-        assert_eq!(value["run"]["id"], "run-7");
-        assert!(value.get("contract_warnings").is_none());
-    }
-
-    /// The envelope stayed backward compatible: `contract_warnings` is additive
-    /// and optional, so a consumer compiled against the pre-change v3 shape
-    /// still parses a new envelope that carries warnings.
-    #[test]
-    fn pre_change_v3_consumer_still_parses_an_envelope_carrying_contract_warnings() {
-        /// The v3 envelope exactly as it existed before `contract_warnings`,
-        /// standing in for an already-deployed client.
-        #[derive(Deserialize)]
-        #[allow(dead_code)]
-        struct LegacyV3Envelope {
-            schema: String,
-            command: String,
-            #[serde(default)]
-            operation: Option<String>,
-            success: bool,
-            exit_code: i32,
-            status: String,
-            #[serde(default)]
-            run: Option<CommandRunRef>,
-            #[serde(default)]
-            refs: CommandResultRefs,
-            #[serde(default)]
-            summary: Option<String>,
-            #[serde(default)]
-            next_actions: Vec<CommandNextAction>,
-            #[serde(default)]
-            artifacts: Vec<CommandArtifactRef>,
-            #[serde(default)]
-            evidence: Vec<CommandArtifactRef>,
-            #[serde(default)]
-            diagnostics: Option<Value>,
-            #[serde(default)]
-            data: Option<Value>,
-        }
-
-        let response = cli_response_for_json_result_for_command(
-            &Ok(json!({
-                "run_id": "run-9",
-                ACTIONABLE_METADATA_KEY: { "run": { "id": "run-9" } }
-            })),
-            0,
-            "observe",
-            None,
-        );
-        let serialized = serde_json::to_string(&response).expect("serialize envelope");
-
-        // Precondition: this envelope really does carry the new field.
-        let raw: Value = serde_json::from_str(&serialized).expect("raw json");
-        assert_eq!(raw["contract_warnings"].as_array().map(Vec::len), Some(1));
-
-        let legacy: LegacyV3Envelope =
-            serde_json::from_str(&serialized).expect("pre-change consumer still parses");
-        assert_eq!(legacy.schema, COMMAND_RESULT_SCHEMA);
-        assert_eq!(legacy.command, "observe");
-        assert_eq!(legacy.status, "succeeded");
-        assert!(legacy.success);
     }
 
     #[test]

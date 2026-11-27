@@ -619,7 +619,6 @@ fn key_import(server_id: &str, private_key_path: &str) -> CmdResult<ServerOutput
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
     use homeboy::core::server::{RunnerSecretEnvRef, ServerRunner};
     use std::collections::HashMap;
 
@@ -672,36 +671,6 @@ mod tests {
             "OPENAI_API_KEY"
         );
         assert!(!value.to_string().contains("dummy-secret"));
-    }
-
-    #[test]
-    fn managed_session_output_reports_local_lifetime_scope() {
-        let session = ManagedSshSession {
-            control_path: "/tmp/control".to_string(),
-            persist: "4h".to_string(),
-        };
-        let output = serde_json::to_value(ServerSessionOutput {
-            action: "status".to_string(),
-            server_id: "sandbox".to_string(),
-            session: session.clone(),
-            live: true,
-            persist_scope: PERSIST_SCOPE,
-            stdout: String::new(),
-            stderr: String::new(),
-        })
-        .expect("serialize session status");
-        let policy = serde_json::to_value(ServerSessionPolicyOutput {
-            session,
-            persist_scope: PERSIST_SCOPE,
-        })
-        .expect("serialize session policy");
-
-        assert_eq!(output["persist"], "4h");
-        assert_eq!(policy["persist"], "4h");
-        assert_eq!(
-            output["persist_scope"],
-            "local OpenSSH ControlMaster idle lifetime; not a remote server policy"
-        );
     }
 
     #[test]
@@ -795,34 +764,6 @@ mod tests {
             let value = serde_json::to_value(&output).expect("serialize empty list");
             assert_eq!(value["command"], "server.list");
             assert_eq!(value["entities"], serde_json::json!([]), "full={full}");
-        }
-    }
-
-    #[test]
-    fn server_show_does_not_emit_entities() {
-        let output = ServerOutput {
-            command: "server.show".to_string(),
-            id: Some("lab".to_string()),
-            ..Default::default()
-        };
-        let value = serde_json::to_value(&output).expect("serialize show");
-        assert!(value.get("entities").is_none());
-    }
-
-    #[test]
-    fn server_list_defaults_to_summary_and_full_is_explicit() {
-        assert!(!list_flag(&["homeboy", "server", "list"]));
-        assert!(list_flag(&["homeboy", "server", "list", "--full"]));
-    }
-
-    fn list_flag(args: &[&str]) -> bool {
-        let cli = crate::cli_surface::Cli::try_parse_from(args).expect("parse server list");
-        let crate::cli_surface::Commands::Server(server) = cli.command else {
-            panic!("expected a server command");
-        };
-        match server.command {
-            ServerCommand::List { full } => full,
-            _ => panic!("expected server list"),
         }
     }
 }

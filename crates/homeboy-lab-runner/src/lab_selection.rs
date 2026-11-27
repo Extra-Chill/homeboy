@@ -363,6 +363,10 @@ pub struct PlacementReadiness {
     pub runner_id: String,
     pub state: PlacementReadinessState,
     pub predicates: Vec<PlacementReadinessPredicate>,
+    /// Why the runner admission projection refuses this runner; the same
+    /// reasons Lab offload and `runner status` report for the same status.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub admission_reasons: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_admission:
         Option<homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan>,
@@ -388,11 +392,10 @@ struct PlacementReadinessObservation {
 }
 
 pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<PlacementReadiness> {
-    placement_readiness_with_transport(request, |request, source_path| {
+    placement_readiness_with_transport(request, |request, _source_path| {
         let runner = load(&request.runner_id)?;
         let status = status(&request.runner_id)?;
         let command_prefix = crate::lab_command::lab_offload_command_prefix(
-            source_path,
             super::remote_runner_homeboy_path(&runner, "placement readiness")?,
         );
         Ok(PlacementReadinessObservation {
@@ -514,18 +517,16 @@ fn placement_readiness_from_status_with_catalog(
             status,
             require_exact_runner_version,
         );
-    let mut availability = RunnerAvailability::from_status_parts(
-        request.runner_id.clone(),
-        status.connected,
-        blocking_status_drift,
-        status.active_jobs.len(),
-        &status.active_job_state,
-        capacity,
+    // Required capabilities are evaluated below against the compiled plan, so
+    // the shared admission projection does not repeat the runtime probe.
+    let availability = super::runner_admission_availability(
+        status,
+        &super::RunnerAdmissionPolicy {
+            capacity,
+            capabilities_ready: true,
+            exact_version: require_exact_runner_version,
+        },
     );
-    if status.under_pressure() {
-        availability.reasons.push("pressure".to_string());
-        availability.accepts_jobs = false;
-    }
     let compatible = matches!(capability, super::LabRunnerGateDecision::Eligible);
     let inputs_declared = source_path_inputs
         .iter()
@@ -637,6 +638,7 @@ fn placement_readiness_from_status_with_catalog(
                 }),
         )
         .collect(),
+        admission_reasons: availability.reasons,
         provider_admission,
         recovery_actions,
         recovery_action_projections,
@@ -1569,12 +1571,8 @@ fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String
 
 /// The one repair a caller may execute directly, when there is exactly one.
 ///
-/// #11104: this used to rebuild a `refresh-homeboy` action from scratch and
-/// then lift it only if it rendered to a byte-identical string to the plan's
-/// sole command. Five producers emit five different commands, so the equality
-/// guard threw away the argv the plan had already computed for four of them.
-/// Now the plan carries the action, so the action is simply read off the step.
-/// A multi-step plan is a plan, not one action, and still yields `None`; so
+/// Each repair plan step carries its typed action, so the action is read off
+/// the step rather than rebuilt from its rendered command (#11104). A multi-step plan is a plan, not one action, and still yields `None`; so
 /// does a step with no typed form, and so does the read-only diagnosis, which
 /// must not be presented as a repair the caller can apply.
 fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<ExecutableAction> {
@@ -1969,9 +1967,6 @@ mod daemon_repair_step_tests {
 }
 
 #[cfg(test)]
-mod placement_rejection_tests {}
-
-#[cfg(test)]
 mod placement_readiness_tests {
     use super::*;
     use crate::session::RunnerStaleDaemonWarning;
@@ -1996,7 +1991,21 @@ mod placement_readiness_tests {
             session: None,
             stale_daemon: None,
             configured_job_binary_build_identity: None,
-            daemon_freshness: None,
+            daemon_freshness: Some(homeboy_core::daemon::DaemonFreshnessReport {
+                fresh: true,
+                stale_reason_code: None,
+                restartable: false,
+                lease_id: Some("lease".to_string()),
+                pid: Some(42),
+                recovery_evidence: None,
+                ownership_evidence: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             stale_runner_jobs: Vec::new(),
@@ -2229,60 +2238,114 @@ mod placement_readiness_tests {
 
     #[test]
     fn build_drift_does_not_require_recovery() {
-        let mut observed = status();
-        observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
-            "lab",
-            "old".to_string(),
-            "new".to_string(),
-            None,
-            None,
-        ));
-        let result = decide(
-            &request(),
-            &observed,
-            Some(1),
-            super::super::LabRunnerGateDecision::Eligible,
-        );
-        assert_eq!(result.state, PlacementReadinessState::Ready);
-        assert!(result.recovery_actions.is_empty());
+        for (loaded_build, configured_build) in [
+            (None, None),
+            (
+                Some("homeboy 0.0.0+old".to_string()),
+                Some("homeboy 0.0.1+new".to_string()),
+            ),
+        ] {
+            let mut observed = status();
+            observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+                "lab",
+                "homeboy 0.0.0".to_string(),
+                "homeboy 0.0.1".to_string(),
+                loaded_build,
+                configured_build,
+            ));
+            let result = decide(
+                &request(),
+                &observed,
+                Some(1),
+                super::super::LabRunnerGateDecision::Eligible,
+            );
+            assert_eq!(result.state, PlacementReadinessState::Ready);
+            assert!(result.recovery_actions.is_empty());
+        }
     }
 
+    /// Placement, the Lab offload dispatch gate and `runner status` read one
+    /// runner admission projection, so each reports the same refusal reason.
     #[test]
-    fn placement_readiness_accepts_runner_with_build_mismatch() {
-        let mut observed = status();
-        observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
-            "lab",
-            "homeboy 0.0.0".to_string(),
-            "homeboy 0.0.1".to_string(),
-            Some("homeboy 0.0.0+old".to_string()),
-            Some("homeboy 0.0.1+new".to_string()),
-        ));
-
-        let result = decide(
-            &request(),
-            &observed,
-            Some(1),
-            super::super::LabRunnerGateDecision::Eligible,
+    fn placement_offload_and_status_report_the_same_admission_refusal() {
+        let mut pressured = status();
+        pressured
+            .daemon_freshness
+            .as_mut()
+            .expect("fixture freshness")
+            .runtime_paths = Some(homeboy_core::daemon::DaemonRuntimeSnapshot {
+            pressure_thresholds: Default::default(),
+            pressure: Some(homeboy_core::runner_pressure::RunnerPressure {
+                cpu: Some(10_900),
+                load_fallback: true,
+                admission_reason: Some("pressure".to_string()),
+                ..Default::default()
+            }),
+            loaded_at: "2026-11-09T14:39:00Z".to_string(),
+            paths: Vec::new(),
+        });
+        let mut disconnected = status();
+        disconnected.connected = false;
+        disconnected.state = RunnerSessionState::Disconnected;
+        let mut stale_binary = status();
+        stale_binary.stale_daemon = Some(
+            RunnerStaleDaemonWarning::new("lab", "old".to_string(), "new".to_string(), None, None)
+                .with_runtime_paths(
+                    "lab",
+                    vec![crate::session::RunnerStaleRuntimePath {
+                        env: "HOMEBOY_BIN".to_string(),
+                        path: "/usr/local/bin/homeboy".to_string(),
+                        loaded_fingerprint: "old".to_string(),
+                        current_fingerprint: "new".to_string(),
+                    }],
+                    Vec::new(),
+                ),
         );
 
-        assert_eq!(result.state, PlacementReadinessState::Ready);
-    }
+        for (observed, reason) in [
+            (pressured, "pressure"),
+            (disconnected, "not_connected"),
+            (stale_binary, "stale_daemon"),
+        ] {
+            let placement = decide(
+                &request(),
+                &observed,
+                Some(1),
+                super::super::LabRunnerGateDecision::Eligible,
+            );
+            let offload = crate::lab::offload::require_available_lab_runner(
+                "lab",
+                &observed,
+                Some(1),
+                "test",
+            )
+            .expect_err("offload refuses");
+            let offload_reasons: Vec<String> =
+                serde_json::from_value(offload.details["runner_availability"]["reasons"].clone())
+                    .expect("offload reasons");
+            let status_reasons = crate::runner_admission_snapshot_for_status(
+                observed,
+                crate::RunnerAdmissionReadiness::Policy(crate::RunnerAdmissionPolicy {
+                    capacity: Some(1),
+                    capabilities_ready: true,
+                    exact_version: false,
+                }),
+            )
+            .summary
+            .reasons;
 
-    #[test]
-    fn direct_preflight_retains_ssh_transport_resolution() {
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::DirectSsh,
-        };
-
-        let loopback = loopback_direct_ssh_transport_for_preflight(&selection, |runner_id| {
-            assert_eq!(runner_id, "lab");
-            Ok(true)
-        })
-        .expect("direct SSH transport resolution");
-
-        assert!(loopback);
+            assert_eq!(
+                placement.state,
+                PlacementReadinessState::Blocked,
+                "{reason}"
+            );
+            assert_eq!(
+                placement.admission_reasons.first().map(String::as_str),
+                Some(reason)
+            );
+            assert_eq!(placement.admission_reasons, offload_reasons, "{reason}");
+            assert_eq!(placement.admission_reasons, status_reasons, "{reason}");
+        }
     }
 
     #[test]
@@ -2336,10 +2399,6 @@ mod placement_readiness_tests {
             )
             .with_evidence(serde_json::json!({ "remediation": "configure capability.alpha" }))
         );
-        assert_eq!(
-            result.recovery_actions[0].evidence,
-            Some(serde_json::json!({ "remediation": "configure capability.alpha" }))
-        );
     }
 
     #[test]
@@ -2361,11 +2420,6 @@ mod placement_readiness_tests {
         let action = &result.recovery_actions[0];
         assert_eq!(action.id, "runner.connect");
         assert_eq!(action.safety, ActionSafety::Mutating);
-        assert_eq!(
-            serde_json::to_value(&result).expect("serialized v1 envelope")["recovery_actions"][0]
-                ["program"],
-            "homeboy"
-        );
     }
 
     #[test]

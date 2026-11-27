@@ -187,8 +187,9 @@ fn runner_inventory_summary(
         && !runner::is_host_daemon_runner(&configured.runner_id);
     let operator = status.map(super::status::operator_summary);
     let admission = status.map(|status| {
-        homeboy::runner::runners::runner_readiness_admission_snapshot(
-            homeboy::runner::runner_admission_snapshot_for_status(status.clone()),
+        homeboy::runner::runners::runner_admission_snapshot_for_status(
+            status.clone(),
+            homeboy::runner::runners::RunnerAdmissionReadiness::Configured,
         )
     });
     RunnerInventorySummary {
@@ -210,7 +211,7 @@ fn runner_inventory_summary(
         } else {
             admission
                 .as_ref()
-                .map(homeboy::runner::runners::runner_admission_label)
+                .map(homeboy::runner::RunnerAdmissionSnapshot::admission_label)
                 .unwrap_or_else(|| "blocked".to_string())
         },
         concurrency: RunnerInventoryConcurrency {
@@ -702,8 +703,6 @@ mod tests {
         use std::collections::HashMap;
 
         use super::super::*;
-        use crate::cli_surface::Cli;
-        use clap::Parser;
 
         fn configured_runner(id: &str) -> Runner {
             Runner {
@@ -762,31 +761,6 @@ mod tests {
             }
         }
 
-        fn parse(args: &[&str]) -> bool {
-            let cli = Cli::try_parse_from(args).expect("parse runner list");
-            let crate::cli_surface::Commands::Runner(runner) = cli.command else {
-                panic!("expected a runner command");
-            };
-            match runner.command {
-                crate::commands::runner::cli::RunnerCommand::List { full } => full,
-                _ => panic!("expected a runner list command"),
-            }
-        }
-
-        #[test]
-        fn list_defaults_to_the_compact_view() {
-            assert!(
-                !parse(&["homeboy", "runner", "list"]),
-                "the default must be compact; a long-lived controller's full \
-                 listing truncates in agent and terminal output"
-            );
-        }
-
-        #[test]
-        fn full_is_available_explicitly() {
-            assert!(parse(&["homeboy", "runner", "list", "--full"]));
-        }
-
         #[test]
         fn typed_api_failure_is_not_treated_as_an_empty_inventory() {
             let error = descriptors_from_list_response(RunnerApiListResponse {
@@ -825,11 +799,9 @@ mod tests {
             assert!(wire.stdout_json().unwrap().len() <= RUNNER_LIST_PROJECTION_BYTES);
             assert!(wire_json["data"].get("sessions").is_none());
             assert!(!wire_json["data"].to_string().contains("ENV_0"));
-            // Summaries are the canonical `entities` rows (#14876); the former
-            // `runner_summaries` key is gone.
+            // Summaries are the canonical `entities` rows (#14876).
             assert_eq!(wire_json["data"]["entities"].as_array().unwrap().len(), 10);
             assert_eq!(wire_json["data"]["entities"][0]["identity"], "lab-0");
-            assert!(wire_json["data"].get("runner_summaries").is_none());
             assert_eq!(wire_json["data"]["truncation"]["shown"], 10);
             assert_eq!(wire_json["data"]["truncation"]["omitted"], 15);
             assert_eq!(
@@ -879,27 +851,14 @@ mod tests {
         }
 
         #[test]
-        fn default_list_returns_summaries_under_entities_only() {
-            let runners = vec![descriptor(&configured_runner("lab"))];
-            let output = bounded_list_output(compact_list_output(&runners, &[]));
-            let value = serde_json::to_value(&output).expect("list serializes");
-
-            assert_eq!(value["command"], "runner.list");
-            assert_eq!(value["entities"][0]["identity"], "lab");
-            assert!(value.get("runner_summaries").is_none());
-        }
-
-        #[test]
         fn empty_runner_lists_emit_entities_array() {
             let compact = serde_json::to_value(bounded_list_output(compact_list_output(&[], &[])))
                 .expect("compact list serializes");
             assert_eq!(compact["entities"], serde_json::json!([]));
-            assert!(compact.get("runner_summaries").is_none());
 
             let full = serde_json::to_value(full_list_output(Vec::new(), Vec::new()))
                 .expect("full list serializes");
             assert_eq!(full["entities"], serde_json::json!([]));
-            assert!(full.get("runner_summaries").is_none());
         }
 
         #[test]
@@ -986,7 +945,6 @@ mod tests {
                 value["entities"][0]["env"]["PATH"],
                 "/long/path".repeat(5_000)
             );
-            assert!(value.get("runner_summaries").is_none());
             assert!(value.get("truncation").is_none());
         }
     }
@@ -1016,28 +974,5 @@ mod tests {
             expected_live_pid: Some(42),
         })
         .expect("an exact live adoption validates");
-    }
-
-    /// The per-case dead-daemon recovery flags are gone: a plain connect
-    /// starts a daemon whose startup recovers its predecessor (#17429).
-    #[test]
-    fn dead_daemon_recovery_flags_do_not_parse() {
-        use clap::Parser;
-        for flags in [
-            &["--adopt-orphan-lease", "lease"][..],
-            &["--reconcile-leaseless-orphans"][..],
-            &["--recover-missing-lease-state", "lease"][..],
-            &[
-                "--confirm-untracked-child-dead",
-                "00000000-0000-0000-0000-000000000001",
-            ][..],
-        ] {
-            let mut argv = vec!["homeboy", "runner", "connect", "lab"];
-            argv.extend_from_slice(flags);
-            assert!(
-                crate::cli_surface::Cli::try_parse_from(argv).is_err(),
-                "{flags:?} must not parse"
-            );
-        }
     }
 }

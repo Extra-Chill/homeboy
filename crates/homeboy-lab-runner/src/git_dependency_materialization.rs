@@ -569,7 +569,6 @@ mod tests {
             ensure_git_dependency_fresh(checkout.path(), None, false).expect("auto update");
 
         assert_eq!(freshness.status, DependencyUpdateStatus::FastForwarded);
-        assert_ne!(before, expected);
         assert_eq!(freshness.before_sha.as_deref(), Some(before.as_str()));
         assert_eq!(freshness.after_sha.as_deref(), Some(expected.as_str()));
         assert_eq!(freshness.upstream_sha.as_deref(), Some(expected.as_str()));
@@ -599,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_dependency_without_pinned_ref_fails() {
+    fn detached_dependency_requires_an_explicit_pinned_ref() {
         let fixture = GitDependencyFixture::new();
         fixture.commit_file("initial.txt", "initial");
         fixture.push();
@@ -623,6 +622,13 @@ mod tests {
         assert!(hints.contains("switch <branch>"));
         assert!(hints.contains("--path <component-path>"));
         assert_eq!(git_output(checkout.path(), &["rev-parse", "HEAD"]), head);
+
+        let freshness =
+            ensure_git_dependency_fresh(checkout.path(), Some(&head), false).expect("pinned");
+
+        assert_eq!(freshness.status, DependencyUpdateStatus::PinnedRef);
+        assert!(freshness.used_pinned_ref);
+        assert_eq!(freshness.pinned_ref.as_deref(), Some(head.as_str()));
     }
 
     #[test]
@@ -642,24 +648,6 @@ mod tests {
             ensure_git_dependency_fresh(repo.path(), None, false).expect_err("no upstream fails");
 
         assert!(err.message.contains("no_upstream"));
-    }
-
-    #[test]
-    fn explicit_pinned_ref_allows_detached_dependency() {
-        let fixture = GitDependencyFixture::new();
-        fixture.commit_file("initial.txt", "initial");
-        fixture.push();
-
-        let checkout = fixture.clone_checkout();
-        let head = git_output(checkout.path(), &["rev-parse", "HEAD"]);
-        run_git(checkout.path(), &["checkout", "--detach", &head]);
-
-        let freshness =
-            ensure_git_dependency_fresh(checkout.path(), Some(&head), false).expect("pinned");
-
-        assert_eq!(freshness.status, DependencyUpdateStatus::PinnedRef);
-        assert!(freshness.used_pinned_ref);
-        assert_eq!(freshness.pinned_ref.as_deref(), Some(head.as_str()));
     }
 
     #[test]

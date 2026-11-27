@@ -199,27 +199,7 @@ fn private_at_file_snapshot_survives_source_replacement_before_exec() {
     std::fs::write(&source, verified).expect("write private plan");
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
         .expect("lock private plan");
-    let request = RemoteRunnerJobRequest {
-        runner_id: "lab".to_string(),
-        project_id: None,
-        operation: "runner.exec".to_string(),
-        command: vec!["sh".to_string(), format!("@{}", source.display())],
-        cwd: Some("/tmp".to_string()),
-        env: Default::default(),
-        secret_env_names: Vec::new(),
-        secret_env_plan: Default::default(),
-        env_materialization: None,
-        capture_patch: false,
-        source_snapshot: None,
-        path_materialization_plan: None,
-        require_paths: Vec::new(),
-        extension_env_providers: Vec::new(),
-        lab_runner_workload: None,
-        lifecycle: None,
-        workspace_claim_binding: None,
-        workspace_owner_lease: None,
-        metadata: None,
-    };
+    let request = private_at_file_request(&source);
     let mut envelope = request.execution_envelope();
 
     let cleanup = verify_private_at_files(&mut envelope).expect("verify private input");
@@ -258,66 +238,38 @@ fn private_at_file_snapshot_survives_source_replacement_before_exec() {
 
 #[cfg(unix)]
 #[test]
-fn private_at_file_unsafe_permissions_are_cleaned_before_error() {
+fn private_at_file_rejections_clean_plaintext_and_report_cleanup() {
     use std::os::unix::fs::PermissionsExt;
 
-    let directory = tempfile::tempdir().expect("private file directory");
-    let content = b"private plan";
-    let digest = format!("{:x}", Sha256::digest(content));
-    let source = directory
-        .path()
-        .join(format!("private-sha256-{digest}-plan.json"));
-    std::fs::write(&source, content).expect("write private plan");
-    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644))
-        .expect("make private plan unsafe");
-    let request = private_at_file_request(&source);
-    let mut envelope = request.execution_envelope();
+    // (mode of the private input, or None when it is missing; expected failure)
+    for (mode, failure) in [
+        (Some(0o644), "private runner @file"),
+        (None, "stat private runner @file"),
+        (Some(0o000), "read private runner @file"),
+    ] {
+        let directory = tempfile::tempdir().expect("private file directory");
+        let content = b"private plan";
+        let digest = format!("{:x}", Sha256::digest(content));
+        let source = directory
+            .path()
+            .join(format!("private-sha256-{digest}-plan.json"));
+        if let Some(mode) = mode {
+            std::fs::write(&source, content).expect("write private plan");
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(mode))
+                .expect("set private plan mode");
+        }
+        let mut envelope = private_at_file_request(&source).execution_envelope();
 
-    let error = verify_private_at_files(&mut envelope).expect_err("unsafe mode rejected");
+        let error = verify_private_at_files(&mut envelope).expect_err("unsafe input rejected");
 
-    assert!(error.message.contains("private input cleanup succeeded"));
-    assert!(!source.exists(), "unsafe plaintext is cleaned");
-}
-
-#[cfg(unix)]
-#[test]
-fn private_at_file_stat_failure_reports_cleanup_result() {
-    let directory = tempfile::tempdir().expect("private file directory");
-    let digest = format!("{:x}", Sha256::digest(b"private plan"));
-    let source = directory
-        .path()
-        .join(format!("private-sha256-{digest}-plan.json"));
-    let request = private_at_file_request(&source);
-    let mut envelope = request.execution_envelope();
-
-    let error = verify_private_at_files(&mut envelope).expect_err("missing input rejected");
-
-    assert!(error.message.contains("stat private runner @file"));
-    assert!(error.message.contains("private input cleanup succeeded"));
-}
-
-#[cfg(unix)]
-#[test]
-fn private_at_file_read_failure_is_cleaned_before_error() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let directory = tempfile::tempdir().expect("private file directory");
-    let content = b"private plan";
-    let digest = format!("{:x}", Sha256::digest(content));
-    let source = directory
-        .path()
-        .join(format!("private-sha256-{digest}-plan.json"));
-    std::fs::write(&source, content).expect("write private plan");
-    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000))
-        .expect("make private plan unreadable");
-    let request = private_at_file_request(&source);
-    let mut envelope = request.execution_envelope();
-
-    let error = verify_private_at_files(&mut envelope).expect_err("unreadable input rejected");
-
-    assert!(error.message.contains("read private runner @file"));
-    assert!(error.message.contains("private input cleanup succeeded"));
-    assert!(!source.exists(), "unreadable plaintext is cleaned");
+        assert!(
+            error.message.contains(failure),
+            "{mode:?}: {}",
+            error.message
+        );
+        assert!(error.message.contains("private input cleanup succeeded"));
+        assert!(!source.exists(), "{mode:?}: plaintext is cleaned");
+    }
 }
 
 #[cfg(unix)]

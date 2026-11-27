@@ -4,12 +4,10 @@
 //! readiness surfaces interpret those entries: the readiness summary
 //! ([`super::readiness::classify_pr_ci`]), the fleet rollup
 //! ([`super::fleet`]), and the PR-land merge gate
-//! ([`crate::git::pr_land`]). They previously each re-matched
-//! `(status, conclusion)` with subtly different groupings — most visibly, the
-//! fleet rollup folded `SKIPPED` into its passed count while the readiness
-//! summary tracked it separately. This module is the single place that maps one
+//! ([`crate::git::pr_land`]). This module is the single place that maps one
 //! check entry to a [`CheckClass`], so every surface agrees on what each
-//! outcome means.
+//! outcome means (for example, `SKIPPED` is its own bucket everywhere rather
+//! than a pass).
 
 use serde_json::Value;
 
@@ -203,90 +201,39 @@ mod tests {
         }
     }
 
+    /// Each outcome lands in exactly one bucket: `SKIPPED` is terminal and
+    /// non-blocking, a conclusion-less `COMPLETED` blocks, and matching is
+    /// case-insensitive.
     #[test]
-    fn classifies_terminal_outcomes() {
-        assert_eq!(
-            classify_check(&check("COMPLETED", "SUCCESS")),
-            CheckClass::Passed
-        );
-        assert_eq!(
-            classify_check(&check("COMPLETED", "NEUTRAL")),
-            CheckClass::Passed
-        );
-        assert_eq!(
-            classify_check(&check("COMPLETED", "SKIPPED")),
-            CheckClass::Skipped
-        );
-        assert_eq!(
-            classify_check(&check("COMPLETED", "FAILURE")),
-            CheckClass::Failed
-        );
-        assert_eq!(
-            classify_check(&check("COMPLETED", "ACTION_REQUIRED")),
-            CheckClass::Failed
-        );
-        assert_eq!(
-            classify_check(&check("COMPLETED", "CANCELLED")),
-            CheckClass::Rerunnable
-        );
-        assert_eq!(
-            classify_check(&check("COMPLETED", "TIMED_OUT")),
-            CheckClass::Rerunnable
-        );
-        assert_eq!(
-            classify_check(&check("COMPLETED", "BOGUS")),
-            CheckClass::Unknown
-        );
-    }
-
-    #[test]
-    fn classifies_waiting_outcomes() {
-        assert_eq!(classify_check(&check("QUEUED", "")), CheckClass::Queued);
-        assert_eq!(classify_check(&check("REQUESTED", "")), CheckClass::Queued);
-        assert_eq!(
-            classify_check(&check("IN_PROGRESS", "")),
-            CheckClass::Running
-        );
-        assert_eq!(classify_check(&check("PENDING", "")), CheckClass::Pending);
-        assert_eq!(classify_check(&serde_json::json!({})), CheckClass::Pending);
-    }
-
-    #[test]
-    fn completed_without_conclusion_is_unknown() {
-        assert_eq!(
-            classify_check(&serde_json::json!({ "status": "COMPLETED" })),
-            CheckClass::Unknown
-        );
-    }
-
-    #[test]
-    fn skipped_is_terminal_and_non_blocking() {
-        let skipped = classify_check(&check("COMPLETED", "SKIPPED"));
-        assert!(!skipped.is_blocking());
-        assert!(!skipped.is_waiting());
-    }
-
-    #[test]
-    fn matches_are_case_insensitive() {
-        assert_eq!(
-            classify_check(&check("completed", "failure")),
-            CheckClass::Failed
-        );
-        assert_eq!(
-            classify_check(&check("in_progress", "")),
-            CheckClass::Running
-        );
-    }
-
-    #[test]
-    fn blocking_and_waiting_partition_failure_and_pending() {
-        assert!(CheckClass::Failed.is_blocking());
-        assert!(CheckClass::Rerunnable.is_blocking());
-        assert!(CheckClass::Unknown.is_blocking());
-        assert!(!CheckClass::Passed.is_blocking());
-        assert!(CheckClass::Queued.is_waiting());
-        assert!(CheckClass::Running.is_waiting());
-        assert!(CheckClass::Pending.is_waiting());
-        assert!(!CheckClass::Passed.is_waiting());
+    fn classifies_each_outcome_into_blocking_waiting_or_settled() {
+        use CheckClass::*;
+        for (check, class, blocking, waiting) in [
+            (check("COMPLETED", "SUCCESS"), Passed, false, false),
+            (check("COMPLETED", "NEUTRAL"), Passed, false, false),
+            (check("COMPLETED", "SKIPPED"), Skipped, false, false),
+            (check("COMPLETED", "FAILURE"), Failed, true, false),
+            (check("completed", "failure"), Failed, true, false),
+            (check("COMPLETED", "ACTION_REQUIRED"), Failed, true, false),
+            (check("COMPLETED", "CANCELLED"), Rerunnable, true, false),
+            (check("COMPLETED", "TIMED_OUT"), Rerunnable, true, false),
+            (check("COMPLETED", "BOGUS"), Unknown, true, false),
+            (
+                serde_json::json!({ "status": "COMPLETED" }),
+                Unknown,
+                true,
+                false,
+            ),
+            (check("QUEUED", ""), Queued, false, true),
+            (check("REQUESTED", ""), Queued, false, true),
+            (check("IN_PROGRESS", ""), Running, false, true),
+            (check("in_progress", ""), Running, false, true),
+            (check("PENDING", ""), Pending, false, true),
+            (serde_json::json!({}), Pending, false, true),
+        ] {
+            let classified = classify_check(&check);
+            assert_eq!(classified, class, "{check}");
+            assert_eq!(classified.is_blocking(), blocking, "{check}");
+            assert_eq!(classified.is_waiting(), waiting, "{check}");
+        }
     }
 }

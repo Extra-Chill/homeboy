@@ -37,6 +37,7 @@ pub(crate) mod artifact_materialization;
 mod cancellation;
 mod control_plane_identities;
 mod conversion;
+mod cook_admission_phase;
 mod cook_delivery_writer;
 mod cook_effects;
 pub(crate) mod cook_run_state;
@@ -81,8 +82,13 @@ pub use control_plane_identities::{
     canonical_fanout_mission, canonical_mission, split_transport_retry_suffix,
     CanonicalControlPlaneIdentities,
 };
+pub(crate) use cook_admission_phase::handoff_materialized;
+pub use cook_admission_phase::CookAdmissionPhase;
 pub use cook_effects::*;
-pub use cook_run_state::{legal_actions, CookRunEvent, CookRunPhase, CookRunState, CookRunStatus};
+pub use cook_run_state::{
+    legal_actions, live_gate_owner, CookRunEvent, CookRunPhase, CookRunState, CookRunStatus,
+    LiveGateOwner, LIVE_GATE_HEARTBEAT_WINDOW_SECONDS,
+};
 pub use durable_progress::record_promotion_progress_in_store;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

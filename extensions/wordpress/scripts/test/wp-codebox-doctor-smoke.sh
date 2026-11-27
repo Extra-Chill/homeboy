@@ -50,6 +50,11 @@ if [[ "$output" != *"WP Codebox doctor: warning"* ]]; then
     exit 1
 fi
 
+if [[ "$output" != *"pin/cache mismatch: expected v0.34.3, observed 0.21.0"* ]]; then
+    echo "Expected doctor to report extension pin/cache drift" >&2
+    exit 1
+fi
+
 cleanup_output=$(WP_CODEBOX_CALLS="$CALLS" \
     HOMEBOY_WP_CODEBOX_INSTALL_DIR="${TMPDIR}/empty-install" \
     HOMEBOY_WP_CODEBOX_BIN="$FAKE_BIN" \

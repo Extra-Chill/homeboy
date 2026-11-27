@@ -1074,15 +1074,6 @@ mod tests {
         assert_eq!(resolved, dep.canonicalize().unwrap());
     }
 
-    #[test]
-    fn path_like_dependency_detection() {
-        assert!(is_path_like_dependency("../wp-native-auth"));
-        assert!(is_path_like_dependency("./x"));
-        assert!(is_path_like_dependency("~/x"));
-        assert!(is_path_like_dependency("vendor/x"));
-        assert!(!is_path_like_dependency("wp-native-auth"));
-    }
-
     /// When a relative declaration is not materialized next to the checkout
     /// (a Cook or Lab staging root), its final segment names the component.
     #[test]
@@ -1116,9 +1107,21 @@ mod tests {
         git(path, &["commit", "-m", "initial"]);
     }
 
-    /// Register the runner-backed workspace-snapshot provider so tests that run
-    /// an isolated validation-dependency lifecycle can materialize the snapshot.
-    /// Production wires this at CLI startup; core tests wire it explicitly.
+    /// Advance `remote`'s main branch by one commit from a separate clone.
+    fn push_remote_update(remote: &Path) -> tempfile::TempDir {
+        let writer = tempfile::tempdir().unwrap();
+        git(
+            writer.path(),
+            &["clone", "--branch", "main", remote.to_str().unwrap(), "."],
+        );
+        git(writer.path(), &["config", "user.email", "test@example.com"]);
+        git(writer.path(), &["config", "user.name", "Homeboy Test"]);
+        fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
+        git(writer.path(), &["add", "."]);
+        git(writer.path(), &["commit", "-m", "remote update"]);
+        git(writer.path(), &["push", "origin", "HEAD:main"]);
+        writer
+    }
 
     fn init_repo_with_upstream(path: &Path) -> tempfile::TempDir {
         let remote = tempfile::tempdir().unwrap();
@@ -1188,31 +1191,8 @@ mod tests {
     #[test]
     fn dependency_hygiene_fails_when_trace_dependency_is_behind_upstream() {
         let local = tempfile::tempdir().unwrap();
-        let remote = tempfile::tempdir().unwrap();
-        let writer = tempfile::tempdir().unwrap();
-        init_repo(local.path());
-        git(remote.path(), &["init", "--bare", "-b", "main"]);
-        git(
-            local.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
-        git(local.path(), &["push", "-u", "origin", "main"]);
-        git(
-            writer.path(),
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote.path().to_str().unwrap(),
-                ".",
-            ],
-        );
-        git(writer.path(), &["config", "user.email", "test@example.com"]);
-        git(writer.path(), &["config", "user.name", "Homeboy Test"]);
-        fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
-        git(writer.path(), &["add", "."]);
-        git(writer.path(), &["commit", "-m", "remote update"]);
-        git(writer.path(), &["push", "origin", "HEAD:main"]);
+        let remote = init_repo_with_upstream(local.path());
+        let _writer = push_remote_update(remote.path());
 
         let err = require_checkout_hygiene(
             vec![DependencyCheckout {
@@ -1235,23 +1215,7 @@ mod tests {
             fs::create_dir_all(&extension).unwrap();
             let remote = init_repo_with_upstream(&extension);
             assert!(is_managed_extension_cache(&extension));
-            let writer = tempfile::tempdir().unwrap();
-            git(
-                writer.path(),
-                &[
-                    "clone",
-                    "--branch",
-                    "main",
-                    remote.path().to_str().unwrap(),
-                    ".",
-                ],
-            );
-            git(writer.path(), &["config", "user.email", "test@example.com"]);
-            git(writer.path(), &["config", "user.name", "Homeboy Test"]);
-            fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
-            git(writer.path(), &["add", "."]);
-            git(writer.path(), &["commit", "-m", "remote update"]);
-            git(writer.path(), &["push", "origin", "HEAD:main"]);
+            let writer = push_remote_update(remote.path());
 
             let snapshots = require_checkout_hygiene_without_lifecycle(
                 vec![DependencyCheckout {
@@ -1277,23 +1241,7 @@ mod tests {
             let extension = crate::paths::extensions().unwrap().join("wordpress");
             fs::create_dir_all(&extension).unwrap();
             let remote = init_repo_with_upstream(&extension);
-            let writer = tempfile::tempdir().unwrap();
-            git(
-                writer.path(),
-                &[
-                    "clone",
-                    "--branch",
-                    "main",
-                    remote.path().to_str().unwrap(),
-                    ".",
-                ],
-            );
-            git(writer.path(), &["config", "user.email", "test@example.com"]);
-            git(writer.path(), &["config", "user.name", "Homeboy Test"]);
-            fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
-            git(writer.path(), &["add", "."]);
-            git(writer.path(), &["commit", "-m", "remote update"]);
-            git(writer.path(), &["push", "origin", "HEAD:main"]);
+            let writer = push_remote_update(remote.path());
             fs::write(extension.join(".source-requested-ref"), "main\n").unwrap();
 
             let err = require_checkout_hygiene_without_lifecycle(
@@ -1328,23 +1276,7 @@ mod tests {
             std::os::unix::fs::symlink(&snapshot, extensions.join("wordpress")).unwrap();
             assert!(is_managed_extension_snapshot(&extensions.join("wordpress")));
 
-            let writer = tempfile::tempdir().unwrap();
-            git(
-                writer.path(),
-                &[
-                    "clone",
-                    "--branch",
-                    "main",
-                    remote.path().to_str().unwrap(),
-                    ".",
-                ],
-            );
-            git(writer.path(), &["config", "user.email", "test@example.com"]);
-            git(writer.path(), &["config", "user.name", "Homeboy Test"]);
-            fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
-            git(writer.path(), &["add", "."]);
-            git(writer.path(), &["commit", "-m", "remote update"]);
-            git(writer.path(), &["push", "origin", "HEAD:main"]);
+            let _writer = push_remote_update(remote.path());
             let snapshot_head = crate::git::output_allow_empty(&snapshot, &["rev-parse", "HEAD"]);
 
             let snapshots = require_checkout_hygiene_without_lifecycle(
@@ -1396,23 +1328,7 @@ mod tests {
                 &extensions.join("wordpress")
             ));
 
-            let writer = tempfile::tempdir().unwrap();
-            git(
-                writer.path(),
-                &[
-                    "clone",
-                    "--branch",
-                    "main",
-                    remote.path().to_str().unwrap(),
-                    ".",
-                ],
-            );
-            git(writer.path(), &["config", "user.email", "test@example.com"]);
-            git(writer.path(), &["config", "user.name", "Homeboy Test"]);
-            fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
-            git(writer.path(), &["add", "."]);
-            git(writer.path(), &["commit", "-m", "remote update"]);
-            git(writer.path(), &["push", "origin", "HEAD:main"]);
+            let _writer = push_remote_update(remote.path());
             let source_head =
                 crate::git::output_allow_empty(developer_source.path(), &["rev-parse", "HEAD"]);
 
@@ -1440,23 +1356,7 @@ mod tests {
             let extension = crate::paths::extensions().unwrap().join("wordpress");
             fs::create_dir_all(&extension).unwrap();
             let remote = init_repo_with_upstream(&extension);
-            let writer = tempfile::tempdir().unwrap();
-            git(
-                writer.path(),
-                &[
-                    "clone",
-                    "--branch",
-                    "main",
-                    remote.path().to_str().unwrap(),
-                    ".",
-                ],
-            );
-            git(writer.path(), &["config", "user.email", "test@example.com"]);
-            git(writer.path(), &["config", "user.name", "Homeboy Test"]);
-            fs::write(writer.path().join("remote.txt"), "remote\n").unwrap();
-            git(writer.path(), &["add", "."]);
-            git(writer.path(), &["commit", "-m", "remote update"]);
-            git(writer.path(), &["push", "origin", "HEAD:main"]);
+            let _writer = push_remote_update(remote.path());
             fs::write(extension.join("local.txt"), "local\n").unwrap();
             git(&extension, &["add", "."]);
             git(&extension, &["commit", "-m", "local update"]);
@@ -1716,7 +1616,6 @@ mod tests {
                 .expect_err("failed deps script should be structured");
 
             assert_eq!(err.code, ErrorCode::DependencyStepFailed);
-            assert_eq!(err.code.as_str(), "dependency_step_failed");
             assert_eq!(err.details["step_id"], "dependency.install");
             assert_eq!(err.details["component_id"], "dep");
             let artifact = err.details["artifact_refs"][0]
@@ -1763,7 +1662,6 @@ mod tests {
                 .expect_err("declared missing output should be structured");
 
             assert_eq!(err.code, ErrorCode::DependencyOutputMissing);
-            assert_eq!(err.code.as_str(), "dependency_output_missing");
             assert_eq!(
                 err.details["step_id"],
                 "dependency.output:generated/report.json"
@@ -1797,53 +1695,34 @@ mod tests {
     }
 
     #[test]
-    fn validation_dependency_ids_reads_top_level_declaration() {
-        // #9926: a component-scoped top-level `validation_dependencies` must be
-        // collected (previously only extension-nested keys were read, so a
-        // `--path` review dropped the dependency).
-        let dir = tempfile::tempdir().unwrap();
-        write_manifest(
-            dir.path(),
-            r#"{"validation_dependencies": ["workspace-events"]}"#,
-        );
-        let ids = validation_dependency_ids(dir.path()).expect("ids");
-        assert_eq!(ids, vec!["workspace-events".to_string()]);
-    }
-
-    #[test]
-    fn validation_dependency_ids_reads_extension_nested_declaration() {
-        let dir = tempfile::tempdir().unwrap();
-        write_manifest(
-            dir.path(),
-            r#"{"extensions": {"wp": {"settings": {"validation_dependencies": ["shared-runtime"]}}}}"#,
-        );
-        let ids = validation_dependency_ids(dir.path()).expect("ids");
-        assert_eq!(ids, vec!["shared-runtime".to_string()]);
-    }
-
-    #[test]
-    fn validation_dependency_ids_merges_and_dedupes_top_level_and_nested() {
-        let dir = tempfile::tempdir().unwrap();
-        write_manifest(
-            dir.path(),
-            r#"{
-                "validation_dependencies": ["workspace-events", "shared-runtime"],
-                "extensions": {"wp": {"validation_dependencies": ["shared-runtime"]}}
-            }"#,
-        );
-        let ids = validation_dependency_ids(dir.path()).expect("ids");
-        assert_eq!(
-            ids,
-            vec!["shared-runtime".to_string(), "workspace-events".to_string()]
-        );
-    }
-
-    #[test]
-    fn validation_dependency_ids_empty_without_declarations() {
-        let dir = tempfile::tempdir().unwrap();
-        write_manifest(dir.path(), r#"{"id": "some-component"}"#);
-        assert!(validation_dependency_ids(dir.path())
-            .expect("ids")
-            .is_empty());
+    fn validation_dependency_ids_merge_top_level_and_extension_declarations() {
+        // A component-scoped top-level `validation_dependencies` is collected
+        // alongside extension-nested keys, so a `--path` review keeps it.
+        for (manifest, expected) in [
+            (
+                r#"{"validation_dependencies": ["workspace-events"]}"#,
+                vec!["workspace-events"],
+            ),
+            (
+                r#"{"extensions": {"wp": {"settings": {"validation_dependencies": ["shared-runtime"]}}}}"#,
+                vec!["shared-runtime"],
+            ),
+            (
+                r#"{
+                    "validation_dependencies": ["workspace-events", "shared-runtime"],
+                    "extensions": {"wp": {"validation_dependencies": ["shared-runtime"]}}
+                }"#,
+                vec!["shared-runtime", "workspace-events"],
+            ),
+            (r#"{"id": "some-component"}"#, vec![]),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            write_manifest(dir.path(), manifest);
+            assert_eq!(
+                validation_dependency_ids(dir.path()).expect("ids"),
+                expected,
+                "{manifest}"
+            );
+        }
     }
 }

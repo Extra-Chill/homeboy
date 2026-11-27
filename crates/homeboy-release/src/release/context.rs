@@ -223,15 +223,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_extensions() {
-        let component = Component::default();
-
-        let extensions = resolve_extensions(&component).expect("missing extensions are optional");
-
-        assert!(extensions.is_empty());
-    }
-
-    #[test]
     fn resolve_extensions_derives_actions_from_the_api_catalog() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({

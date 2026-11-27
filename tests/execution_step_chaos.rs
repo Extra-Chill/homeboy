@@ -337,15 +337,19 @@ fn crash_case(fault: Fault) {
         start_daemon(&context, false);
     } else {
         release(&context, "delivery");
+        let mut child = None;
         wait(
             &context,
-            "exact execution-step child held before publication",
-            || context.root().join("child").exists(),
+            "exact execution-step child PID published before fault injection",
+            || {
+                child = std::fs::read_to_string(context.root().join("child"))
+                    .ok()
+                    .and_then(|text| text.parse::<i32>().ok())
+                    .filter(|pid| *pid > 1 && alive(*pid));
+                child.is_some()
+            },
         );
-        let child: i32 = std::fs::read_to_string(context.root().join("child"))
-            .unwrap()
-            .parse()
-            .unwrap();
+        let child = child.expect("observed live execution-step child");
         assert!(
             !ledger.exists(),
             "held child has not executed provider work"
@@ -353,6 +357,9 @@ fn crash_case(fault: Fault) {
         match fault {
             Fault::Child => {
                 signal(child);
+                wait(&context, "SIGKILLed execution-step child exits", || {
+                    !alive(child)
+                });
                 wait(
                     &context,
                     "consumer commits exactly one recovery failure",

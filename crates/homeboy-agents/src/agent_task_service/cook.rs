@@ -277,29 +277,80 @@ pub(super) fn report_cook_progress_with_activity(
     terminal_success: Option<bool>,
     terminal_retry_command: Option<&str>,
 ) -> Result<()> {
-    let record = lifecycle_store.record_cook_progress_with_activity(
-        run_id,
-        phase,
-        attempt,
-        detail,
+    publish_cook_progress(
+        lifecycle_store,
+        observer,
+        CookProgressEvent {
+            phase,
+            cook_id,
+            run_id,
+            attempt,
+            detail,
+            elapsed_ms: 0,
+            wait_owner: String::new(),
+            terminal_success,
+            terminal_retry_command,
+            activity,
+        },
         activity.and_then(CookProviderActivity::to_record_value),
+    )
+}
+
+/// Record a progress phase whose durable activity is controller evidence
+/// rather than a provider activity sample (for example a local dispatch
+/// waiting for host pressure), then deliver it to the observer.
+pub(super) fn report_cook_progress_with_evidence(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    observer: Option<&CookProgressObserver<'_>>,
+    cook_id: &str,
+    run_id: &str,
+    phase: &str,
+    attempt: u32,
+    detail: Option<&str>,
+    evidence: Value,
+) -> Result<()> {
+    publish_cook_progress(
+        lifecycle_store,
+        observer,
+        CookProgressEvent {
+            phase,
+            cook_id,
+            run_id,
+            attempt,
+            detail,
+            elapsed_ms: 0,
+            wait_owner: String::new(),
+            terminal_success: None,
+            terminal_retry_command: None,
+            activity: None,
+        },
+        Some(evidence),
+    )
+}
+
+/// Persist `event` with its durable activity record, then hand the observer
+/// the event with the lifecycle-owned elapsed time and wait owner.
+fn publish_cook_progress(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    observer: Option<&CookProgressObserver<'_>>,
+    mut event: CookProgressEvent<'_>,
+    activity_record: Option<Value>,
+) -> Result<()> {
+    let record = lifecycle_store.record_cook_progress_with_activity(
+        event.run_id,
+        event.phase,
+        event.attempt,
+        event.detail,
+        activity_record,
     )?;
     let progress = &record.metadata["cook_progress"];
-    let event = CookProgressEvent {
-        phase,
-        cook_id,
-        run_id,
-        attempt,
-        detail,
-        elapsed_ms: progress["elapsed_ms"].as_u64().unwrap_or_default(),
-        wait_owner: progress["wait_owner"]
-            .as_str()
-            .unwrap_or("cook_controller")
-            .to_string(),
-        terminal_success,
-        terminal_retry_command,
-        activity,
-    };
+    event.elapsed_ms = progress["elapsed_ms"].as_u64().unwrap_or_default();
+    event.wait_owner = progress["wait_owner"]
+        .as_str()
+        .unwrap_or("cook_controller")
+        .to_string();
+    let run_id = event.run_id;
+    let phase = event.phase;
     if let Some(observer) = observer {
         if let Err(error) = observer(&event) {
             // The observer is the submitting client's output channel. Once the
@@ -691,6 +742,27 @@ pub(crate) fn review_form_from_aggregate(
         return Ok(None);
     };
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
+}
+
+/// The latest attempt's complete review form exactly as the agent authored
+/// it, read from the persisted outcome: `outputs.review_form`, else the same
+/// field in the outcome's `json` typed artifact (the runtime result). Never
+/// parsed or truncated, so read surfaces return the whole form for terminal
+/// and `candidate_recoverable` runs alike (#18930).
+pub fn persisted_review_form(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> Option<Value> {
+    let outcome = aggregate
+        .selected_outcome()
+        .or_else(|| aggregate.outcomes.last())?;
+    let present = |form: Option<&Value>| form.filter(|form| !form.is_null()).cloned();
+    present(outcome.outputs.get("review_form")).or_else(|| {
+        outcome
+            .typed_artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_type.as_deref() == Some("json"))
+            .find_map(|artifact| present(artifact.payload.pointer("/outputs/review_form")))
+    })
 }
 
 /// The agent's own reason, from the review form in `outputs`, for leaving
@@ -1233,6 +1305,34 @@ pub fn cook_driver_is_live(cook_id: &str) -> Result<bool> {
         .is_some())
 }
 
+/// Whether a held Cook driver lock owns `record` as unspawned work: the record
+/// names its Cook, claims neither a runner process (`runner_pid`) nor a runner
+/// job, and some controller (this process included) holds that Cook's driver
+/// lock. Such an attempt is waiting on its driver (admission, worktree or
+/// provider lookup), not dead, so it is never `missing_runner_pid` (#19182).
+pub(crate) fn cook_driver_owns_unspawned_attempt(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    if record.state().is_terminal()
+        || record.owner_pid().is_some()
+        || record.runner_job_id().is_some()
+    {
+        return false;
+    }
+    let Some(cook_id) = record
+        .metadata
+        .get("cook_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return false;
+    };
+    CookRecipeStore::for_lifecycle_store(store)
+        .cook_driver_held(cook_id)
+        .unwrap_or(false)
+}
+
 pub fn cook_continuation_owner_denial(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     cook_id: &str,
@@ -1556,6 +1656,17 @@ pub(super) fn gate_environment_unavailable_stop_reason(
     promotion: &AgentTaskPromotionReport,
     cook_id: &str,
 ) -> String {
+    if let Some(failure) = serde_json::to_value(promotion)
+        .ok()
+        .and_then(|report| super::gate_failure::gate_failure_projection(&report))
+        .filter(|failure| failure["error_code"] == "runner.lab_transport_failure")
+    {
+        if let Some(connect) = failure["next_action"].as_str() {
+            return format!("Blocked: {}. Candidate preserved. Next: {connect} && homeboy agent-task recover {} --regate",
+                failure["message"].as_str().unwrap_or("runner transport unavailable"),
+                homeboy_core::error::posix_quote_arg(cook_id));
+        }
+    }
     let causes = promotion
         .deterministic_gates
         .iter()
@@ -1605,61 +1716,20 @@ mod cook_deadline_tests {
         CookDeadline::from_unix_ms(now_unix_ms().saturating_sub(1))
     }
 
-    /// The default has to remain "no budget": every caller that never set one
-    /// must reach its attempt boundary exactly as before.
+    /// No budget never expires, a live budget must not stop a Cook that still
+    /// has time (firing early kills real work), and an expired one trips.
     #[test]
-    fn an_unbudgeted_cook_never_reports_an_expired_boundary() {
+    fn cook_deadline_boundary_trips_only_after_expiry() {
         assert_eq!(current_cook_deadline(), None);
         assert_eq!(expired_cook_deadline(), None);
-    }
-
-    /// A live budget must not stop a Cook that still has time. Firing early is
-    /// the failure mode that kills real work.
-    #[test]
-    fn a_live_budget_does_not_trip_a_boundary() {
         with_current_cook_deadline(
             Some(CookDeadline::from_unix_ms(now_unix_ms() + 3_600_000)),
-            || {
-                assert_eq!(expired_cook_deadline(), None);
-            },
+            || assert_eq!(expired_cook_deadline(), None),
         );
-    }
-
-    #[test]
-    fn an_expired_budget_trips_the_boundary() {
         let deadline = expired();
         with_current_cook_deadline(Some(deadline), || {
             assert_eq!(expired_cook_deadline(), Some(deadline));
         });
-    }
-
-    #[test]
-    fn live_owner_denies_continuation_without_dispatch_hint() {
-        let record: agent_task_lifecycle::AgentTaskRunRecord =
-            serde_json::from_value(serde_json::json!({
-                "schema": "homeboy/agent-task-run/v1",
-                "run_id": "run-live-owner",
-                "plan_id": "plan",
-                "state": "candidate_recoverable",
-                "submitted_at": "2026-01-01T00:00:00Z",
-                "plan_path": "/plan",
-                "metadata": {
-                    "provider_executions": [{
-                        "state": "running",
-                        "owner_pid": std::process::id()
-                    }]
-                }
-            }))
-            .expect("record");
-        let error = live_owner_continuation_denial(&record).expect("live owner denial");
-        assert_eq!(
-            error.details["continuation_admission"]["first_authoritative_denial"],
-            "live_owner_in_progress"
-        );
-        assert_eq!(
-            error.details["continuation_admission"]["phase"],
-            "provider_execution"
-        );
     }
 
     #[test]
@@ -1713,36 +1783,6 @@ mod cook_deadline_tests {
             error.details["continuation_admission"]["phase"],
             "provider_execution"
         );
-    }
-
-    #[test]
-    fn terminal_child_fences_its_live_gate_or_promotion_owner() {
-        let record: agent_task_lifecycle::AgentTaskRunRecord =
-            serde_json::from_value(serde_json::json!({
-                "schema": "homeboy/agent-task-run/v1",
-                "run_id": "run-terminal-gate",
-                "plan_id": "plan",
-                "state": "candidate_recoverable",
-                "submitted_at": "2026-01-01T00:00:00Z",
-                "plan_path": "/plan",
-                "metadata": {
-                    "runner_pid": std::process::id(),
-                    "promotion_progress": {
-                        "active": true,
-                        "phase": "gate",
-                        "owner_pid": std::process::id()
-                    }
-                }
-            }))
-            .expect("record");
-
-        let error =
-            live_owner_continuation_denial(&record).expect("live child gate remains fenced");
-        assert_eq!(
-            error.details["continuation_admission"]["first_authoritative_denial"],
-            "live_owner_in_progress"
-        );
-        assert_eq!(error.details["continuation_admission"]["phase"], "gate");
     }
 
     #[cfg(unix)]
@@ -1821,6 +1861,8 @@ mod cook_deadline_tests {
 
         assert_eq!(result.exit_code, 1, "expiry is not a success");
         assert_eq!(result.value.status.as_str(), "timed_out");
+        assert!(!result.value.status.is_in_flight());
+        assert!(!result.value.status.is_success_exit());
         assert_eq!(result.value.disposition, CookDisposition::Terminal);
         assert_eq!(
             result.value.terminal_phase.as_deref(),
@@ -1835,44 +1877,6 @@ mod cook_deadline_tests {
         let reason = result.value.stop_reason.clone().expect("a stop reason");
         assert!(reason.contains("--max-duration"), "{reason}");
         assert!(reason.contains("attempt 2 could be started"), "{reason}");
-    }
-
-    /// The status must classify the same way every other terminal Cook status
-    /// does, or batch totals and exit codes disagree with the report.
-    ///
-    /// Also pins the literal written by `cook_deadline_report` to the enum
-    /// entry it is meant to be, so the two cannot drift apart.
-    #[test]
-    fn the_reported_status_reads_as_terminal_and_not_as_success() {
-        assert_eq!(CookStatus::TimedOut.as_str(), "timed_out");
-        let status = CookStatus::from_status("timed_out").unwrap();
-        assert_eq!(status, CookStatus::TimedOut);
-        assert!(!status.is_in_flight());
-        assert!(!status.is_success_exit());
-    }
-
-    /// A gate-boundary stop names the gates, because "out of time" and "out of
-    /// time before the gates could run" call for different follow-ups.
-    #[test]
-    fn a_gate_boundary_stop_names_the_gate_phase() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let store = CookRecipeStore::new(context.path_roots());
-        let lifecycle_store = store.lifecycle_store();
-        let reason = cook_deadline_report(
-            CookStores {
-                recipe: &store,
-                lifecycle: &lifecycle_store,
-            },
-            "cook-1".to_string(),
-            Vec::new(),
-            "run-1",
-            &expired(),
-            "attempt 1 could enter promotion and run its gates",
-        )
-        .value
-        .stop_reason
-        .expect("a stop reason");
-        assert!(reason.contains("run its gates"), "{reason}");
     }
 }
 

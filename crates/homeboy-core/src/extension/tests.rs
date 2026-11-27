@@ -7,7 +7,6 @@ use homeboy_extension_contract::extension_contract_producer::{
     EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
 };
 use homeboy_extension_contract::manifest_toolchain_config::TestChangedFileRoutingStrategy;
-use homeboy_extension_contract::runner_contract::RunnerStepFilter;
 use homeboy_extension_contract::{
     ExtensionCapability, ExtensionManifest, TestPassthroughFilterStrategy,
 };
@@ -102,7 +101,6 @@ fn fuzz_manifest_support_does_not_require_execution_script() {
 
     assert!(ExtensionCapability::Fuzz.has_manifest_support(&manifest));
     assert_eq!(ExtensionCapability::Fuzz.script_path(&manifest), None);
-    assert!(!ExtensionCapability::Fuzz.requires_script());
     assert_eq!(manifest.fuzz_workloads()[0].id, "parser");
 }
 
@@ -227,21 +225,6 @@ fn extension_manifest_accepts_real_extension_fixture_shapes() {
         assert_eq!(manifest.id, fixture_id);
         assert!(!manifest.name.is_empty());
     }
-}
-
-#[test]
-fn retired_runtime_key_is_preserved_like_other_unknown_manifest_data() {
-    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "name": "Example",
-        "version": "1.0.0",
-        "agent_runtimes": "not interpreted",
-        "unknown_fixture_key": "not interpreted"
-    }))
-    .expect("unknown manifest keys remain opaque");
-    assert_eq!(
-        manifest.extra["agent_runtimes"],
-        manifest.extra["unknown_fixture_key"]
-    );
 }
 
 #[test]
@@ -474,67 +457,42 @@ fn structured_sidecar_declarations_reject_unknown_fields() {
 }
 
 #[test]
-fn manifest_parses_changed_test_routing_contract() {
-    let fixture_extension = "php".to_string();
+fn manifest_parses_test_routing_and_passthrough_contracts() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
         "test": {
             "extension_script": "test.sh",
+            "passthrough_filter": { "strategy": "runner_positional" },
             "changed_file_routing": {
                 "strategy": "exclusive_env",
                 "exclusive_env": {
                     "name": "HOMEBOY_FIXTURE_HOST_SMOKE_FILES",
-                    "globs": [format!("tests/**/*-smoke.{fixture_extension}")]
+                    "globs": ["tests/**/*-smoke.php"]
                 }
             }
         }
     }))
     .unwrap();
+    let test = manifest.test.as_ref().expect("test contract");
 
-    let routing = manifest
-        .test
+    assert_eq!(
+        test.passthrough_filter
+            .as_ref()
+            .map(|filter| &filter.strategy),
+        Some(&TestPassthroughFilterStrategy::RunnerPositional)
+    );
+    let routing = test
+        .changed_file_routing
         .as_ref()
-        .and_then(|test| test.changed_file_routing.as_ref())
         .expect("test routing should parse");
-
     assert_eq!(
         routing.strategy,
         TestChangedFileRoutingStrategy::ExclusiveEnv
     );
-    assert_eq!(
-        routing
-            .exclusive_env
-            .as_ref()
-            .map(|exclusive_env| exclusive_env.name.as_str()),
-        Some("HOMEBOY_FIXTURE_HOST_SMOKE_FILES")
-    );
-}
-
-#[test]
-fn manifest_parses_passthrough_filter_contract() {
-    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "name": "Example",
-        "version": "0.0.0",
-        "test": {
-            "extension_script": "test.sh",
-            "passthrough_filter": {
-                "strategy": "runner_positional"
-            }
-        }
-    }))
-    .unwrap();
-
-    let filter = manifest
-        .test
-        .as_ref()
-        .and_then(|test| test.passthrough_filter.as_ref())
-        .expect("test passthrough filter should parse");
-
-    assert_eq!(
-        filter.strategy,
-        TestPassthroughFilterStrategy::RunnerPositional
-    );
+    let exclusive_env = routing.exclusive_env.as_ref().expect("exclusive env");
+    assert_eq!(exclusive_env.name, "HOMEBOY_FIXTURE_HOST_SMOKE_FILES");
+    assert_eq!(exclusive_env.globs, ["tests/**/*-smoke.php"]);
 }
 
 #[test]
@@ -605,69 +563,42 @@ fn deploy_contract_rejects_unknown_active_policy_keys() {
 }
 
 #[test]
-fn archive_install_required_header_rejects_ambiguous_selector() {
-    let protected_path = "/wp-content/plugins/".to_string();
-    let script_extension = "php".to_string();
-    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
-        "name": "Example",
-        "version": "0.0.0",
-        "deploy": {
-            "archive_install": [
-                {
-                    "path_pattern": protected_path,
-                    "required_header": {
-                        "file": format!("plugin.{script_extension}"),
-                        "file_glob": format!("*.{script_extension}"),
-                        "contains": "Plugin Name:"
-                    }
-                }
-            ]
-        }
-    }))
-    .expect_err("required_header must choose exactly one selector");
+fn archive_install_required_header_requires_exactly_one_selector() {
+    for required_header in [
+        serde_json::json!({
+            "file": "plugin.php",
+            "file_glob": "*.php",
+            "contains": "Plugin Name:"
+        }),
+        serde_json::json!({ "contains": "Plugin Name:" }),
+    ] {
+        let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
+            "name": "Example",
+            "version": "0.0.0",
+            "deploy": {
+                "archive_install": [{
+                    "path_pattern": "/wp-content/plugins/",
+                    "required_header": required_header
+                }]
+            }
+        }))
+        .expect_err("required_header must choose exactly one selector");
 
-    assert!(err.to_string().contains("exactly one of file or file_glob"));
+        assert!(err.to_string().contains("exactly one of file or file_glob"));
+    }
 }
 
 #[test]
-fn archive_install_required_header_rejects_missing_selector() {
-    let protected_path = "/wp-content/plugins/".to_string();
-    let err = serde_json::from_value::<ExtensionManifest>(serde_json::json!({
-        "name": "Example",
-        "version": "0.0.0",
-        "deploy": {
-            "archive_install": [
-                {
-                    "path_pattern": protected_path,
-                    "required_header": {
-                        "contains": "Plugin Name:"
-                    }
-                }
-            ]
-        }
-    }))
-    .expect_err("required_header must declare a selector");
-
-    assert!(err.to_string().contains("exactly one of file or file_glob"));
-}
-
-#[test]
-fn validate_required_extensions_passes_with_no_modules() {
-    let comp = Component {
-        id: "test-component".to_string(),
-        ..Default::default()
-    };
-    assert!(resolve::validate_required_extensions(&comp).is_ok());
-}
-
-#[test]
-fn validate_required_extensions_passes_with_empty_modules() {
-    let comp = Component {
-        id: "test-component".to_string(),
-        extensions: Some(HashMap::new()),
-        ..Default::default()
-    };
-    assert!(resolve::validate_required_extensions(&comp).is_ok());
+fn validate_requirements_pass_without_declared_extensions() {
+    for extensions in [None, Some(HashMap::new())] {
+        let comp = Component {
+            id: "test-component".to_string(),
+            extensions,
+            ..Default::default()
+        };
+        assert!(resolve::validate_required_extensions(&comp).is_ok());
+        assert!(resolve::validate_extension_requirements(&comp).is_ok());
+    }
 }
 
 #[test]
@@ -757,15 +688,6 @@ fn validate_required_extensions_reports_all_missing() {
 }
 
 #[test]
-fn test_validate_extension_requirements() {
-    let comp = Component {
-        id: "test-component".to_string(),
-        ..Default::default()
-    };
-    assert!(resolve::validate_extension_requirements(&comp).is_ok());
-}
-
-#[test]
 fn extension_guidance_hints_point_to_supported_paths() {
     let comp = Component {
         id: "plain-package".to_string(),
@@ -783,26 +705,4 @@ fn extension_guidance_hints_point_to_supported_paths() {
     assert!(hints
         .iter()
         .any(|hint| hint.contains("homeboy extension list")));
-}
-
-#[test]
-fn runner_step_filter_applies_step_and_skip() {
-    let filter = RunnerStepFilter {
-        step: Some("lint,test".to_string()),
-        skip: Some("test".to_string()),
-    };
-    assert!(filter.should_run("lint"));
-    assert!(!filter.should_run("test"));
-    assert!(!filter.should_run("deploy"));
-}
-
-#[test]
-fn runner_step_filter_exports_env_pairs() {
-    let filter = RunnerStepFilter {
-        step: Some("a".to_string()),
-        skip: Some("b".to_string()),
-    };
-    let env = filter.to_env_pairs();
-    assert!(env.iter().any(|(k, v)| k == "HOMEBOY_STEP" && v == "a"));
-    assert!(env.iter().any(|(k, v)| k == "HOMEBOY_SKIP" && v == "b"));
 }

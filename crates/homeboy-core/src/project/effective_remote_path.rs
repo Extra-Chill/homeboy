@@ -356,15 +356,6 @@ mod tests {
         component
     }
 
-    fn project_with_root() -> Project {
-        Project {
-            id: "site".to_string(),
-            base_path: Some("/srv/site".to_string()),
-            path_roots: HashMap::from([("package_root".to_string(), "/opt/packages".to_string())]),
-            ..Project::default()
-        }
-    }
-
     fn install_extension() {
         install_extension_with_detect_command(None);
     }
@@ -412,104 +403,101 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_component_remote_path() {
-        assert_eq!(
-            component_remote_path(&component("explicit/path")).expect("explicit path"),
-            "explicit/path"
-        );
-
-        with_isolated_home(|_| {
-            install_extension();
-            let mut auto = component("");
-            auto.local_path = std::env::temp_dir().to_string_lossy().to_string();
-
-            assert_eq!(component_remote_path(&auto).expect("no rule matched"), "");
-        });
-    }
-
-    #[test]
-    fn test_resolve_effective_remote_path() {
-        with_isolated_home(|_| {
-            install_extension();
-
-            let resolved = resolve_effective_remote_path(
-                &project_with_root(),
-                &component("packages/foo"),
-                "/srv/site",
-            )
-            .expect("resolve path");
-
-            assert_eq!(resolved, "/opt/packages/foo");
-        });
-    }
-
-    #[test]
-    fn resolves_relative_managed_root_against_base_path() {
-        with_isolated_home(|_| {
-            install_extension();
-            let project = Project {
-                id: "site".to_string(),
-                base_path: Some("/srv/site".to_string()),
-                path_roots: HashMap::from([("package_root".to_string(), "packages".to_string())]),
-                ..Project::default()
-            };
-
-            let resolved =
-                resolve_effective_remote_path(&project, &component("packages/foo"), "/srv/site")
-                    .expect("resolve path");
-
-            assert_eq!(resolved, "/srv/site/packages/foo");
-        });
-    }
-
-    #[test]
-    fn parent_relative_managed_paths_without_root_are_rejected() {
-        with_isolated_home(|_| {
-            install_extension();
-
-            let err = resolve_effective_remote_path(
-                &Project {
-                    id: "site".to_string(),
-                    base_path: Some("/srv/site".to_string()),
-                    ..Project::default()
-                },
-                &component("../packages/foo"),
-                "/srv/site",
-            )
-            .expect_err("parent-relative managed path without a root should be rejected");
-
-            let message = err.to_string();
-            assert!(
-                message.contains("resolves outside the writable managed root"),
-                "expected clear root-escape diagnostic, got: {message}"
-            );
-            assert!(message.contains("package_root"));
-
-            // Remediation lives in details.tried (same shape as the other
-            // path-root errors in this module).
-            let tried = err.details["tried"].as_array().expect("tried hints");
-            let tried_text: String = tried
+    fn project(path_roots: &[(&str, &str)]) -> Project {
+        Project {
+            id: "site".to_string(),
+            base_path: Some("/srv/site".to_string()),
+            path_roots: path_roots
                 .iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                tried_text.contains("runtime-managed-root>/foo"),
-                "diagnostic should suggest an explicit absolute path shape, got: {tried_text}"
-            );
-            assert!(
-                tried_text.contains("path_roots.package_root"),
-                "diagnostic should mention configuring the path_root, got: {tried_text}"
-            );
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn resolves_remote_paths_through_managed_roots_or_base_path() {
+        with_isolated_home(|_| {
+            install_extension();
+            let absolute_root = [("package_root", "/opt/packages")];
+            let relative_root = [("package_root", "packages")];
+
+            for (roots, remote_path, base, expected) in [
+                (
+                    &absolute_root[..],
+                    "packages/foo",
+                    "/srv/site",
+                    "/opt/packages/foo",
+                ),
+                (
+                    &absolute_root[..],
+                    "packages/themes/theme",
+                    "/srv/site",
+                    "/opt/packages/themes/theme",
+                ),
+                (
+                    &relative_root[..],
+                    "packages/foo",
+                    "/srv/site",
+                    "/srv/site/packages/foo",
+                ),
+                (
+                    &absolute_root[..],
+                    "../packages/foo",
+                    "/srv/runtime/app",
+                    "/opt/packages/foo",
+                ),
+                (
+                    &absolute_root[..],
+                    "var/log/app.log",
+                    "/srv/site",
+                    "/srv/site/var/log/app.log",
+                ),
+            ] {
+                let resolved =
+                    resolve_effective_remote_path(&project(roots), &component(remote_path), base)
+                        .unwrap_or_else(|err| panic!("{remote_path}: {err}"));
+                assert_eq!(resolved, expected, "{remote_path}");
+            }
         });
     }
 
     #[test]
-    fn parent_relative_path_without_root_is_rejected_before_expansion_3488() {
-        // Regression for issue #3488: a base_path inside a managed runtime with a
-        // `../packages/...` remote_path and no detected package root must be
-        // rejected at preflight instead of producing an escaping expanded path.
+    fn rejects_remote_paths_that_escape_or_lack_their_managed_root() {
+        with_isolated_home(|_| {
+            install_extension();
+            let with_root = [("package_root", "/opt/packages")];
+
+            for (roots, remote_path, expected) in [
+                (
+                    &with_root[..],
+                    "../var/log/app.log",
+                    "escapes the project base_path",
+                ),
+                (
+                    &with_root[..],
+                    "../packages/../secrets/foo",
+                    "escapes the project base_path",
+                ),
+                (&[][..], "packages/foo", "matches managed path root"),
+            ] {
+                let err = resolve_effective_remote_path(
+                    &project(roots),
+                    &component(remote_path),
+                    "/srv/site",
+                )
+                .expect_err(remote_path);
+                let message = err.to_string();
+                assert!(message.contains(expected), "{remote_path}: {message}");
+                if roots.is_empty() {
+                    assert!(message.contains("package_root"));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn parent_relative_managed_path_without_root_is_rejected_before_expansion_3488() {
         with_isolated_home(|_| {
             install_extension();
 
@@ -526,64 +514,26 @@ mod tests {
 
             let message = err.to_string();
             assert!(message.contains("resolves outside the writable managed root"));
-            assert!(message.contains("frontend-agent-chat"));
+            assert!(message.contains("package_root"));
             assert!(
                 !message.contains("/srv/runtime/app/../packages"),
                 "must not surface the escaping expanded path, got: {message}"
             );
+
+            let tried_text = err.details["tried"]
+                .as_array()
+                .expect("tried hints")
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(tried_text.contains("runtime-managed-root>/frontend-agent-chat"));
+            assert!(tried_text.contains("path_roots.package_root"));
         });
     }
 
     #[test]
-    fn parent_relative_managed_paths_use_configured_root_when_available() {
-        with_isolated_home(|_| {
-            install_extension();
-
-            let resolved = resolve_effective_remote_path(
-                &project_with_root(),
-                &component("../packages/foo"),
-                "/srv/runtime/app",
-            )
-            .expect("parent-relative managed path should resolve through root");
-
-            assert_eq!(resolved, "/opt/packages/foo");
-        });
-    }
-
-    #[test]
-    fn parent_relative_non_managed_paths_are_rejected() {
-        with_isolated_home(|_| {
-            install_extension();
-
-            let err = resolve_effective_remote_path(
-                &project_with_root(),
-                &component("../var/log/app.log"),
-                "/srv/site",
-            )
-            .expect_err("parent traversal should fail");
-
-            assert!(err.to_string().contains("escapes the project base_path"));
-        });
-    }
-
-    #[test]
-    fn parent_segments_after_managed_prefix_are_rejected() {
-        with_isolated_home(|_| {
-            install_extension();
-
-            let err = resolve_effective_remote_path(
-                &project_with_root(),
-                &component("../packages/../secrets/foo"),
-                "/srv/site",
-            )
-            .expect_err("internal parent traversal should fail");
-
-            assert!(err.to_string().contains("escapes the project base_path"));
-        });
-    }
-
-    #[test]
-    fn test_project_with_detected_path_roots() {
+    fn detects_missing_path_roots_with_the_extension_detect_command() {
         with_isolated_home(|_| {
             install_extension_with_detect_command(Some("printf /detected/packages"));
             let project = Project {
@@ -603,60 +553,6 @@ mod tests {
                 detected.path_roots.get("package_root").map(String::as_str),
                 Some("/detected/packages")
             );
-        });
-    }
-
-    #[test]
-    fn applies_managed_root_to_nested_paths() {
-        with_isolated_home(|_| {
-            install_extension();
-
-            let resolved = resolve_effective_remote_path(
-                &project_with_root(),
-                &component("packages/themes/theme"),
-                "/srv/site",
-            )
-            .expect("resolve path");
-
-            assert_eq!(resolved, "/opt/packages/themes/theme");
-        });
-    }
-
-    #[test]
-    fn falls_back_to_base_path_when_rule_does_not_match() {
-        with_isolated_home(|_| {
-            install_extension();
-
-            let resolved = resolve_effective_remote_path(
-                &project_with_root(),
-                &component("var/log/app.log"),
-                "/srv/site",
-            )
-            .expect("resolve path");
-
-            assert_eq!(resolved, "/srv/site/var/log/app.log");
-        });
-    }
-
-    #[test]
-    fn matching_path_root_without_detected_root_fails_instead_of_falling_back() {
-        with_isolated_home(|_| {
-            install_extension();
-
-            let err = resolve_effective_remote_path(
-                &Project {
-                    id: "site".to_string(),
-                    base_path: Some("/srv/site".to_string()),
-                    ..Project::default()
-                },
-                &component("packages/foo"),
-                "/srv/site",
-            )
-            .expect_err("missing managed root should fail");
-
-            let message = err.to_string();
-            assert!(message.contains("matches managed path root"));
-            assert!(message.contains("package_root"));
         });
     }
 }

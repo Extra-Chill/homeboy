@@ -13,6 +13,7 @@ mod cook_ci;
 mod cook_driver;
 mod cook_follow_up;
 mod cook_gate_setup;
+mod cook_local_dispatch;
 mod cook_projections;
 mod cook_spine;
 mod cook_timeout;
@@ -93,7 +94,7 @@ pub use cook_delivery::test_support::*;
 pub use cook_delivery::{
     CookDelivery, CookDeliveryArtifacts, CookDeliveryBlocker, CookDeliveryBlockerCode,
     CookDeliveryCandidate, CookDeliveryDestination, CookDeliveryGate, CookDeliveryLifecycle,
-    CookDeliveryPublication, CookManualPublication, COOK_DELIVERY_SCHEMA,
+    CookDeliveryPublication, CookManualPublication, CookOutcome, COOK_DELIVERY_SCHEMA,
 };
 pub(crate) use cook_delivery::{CookDeliveryState, COOK_DELIVERY_KEY};
 pub use cook_delivery_artifacts::*;

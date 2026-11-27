@@ -1647,6 +1647,24 @@ impl ObservationStore {
             .map_err(sqlite_error("read pending unmaterialized Cook admissions"))
     }
 
+    /// Whether a workflow instance's controller job is still active in the
+    /// daemon ledger. That job, not the process that created the row, owns
+    /// the instance's run: a restarted daemon resumes it in place.
+    pub fn workflow_instance_job_is_active(&self, instance: &str) -> Result<bool> {
+        if self.connection.path().is_none_or(str::is_empty) {
+            return Ok(false);
+        }
+        self.connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM daemon_jobs WHERE active = 1 \
+                 AND json_extract(body, '$.controller_job.job_type') = 'workflow' \
+                 AND json_extract(body, '$.controller_job.public_request.instance') = ?1)",
+                [instance],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error("read active workflow instance job"))
+    }
+
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
         Ok(self.list_runs_page(filter)?.runs)
     }
@@ -2706,19 +2724,6 @@ mod tests {
         });
     }
 
-    /// VM steps one pending-admission probe takes against the current store.
-    fn pending_admission_probe_steps(store: &ObservationStore) -> (bool, i32) {
-        let mut statement = store
-            .connection
-            .prepare(PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY)
-            .unwrap();
-        let pending = statement.query_row([], |row| row.get(0)).unwrap();
-        (
-            pending,
-            statement.get_status(rusqlite::StatementStatus::VmStep),
-        )
-    }
-
     fn record_terminal_history(store: &ObservationStore, from: usize, to: usize) {
         for number in from..to {
             let mut run = scoped_run(
@@ -2731,51 +2736,6 @@ mod tests {
                 serde_json::json!({ "binding": {} });
             store.upsert_imported_run(&run).unwrap();
         }
-    }
-
-    /// The daemon lifetime monitor asks this every second (#17673). Its cost
-    /// must track live admissions, not the terminal agent-task history.
-    #[test]
-    fn pending_admission_probe_cost_does_not_grow_with_history() {
-        with_isolated_home(|_| {
-            let store = ObservationStore::open_initialized().unwrap();
-            let mut live = scoped_run("task-live", "caller", "running", Some("repo"));
-            store.upsert_imported_run(&live).unwrap();
-
-            record_terminal_history(&store, 0, 100);
-            let (pending, small) = pending_admission_probe_steps(&store);
-            assert!(!pending, "terminal admissions are not pending");
-            record_terminal_history(&store, 100, 1000);
-            let (pending, large) = pending_admission_probe_steps(&store);
-            assert!(!pending);
-            assert_eq!(
-                small, large,
-                "10x terminal history must not change the probe's VM steps"
-            );
-
-            let mut explain = store
-                .connection
-                .prepare(&format!(
-                    "EXPLAIN QUERY PLAN {PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY}"
-                ))
-                .unwrap();
-            let details = explain
-                .query_map([], |row| row.get::<_, String>(3))
-                .unwrap()
-                .map(|row| row.unwrap())
-                .collect::<Vec<_>>();
-            assert!(
-                details
-                    .iter()
-                    .any(|detail| detail.contains("idx_agent_task_active_scope")),
-                "{details:?}"
-            );
-
-            live.metadata_json["agent_task_run"]["metadata"]["unmaterialized_cook_admission"] =
-                serde_json::json!({ "binding": {} });
-            store.upsert_imported_run(&live).unwrap();
-            assert!(store.has_pending_unmaterialized_cook_admission().unwrap());
-        });
     }
 
     /// Statements run on a periodic or supervision hot path (#17760): the
@@ -2923,6 +2883,13 @@ mod tests {
                 small, large,
                 "10x terminal history must not change any hot-path statement's VM steps"
             );
+            // Terminal admissions are history, not pending work (#17673).
+            assert!(!store.has_pending_unmaterialized_cook_admission().unwrap());
+            let mut live = scoped_run("task-live", "caller", "running", Some("repo"));
+            live.metadata_json["agent_task_run"]["metadata"]["unmaterialized_cook_admission"] =
+                serde_json::json!({ "binding": {} });
+            store.upsert_imported_run(&live).unwrap();
+            assert!(store.has_pending_unmaterialized_cook_admission().unwrap());
 
             for (name, sql, parameters, index) in hot_path_statements() {
                 let plan = store
@@ -3780,141 +3747,84 @@ mod tests {
         runs.iter().map(|run| run.id.clone()).collect()
     }
 
-    /// The whole defect is that a cut-short page looked exactly like a complete
-    /// one. A page that merely ends on its limit boundary must not claim
-    /// truncation, or the signal is noise and callers learn to ignore it.
+    /// A cut-short page must not look like a complete one (#11177): a page
+    /// reports truncation and a resume point only when the limit cut it, and
+    /// always reports the limit it actually applied.
     #[test]
-    fn a_page_that_ends_because_the_data_ended_is_not_truncated() {
+    fn pages_report_truncation_resume_points_and_the_applied_limit() {
         with_isolated_home(|_home| {
             let store = ObservationStore::open_initialized().expect("store");
-            seed_runs(&store, "page-exact", 3);
-
-            let page = store
-                .list_runs_page(RunListFilter {
-                    kind: Some("page-exact".to_string()),
-                    limit: Some(3),
-                    ..RunListFilter::default()
-                })
-                .expect("page");
-
-            assert_eq!(page.runs.len(), 3);
-            assert!(!page.truncated, "an exact fit is a complete answer");
-            assert_eq!(page.next_cursor, None);
-            assert_eq!(page.next_offset, None);
-        });
-    }
-
-    /// And a page that ended because the limit did must say so, and must say
-    /// where to resume — otherwise the caller can detect the boundary but not
-    /// cross it.
-    #[test]
-    fn a_page_cut_short_by_its_limit_reports_truncation_and_a_resume_point() {
-        with_isolated_home(|_home| {
-            let store = ObservationStore::open_initialized().expect("store");
-            let seeded = seed_runs(&store, "page-cut", 5);
-
-            let page = store
-                .list_runs_page(RunListFilter {
-                    kind: Some("page-cut".to_string()),
-                    limit: Some(2),
-                    ..RunListFilter::default()
-                })
-                .expect("page");
-
-            assert_eq!(ids(&page.runs), seeded[..2].to_vec());
-            assert!(page.truncated);
-            assert_eq!(page.applied_limit, 2);
-            assert_eq!(page.next_offset, Some(2));
-            assert_eq!(
-                page.next_cursor,
-                page.runs.last().map(RunCursor::from_run),
-                "the resume point is the last row handed out"
-            );
-        });
-    }
-
-    /// A request above the page ceiling is still reduced — but the reduction is
-    /// now reported instead of silent, which is the #11177 contract.
-    #[test]
-    fn a_request_above_the_page_ceiling_reports_the_limit_it_actually_applied() {
-        with_isolated_home(|_home| {
-            let store = ObservationStore::open_initialized().expect("store");
-            seed_runs(&store, "page-ceiling", 2);
-
-            let page = store
-                .list_runs_page(RunListFilter {
-                    kind: Some("page-ceiling".to_string()),
-                    limit: Some(5_000),
-                    ..RunListFilter::default()
-                })
-                .expect("page");
-
-            assert_eq!(page.applied_limit, MAX_RUN_PAGE_LIMIT);
-            assert!(!page.truncated);
-            assert_eq!(page.runs.len(), 2);
-        });
-    }
-
-    /// Offset pagination has to actually reach past the first page, or the
-    /// truncation signal is a dead end.
-    #[test]
-    fn offset_pagination_reaches_the_rows_past_the_first_page() {
-        with_isolated_home(|_home| {
-            let store = ObservationStore::open_initialized().expect("store");
-            let seeded = seed_runs(&store, "page-offset", 5);
-            let filter = |offset: Option<i64>| RunListFilter {
-                kind: Some("page-offset".to_string()),
-                limit: Some(2),
-                offset,
-                ..RunListFilter::default()
-            };
-
-            let first = store.list_runs_page(filter(None)).expect("first page");
-            let second = store
-                .list_runs_page(filter(first.next_offset))
-                .expect("second page");
-            let third = store
-                .list_runs_page(filter(second.next_offset))
-                .expect("third page");
-
-            let walked: Vec<String> = ids(&first.runs)
-                .into_iter()
-                .chain(ids(&second.runs))
-                .chain(ids(&third.runs))
-                .collect();
-
-            assert_eq!(walked, seeded, "an offset walk must visit every row once");
-            assert!(!third.truncated, "the walk must terminate");
-        });
-    }
-
-    /// Cursor pagination is the one that stays correct while rows are being
-    /// inserted, so it must cover the same ground as the offset walk.
-    #[test]
-    fn cursor_pagination_visits_every_row_exactly_once() {
-        with_isolated_home(|_home| {
-            let store = ObservationStore::open_initialized().expect("store");
-            let seeded = seed_runs(&store, "page-cursor", 5);
-
-            let mut walked = Vec::new();
-            let mut after = None;
-            loop {
-                let page = store
+            let seeded = seed_runs(&store, "page", 5);
+            let page = |limit: Option<i64>| {
+                store
                     .list_runs_page(RunListFilter {
-                        kind: Some("page-cursor".to_string()),
-                        limit: Some(2),
-                        after: after.clone(),
+                        kind: Some("page".to_string()),
+                        limit,
                         ..RunListFilter::default()
                     })
-                    .expect("cursor page");
-                walked.extend(ids(&page.runs));
-                if !page.truncated {
-                    break;
-                }
-                after = page.next_cursor;
-            }
+                    .expect("page")
+            };
 
-            assert_eq!(walked, seeded);
+            // (requested, applied, rows, truncated)
+            for (requested, applied, rows, truncated) in [
+                (Some(5), 5, 5, false),
+                (Some(2), 2, 2, true),
+                (Some(5_000), MAX_RUN_PAGE_LIMIT, 5, false),
+                (None, DEFAULT_RUN_PAGE_LIMIT, 5, false),
+            ] {
+                let page = page(requested);
+                assert_eq!(page.applied_limit, applied, "{requested:?}");
+                assert_eq!(ids(&page.runs), seeded[..rows].to_vec(), "{requested:?}");
+                assert_eq!(page.truncated, truncated, "{requested:?}");
+                if truncated {
+                    assert_eq!(page.next_offset, Some(rows as i64));
+                    assert_eq!(
+                        page.next_cursor,
+                        page.runs.last().map(RunCursor::from_run),
+                        "the resume point is the last row handed out"
+                    );
+                } else {
+                    assert_eq!(page.next_offset, None, "{requested:?}");
+                    assert_eq!(page.next_cursor, None, "{requested:?}");
+                }
+            }
+        });
+    }
+
+    /// Offset and cursor walks must both cross every page boundary and visit
+    /// every row exactly once, or the truncation signal is a dead end.
+    #[test]
+    fn offset_and_cursor_walks_visit_every_row_exactly_once() {
+        with_isolated_home(|_home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let seeded = seed_runs(&store, "page-walk", 5);
+
+            for by_cursor in [false, true] {
+                let mut walked = Vec::new();
+                let mut offset = None;
+                let mut after = None;
+                loop {
+                    let page = store
+                        .list_runs_page(RunListFilter {
+                            kind: Some("page-walk".to_string()),
+                            limit: Some(2),
+                            offset,
+                            after: after.clone(),
+                            ..RunListFilter::default()
+                        })
+                        .expect("page");
+                    walked.extend(ids(&page.runs));
+                    if !page.truncated {
+                        break;
+                    }
+                    if by_cursor {
+                        after = page.next_cursor;
+                    } else {
+                        offset = page.next_offset;
+                    }
+                }
+                assert_eq!(walked, seeded, "by_cursor={by_cursor}");
+            }
         });
     }
 
@@ -3994,46 +3904,6 @@ mod tests {
         });
     }
 
-    /// The bounded accessor keeps its historical shape so the existing call
-    /// sites are unaffected: same rows, signal dropped.
-    #[test]
-    fn the_bounded_accessor_returns_the_same_rows_as_the_page() {
-        with_isolated_home(|_home| {
-            let store = ObservationStore::open_initialized().expect("store");
-            seed_runs(&store, "page-parity", 4);
-            let filter = RunListFilter {
-                kind: Some("page-parity".to_string()),
-                limit: Some(3),
-                ..RunListFilter::default()
-            };
-
-            let rows = store.list_runs(filter.clone()).expect("rows");
-            let page = store.list_runs_page(filter).expect("page");
-
-            assert_eq!(rows, page.runs);
-            assert_eq!(rows.len(), 3);
-            assert!(page.truncated);
-        });
-    }
-
-    /// The default page size is unchanged for callers that ask for nothing.
-    #[test]
-    fn an_unspecified_limit_still_applies_the_historical_default() {
-        with_isolated_home(|_home| {
-            let store = ObservationStore::open_initialized().expect("store");
-            seed_runs(&store, "page-default", 2);
-
-            let page = store
-                .list_runs_page(RunListFilter {
-                    kind: Some("page-default".to_string()),
-                    ..RunListFilter::default()
-                })
-                .expect("page");
-
-            assert_eq!(page.applied_limit, DEFAULT_RUN_PAGE_LIMIT);
-        });
-    }
-
     /// Retry lineage carried the identical unsignalled clamp. A truncated
     /// lineage is a wrong answer, not a slow one.
     #[test]
@@ -4062,13 +3932,6 @@ mod tests {
                 .expect("lineage page");
             assert_eq!(complete.runs.len(), 3);
             assert!(!complete.truncated);
-            assert_eq!(
-                store
-                    .list_runs_by_retry_of("agent-task", "source-run", 8)
-                    .expect("lineage rows"),
-                complete.runs,
-                "the bounded accessor keeps returning the same rows"
-            );
         });
     }
 

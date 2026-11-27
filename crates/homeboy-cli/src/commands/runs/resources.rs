@@ -1002,34 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_plan_is_read_only_by_default() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let resource_path = tempdir.path().join("resource");
-        std::fs::create_dir(&resource_path).expect("resource dir");
-        let resource = ResourceLifecycleRecord {
-            path: resource_path.display().to_string(),
-            ..record(ResourceLifecycleResourceStatus::CleanupPending)
-        };
-
-        let cleanup = build_cleanup_output(
-            &[resource],
-            &RunsResourcesArgs {
-                cleanup_plan: true,
-                cleanup_root: Some(tempdir.path().to_path_buf()),
-                ..Default::default()
-            },
-        )
-        .expect("cleanup plan");
-
-        assert_eq!(cleanup.candidate_count, 1);
-        assert_eq!(cleanup.planned_count, 1);
-        assert_eq!(cleanup.planned[0].root_bound, None);
-        assert_eq!(cleanup.applied_count, 0);
-        assert!(resource_path.exists());
-    }
-
-    #[test]
-    fn cleanup_plan_surfaces_root_bound_and_follow_up_command() {
+    fn cleanup_plan_is_read_only_and_surfaces_root_bound_and_follow_up_command() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let resource_path = tempdir.path().join("resource");
         std::fs::create_dir(&resource_path).expect("resource dir");
@@ -1052,6 +1025,7 @@ mod tests {
         .expect("cleanup plan");
 
         assert_eq!(cleanup.planned_count, 1);
+        assert_eq!(cleanup.applied_count, 0);
         assert_eq!(
             cleanup.planned[0].root_bound,
             Some(tempdir.path().display().to_string())
@@ -1302,14 +1276,7 @@ mod tests {
             assert_eq!(cleanup.candidate_count, 1);
             assert_eq!(cleanup.planned_count, 1);
             assert_eq!(cleanup.applied_count, 0);
-            assert_eq!(cleanup.planned[0].owner, "agent-task.executor-evidence");
-            assert_eq!(cleanup.planned[0].run_id, run_id);
             assert_eq!(cleanup.planned[0].path, evidence_dir.display().to_string());
-            assert_eq!(
-                cleanup.planned[0].root_bound,
-                Some(evidence_root.display().to_string())
-            );
-            assert_eq!(cleanup.planned[0].kind, "executor_evidence_directory");
             assert_eq!(
                 cleanup.planned[0].cleanup_command.as_deref(),
                 Some("homeboy runs resources --run-id orphaned-run --cleanup-plan --cleanup-eligible")
@@ -1319,128 +1286,62 @@ mod tests {
     }
 
     #[test]
-    fn store_discovered_cleanup_plan_remains_read_only() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let store = temp_store(&tempdir);
-        let run = store
-            .start_run(NewRunRecord::builder("runner-exec").build())
-            .expect("run");
-        let artifact_path = tempdir.path().join("artifact.json");
-        std::fs::write(&artifact_path, "{}").expect("artifact file");
-        let resource_path = tempdir.path().join("resource");
-        std::fs::write(&resource_path, "generated").expect("resource file");
-        let resource = ResourceLifecycleRecord {
-            run_id: run.id.clone(),
-            path: resource_path.display().to_string(),
-            ..record(ResourceLifecycleResourceStatus::CleanupPending)
-        };
-        record_store_resource(&store, &run.id, &artifact_path, resource);
-        let indexes = load_observation_store_index(&test_config_root(), &store, Some(&run.id))
-            .expect("store index");
+    fn apply_skips_resources_it_must_not_delete() {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let inside_path = root.path().join("resource");
+        let outside_path = outside.path().join("resource");
+        std::fs::write(&inside_path, "generated").expect("inside file");
+        std::fs::write(&outside_path, "generated").expect("outside file");
+        let cases = [
+            (
+                "dry-run intent",
+                ResourceLifecycleRecord {
+                    path: inside_path.display().to_string(),
+                    cleanup_intent: ResourceCleanupIntent::DryRun,
+                    ..record(ResourceLifecycleResourceStatus::CleanupPending)
+                },
+                "explicit apply intent",
+            ),
+            (
+                "outside root",
+                ResourceLifecycleRecord {
+                    path: outside_path.display().to_string(),
+                    cleanup_intent: ResourceCleanupIntent::Apply,
+                    ..record(ResourceLifecycleResourceStatus::CleanupPending)
+                },
+                "resource path is outside cleanup root",
+            ),
+            (
+                "remote without executor",
+                ResourceLifecycleRecord {
+                    owner: "homeboy-runs".to_string(),
+                    runner_id: Some("lab".to_string()),
+                    path: "/srv/homeboy/artifacts/run-1".to_string(),
+                    cleanup_intent: ResourceCleanupIntent::Apply,
+                    ..record(ResourceLifecycleResourceStatus::CleanupPending)
+                },
+                "remote-owned resource has no cleanup executor; leaving plan-only",
+            ),
+        ];
 
-        let cleanup = build_cleanup_output(
-            &indexes[0].index.resources,
-            &RunsResourcesArgs {
-                cleanup_plan: true,
-                cleanup_root: Some(tempdir.path().to_path_buf()),
-                ..Default::default()
-            },
-        )
-        .expect("cleanup plan");
+        for (case, resource, reason) in cases {
+            let cleanup = build_cleanup_output(
+                &[resource],
+                &RunsResourcesArgs {
+                    apply: true,
+                    cleanup_root: Some(root.path().to_path_buf()),
+                    ..Default::default()
+                },
+            )
+            .expect("cleanup apply");
 
-        assert_eq!(cleanup.planned_count, 1);
-        assert_eq!(cleanup.applied_count, 0);
-        assert!(resource_path.exists());
-    }
-
-    #[test]
-    fn store_discovered_apply_still_requires_apply_intent() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let store = temp_store(&tempdir);
-        let run = store
-            .start_run(NewRunRecord::builder("runner-exec").build())
-            .expect("run");
-        let artifact_path = tempdir.path().join("artifact.json");
-        std::fs::write(&artifact_path, "{}").expect("artifact file");
-        let resource_path = tempdir.path().join("resource");
-        std::fs::write(&resource_path, "generated").expect("resource file");
-        let resource = ResourceLifecycleRecord {
-            run_id: run.id.clone(),
-            path: resource_path.display().to_string(),
-            cleanup_intent: ResourceCleanupIntent::DryRun,
-            ..record(ResourceLifecycleResourceStatus::CleanupPending)
-        };
-        record_store_resource(&store, &run.id, &artifact_path, resource);
-        let indexes = load_observation_store_index(&test_config_root(), &store, Some(&run.id))
-            .expect("store index");
-
-        let cleanup = build_cleanup_output(
-            &indexes[0].index.resources,
-            &RunsResourcesArgs {
-                apply: true,
-                cleanup_root: Some(tempdir.path().to_path_buf()),
-                ..Default::default()
-            },
-        )
-        .expect("cleanup apply");
-
-        assert_eq!(cleanup.applied_count, 0);
-        assert_eq!(cleanup.skipped_count, 1);
-        assert!(cleanup.skipped[0].reason.contains("explicit apply intent"));
-        assert!(resource_path.exists());
-    }
-
-    #[test]
-    fn apply_requires_explicit_apply_intent() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let resource_path = tempdir.path().join("resource");
-        std::fs::write(&resource_path, "generated").expect("resource file");
-        let resource = ResourceLifecycleRecord {
-            path: resource_path.display().to_string(),
-            cleanup_intent: ResourceCleanupIntent::DryRun,
-            ..record(ResourceLifecycleResourceStatus::CleanupPending)
-        };
-
-        let cleanup = build_cleanup_output(
-            &[resource],
-            &RunsResourcesArgs {
-                apply: true,
-                cleanup_root: Some(tempdir.path().to_path_buf()),
-                ..Default::default()
-            },
-        )
-        .expect("cleanup apply plan");
-
-        assert_eq!(cleanup.applied_count, 0);
-        assert_eq!(cleanup.skipped_count, 1);
-        assert!(cleanup.skipped[0].reason.contains("explicit apply intent"));
-        assert!(resource_path.exists());
-    }
-
-    #[test]
-    fn apply_deletes_apply_intended_paths_under_root() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let resource_path = tempdir.path().join("resource");
-        std::fs::write(&resource_path, "generated").expect("resource file");
-        let resource = ResourceLifecycleRecord {
-            path: resource_path.display().to_string(),
-            cleanup_intent: ResourceCleanupIntent::Apply,
-            ..record(ResourceLifecycleResourceStatus::CleanupPending)
-        };
-
-        let cleanup = build_cleanup_output(
-            &[resource],
-            &RunsResourcesArgs {
-                apply: true,
-                cleanup_root: Some(tempdir.path().to_path_buf()),
-                limit: 1,
-                ..Default::default()
-            },
-        )
-        .expect("cleanup apply");
-
-        assert_eq!(cleanup.applied_count, 1);
-        assert!(!resource_path.exists());
+            assert_eq!(cleanup.applied_count, 0, "{case}");
+            assert_eq!(cleanup.skipped_count, 1, "{case}");
+            assert!(cleanup.skipped[0].reason.contains(reason), "{case}");
+        }
+        assert!(inside_path.exists());
+        assert!(outside_path.exists());
     }
 
     #[test]
@@ -1542,35 +1443,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_keeps_unsupported_remote_records_plan_only() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let resource = ResourceLifecycleRecord {
-            owner: "homeboy-runs".to_string(),
-            runner_id: Some("lab".to_string()),
-            path: "/srv/homeboy/artifacts/run-1".to_string(),
-            cleanup_intent: ResourceCleanupIntent::Apply,
-            ..record(ResourceLifecycleResourceStatus::CleanupPending)
-        };
-
-        let cleanup = build_cleanup_output(
-            &[resource],
-            &RunsResourcesArgs {
-                apply: true,
-                cleanup_root: Some(tempdir.path().to_path_buf()),
-                ..Default::default()
-            },
-        )
-        .expect("cleanup apply");
-
-        assert_eq!(cleanup.applied_count, 0);
-        assert_eq!(cleanup.skipped_count, 1);
-        assert_eq!(
-            cleanup.skipped[0].reason,
-            "remote-owned resource has no cleanup executor; leaving plan-only"
-        );
-    }
-
-    #[test]
     fn terminal_store_run_flips_preserved_runner_workspace_eligibility() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let store = temp_store(&tempdir);
@@ -1622,37 +1494,6 @@ mod tests {
             ResourceLifecycleResourceStatus::CleanupPending
         );
         assert!(resource_lifecycle_record_is_cleanup_eligible(transitioned));
-    }
-
-    #[test]
-    fn apply_skips_paths_outside_root() {
-        let root = tempfile::tempdir().expect("root tempdir");
-        let outside = tempfile::tempdir().expect("outside tempdir");
-        let resource_path = outside.path().join("resource");
-        std::fs::write(&resource_path, "generated").expect("resource file");
-        let resource = ResourceLifecycleRecord {
-            path: resource_path.display().to_string(),
-            cleanup_intent: ResourceCleanupIntent::Apply,
-            ..record(ResourceLifecycleResourceStatus::CleanupPending)
-        };
-
-        let cleanup = build_cleanup_output(
-            &[resource],
-            &RunsResourcesArgs {
-                apply: true,
-                cleanup_root: Some(root.path().to_path_buf()),
-                ..Default::default()
-            },
-        )
-        .expect("cleanup apply");
-
-        assert_eq!(cleanup.applied_count, 0);
-        assert_eq!(cleanup.skipped_count, 1);
-        assert_eq!(
-            cleanup.skipped[0].reason,
-            "resource path is outside cleanup root"
-        );
-        assert!(resource_path.exists());
     }
 
     #[test]

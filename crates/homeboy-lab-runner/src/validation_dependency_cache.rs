@@ -140,25 +140,11 @@ pub(crate) fn cache_enabled() -> bool {
 }
 
 /// Prepare `component` from `source` into a private directory, reusing a
-/// cached prepared tree when one exists for the same key.
+/// cached prepared tree when one exists for the same key, omitting
+/// `consumer_excludes` when a cached tree is copied out to this consumer.
 ///
 /// `lifecycle` runs the dependency lifecycle in the directory it is given,
 /// with `component` already pointing its `local_path` at that directory.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn prepare_with_cache<F>(
-    component: &Component,
-    source: &Path,
-    excludes: &[String],
-    lifecycle: F,
-) -> Result<PreparedDependencyCopy>
-where
-    F: FnOnce(&Component, &Path) -> Result<()>,
-{
-    prepare_with_cache_excluding(component, source, excludes, &[], lifecycle)
-}
-
-/// [`prepare_with_cache`], omitting `consumer_excludes` when a cached tree is
-/// copied out to this consumer.
 ///
 /// A published entry holds the full post-lifecycle tree, including
 /// package-manager installs the consumer never ships. Copying it goes through a
@@ -565,6 +551,19 @@ mod tests {
     use super::*;
     use homeboy_core::test_support::{run_git_command as git, EnvVarGuard};
 
+    /// Prepare with no consumer-only excludes.
+    fn prepare_with_cache<F>(
+        component: &Component,
+        source: &Path,
+        excludes: &[String],
+        lifecycle: F,
+    ) -> Result<PreparedDependencyCopy>
+    where
+        F: FnOnce(&Component, &Path) -> Result<()>,
+    {
+        prepare_with_cache_excluding(component, source, excludes, &[], lifecycle)
+    }
+
     fn excludes() -> Vec<String> {
         crate::workspace::DEFAULT_EXCLUDES
             .iter()
@@ -699,10 +698,15 @@ mod tests {
             let first =
                 prepare_with_cache(&component, &source, &excludes(), counting_build(&counter))
                     .expect("first prepare");
+            fs::write(first.path.join("evidence.json"), "{}").expect("consumer write");
             let second =
                 prepare_with_cache(&component, &source, &excludes(), counting_build(&counter))
                     .expect("second prepare");
 
+            assert!(
+                !second.path.join("evidence.json").exists(),
+                "consumer writes do not leak into the cache entry"
+            );
             assert_eq!(counter.load(Ordering::SeqCst), 1);
             assert_eq!(first.outcome, CacheOutcome::Miss);
             assert_eq!(second.outcome, CacheOutcome::Hit);
@@ -717,25 +721,6 @@ mod tests {
             }
             assert!(!source.join("built.txt").exists(), "source stays clean");
             assert!(cache_root().unwrap().starts_with(home.path()));
-        });
-    }
-
-    #[test]
-    fn consumer_writes_do_not_leak_into_the_cache_entry() {
-        crate::test_support::with_isolated_home(|_| {
-            let parent = tempfile::tempdir().expect("parent");
-            let (source, component) = checkout(parent.path(), "shared-runtime");
-            let counter = Arc::new(AtomicUsize::new(0));
-
-            let first =
-                prepare_with_cache(&component, &source, &excludes(), counting_build(&counter))
-                    .expect("first prepare");
-            fs::write(first.path.join("evidence.json"), "{}").expect("consumer write");
-            let second =
-                prepare_with_cache(&component, &source, &excludes(), counting_build(&counter))
-                    .expect("second prepare");
-
-            assert!(!second.path.join("evidence.json").exists());
         });
     }
 

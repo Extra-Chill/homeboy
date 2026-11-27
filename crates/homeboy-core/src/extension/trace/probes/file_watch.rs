@@ -102,21 +102,6 @@ mod tests {
     use std::time::Duration;
 
     use super::super::{ActiveTraceProbes, TraceProbeConfig};
-    use super::file_state;
-
-    #[test]
-    fn test_file_state() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let missing = file_state(&temp.path().join("missing.txt"));
-        assert!(!missing.exists);
-
-        let path = temp.path().join("present.txt");
-        fs::write(&path, "content").expect("write file");
-        let present = file_state(&path);
-        assert!(present.exists);
-        assert_eq!(present.len, 7);
-        assert!(present.modified_ms.is_some());
-    }
 
     #[test]
     fn test_run_file_watch() {

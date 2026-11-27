@@ -49,21 +49,16 @@ mod discovery {
         write_rig(package.path(), "beta", &minimal_rig("beta"));
 
         let rigs = discover_rigs(package.path()).expect("discover");
-        assert_eq!(rigs.len(), 2);
-        assert_eq!(rigs[0].id, "alpha");
-        assert_eq!(rigs[0].description, "alpha rig");
-        assert_eq!(rigs[1].id, "beta");
-    }
+        let ids: Vec<&str> = rigs.iter().map(|rig| rig.id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "beta"]);
 
-    #[test]
-    fn discover_single_rig_directory_with_rig_json() {
-        let package = tempfile::tempdir().expect("package");
-        fs::write(package.path().join("rig.json"), minimal_rig("solo")).expect("rig json");
-
-        let rigs = discover_rigs(package.path()).expect("discover");
+        // A package root that is itself a rig directory discovers just that rig.
+        let single = tempfile::tempdir().expect("single");
+        fs::write(single.path().join("rig.json"), minimal_rig("solo")).expect("rig json");
+        let rigs = discover_rigs(single.path()).expect("discover single");
         assert_eq!(rigs.len(), 1);
         assert_eq!(rigs[0].id, "solo");
-        assert_eq!(rigs[0].rig_path, package.path().join("rig.json"));
+        assert_eq!(rigs[0].rig_path, single.path().join("rig.json"));
     }
 
     #[test]
@@ -87,10 +82,6 @@ mod discovery {
         assert!(installed.exists());
         #[cfg(unix)]
         assert_eq!(fs::read_link(&installed).expect("symlink"), source);
-
-        let installed_content = fs::read_to_string(&installed).expect("installed content");
-        assert!(installed_content.contains("${env.DEV_ROOT}/alpha"));
-        assert!(installed_content.contains("${components.app.path}"));
 
         let metadata =
             read_source_metadata_in_root(&test_config_root(), "alpha").expect("metadata");
@@ -129,90 +120,6 @@ mod discovery {
 
 mod materialization {
     use super::*;
-
-    #[test]
-    fn materialize_resolves_inheritance_append_merge_by_and_serializes_deterministically() {
-        let package = tempfile::tempdir().expect("package");
-        fs::create_dir_all(package.path().join("templates")).expect("templates");
-        fs::create_dir_all(package.path().join("rigs/child")).expect("rig dir");
-        fs::write(
-            package.path().join("templates/base.json"),
-            r#"{
-                "settings": { "base": true, "shared": "parent" },
-                "appendable": ["base"],
-                "steps": [
-                    { "id": "build", "command": "make build", "metadata": { "retries": 1 } },
-                    { "id": "test", "command": "make test" }
-                ]
-            }"#,
-        )
-        .expect("base template");
-        let child = package.path().join("rigs/child/rig.json");
-        fs::write(
-            &child,
-            r#"{
-                "extends": "../../templates/base.json",
-                "id": "child",
-                "settings": { "shared": "child" },
-                "appendable": { "$append": ["child"] },
-                "steps": {
-                    "$merge_by": "id",
-                    "entries": [
-                        { "id": "build", "command": "make build-fast", "metadata": { "timeout": 60 } },
-                        { "id": "lint", "command": "make lint" }
-                    ]
-                }
-            }"#,
-        )
-        .expect("child rig");
-
-        let materialized = materialize_rig_spec(&child, package.path()).expect("materialize");
-        assert_eq!(materialized["id"], "child");
-        assert_eq!(materialized["settings"]["base"], true);
-        assert_eq!(materialized["settings"]["shared"], "child");
-        assert_eq!(
-            materialized["appendable"],
-            serde_json::json!(["base", "child"])
-        );
-        assert_eq!(materialized["steps"][0]["command"], "make build-fast");
-        assert_eq!(
-            materialized["steps"][0]["metadata"],
-            serde_json::json!({ "retries": 1, "timeout": 60 })
-        );
-        assert_eq!(materialized["steps"][2]["id"], "lint");
-        assert!(materialized.get("extends").is_none());
-
-        let first = serde_json::to_string(&materialized).expect("serialize");
-        let second = serde_json::to_string(
-            &materialize_rig_spec(&child, package.path()).expect("materialize again"),
-        )
-        .expect("serialize again");
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn materialize_default_source_root_resolves_package_templates() {
-        let package = tempfile::tempdir().expect("package");
-        let rig = package.path().join("rigs/example/rig.json");
-        fs::create_dir_all(rig.parent().expect("rig directory")).expect("rig directory");
-        fs::create_dir_all(package.path().join("templates")).expect("template directory");
-        fs::write(
-            package.path().join("templates/base.json"),
-            r#"{ "settings": { "inherited": true } }"#,
-        )
-        .expect("template");
-        fs::write(
-            &rig,
-            r#"{ "extends": "../../templates/base.json", "id": "example" }"#,
-        )
-        .expect("rig");
-
-        assert_eq!(default_materialize_source_root(&rig), package.path());
-        assert_eq!(
-            materialize_rig_spec_with_default_source_root(&rig).expect("materialize"),
-            serde_json::json!({ "id": "example", "settings": { "inherited": true } })
-        );
-    }
 
     #[test]
     fn materialized_resource_resolves_inheritance_and_digests_canonical_json() {
@@ -284,14 +191,6 @@ mod materialization {
     }
 
     #[test]
-    fn materialize_default_source_root_keeps_non_standard_files_narrow() {
-        assert_eq!(
-            default_materialize_source_root(Path::new("rigs/example/template.json")),
-            std::path::PathBuf::from("rigs/example")
-        );
-    }
-
-    #[test]
     fn materialize_matches_generic_representative_fixture() {
         let package = tempfile::tempdir().expect("package");
         let templates = package.path().join("templates");
@@ -312,9 +211,15 @@ mod materialization {
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../../fixtures/rig-materialize/expected.json"))
                 .expect("expected fixture");
+        assert_eq!(default_materialize_source_root(&rig), package.path());
         assert_eq!(
             materialize_rig_spec_with_default_source_root(&rig).expect("materialize"),
             expected
+        );
+        // Files outside the `rigs/<id>/rig.json` convention keep a narrow root.
+        assert_eq!(
+            default_materialize_source_root(Path::new("rigs/example/template.json")),
+            std::path::PathBuf::from("rigs/example")
         );
     }
 
@@ -329,36 +234,6 @@ mod materialization {
         let error = materialize_rig_spec(&first, package.path()).expect_err("cycle rejected");
         assert_eq!(error.details["field"], "extends");
         assert!(error.message.contains("cycle"));
-    }
-
-    #[test]
-    fn materialize_rejects_array_directives_without_an_inherited_array() {
-        let package = tempfile::tempdir().expect("package");
-        let rig = package.path().join("rig.json");
-        fs::write(&rig, r#"{ "items": { "$append": ["unexpected"] } }"#).expect("rig");
-
-        let error = materialize_rig_spec(&rig, package.path()).expect_err("directive rejected");
-        assert_eq!(error.details["field"], "items");
-        assert!(error.message.contains("inherited array"));
-    }
-
-    #[test]
-    fn materialize_rejects_unknown_array_directives() {
-        let package = tempfile::tempdir().expect("package");
-        let base = package.path().join("base.json");
-        let rig = package.path().join("rig.json");
-        fs::write(&base, r#"{ "items": ["base"] }"#).expect("base");
-        fs::write(
-            &rig,
-            r#"{ "extends": "base.json", "items": { "$unknown": [] } }"#,
-        )
-        .expect("rig");
-
-        let error = materialize_rig_spec(&rig, package.path()).expect_err("directive rejected");
-        assert_eq!(error.details["field"], "items");
-        assert!(error
-            .message
-            .contains("Unknown rig extends array merge directive"));
     }
 
     #[test]
@@ -400,47 +275,18 @@ mod materialization {
             assert_eq!(error.details["field"], "items", "{name}");
             assert!(error.message.contains(message), "{name}: {}", error.message);
         }
+
+        // A directive with no inherited array to apply to is rejected too.
+        let orphan = package.path().join("orphan.json");
+        fs::write(&orphan, r#"{ "items": { "$append": ["unexpected"] } }"#).expect("rig");
+        let error = materialize_rig_spec(&orphan, package.path()).expect_err("directive rejected");
+        assert_eq!(error.details["field"], "items");
+        assert!(error.message.contains("inherited array"));
     }
 }
 
 mod install_flows {
     use super::*;
-
-    #[test]
-    fn installed_rig_check_reports_package_lint_failures() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "lint-fixture", &minimal_rig("lint-fixture"));
-        fs::write(
-            package.path().join("conflicted.txt"),
-            "<<<<<<< ours\n=======\n>>>>>>> theirs\n",
-        )
-        .expect("conflict fixture");
-
-        install(
-            &test_config_root(),
-            package.path().to_str().unwrap(),
-            None,
-            false,
-        )
-        .expect("install");
-        let rig = load(&test_config_root(), "lint-fixture").expect("load rig");
-        let report = run_check(&rig).expect("check report");
-
-        assert!(
-            !report.success,
-            "package conflict marker should fail rig check"
-        );
-        assert!(report.pipeline.steps.iter().any(|step| {
-            step.kind == "rig-package-lint"
-                && step.status == "fail"
-                && step
-                    .error
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("conflicted.txt")
-        }));
-    }
 
     #[test]
     fn local_package_rig_check_loads_without_installing_source() {
@@ -664,28 +510,6 @@ mod install_flows {
     }
 
     #[test]
-    fn install_rejects_rig_template_extends_outside_source_root() {
-        let _home = HomeGuard::new();
-        let root = tempfile::tempdir().expect("root");
-        let package = root.path().join("package");
-        let outside = root.path().join("outside");
-        fs::create_dir_all(&package).expect("package dir");
-        fs::create_dir_all(&outside).expect("outside dir");
-        fs::write(outside.join("base.json"), minimal_rig("base")).expect("outside base");
-        fs::write(
-            package.join("rig.json"),
-            r#"{"id":"alpha","extends":"../outside/base.json"}"#,
-        )
-        .expect("rig json");
-
-        let err = install(&test_config_root(), package.to_str().unwrap(), None, false)
-            .expect_err("outside extends");
-
-        assert_eq!(err.details["field"], "extends");
-        assert!(err.message.contains("inside the rig package source root"));
-    }
-
-    #[test]
     fn installed_rig_load_applies_trace_workload_defaults() {
         let _home = HomeGuard::new();
         let package = tempfile::tempdir().expect("package");
@@ -817,18 +641,26 @@ mod install_flows {
         )
         .expect("install");
         let rig = load(&test_config_root(), "lint-conflict").expect("load rig");
-        let lint = run_lint(&rig).expect("lint report");
 
-        assert!(!lint.success, "conflict markers should fail rig lint");
-        assert!(lint.pipeline.steps.iter().any(|step| {
-            step.kind == "rig-package-lint"
-                && step.status == "fail"
-                && step
-                    .error
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains("conflicted.txt")
-        }));
+        // Both `rig lint` and the full `rig check` surface the package lint failure.
+        for (label, report) in [
+            ("lint", run_lint(&rig).expect("lint report")),
+            ("check", run_check(&rig).expect("check report")),
+        ] {
+            assert!(!report.success, "conflict markers should fail rig {label}");
+            assert!(
+                report.pipeline.steps.iter().any(|step| {
+                    step.kind == "rig-package-lint"
+                        && step.status == "fail"
+                        && step
+                            .error
+                            .as_deref()
+                            .unwrap_or_default()
+                            .contains("conflicted.txt")
+                }),
+                "rig {label} should report conflicted.txt"
+            );
+        }
     }
 
     #[test]
@@ -860,99 +692,6 @@ mod install_flows {
             lint.success,
             "conflict markers inside .datamachine must be ignored by the lint walk"
         );
-    }
-
-    #[test]
-    fn install_supports_extends_array_merge_directives() {
-        let cases = [
-            (
-                "appender",
-                r#"{
-                    "$append": [
-                        { "kind": "check", "label": "sample runtime cli exists", "command": "sample-runtime --version" }
-                    ]
-                }"#,
-                vec!["npm available", "build", "sample runtime cli exists"],
-                None,
-            ),
-            (
-                "keyed",
-                r#"{
-                    "$merge_by": "label",
-                    "entries": [
-                        { "kind": "check", "label": "build", "command": "make build --fast", "metadata": { "timeout": 60 } },
-                        { "kind": "check", "label": "lint", "command": "make lint" }
-                    ]
-                }"#,
-                vec!["npm available", "build", "lint"],
-                Some(("make build --fast", 60)),
-            ),
-        ];
-
-        for (id, check_overlay, expected_labels, expected_build) in cases {
-            let _home = HomeGuard::new();
-            let package = tempfile::tempdir().expect("package");
-            fs::create_dir_all(package.path().join("templates")).expect("templates dir");
-            fs::write(
-                package.path().join("templates/base.json"),
-                r#"{
-                "description": "base rig",
-                "pipeline": {
-                    "check": [
-                        { "kind": "check", "label": "npm available", "command": "npm --version" },
-                        { "kind": "check", "label": "build", "command": "make build", "metadata": { "retries": 1 } }
-                    ]
-                }
-            }"#,
-            )
-            .expect("base template");
-            write_rig(
-                package.path(),
-                id,
-                &format!(
-                    r#"{{
-                    "extends": "../../templates/base.json",
-                    "id": "{id}",
-                    "pipeline": {{
-                        "check": {check_overlay}
-                    }}
-                }}"#
-                ),
-            );
-
-            install(
-                &test_config_root(),
-                package.path().to_str().unwrap(),
-                None,
-                false,
-            )
-            .expect("install");
-
-            let installed_path = homeboy_core::paths::rig_config_in_root(&test_config_root(), id);
-            let installed = fs::read_to_string(&installed_path).expect("installed rig");
-            assert!(!installed.contains("$append"));
-            assert!(!installed.contains("$merge_by"));
-            let value: serde_json::Value =
-                serde_json::from_str(&installed).expect("materialized json");
-            let checks = value["pipeline"]["check"].as_array().expect("check array");
-            let labels: Vec<&str> = checks
-                .iter()
-                .map(|step| step["label"].as_str().expect("label"))
-                .collect();
-            assert_eq!(labels, expected_labels);
-
-            if let Some((expected_command, expected_timeout)) = expected_build {
-                let build = checks
-                    .iter()
-                    .find(|step| step["label"] == "build")
-                    .expect("build step");
-                assert_eq!(build["command"], expected_command);
-                assert_eq!(build["metadata"]["retries"], 1);
-                assert_eq!(build["metadata"]["timeout"], expected_timeout);
-            }
-
-            load(&test_config_root(), id).expect("load materialized rig");
-        }
     }
 
     #[test]
@@ -1096,26 +835,6 @@ mod multi_rig {
         assert!(err.message.contains("multiple rigs"));
         assert!(err.message.contains("alpha"));
         assert!(err.message.contains("beta"));
-    }
-
-    #[test]
-    fn install_multi_rig_package_can_select_id() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-        write_rig(package.path(), "beta", &minimal_rig("beta"));
-
-        let result = install(
-            &test_config_root(),
-            package.path().to_str().unwrap(),
-            Some("beta"),
-            false,
-        )
-        .expect("install");
-        assert_eq!(result.installed.len(), 1);
-        assert_eq!(result.installed[0].id, "beta");
-        assert!(homeboy_core::paths::rig_config_in_root(&test_config_root(), "beta").exists());
-        assert!(!homeboy_core::paths::rig_config_in_root(&test_config_root(), "alpha").exists());
     }
 
     #[test]

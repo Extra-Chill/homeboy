@@ -128,38 +128,30 @@ fn undelivered_items_settle_succeeded_partial_with_the_list() {
 }
 
 #[test]
-fn every_terminal_phase_without_a_pr_names_why() {
-    for state in [
-        RunExecutionState::CandidateRecoverable,
-        RunExecutionState::Succeeded,
-        RunExecutionState::PartialFailure,
-        RunExecutionState::Failed,
-        RunExecutionState::Cancelled,
-        RunExecutionState::Unknown,
+fn why_no_pr_is_named_for_every_terminal_phase_and_absent_in_flight() {
+    for (state, terminal) in [
+        (RunExecutionState::CandidateRecoverable, true),
+        (RunExecutionState::Succeeded, true),
+        (RunExecutionState::PartialFailure, true),
+        (RunExecutionState::Failed, true),
+        (RunExecutionState::Cancelled, true),
+        (RunExecutionState::Unknown, true),
+        (RunExecutionState::Queued, false),
+        (RunExecutionState::Running, false),
     ] {
         let summary = cook_summary(&record(state, json!({})));
         summary.validate().expect("valid summary");
-        assert!(summary.terminal, "{state:?}");
-        assert!(summary.why_no_pr.is_some(), "{state:?}");
-        assert!(
-            summary
-                .why_no_pr
-                .as_deref()
-                .unwrap()
-                .starts_with(&format!("{}: ", summary.status)),
-            "{state:?}"
-        );
-    }
-}
-
-#[test]
-fn in_flight_runs_have_no_reason_yet() {
-    for state in [RunExecutionState::Queued, RunExecutionState::Running] {
-        let summary = cook_summary(&record(state, json!({})));
-        summary.validate().expect("valid summary");
-        assert!(!summary.terminal);
-        assert_eq!(summary.why_no_pr, None);
-        assert_eq!(summary.pr_url, None);
+        assert_eq!(summary.terminal, terminal, "{state:?}");
+        assert_eq!(summary.pr_url, None, "{state:?}");
+        if terminal {
+            let why = summary.why_no_pr.as_deref().expect("why_no_pr");
+            assert!(
+                why.starts_with(&format!("{}: ", summary.status)),
+                "{state:?}"
+            );
+        } else {
+            assert_eq!(summary.why_no_pr, None, "{state:?}");
+        }
     }
 }
 

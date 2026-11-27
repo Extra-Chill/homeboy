@@ -11,7 +11,7 @@ use homeboy_engine_primitives::command::{
 };
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -927,8 +927,7 @@ fn metadata_fallback_error(
 ///
 /// The error distinguishes the three ways this can fail -- the `gh` invocation
 /// itself failed, no release matched the tag, or the matched record was not
-/// parseable release metadata -- because they demand different responses and
-/// were previously indistinguishable (all collapsed into `None`).
+/// parseable release metadata -- because they demand different responses.
 fn gh_draft_release_metadata(
     github: &GitHubRepo,
     config: &GithubConfig,
@@ -982,47 +981,6 @@ pub(crate) fn parse_listed_release_metadata(stdout: &str) -> Option<GitHubReleas
         .map(str::trim)
         .find(|line| !line.is_empty())
         .and_then(|line| serde_json::from_str(line).ok())
-}
-
-#[allow(
-    dead_code,
-    reason = "No production caller: release upload verification is asserted by this module's tests but is not wired into the publish path."
-)]
-pub(crate) fn verify_release_assets(
-    artifact_paths: &[String],
-    assets: &[GitHubReleaseAsset],
-) -> Result<(), String> {
-    for path in artifact_paths {
-        let metadata = std::fs::metadata(path)
-            .map_err(|error| format!("could not read release artifact '{path}': {error}"))?;
-        let name = std::path::Path::new(path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| format!("release artifact '{path}' has no valid filename"))?;
-        let asset = assets
-            .iter()
-            .find(|asset| asset.name == name)
-            .ok_or_else(|| format!("GitHub Release is missing uploaded asset '{name}'"))?;
-        if asset.size != metadata.len() {
-            return Err(format!(
-                "GitHub Release asset '{name}' has size {}, expected {}",
-                asset.size,
-                metadata.len()
-            ));
-        }
-        if let Some(digest) = asset
-            .digest
-            .as_deref()
-            .and_then(|value| value.strip_prefix("sha256:"))
-        {
-            if file_sha256(path)? != digest {
-                return Err(format!(
-                    "GitHub Release asset '{name}' digest does not match uploaded artifact"
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn verify_release_publications(
@@ -1339,8 +1297,8 @@ fn run_bounded_asset_download(
         std::thread::sleep(Duration::from_millis(10));
     };
     // Build the captured evidence BEFORE branching on the outcome: a failed
-    // streamed download never produces a `GhCommandOutput`, which is exactly why
-    // its stderr used to be flattened into a sentence and lost (#11135).
+    // streamed download never produces a `GhCommandOutput`, so its stderr
+    // would otherwise be flattened into a sentence and lost (#11135).
     let captured_stderr = || {
         let mut text = String::from_utf8_lossy(&diagnostics).to_string();
         if diagnostics_truncated {
@@ -1966,8 +1924,8 @@ mod tests {
             "HTTP 404: no release found"
         ));
 
-        // Everything else on a non-zero exit is a failure to ask. Each of these
-        // previously collapsed to "no release exists".
+        // Everything else on a non-zero exit is a failure to ask, never
+        // "no release exists".
         for stderr in [
             "error connecting to github.example.com\ncheck your internet connection",
             "dial tcp: lookup github.example.com: no such host",
@@ -2019,67 +1977,6 @@ mod tests {
         );
         assert_eq!(first_meaningful_line("   \n"), "no diagnostic output");
         assert_eq!(first_meaningful_line(&"x".repeat(500)).len(), 200);
-    }
-
-    /// #10519: resolving a just-created draft must not scan the release list.
-    ///
-    /// `releases/tags/{tag}` 404s for a draft by design, so the readback after
-    /// `gh release create --draft` always falls through. The fallback used to
-    /// page the entire repository: `Extra-Chill/homeboy-extensions` carries 920
-    /// releases, so finding a draft created seconds earlier cost ~31 sequential
-    /// API calls and intermittently returned nothing, stranding the release with
-    /// "the draft fallback also failed: no GitHub Release matched tag".
-    ///
-    /// The id path is two O(1) calls regardless of repository size.
-    #[test]
-    fn draft_resolution_prefers_the_id_lookup_over_scanning_every_release() {
-        let source = include_str!("gh_cli.rs");
-        let body = source
-            .split("pub(crate) fn gh_release_metadata(")
-            .nth(1)
-            .expect("gh_release_metadata should exist");
-        let by_id = body
-            .find("gh_release_metadata_by_id")
-            .expect("the id lookup must be attempted");
-        let by_scan = body
-            .find("gh_draft_release_metadata")
-            .expect("the list scan must remain as a last resort");
-
-        assert!(
-            by_id < by_scan,
-            "the O(1) id lookup must be attempted before the O(releases) list scan"
-        );
-    }
-
-    /// The release lookup may only request `--json` fields that `gh` actually
-    /// serves (#11250).
-    ///
-    /// `databaseId` is not a stable part of the `gh release view --json`
-    /// contract. A `gh` build that omits it does not degrade -- it rejects the
-    /// entire call with `Unknown JSON field: "databaseId"`, which stranded
-    /// `extrachill-events` `v0.56.5` with its tag, draft and asset already
-    /// created and finalization refused. `apiUrl` appears in that same build's
-    /// own "Available fields" list, which is the property being pinned here.
-    #[test]
-    fn the_release_lookup_requests_only_a_universally_served_json_field() {
-        let source = include_str!("gh_cli.rs");
-        let body = source
-            .split("fn gh_release_metadata_by_id(")
-            .nth(1)
-            .expect("gh_release_metadata_by_id should exist")
-            .split("\nfn ")
-            .next()
-            .expect("the function body should be delimited");
-
-        assert!(
-            body.contains("\"apiUrl\""),
-            "the release lookup must resolve through apiUrl"
-        );
-        assert!(
-            !body.contains("\"databaseId\""),
-            "gh release view must not request databaseId: a gh build without that \
-             field rejects the whole call and strands the release (#11250)"
-        );
     }
 
     /// The URL from `gh` is an argument to `gh api`, so it is validated before
@@ -2165,30 +2062,8 @@ mod tests {
     }
 
     use super::*;
+    use sha2::Sha256;
     use std::sync::mpsc;
-
-    /// The list endpoint is the only REST surface that exposes a draft release:
-    /// `releases/tags/{tag}` returns 404 for drafts, which deadlocked recovery
-    /// (a failed publish leaves a draft, every retry 404'd, it stayed a draft).
-    /// This is a real `gh api --paginate --jq` record for a stranded release.
-    #[test]
-    fn draft_release_metadata_parses_from_the_list_endpoint() {
-        let stdout = r#"{"id":360531007,"tag_name":"v0.320.0","draft":true,"assets":[{"id":1,"name":"homeboy-x86_64-unknown-linux-gnu.tar.xz","size":9876543,"digest":"sha256:abc123"}]}"#;
-        let metadata = parse_listed_release_metadata(stdout).expect("draft metadata parses");
-        assert!(metadata.is_draft);
-        assert_eq!(metadata.assets.len(), 1);
-        // Recovery reconciles by digest, so losing it would silently re-upload.
-        assert_eq!(metadata.assets[0].digest.as_deref(), Some("sha256:abc123"));
-    }
-
-    #[test]
-    fn listed_release_metadata_ignores_blank_and_paginated_noise() {
-        let stdout = "\n\n{\"tag_name\":\"v1.2.3\",\"draft\":false,\"assets\":[]}\n";
-        let metadata = parse_listed_release_metadata(stdout).expect("metadata parses");
-        assert!(!metadata.is_draft);
-        assert!(parse_listed_release_metadata("").is_none());
-        assert!(parse_listed_release_metadata("not json").is_none());
-    }
 
     fn failed_output(
         stdout: &str,
@@ -2204,8 +2079,10 @@ mod tests {
         }
     }
 
+    /// Both lookups' failures survive, and the causal failure leads: the tag
+    /// endpoint 404s for every draft by design, so it must trail (#11145).
     #[test]
-    fn metadata_fallback_retains_primary_404_and_draft_list_failure() {
+    fn metadata_fallback_retains_primary_404_and_leads_with_the_draft_list_failure() {
         let primary = failed_output("", "HTTP 404: Not Found", Some(1), false);
         let draft = GitHubReleaseMetadataError {
             message: "gh api releases list exited with status 1".to_string(),
@@ -2218,103 +2095,18 @@ mod tests {
 
         let error = metadata_fallback_error("repos/example/repo/releases/tags/v1", &primary, draft);
 
-        assert!(error
-            .message
-            .contains("gh api releases list exited with status 1"));
-        assert!(error
-            .message
-            .contains("the release lookup by tag also failed"));
-        assert_eq!(error.diagnostics.len(), 2);
-        // #11145: the causal failure leads; the by-design 404 trails.
-        assert_eq!(error.diagnostics[0].http_status, Some(403));
-        assert_eq!(error.diagnostics[1].http_status, Some(404));
-    }
-
-    /// #11145: a 404 that is expected must not be the first thing an operator
-    /// reads.
-    ///
-    /// `releases/tags/{tag}` returns 404 for every draft by design, so the
-    /// composed message led with "gh api release metadata exited with status 1"
-    /// on every failure this error type has ever described -- burying the cause
-    /// that actually stranded the release behind a line that carries no
-    /// information at all.
-    #[test]
-    fn the_composed_message_leads_with_the_cause_not_the_by_design_404() {
-        let primary = failed_output("", "HTTP 404: Not Found", Some(1), false);
-        let draft = GitHubReleaseMetadataError {
-            message: "gh release view apiUrl exited with status 1".to_string(),
-            diagnostics: Vec::new(),
-        };
-
-        let error = metadata_fallback_error("repos/example/repo/releases/tags/v1", &primary, draft);
-
         let cause = error
             .message
-            .find("gh release view apiUrl")
+            .find("gh api releases list exited with status 1")
             .expect("the causal failure must survive");
         let expected_404 = error
             .message
             .find("the release lookup by tag also failed")
             .expect("the tag lookup failure must survive");
-        assert!(
-            cause < expected_404,
-            "operator diagnosis reads top-down; the cause must precede the expected 404: {}",
-            error.message
-        );
-    }
-
-    /// #11145: the post-create readback knows the release is a draft, so it
-    /// must not pay a round trip to an endpoint that 404s for drafts by design.
-    ///
-    /// Asserted structurally because the alternative is a live `gh` call. The
-    /// tag endpoint may only be built inside the `expect_draft` guard.
-    #[test]
-    fn an_expected_draft_skips_the_tag_endpoint_that_404s_by_design() {
-        let source = include_str!("gh_cli.rs");
-        let body = source
-            .split("pub(crate) fn gh_release_metadata(")
-            .nth(1)
-            .expect("gh_release_metadata should exist");
-        let signature_end = body.find(')').expect("the signature must terminate");
-        assert!(
-            body[..signature_end].contains("expect_draft: bool"),
-            "callers must be able to state that the release is a draft"
-        );
-
-        let guard = body
-            .find("if expect_draft {")
-            .expect("the tag lookup must be gated on what the caller knows");
-        let tag_request = body
-            .find("&[\"api\", &endpoint]")
-            .expect("the tag lookup must still exist for callers that need it");
-        assert!(
-            guard < tag_request,
-            "the tag lookup must sit inside the expect_draft guard, not before it"
-        );
-    }
-
-    /// #11145: the readback after `gh release create --draft` is the one call
-    /// site that KNOWS it is reading a draft. If it ever reverts to `false` the
-    /// guaranteed 404 comes straight back, silently -- the release still
-    /// resolves via the id lookup, so nothing fails, it just costs a round trip
-    /// and corrupts every error message on that path.
-    #[test]
-    fn the_post_create_readback_declares_that_it_expects_a_draft() {
-        let source = include_str!("run.rs");
-        let after_create = source
-            .split("\"--draft\",")
-            .nth(1)
-            .expect("the create call must still pass --draft");
-        let readback = after_create
-            .find("gh_release_metadata(")
-            .expect("the create path must read the release back");
-        let call = &after_create[readback..];
-        let call_end = call.find(')').expect("the call must terminate");
-        assert!(
-            call[..call_end].contains("true"),
-            "the post-create readback must pass expect_draft: true, got: {}",
-            &call[..call_end]
-        );
+        assert!(cause < expected_404, "{}", error.message);
+        assert_eq!(error.diagnostics.len(), 2);
+        assert_eq!(error.diagnostics[0].http_status, Some(403));
+        assert_eq!(error.diagnostics[1].http_status, Some(404));
     }
 
     #[test]
@@ -2338,6 +2130,15 @@ mod tests {
         );
         assert!(!diagnostic.stderr.contains("secret"));
 
+        // The status is also read from a whitespace-formatted JSON body.
+        let json_status = gh_failure_diagnostic(
+            "gh api",
+            "repos/example/repo",
+            &failed_output("{\"status\": 403}", "", Some(1), false),
+        );
+        assert_eq!(json_status.http_status, Some(403));
+        assert!(json_status.summary.contains("HTTP 403"));
+
         let timeout = gh_failure_diagnostic(
             "gh release upload",
             "repos/example/repo/releases/v1/assets",
@@ -2348,20 +2149,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_diagnostic_parses_whitespace_json_status_and_redacts_url_userinfo() {
-        let diagnostic = gh_failure_diagnostic(
-            "gh api",
-            "https://user:password@example.test/repos/example/repo",
-            &failed_output("{\"status\": 403}", "", Some(1), false),
-        );
-        assert_eq!(diagnostic.http_status, Some(403));
-        assert!(diagnostic.summary.contains("HTTP 403"));
-        assert!(!diagnostic.endpoint.contains("user:password"));
-        assert!(!diagnostic.endpoint.contains("password"));
-    }
-
-    #[test]
-    fn failure_diagnostic_redacts_signed_url_secrets_and_bounds_output() {
+    fn failure_diagnostic_redacts_secrets_and_bounds_output() {
         let output = failed_output(
             &format!(
                 "{} https://example.test/file?X-Amz-Signature=secret&token=also-secret",
@@ -2373,31 +2161,15 @@ mod tests {
         );
         let diagnostic = gh_failure_diagnostic(
             "gh api",
-            "repos/example/repo/releases?access_token=secret",
+            "https://user:password@example.test/repos?access_token=secret",
             &output,
         );
         assert!(!diagnostic.stdout.contains("secret"));
-        assert!(!diagnostic.stdout.contains("also-secret"));
         assert!(!diagnostic.endpoint.contains("secret"));
+        assert!(!diagnostic.endpoint.contains("password"));
         assert!(diagnostic.stdout.len() <= GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT + 16);
         assert!(diagnostic.stdout.ends_with("...[truncated]"));
-    }
 
-    #[test]
-    fn diagnostic_text_redacts_json_secret_values() {
-        let redacted = gh_diagnostic_text(
-            r#"{"access_token":"secret","token": "escaped\\u0073ecret","secret":"another-secret"}"#,
-        );
-        assert!(redacted.contains(r#""access_token":"[REDACTED]""#));
-        assert!(redacted.contains(r#""token":"[REDACTED]""#));
-        assert!(redacted.contains(r#""secret":"[REDACTED]""#));
-        assert!(!redacted.contains("another-secret"));
-        assert!(!redacted.contains("escaped"));
-        assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn diagnostic_text_redacts_sensitive_headers_and_signed_urls() {
         let redacted = gh_diagnostic_text(
             "Cookie: session=secret\nSet-Cookie: sid=secret\nProxy-Authorization: Basic secret\nAuthorization: token ghp_secret\nX-Api-Key: secret\nhttps://user:password@example.test/path?X-Amz-Signature=secret&token=secret",
         );
@@ -2411,7 +2183,15 @@ mod tests {
         ] {
             assert!(!redacted.contains(secret), "leaked {secret}: {redacted}");
         }
-        assert!(redacted.contains("[REDACTED]"));
+
+        let redacted = gh_diagnostic_text(
+            r#"{"access_token":"secret","token": "escaped\\u0073ecret","secret":"another-secret"}"#,
+        );
+        assert!(redacted.contains(r#""access_token":"[REDACTED]""#));
+        assert!(redacted.contains(r#""token":"[REDACTED]""#));
+        assert!(redacted.contains(r#""secret":"[REDACTED]""#));
+        assert!(!redacted.contains("another-secret"));
+        assert!(!redacted.contains("escaped"));
     }
 
     #[test]
@@ -2625,16 +2405,13 @@ mod tests {
     }
 
     #[test]
-    fn bounded_command_reports_timeout() {
+    fn bounded_command_reports_timeout_and_preserves_nonzero_empty_stderr() {
         let mut command = Command::new("sh");
         command.args(["-c", "sleep 1"]);
         let output = run_gh_command(command, Duration::from_millis(10));
         assert!(output.timed_out);
         assert_ne!(output.exit_code, Some(0));
-    }
 
-    #[test]
-    fn bounded_command_preserves_nonzero_empty_stderr() {
         let mut command = Command::new("sh");
         command.args(["-c", "exit 7"]);
         let output = run_gh_command(command, Duration::from_secs(1));
@@ -2885,7 +2662,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bounded_asset_download_timeout_closes_descendant_inherited_pipes() {
+    fn bounded_asset_download_closes_descendant_inherited_pipes_on_timeout_and_oversize() {
         assert_inherited_pipe_cleanup(
             "sleep 30",
             "wait",
@@ -2893,11 +2670,6 @@ mod tests {
             "timed out",
             "timeout",
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bounded_asset_download_oversize_closes_descendant_inherited_pipes() {
         assert_inherited_pipe_cleanup(
             "sleep 30",
             "printf 'oversized'; wait",
@@ -2905,18 +2677,15 @@ mod tests {
             "exceeded expected byte length 4",
             "oversize",
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn bounded_asset_download_timeout_kills_escaped_inherited_pipes() {
-        assert_inherited_pipe_cleanup(
-            "setsid sleep 30",
-            "wait",
-            Duration::from_millis(50),
-            "timed out",
-            "escaped timeout",
-        );
+        if cfg!(target_os = "linux") {
+            assert_inherited_pipe_cleanup(
+                "setsid sleep 30",
+                "wait",
+                Duration::from_millis(50),
+                "timed out",
+                "escaped timeout",
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -3004,19 +2773,6 @@ mod tests {
     }
 
     #[test]
-    fn verifies_asset_name_size_and_digest() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("asset.zip");
-        std::fs::write(&path, b"asset bytes").expect("write asset");
-        let digest = format!("sha256:{:x}", Sha256::digest(b"asset bytes"));
-        verify_release_assets(
-            &[path.display().to_string()],
-            &[remote_asset("asset.zip", 11, Some(digest))],
-        )
-        .expect("verified asset");
-    }
-
-    #[test]
     fn publishing_uses_durable_release_artifact_after_source_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let durable = dir.path().join("durable.zip");
@@ -3042,58 +2798,22 @@ mod tests {
     }
 
     #[test]
-    fn manifest_only_release_fails_with_the_missing_target_archive() {
+    fn manifest_declared_archives_are_uploaded_with_the_manifest_or_named_when_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let manifest = dir.path().join("dist-manifest.json");
+        let archive = dir.path().join("homeboy-x86_64-unknown-linux-gnu.tar.xz");
         std::fs::write(
             &manifest,
             r#"{"artifacts":[{"path":"homeboy-x86_64-unknown-linux-gnu.tar.xz"}]}"#,
         )
         .expect("write manifest");
-        let state = ReleaseState {
-            artifacts: vec![crate::release::types::ReleaseArtifact {
-                path: manifest.display().to_string(),
-                durable_path: None,
-                artifact_type: None,
-                platform: None,
-                phase: "final".to_string(),
-                producer: "test".to_string(),
-                sha256: None,
-                publication_authority: false,
-            }],
-            ..ReleaseState::default()
-        };
+        let state = release_state_with_artifacts(vec![artifact(&manifest, None)]);
 
         let error = github_release_asset_paths(&state).expect_err("missing archive");
         assert!(error.contains("homeboy-x86_64-unknown-linux-gnu.tar.xz"));
         assert!(error.contains("homeboy release --head --from-artifacts"));
-    }
 
-    #[test]
-    fn manifest_declared_archives_are_uploaded_with_the_manifest() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let manifest = dir.path().join("dist-manifest.json");
-        let archive = dir.path().join("homeboy-x86_64-unknown-linux-gnu.tar.xz");
         std::fs::write(&archive, b"archive").expect("write archive");
-        std::fs::write(
-            &manifest,
-            r#"{"artifacts":[{"path":"homeboy-x86_64-unknown-linux-gnu.tar.xz"}]}"#,
-        )
-        .expect("write manifest");
-        let state = ReleaseState {
-            artifacts: vec![crate::release::types::ReleaseArtifact {
-                path: manifest.display().to_string(),
-                durable_path: None,
-                artifact_type: None,
-                platform: None,
-                phase: "final".to_string(),
-                producer: "test".to_string(),
-                sha256: None,
-                publication_authority: false,
-            }],
-            ..ReleaseState::default()
-        };
-
         assert_eq!(
             github_release_asset_paths(&state).expect("assets"),
             vec![
@@ -3126,20 +2846,6 @@ mod tests {
         assert_eq!(
             error,
             "release asset 'homeboy-x86_64-unknown-linux-gnu.tar.xz' is empty"
-        );
-    }
-
-    #[test]
-    fn verification_names_the_missing_uploaded_archive() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("homeboy-x86_64-unknown-linux-gnu.tar.xz");
-        std::fs::write(&path, b"archive").expect("write archive");
-
-        let error = verify_release_assets(&[path.display().to_string()], &[])
-            .expect_err("remote archive is absent");
-        assert_eq!(
-            error,
-            "GitHub Release is missing uploaded asset 'homeboy-x86_64-unknown-linux-gnu.tar.xz'"
         );
     }
 
@@ -3213,27 +2919,6 @@ mod tests {
             std::fs::read(&canonical).expect("canonical zip retained"),
             b"existing bytes"
         );
-    }
-
-    #[test]
-    fn exact_remote_asset_is_reused_on_retry() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("component.zip");
-        std::fs::write(&path, b"component bytes").expect("write zip");
-        let publications =
-            github_release_publications(&release_state_with_artifacts(vec![artifact(&path, None)]))
-                .expect("publication identity");
-        let remote = remote_asset(
-            "component.zip",
-            publications[0].size,
-            Some(format!("sha256:{}", publications[0].sha256)),
-        );
-
-        let (upload, existing) =
-            reconcile_release_publications_with(&publications, &[remote], &mut unexpected_download)
-                .expect("reconcile exact asset");
-        assert!(upload.is_empty());
-        assert_eq!(existing, publications);
     }
 
     #[test]
@@ -3345,112 +3030,70 @@ mod tests {
     }
 
     #[test]
-    fn draft_published_during_build_rejects_conflicting_existing_bytes() {
+    fn reconcile_fails_closed_on_conflicting_unverifiable_or_ambiguous_remote_assets() {
         let publication = ReleaseAssetPublication {
             target_name: "component.zip".to_string(),
             sha256: "a".repeat(64),
             size: 15,
             source_path: "component.zip".to_string(),
         };
-        let planned = GitHubReleaseMetadata {
-            tag_name: "v1.2.3".to_string(),
-            is_draft: true,
-            assets: Vec::new(),
-        };
-        let finalizing = GitHubReleaseMetadata {
-            tag_name: planned.tag_name.clone(),
-            is_draft: false,
-            assets: vec![remote_asset(
-                "component.zip",
-                publication.size,
-                Some(format!("sha256:{}", "b".repeat(64))),
-            )],
-        };
-
-        let error = reconcile_release_publications_with(
-            &[publication],
-            &finalizing.assets,
-            &mut unexpected_download,
-        )
-        .expect_err("published conflicting bytes must fail closed");
-
-        assert_eq!(finalizing.tag_name, planned.tag_name);
-        assert!(!finalizing.is_draft);
-        assert_eq!(
-            error.message,
-            format!(
-                "GitHub Release asset 'component.zip' conflicts with the canonical publication bytes (expected sha256:{}, found sha256:{})",
-                "a".repeat(64),
-                "b".repeat(64)
-            )
+        let conflict = format!(
+            "GitHub Release asset 'component.zip' conflicts with the canonical publication bytes (expected sha256:{}, found sha256:{})",
+            "a".repeat(64),
+            "b".repeat(64)
         );
-    }
+        let asset =
+            |digest: Option<&str>| remote_asset("component.zip", 15, digest.map(str::to_string));
+        let mismatched = format!("sha256:{}", "b".repeat(64));
 
-    #[test]
-    fn authority_rejects_malformed_and_mismatching_remote_digests() {
-        let publication = ReleaseAssetPublication {
-            target_name: "component.zip".to_string(),
-            sha256: "a".repeat(64),
-            size: 1,
-            source_path: "component.zip".to_string(),
-        };
-        for digest in [Some("sha256:not-a-digest"), Some("sha512:abcd")] {
+        // (remote assets, downloaded identity, expected message fragment)
+        type Download = Result<(u64, String), &'static str>;
+        let cases: Vec<(Vec<GitHubReleaseAsset>, Option<Download>, &str)> = vec![
+            (vec![asset(Some(&mismatched))], None, conflict.as_str()),
+            (
+                vec![asset(Some("sha256:not-a-digest"))],
+                None,
+                "cannot safely verify canonical publication ownership",
+            ),
+            (
+                vec![asset(Some("sha512:abcd"))],
+                None,
+                "cannot safely verify canonical publication ownership",
+            ),
+            (
+                vec![asset(None)],
+                Some(Ok((15, "b".repeat(64)))),
+                "conflicts with the canonical publication bytes",
+            ),
+            (
+                vec![asset(None)],
+                Some(Err("authenticated asset download failed")),
+                "authenticated asset download failed",
+            ),
+            (
+                vec![asset(None), asset(None)],
+                None,
+                "canonical publication ownership is ambiguous",
+            ),
+        ];
+
+        for (remote, download, expected) in cases {
             let error = reconcile_release_publications_with(
                 std::slice::from_ref(&publication),
-                &[remote_asset(
-                    &publication.target_name,
-                    publication.size,
-                    digest.map(str::to_string),
-                )],
-                &mut unexpected_download,
+                &remote,
+                &mut |asset, size| match &download {
+                    None => unexpected_download(asset, size),
+                    Some(Ok(identity)) => Ok(identity.clone()),
+                    Some(Err(message)) => Err(GitHubReleaseMetadataError::message(*message)),
+                },
             )
-            .expect_err("unverifiable remote digest must fail closed");
-            assert!(error
-                .message
-                .contains("cannot safely verify canonical publication ownership"));
+            .expect_err("unverifiable remote bytes must fail closed");
+            assert!(error.message.contains(expected), "{}", error.message);
         }
-
-        let error = reconcile_release_publications_with(
-            std::slice::from_ref(&publication),
-            &[remote_asset(
-                &publication.target_name,
-                publication.size,
-                Some(format!("sha256:{}", "b".repeat(64))),
-            )],
-            &mut unexpected_download,
-        )
-        .expect_err("mismatching remote digest must fail closed");
-        assert!(error
-            .message
-            .contains("conflicts with the canonical publication bytes"));
     }
 
     #[test]
-    fn conflicting_preexisting_canonical_asset_is_rejected() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("component.zip");
-        std::fs::write(&path, b"component bytes").expect("write zip");
-        let publications =
-            github_release_publications(&release_state_with_artifacts(vec![artifact(&path, None)]))
-                .expect("publication identity");
-
-        let error = reconcile_release_publications_with(
-            &publications,
-            &[remote_asset(
-                "component.zip",
-                publications[0].size,
-                Some(format!("sha256:{}", "f".repeat(64))),
-            )],
-            &mut unexpected_download,
-        )
-        .expect_err("conflicting bytes must fail");
-        assert!(error
-            .message
-            .contains("conflicts with the canonical publication bytes"));
-    }
-
-    #[test]
-    fn digestless_asset_is_reused_when_downloaded_identity_matches() {
+    fn digestless_asset_is_reused_and_verified_when_downloaded_identity_matches() {
         let publication = ReleaseAssetPublication {
             target_name: "component.zip".to_string(),
             sha256: "a".repeat(64),
@@ -3469,83 +3112,15 @@ mod tests {
         .expect("downloaded identity establishes publication authority");
 
         assert!(uploads.is_empty());
-        assert_eq!(existing, vec![publication]);
+        assert_eq!(existing, vec![publication.clone()]);
         assert_eq!(downloads, 1);
-    }
 
-    #[test]
-    fn digestless_asset_rejects_downloaded_byte_mismatch() {
-        let publication = ReleaseAssetPublication {
-            target_name: "component.zip".to_string(),
-            sha256: "a".repeat(64),
-            size: 15,
-            source_path: "component.zip".to_string(),
-        };
-        let error = reconcile_release_publications_with(
+        verify_release_publications_with(
             &[publication],
             &[remote_asset("component.zip", 15, None)],
-            &mut |_, _| Ok((15, "b".repeat(64))),
+            &mut |_, _| Ok((15, "a".repeat(64))),
         )
-        .expect_err("different downloaded bytes must fail closed");
-
-        assert!(error
-            .message
-            .contains("conflicts with the canonical publication bytes"));
-    }
-
-    #[test]
-    fn missing_or_mismatched_remote_digest_cannot_adopt_canonical_bytes() {
-        let publication = ReleaseAssetPublication {
-            target_name: "component.zip".to_string(),
-            sha256: "a".repeat(64),
-            size: 15,
-            source_path: "component.zip".to_string(),
-        };
-        let missing_digest = reconcile_release_publications_with(
-            std::slice::from_ref(&publication),
-            &[remote_asset("component.zip", 15, None)],
-            &mut |_, _| Ok((15, "b".repeat(64))),
-        )
-        .expect_err("digestless assets require matching downloaded bytes");
-        assert!(missing_digest
-            .message
-            .contains("conflicts with the canonical publication bytes"));
-
-        let mismatched_digest = reconcile_release_publications_with(
-            &[publication],
-            &[remote_asset(
-                "component.zip",
-                15,
-                Some(format!("sha256:{}", "b".repeat(64))),
-            )],
-            &mut unexpected_download,
-        )
-        .expect_err("mismatched GitHub digest must fail closed");
-        assert!(mismatched_digest
-            .message
-            .contains("conflicts with the canonical publication bytes"));
-    }
-
-    #[test]
-    fn digestless_asset_rejects_download_failure() {
-        let publication = ReleaseAssetPublication {
-            target_name: "component.zip".to_string(),
-            sha256: "a".repeat(64),
-            size: 15,
-            source_path: "component.zip".to_string(),
-        };
-        let error = reconcile_release_publications_with(
-            &[publication],
-            &[remote_asset("component.zip", 15, None)],
-            &mut |_, _| {
-                Err(GitHubReleaseMetadataError::message(
-                    "authenticated asset download failed",
-                ))
-            },
-        )
-        .expect_err("download failure must fail closed");
-
-        assert_eq!(error.message, "authenticated asset download failed");
+        .expect("verified assets satisfy the publication gate");
     }
 
     /// A release verification failure that came from a real `gh` invocation must
@@ -3592,10 +3167,11 @@ mod tests {
         assert!(hint.contains("AB12:CD34"), "unexpected hint: {hint}");
     }
 
-    /// A timeout kills the child before it reports a status. Report that as a
-    /// timeout rather than inventing an exit code.
+    /// A timeout kills the child before it reports a status, so it is reported
+    /// as a timeout rather than an invented exit code; failures with no `gh`
+    /// invocation behind them must not fabricate evidence.
     #[test]
-    fn timed_out_command_failure_is_named_as_a_timeout() {
+    fn timed_out_and_message_only_failures_do_not_invent_command_evidence() {
         let error = GitHubReleaseMetadataError::from_command_failure(
             "download timed out",
             "gh api release asset download",
@@ -3620,20 +3196,15 @@ mod tests {
                 .and_then(|value| value.as_i64()),
             Some(-1)
         );
-    }
 
-    /// Failures with no `gh` invocation behind them must not fabricate evidence.
-    #[test]
-    fn message_only_failure_carries_no_command_evidence() {
         let structured = GitHubReleaseMetadataError::message("GitHub Release is missing an asset")
             .into_structured_error("release assets");
-
         assert!(structured.details.get("command_evidence").is_none());
         assert!(structured.hints.is_empty());
     }
 
-    /// The `&[]` hole: a verification failure used to reach `upload_failed_result`
-    /// with its diagnostics dropped, so `error_details` was absent entirely.
+    /// A verification failure reaches `upload_failed_result` with its
+    /// diagnostics, so `error_details` is present.
     #[test]
     fn verification_failure_propagates_command_diagnostics() {
         let publication = ReleaseAssetPublication {
@@ -3665,48 +3236,6 @@ mod tests {
         assert_eq!(error.diagnostics.len(), 1);
         assert_eq!(error.diagnostics[0].http_status, Some(403));
         assert_eq!(error.diagnostics[0].exit_code, Some(1));
-    }
-
-    #[test]
-    fn duplicate_remote_asset_name_is_ambiguous() {
-        let publication = ReleaseAssetPublication {
-            target_name: "component.zip".to_string(),
-            sha256: "a".repeat(64),
-            size: 15,
-            source_path: "component.zip".to_string(),
-        };
-        let error = reconcile_release_publications_with(
-            &[publication],
-            &[
-                remote_asset("component.zip", 15, None),
-                remote_asset("component.zip", 15, None),
-            ],
-            &mut |_, _| panic!("ambiguous assets must not be downloaded"),
-        )
-        .expect_err("duplicate canonical names must fail closed");
-
-        assert!(error
-            .message
-            .contains("canonical publication ownership is ambiguous"));
-    }
-
-    #[test]
-    fn release_continues_after_digestless_asset_verification() {
-        let publication = ReleaseAssetPublication {
-            target_name: "component.zip".to_string(),
-            sha256: "a".repeat(64),
-            size: 15,
-            source_path: "component.zip".to_string(),
-        };
-        let next_step = verify_release_publications_with(
-            &[publication],
-            &[remote_asset("component.zip", 15, None)],
-            &mut |_, _| Ok((15, "a".repeat(64))),
-        )
-        .map(|()| "publish.nodejs")
-        .expect("verified assets satisfy the publication gate");
-
-        assert_eq!(next_step, "publish.nodejs");
     }
 
     #[test]

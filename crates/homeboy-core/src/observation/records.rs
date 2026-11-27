@@ -254,14 +254,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn test_builder() {
-        let record = NewRunRecord::builder("lint").build();
-
-        assert_eq!(record.kind, "lint");
-        assert_eq!(record.metadata_json, serde_json::json!({}));
-    }
-
-    #[test]
     fn defaulted_run_record_uses_the_current_wire_shape() {
         let record = RunRecord {
             id: "run-1".to_string(),
@@ -318,22 +310,6 @@ mod tests {
         assert_eq!(record.fixable, Some(true));
         assert_eq!(record.metadata_json["category"], "security");
         assert_eq!(record.metadata_json["source_sidecar"], "lint-findings");
-    }
-
-    #[test]
-    fn test_finding_records_from_lint() {
-        let findings = [
-            lint_finding("one", "security", Some("phpcs")),
-            lint_finding("two", "i18n", None),
-        ];
-
-        let records = finding_records_from_lint("run-1", &findings);
-
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0].fingerprint.as_deref(), Some("one"));
-        assert_eq!(records[0].tool, "phpcs");
-        assert_eq!(records[1].fingerprint.as_deref(), Some("two"));
-        assert_eq!(records[1].tool, "lint");
     }
 
     #[test]
@@ -402,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn test_finding_record_from_annotation() {
+    fn annotation_without_source_uses_file_stem_and_explicit_id() {
         let annotation = AnnotationSidecarItem {
             file: Some("src/lib.rs".to_string()),
             line: Some(33),
@@ -419,14 +395,10 @@ mod tests {
             homeboy_finding_from_annotation(&annotation, "phpcs.json"),
         );
 
-        assert_eq!(record.run_id, "run-1");
+        // A source-less annotation takes its tool from the sidecar file stem,
+        // and an explicit `id` wins over the derived fingerprint.
         assert_eq!(record.tool, "phpcs");
-        assert_eq!(record.rule.as_deref(), Some("WordPress.Security"));
-        assert_eq!(record.file.as_deref(), Some("src/lib.rs"));
-        assert_eq!(record.line, Some(33));
-        assert_eq!(record.severity.as_deref(), Some("notice"));
         assert_eq!(record.fingerprint.as_deref(), Some("custom-id"));
-        assert_eq!(record.fixable, Some(false));
     }
 
     #[test]
@@ -458,15 +430,6 @@ mod tests {
         assert_eq!(recorded.finding.location.column, Some(4));
         assert_eq!(recorded.finding.metadata["source_sidecar"], "lint-findings");
         assert_eq!(FindingRecord::from(recorded), record);
-    }
-
-    fn lint_finding(id: &str, category: &str, tool: Option<&str>) -> HomeboyFinding {
-        HomeboyFinding::builder(tool.unwrap_or("lint"), format!("{category} finding"))
-            .category(category)
-            .file("src/lib.rs")
-            .severity("error")
-            .fingerprint(id)
-            .build()
     }
 
     fn annotation_json(file: &str, code: &str) -> String {

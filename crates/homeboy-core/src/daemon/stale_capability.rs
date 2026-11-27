@@ -146,7 +146,6 @@ mod tests {
     fn different_build_unknown_field_is_typed_stale_capability() {
         let error = classify_admission_error(shape_error(), Some(CLI), DAEMON, || Some(2));
         assert_eq!(error.code, ErrorCode::DaemonStaleCapability);
-        assert_eq!(error.code.as_str(), "daemon.stale_capability");
         assert_eq!(error.details["daemon_version"], DAEMON);
         assert_eq!(error.details["submitter_version"], CLI);
         assert_eq!(error.details["active_durable_jobs"], 2);
@@ -157,23 +156,18 @@ mod tests {
         assert!(error.hints[0].message.contains("homeboy daemon status"));
     }
 
+    /// Only a shape refusal from a different, attributed build is reclassified.
     #[test]
-    fn same_build_keeps_invalid_argument() {
+    fn same_build_unattributed_or_non_shape_errors_keep_invalid_argument() {
         let error = classify_admission_error(shape_error(), Some(DAEMON), DAEMON, || {
             panic!("active jobs are not read for a same-build submitter")
         });
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
         assert_eq!(error.message, shape_error().message);
-    }
 
-    #[test]
-    fn unattributed_submitter_keeps_invalid_argument() {
         let error = classify_admission_error(shape_error(), None, DAEMON, || None);
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    }
 
-    #[test]
-    fn different_build_non_shape_error_is_unchanged() {
         let error = classify_admission_error(
             Error::validation_invalid_argument("workflow", "digest mismatch", None, None),
             Some(CLI),

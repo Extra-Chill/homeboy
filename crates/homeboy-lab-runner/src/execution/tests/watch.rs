@@ -1,5 +1,5 @@
 //! End-to-end coverage for the controller following Lab jobs with the Runner
-//! API v1 watch cursor (#13881 step 2): cursor-follow event-log equality and
+//! API v1 watch cursor: cursor-follow event-log equality and
 //! resume after a dropped connection.
 
 use super::super::daemon::{
@@ -72,6 +72,7 @@ fn start_direct_daemon_job(
         true,
         false,
         None,
+        false,
     )
     .expect("zero-wait direct daemon handoff");
     output.job_id.expect("accepted job id")
@@ -185,6 +186,7 @@ fn watch_follow_reproduces_the_daemon_event_log_and_reports_promotion_once() {
             false,
             false,
             None,
+            false,
         )
         .expect("watched direct-daemon handoff");
         releaser.join().expect("releaser thread");

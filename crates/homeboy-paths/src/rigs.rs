@@ -94,13 +94,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rigs_path_under_homeboy_dir() {
-        let path = rigs_in_root(&test_config_root());
-        assert!(path.ends_with("rigs"), "got {}", path.display());
-        assert!(path.parent().expect("parent").ends_with("homeboy"));
-    }
-
-    #[test]
     fn rig_registry_root_override_scopes_all_rig_state() {
         let default_root = PathBuf::from("/default/homeboy");
         assert_eq!(
@@ -116,78 +109,30 @@ mod tests {
             &PathBuf::from("/default/homeboy"),
         );
         assert_eq!(root, PathBuf::from("/runner/job-artifacts/rig-registry"));
-        assert_eq!(
-            root.join("rigs"),
-            PathBuf::from("/runner/job-artifacts/rig-registry/rigs")
-        );
-        assert_eq!(
-            root.join("rig-packages"),
-            PathBuf::from("/runner/job-artifacts/rig-registry/rig-packages")
-        );
-        assert_eq!(
-            root.join("rig-sources"),
-            PathBuf::from("/runner/job-artifacts/rig-registry/rig-sources")
-        );
-        assert_eq!(
-            root.join("rig-leases"),
-            PathBuf::from("/runner/job-artifacts/rig-registry/rig-leases")
-        );
     }
 
     #[test]
-    fn test_rig_config_uses_id_filename() {
-        let path = rig_config_in_root(&test_config_root(), "studio-dev");
+    fn rig_files_nest_under_the_rig_state_dir() {
+        let root = test_config_root();
+        let rigs = rigs_in_root(&root);
+        assert_eq!(rigs, root.join("rigs"));
         assert_eq!(
-            path.file_name().and_then(|s| s.to_str()),
-            Some("studio-dev.json")
+            rig_config_in_root(&root, "studio-dev"),
+            rigs.join("studio-dev.json")
         );
-    }
-
-    #[test]
-    fn test_rig_state_dir_uses_state_suffix() {
-        let path = rig_state_dir_in_root(&test_config_root(), "studio-dev");
+        let state_dir = rig_state_dir_in_root(&root, "studio-dev");
+        assert_eq!(state_dir, rigs.join("studio-dev.state"));
         assert_eq!(
-            path.file_name().and_then(|s| s.to_str()),
-            Some("studio-dev.state")
-        );
-    }
-
-    #[test]
-    fn test_rig_state_file_nested_under_state_dir() {
-        let path = rig_state_file_in_root(&test_config_root(), "studio-dev");
-        assert_eq!(
-            path.file_name().and_then(|s| s.to_str()),
-            Some("state.json")
+            rig_state_file_in_root(&root, "studio-dev"),
+            state_dir.join("state.json")
         );
         assert_eq!(
-            path.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str()),
-            Some("studio-dev.state")
+            rig_logs_dir_in_root(&root, "studio-dev"),
+            state_dir.join("logs")
         );
-    }
-
-    #[test]
-    fn test_rig_logs_dir_nested_under_state_dir() {
-        let path = rig_logs_dir_in_root(&test_config_root(), "studio-dev");
-        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("logs"));
         assert_eq!(
-            path.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str()),
-            Some("studio-dev.state")
-        );
-    }
-
-    #[test]
-    fn test_rig_baseline_root_nested_under_state_dir() {
-        let path = rig_baseline_root_in_root(&test_config_root(), "studio-dev");
-        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("baselines"));
-        assert_eq!(
-            path.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str()),
-            Some("studio-dev.state")
+            rig_baseline_root_in_root(&root, "studio-dev"),
+            state_dir.join("baselines")
         );
     }
 }

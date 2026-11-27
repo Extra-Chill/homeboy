@@ -202,17 +202,13 @@ pub(crate) fn finalize_set_spec(
 // Every command module is declared here with a literal `pub mod`, including the
 // modules named by `builtin_json_command_descriptors!`.
 //
-// Module declarations used to be emitted by a descriptor consumer. That saved
-// lines and cost the formatter: rustfmt resolves the module tree by *parsing*,
-// and it does not expand `macro_rules!`, so a `mod` declared inside a macro body
-// is a module rustfmt never learns exists.
+// Module declarations stay out of macro bodies because rustfmt resolves the
+// module tree by *parsing* and does not expand `macro_rules!`, so a `mod`
+// declared inside a macro body is a module rustfmt never learns exists.
 //
 // The descriptor table generates the JSON registry and dispatch; only module
 // declarations remain literal. A row whose handler module is absent still fails
 // to compile.
-//
-// `formatter_visibility::no_modules_are_declared_inside_macros` (below) fails
-// closed if a `mod` declaration is ever moved back inside a macro body.
 pub mod agent_task;
 pub(crate) mod agent_task_dispatch;
 pub(crate) mod agent_task_summary;
@@ -300,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn command_report_matches_legacy_envelope_snapshot() {
+    fn command_report_flattens_report_beside_command() {
         let output = CommandReport {
             command: "stack.status",
             report: SnapshotReport {
@@ -317,36 +313,24 @@ mod tests {
     }
 
     #[test]
-    fn merge_dynamic_args_accepts_explicit_json() {
-        let args = DynamicSetArgs {
-            id: Some("sandbox".to_string()),
-            json: Some(r#"{"auth":{"mode":"key_plus_password_controlmaster"}}"#.to_string()),
-            ..Default::default()
-        };
+    fn merge_dynamic_args_decodes_json_and_base64_with_base64_priority() {
+        let spec = r#"{"auth":{"mode":"key_plus_password_controlmaster"}}"#;
+        let expected = json!({"auth": {"mode": "key_plus_password_controlmaster"}});
+        let encoded = base64::engine::general_purpose::STANDARD.encode(spec);
 
-        let merged = merge_dynamic_args(&args).unwrap().unwrap();
-
-        assert_eq!(
-            merged,
-            json!({"auth": {"mode": "key_plus_password_controlmaster"}})
-        );
-    }
-
-    #[test]
-    fn merge_dynamic_args_accepts_base64_json() {
-        let encoded = base64::engine::general_purpose::STANDARD
-            .encode(r#"{"auth":{"mode":"key_plus_password_controlmaster"}}"#);
-        let args = DynamicSetArgs {
-            id: Some("sandbox".to_string()),
-            base64: Some(encoded),
-            ..Default::default()
-        };
-
-        let merged = merge_dynamic_args(&args).unwrap().unwrap();
-
-        assert_eq!(
-            merged,
-            json!({"auth": {"mode": "key_plus_password_controlmaster"}})
-        );
+        for (json_arg, base64_arg, want) in [
+            (Some(spec.to_string()), None, Some(expected.clone())),
+            (None, Some(encoded.clone()), Some(expected.clone())),
+            (Some("not json".to_string()), Some(encoded), Some(expected)),
+            (None, None, None),
+        ] {
+            let args = DynamicSetArgs {
+                id: Some("sandbox".to_string()),
+                json: json_arg,
+                base64: base64_arg,
+                ..Default::default()
+            };
+            assert_eq!(merge_dynamic_args(&args).unwrap(), want);
+        }
     }
 }

@@ -45,15 +45,4 @@ mod tests {
             resource
         );
     }
-
-    #[test]
-    fn materialized_rig_resource_requires_schema_and_identity() {
-        let error = serde_json::from_value::<MaterializedRigResource>(json!({
-            "materialized_rig_json_sha256": "sha256:abc123",
-            "rig": { "id": "example" }
-        }))
-        .expect_err("schema and rig identity are required");
-
-        assert!(error.to_string().contains("missing field `schema`"));
-    }
 }

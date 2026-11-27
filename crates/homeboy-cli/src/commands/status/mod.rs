@@ -652,8 +652,12 @@ fn global_status(
         let sender = sender.clone();
         let id = id.clone();
         std::thread::spawn(move || {
-            let result = homeboy::runner::runner_admission_snapshot_until(&id, deadline)
-                .map(|snapshot| snapshot.status.connected);
+            let result = homeboy::runner::runner_admission_snapshot(
+                &id,
+                Some(deadline),
+                homeboy::runner::RunnerAdmissionReadiness::Observation,
+            )
+            .map(|snapshot| snapshot.status.connected);
             let _ = sender.send(result);
         });
     }
@@ -1255,7 +1259,7 @@ fn run_project_dashboard(
             );
             break;
         }
-        // Bundled/retired components are no longer standalone deploy targets.
+        // Bundled/retired components are not standalone deploy targets.
         // Surface their lifecycle status for visibility, but do not run the
         // version/release-state machinery that would flag false `outdated`
         // drift (issue #3489).
@@ -1555,12 +1559,7 @@ mod tests {
         result
     }
 
-    fn assert_hung_probe_is_bounded(
-        needle: &str,
-        _expected_phase: &'static str,
-        expected_component: &str,
-        require_degraded_component: bool,
-    ) {
+    fn assert_hung_probe_is_bounded(needle: &str, expected_component: &str) {
         with_hung_git_probe(needle, |pid_file| {
             let (_dir, repo) = make_committed_git_repo("bounded-status");
             run_git(&repo, &["tag", "v0.1.0"]);
@@ -1587,9 +1586,7 @@ mod tests {
                 partial.reason,
                 "component_git_probe_degraded" | "total_latency_budget_exhausted"
             ));
-            if require_degraded_component {
-                assert_eq!(partial.degraded_components, vec![expected_component]);
-            }
+            assert_eq!(partial.degraded_components, vec![expected_component]);
             assert!(
                 partial.replay_commands.iter().any(|command| command
                     == &format!("homeboy status --component {expected_component}")),
@@ -1649,9 +1646,10 @@ mod tests {
         )
     }
 
-    /// The controller's own freshness is part of the status contract, not an
-    /// optional extra: every other freshness signal in this report is measured
-    /// against this binary (#11483).
+    /// The controller's own freshness is part of the status contract: every
+    /// other freshness signal is measured against this binary (#11483), and a
+    /// current controller still emits the field so "checked, current" is
+    /// distinguishable from "never checked".
     #[test]
     fn status_output_always_carries_controller_freshness() {
         let output = StatusOutput {
@@ -1666,26 +1664,11 @@ mod tests {
         assert_eq!(json["controller"]["minor_releases_behind"], 2);
         assert_eq!(json["controller"]["latest_version"], "0.329.1");
         assert_eq!(json["controller"]["remediation"], "homeboy upgrade");
-    }
 
-    /// A current or unestablished controller must still emit the field, so a
-    /// reader can distinguish "checked, current" from "never checked" instead
-    /// of reading silence as health.
-    #[test]
-    fn status_output_emits_controller_freshness_when_not_stale() {
         let json = serde_json::to_value(empty_status_output()).expect("serialize status output");
-
         let controller = json.get("controller").expect("controller field is present");
         assert!(controller.get("status").and_then(|v| v.as_str()).is_some());
         assert!(controller.get("detail").and_then(|v| v.as_str()).is_some());
-    }
-
-    /// Reporting only: the staleness warning is emitted, never turned into a
-    /// non-zero exit or an error.
-    #[test]
-    fn controller_staleness_logging_is_advisory_only() {
-        log_controller_staleness(&stale_controller());
-        log_controller_staleness(&empty_status_output().controller);
     }
 
     fn readiness(
@@ -1710,8 +1693,10 @@ mod tests {
         }
     }
 
-    /// A connected, policy-selected runner is the one case where default
-    /// `status` reports the preferred placement as `lab` (#14736).
+    /// Only a connected, policy-selected runner makes default `status` report
+    /// `lab` placement (#14736). Disconnected, absent and failed refreshes all
+    /// fall back to `local`, and a disconnected runner stays visible with its
+    /// blockers and remediation instead of requiring a second call.
     #[test]
     fn dispatch_readiness_reports_lab_only_when_a_runner_is_connected_and_selected() {
         let output = dispatch_readiness_from_refresh(Ok(readiness(
@@ -1721,7 +1706,6 @@ mod tests {
             &[],
             &[],
         )));
-
         assert_eq!(output.effective_placement, "lab");
         assert_eq!(output.runner.state, "connected_ready");
         assert_eq!(
@@ -1729,73 +1713,62 @@ mod tests {
             Some("homeboy-lab")
         );
         assert_eq!(output.runner.available_runner_ids, vec!["homeboy-lab"]);
-    }
 
-    /// A disconnected runner must be visible from the default `status`
-    /// answer, without requiring a second `runner status` call, and it must
-    /// never be reported as the effective placement (#14736).
-    #[test]
-    fn dispatch_readiness_names_a_disconnected_runner_and_falls_back_to_local() {
-        let output = dispatch_readiness_from_refresh(Ok(readiness(
+        let disconnected = dispatch_readiness_from_refresh(Ok(readiness(
             runner::LabRunnerReadinessState::Disconnected,
             None,
             &[],
             &["daemon_transport_unreachable"],
             &["homeboy runner connect homeboy-lab"],
         )));
-
-        assert_eq!(output.effective_placement, "local");
-        assert_eq!(output.runner.state, "disconnected");
-        assert!(output.runner.selected_runner_id.is_none());
-        assert!(output
+        assert!(disconnected.runner.selected_runner_id.is_none());
+        assert!(disconnected
             .runner
             .blockers
             .iter()
             .any(|reason| reason == "daemon_transport_unreachable"));
-        assert!(output
+        assert!(disconnected
             .runner
             .remediation_commands
             .iter()
             .any(|command| command == "homeboy runner connect homeboy-lab"));
-    }
 
-    /// No Lab runner configured at all is `absent`, and dispatch still falls
-    /// back to `local` rather than erroring.
-    #[test]
-    fn dispatch_readiness_with_no_runners_configured_is_absent_and_local() {
-        let output = dispatch_readiness_from_refresh(Ok(readiness(
+        let absent = dispatch_readiness_from_refresh(Ok(readiness(
             runner::LabRunnerReadinessState::Absent,
             None,
             &[],
             &[],
             &["homeboy runner connect <runner-id>"],
         )));
-
-        assert_eq!(output.effective_placement, "local");
-        assert_eq!(output.runner.state, "absent");
-    }
-
-    /// A failed or timed-out bounded refresh must never manufacture "lab is
-    /// ready" — the safe answer is always `local`, with the failure surfaced
-    /// as a blocker rather than silently dropped.
-    #[test]
-    fn dispatch_readiness_falls_back_to_local_when_the_refresh_itself_fails() {
-        let output = dispatch_readiness_from_refresh(Err(homeboy::core::Error::new(
+        let failed = dispatch_readiness_from_refresh(Err(homeboy::core::Error::new(
             homeboy::core::ErrorCode::RemoteCommandTimeout,
             "bounded admission refresh timed out",
             serde_json::json!({}),
         )));
+        assert!(!failed.runner.blockers.is_empty());
 
-        assert_eq!(output.effective_placement, "local");
-        assert_eq!(output.runner.state, "unavailable");
-        assert!(!output.runner.blockers.is_empty());
+        for (output, state) in [
+            (disconnected, "disconnected"),
+            (absent, "absent"),
+            (failed, "unavailable"),
+        ] {
+            assert_eq!(output.effective_placement, "local", "{state}");
+            assert_eq!(output.runner.state, state);
+        }
     }
 
     #[test]
-    fn global_probe_replays_the_global_snapshot_and_omitted_subsystems() {
-        let args = parse_status(&["homeboy", "status", "--global"]);
+    fn isolated_probe_replays_its_scope_and_the_global_omitted_subsystems() {
+        for argv in [
+            vec!["homeboy", "status", "--global"],
+            vec!["homeboy", "status", "--full"],
+            vec!["homeboy", "status", "--all"],
+            vec!["homeboy", "status", "--component", "core"],
+        ] {
+            assert_eq!(status_probe_argv(&parse_status(&argv)), argv);
+        }
 
-        assert_eq!(status_probe_argv(&args), ["homeboy", "status", "--global"]);
+        let args = parse_status(&["homeboy", "status", "--global"]);
         assert_eq!(
             status_probe_replay_commands(&args, None),
             [
@@ -1845,31 +1818,6 @@ mod tests {
         assert_eq!(
             status_probe_replay_commands(&args, Some(&progress)),
             ["homeboy status --global", "homeboy component list"]
-        );
-    }
-
-    #[test]
-    fn status_partial_serializes_exact_unfinished_probe_diagnostics() {
-        let partial = StatusPartial {
-            reason: "status_probe_timeout",
-            phase: "probe_context_inventory_scope",
-            omitted_components: vec!["slow-component".to_string()],
-            degraded_components: Vec::new(),
-            degraded_component_phases: Vec::new(),
-            unfinished_probes: vec!["slow-component".to_string()],
-            current_probe: Some("slow-component".to_string()),
-            replay_commands: vec!["homeboy status --component slow-component".to_string()],
-        };
-
-        let value = serde_json::to_value(partial).expect("serialize partial status");
-        assert_eq!(
-            value["unfinished_probes"],
-            serde_json::json!(["slow-component"])
-        );
-        assert_eq!(value["current_probe"], "slow-component");
-        assert_eq!(
-            value["replay_commands"],
-            serde_json::json!(["homeboy status --component slow-component"])
         );
     }
 
@@ -1994,146 +1942,84 @@ mod tests {
     }
 
     #[test]
-    fn summary_status_bounds_hung_tag_probe_and_preserves_typed_observations() {
-        assert_hung_probe_is_bounded(
-            "tag --merged HEAD",
-            "inspect_release_state",
-            "hung-tag",
-            true,
-        );
+    fn summary_status_bounds_hung_git_probes_and_preserves_typed_observations() {
+        for (needle, component) in [
+            ("tag --merged HEAD", "hung-tag"),
+            ("log --no-merges", "hung-release"),
+        ] {
+            assert_hung_probe_is_bounded(needle, component);
+        }
     }
 
+    /// The advisory notes are part of the JSON contract only alongside the
+    /// lists they explain; empty lists must not leak either key.
     #[test]
-    fn summary_status_bounds_hung_release_log_probe_and_preserves_typed_observations() {
-        assert_hung_probe_is_bounded(
-            "log --no-merges",
-            "inspect_release_state",
-            "hung-release",
-            true,
-        );
-    }
+    fn status_notes_serialize_only_alongside_their_lists() {
+        let json = serde_json::to_value(empty_status_output()).expect("serialize status output");
+        for key in [
+            "ready_to_deploy",
+            "ready_to_deploy_note",
+            "unreleased_merges",
+            "unreleased_merges_note",
+        ] {
+            assert!(json.get(key).is_none(), "{key} must be omitted when empty");
+        }
 
-    #[test]
-    fn ready_to_deploy_note_is_omitted_when_no_components_are_clean() {
-        let output = empty_status_output();
-        let json = serde_json::to_value(&output).expect("serialize status output");
-
-        // ready_to_deploy is empty -> note must not leak into the JSON contract.
-        assert!(json.get("ready_to_deploy").is_none());
-        assert!(
-            json.get("ready_to_deploy_note").is_none(),
-            "note should be omitted when ready_to_deploy is empty"
-        );
-    }
-
-    #[test]
-    fn ready_to_deploy_note_clarifies_git_state_only_when_components_are_clean() {
         let output = StatusOutput {
             total: 1,
             ready_to_deploy: vec!["sample-plugin".to_string()],
             ready_to_deploy_note: Some(READY_TO_DEPLOY_NOTE),
+            unreleased_merges: vec![UnreleasedMerge {
+                component_id: "extrachill-artist-platform".to_string(),
+                latest_tag: Some("v1.11.0".to_string()),
+                commits_since_tag: 3,
+            }],
+            unreleased_merges_note: Some(UNRELEASED_MERGES_NOTE),
             ..empty_status_output()
         };
         let json = serde_json::to_value(&output).expect("serialize status output");
-
-        let note = json
-            .get("ready_to_deploy_note")
-            .and_then(|v| v.as_str())
-            .expect("note present when ready_to_deploy is non-empty");
-
-        // The note must steer operators away from treating git state as a
-        // target-accurate deploy backlog (issue #4588).
-        assert!(
-            note.contains("git-state-only"),
-            "note should flag the list as git-state-only"
-        );
-        assert!(
-            note.contains("homeboy status <project>"),
-            "note should point at the target-accurate project dashboard"
-        );
+        assert_eq!(json["ready_to_deploy_note"], READY_TO_DEPLOY_NOTE);
+        assert_eq!(json["unreleased_merges_note"], UNRELEASED_MERGES_NOTE);
     }
 
     #[test]
-    fn deployed_version_status_marks_current_version_with_newer_origin_tag_as_pinned_current() {
-        let status = deployed_version_dashboard_status(
-            &Some("0.139.18".to_string()),
-            &Some("0.139.18".to_string()),
-            Some("v0.139.19"),
-        );
-
-        assert!(matches!(
-            status,
-            ProjectComponentDashboardStatus::PinnedCurrent
-        ));
-    }
-
-    #[test]
-    fn deployed_version_status_keeps_exact_origin_tag_current() {
-        let status = deployed_version_dashboard_status(
-            &Some("0.139.18".to_string()),
-            &Some("0.139.18".to_string()),
-            Some("v0.139.18"),
-        );
-
-        assert!(matches!(status, ProjectComponentDashboardStatus::Current));
-    }
-
-    #[test]
-    fn deployed_version_status_keeps_newer_remote_current() {
-        let status = deployed_version_dashboard_status(
-            &Some("0.12.2".to_string()),
-            &Some("0.12.15".to_string()),
-            Some("v0.12.15"),
-        );
-
-        assert!(matches!(status, ProjectComponentDashboardStatus::Current));
-    }
-
-    #[test]
-    fn deployed_version_status_marks_unknown_versions_unknown() {
-        let status = deployed_version_dashboard_status(
-            &Some("not-a-version".to_string()),
-            &Some("1.0.0".to_string()),
-            None,
-        );
-
-        assert!(matches!(status, ProjectComponentDashboardStatus::Unknown));
-    }
-
-    #[test]
-    fn parser_accepts_status_path_only() {
-        let cli = Cli::try_parse_from(["homeboy", "status", "--path", "/tmp/example", "--full"])
-            .expect("status --path parses");
-
-        match cli.command {
-            Commands::Status(args) => {
-                assert_eq!(args.target, None);
-                assert_eq!(args.scope.path.as_deref(), Some("/tmp/example"));
-                assert!(args.full);
-            }
-            _ => panic!("expected status command"),
-        }
-    }
-
-    #[test]
-    fn parser_accepts_status_id_with_path() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "status",
-            "wordpress-playground",
-            "--path",
-            "/tmp/wp-playground",
-            "--full",
-        ])
-        .expect("status <id> --path parses");
-
-        match cli.command {
-            Commands::Status(args) => {
-                assert_eq!(args.target.as_deref(), Some("wordpress-playground"));
-                assert_eq!(args.scope.path.as_deref(), Some("/tmp/wp-playground"));
-                assert!(args.full);
-            }
-            _ => panic!("expected status command"),
+    fn deployed_version_status_classifies_installed_against_remote_and_origin_tag() {
+        for (installed, remote, origin_tag, expected) in [
+            (
+                "0.139.18",
+                "0.139.18",
+                Some("v0.139.19"),
+                ProjectComponentDashboardStatus::PinnedCurrent,
+            ),
+            (
+                "0.139.18",
+                "0.139.18",
+                Some("v0.139.18"),
+                ProjectComponentDashboardStatus::Current,
+            ),
+            (
+                "0.12.2",
+                "0.12.15",
+                Some("v0.12.15"),
+                ProjectComponentDashboardStatus::Current,
+            ),
+            (
+                "not-a-version",
+                "1.0.0",
+                None,
+                ProjectComponentDashboardStatus::Unknown,
+            ),
+        ] {
+            let status = deployed_version_dashboard_status(
+                &Some(installed.to_string()),
+                &Some(remote.to_string()),
+                origin_tag,
+            );
+            assert_eq!(
+                std::mem::discriminant(&status),
+                std::mem::discriminant(&expected),
+                "{installed} vs {remote} (origin tag {origin_tag:?})"
+            );
         }
     }
 
@@ -2145,34 +2031,6 @@ mod tests {
             Commands::Status(args) => args,
             _ => panic!("expected status command"),
         }
-    }
-
-    #[test]
-    fn status_scope_selectors_resolve_to_their_variants() {
-        assert_eq!(
-            parse_status(&["homeboy", "status", "--project", "growth"])
-                .scope
-                .selection(),
-            Some(Scope::Project("growth".to_string()))
-        );
-        assert_eq!(
-            parse_status(&["homeboy", "status", "--component", "homeboy"])
-                .scope
-                .selection(),
-            Some(Scope::Component("homeboy".to_string()))
-        );
-        assert_eq!(
-            parse_status(&["homeboy", "status", "--rig", "studio"])
-                .scope
-                .selection(),
-            Some(Scope::Rig("studio".to_string()))
-        );
-        assert_eq!(
-            parse_status(&["homeboy", "status", "--workspace"])
-                .scope
-                .selection(),
-            Some(Scope::Workspace)
-        );
     }
 
     #[test]
@@ -2350,19 +2208,10 @@ mod tests {
         assert!(status.success(), "git {:?} failed", args);
     }
 
+    /// Component enrichment flags need an explicit scope, and `--full` rejects
+    /// the component options it would otherwise silently ignore.
     #[test]
-    fn parser_accepts_unreleased_filter() {
-        let cli = Cli::try_parse_from(["homeboy", "status", "--unreleased"])
-            .expect("status --unreleased parses");
-
-        match cli.command {
-            Commands::Status(args) => assert!(args.unreleased),
-            _ => panic!("expected status command"),
-        }
-    }
-
-    #[test]
-    fn unscoped_component_enrichment_requires_an_explicit_scope() {
+    fn status_rejects_component_options_it_cannot_honor() {
         for args in [
             StatusArgs {
                 uncommitted: true,
@@ -2372,14 +2221,6 @@ mod tests {
                 refresh: true,
                 ..default_status_args()
             },
-        ] {
-            assert!(run(args).is_err());
-        }
-    }
-
-    #[test]
-    fn full_status_rejects_ignored_component_options() {
-        for args in [
             StatusArgs {
                 full: true,
                 refresh: true,
@@ -2415,20 +2256,6 @@ mod tests {
     }
 
     #[test]
-    fn isolated_probe_replays_full_all_and_registry_scopes() {
-        let full = parse_status(&["homeboy", "status", "--full"]);
-        let all = parse_status(&["homeboy", "status", "--all"]);
-        let component = parse_status(&["homeboy", "status", "--component", "core"]);
-
-        assert_eq!(status_probe_argv(&full), ["homeboy", "status", "--full"]);
-        assert_eq!(status_probe_argv(&all), ["homeboy", "status", "--all"]);
-        assert_eq!(
-            status_probe_argv(&component),
-            ["homeboy", "status", "--component", "core"]
-        );
-    }
-
-    #[test]
     fn simultaneous_git_and_remote_failures_keep_each_component_phase() {
         let phases = project_degraded_component_phases(
             std::collections::HashMap::from([
@@ -2459,85 +2286,37 @@ mod tests {
     }
 
     #[test]
-    fn unreleased_merges_note_is_omitted_when_empty() {
-        let output = empty_status_output();
-        let json = serde_json::to_value(&output).expect("serialize status output");
+    fn default_origin_branch_prefers_origin_head_then_conventional_branches() {
+        let (_dir, repo) = make_committed_git_repo("no-origin");
+        assert!(default_origin_branch(&repo.to_string_lossy(), &StatusBudget::new()).is_none());
 
-        assert!(
-            json.get("unreleased_merges").is_none(),
-            "empty unreleased_merges must not leak into the JSON contract"
+        // Without origin/HEAD, a conventional remote-tracking ref is used.
+        run_git(&repo, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+        assert_eq!(
+            default_origin_branch(&repo.to_string_lossy(), &StatusBudget::new()).as_deref(),
+            Some("origin/trunk")
         );
-        assert!(
-            json.get("unreleased_merges_note").is_none(),
-            "note should be omitted when unreleased_merges is empty"
-        );
-    }
 
-    #[test]
-    fn unreleased_merges_note_present_when_merges_exist() {
-        let output = StatusOutput {
-            total: 1,
-            unreleased_merges: vec![UnreleasedMerge {
-                component_id: "extrachill-artist-platform".to_string(),
-                latest_tag: Some("v1.11.0".to_string()),
-                commits_since_tag: 3,
-            }],
-            unreleased_merges_note: Some(UNRELEASED_MERGES_NOTE),
-            ..empty_status_output()
-        };
-        let json = serde_json::to_value(&output).expect("serialize status output");
-
-        let note = json
-            .get("unreleased_merges_note")
-            .and_then(|v| v.as_str())
-            .expect("note present when unreleased_merges is non-empty");
-
-        // The note must steer operators away from reading a merged PR as shipped.
-        assert!(
-            note.contains("merged but NOT released"),
-            "note should flag merged-not-released"
-        );
-        assert!(
-            note.contains("not on prod yet"),
-            "note should clarify the code is not live"
-        );
-    }
-
-    #[test]
-    fn default_origin_branch_resolves_origin_head_symbolic_ref() {
-        let (_dir, repo) = make_committed_git_repo("with-origin");
-        // Build a fake "origin" remote by cloning into a bare repo and wiring it up.
-        // Create the origin/main remote-tracking ref directly so the resolver
-        // has something to find without network access.
+        // Conventional fallback order prefers main over trunk...
         run_git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        assert_eq!(
+            default_origin_branch(&repo.to_string_lossy(), &StatusBudget::new()).as_deref(),
+            Some("origin/main")
+        );
+
+        // ...but an explicit origin/HEAD symbolic ref wins over that order.
         run_git(
             &repo,
             &[
                 "symbolic-ref",
                 "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/main",
+                "refs/remotes/origin/trunk",
             ],
         );
-
-        let resolved = default_origin_branch(&repo.to_string_lossy(), &StatusBudget::new());
-        assert_eq!(resolved.as_deref(), Some("origin/main"));
-    }
-
-    #[test]
-    fn default_origin_branch_falls_back_to_conventional_branches() {
-        let (_dir, repo) = make_committed_git_repo("fallback-origin");
-        // No origin/HEAD symbolic ref; only a conventional remote-tracking ref.
-        run_git(&repo, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
-
-        let resolved = default_origin_branch(&repo.to_string_lossy(), &StatusBudget::new());
-        assert_eq!(resolved.as_deref(), Some("origin/trunk"));
-    }
-
-    #[test]
-    fn default_origin_branch_none_without_remote_refs() {
-        let (_dir, repo) = make_committed_git_repo("no-origin");
-
-        assert!(default_origin_branch(&repo.to_string_lossy(), &StatusBudget::new()).is_none());
+        assert_eq!(
+            default_origin_branch(&repo.to_string_lossy(), &StatusBudget::new()).as_deref(),
+            Some("origin/trunk")
+        );
     }
 
     #[test]

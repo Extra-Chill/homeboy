@@ -100,27 +100,48 @@ fn provider_run_result_model_is_promoted_to_canonical_provenance() {
 }
 
 #[test]
-fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
-    let scheduler = AgentTaskScheduler::new(Arc::new(NestedFailedStatusExecutor));
+fn nested_executor_failure_fails_succeeded_wrapper_outcome() {
+    let cases: [(SharedAgentTaskExecutor, &str, Option<(&str, &str)>); 3] = [
+        (
+            Arc::new(NestedFailedStatusExecutor),
+            "outputs.provider_run_result.job_status",
+            None,
+        ),
+        (
+            Arc::new(NestedTerminalStateFailedExecutor),
+            "outputs.provider_run_result.wait_result.terminal_state",
+            Some((
+                "terminal_state",
+                "failed - completion_required_tool_unavailable",
+            )),
+        ),
+        (
+            Arc::new(NestedAgentResultFailedExecutor),
+            "typed_artifacts.agent_result.payload.status",
+            None,
+        ),
+    ];
+    for (executor, path, key_value) in cases {
+        let aggregate = AgentTaskScheduler::new(executor).run(plan_with_tasks(1));
 
-    let aggregate = scheduler.run(plan_with_tasks(1));
-
-    assert_eq!(aggregate.status(), RunExecutionState::Failed);
-    assert_eq!(aggregate.totals.failed, 1);
-    assert_eq!(aggregate.totals.succeeded, 0);
-    assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
-    assert_eq!(
-        aggregate.outcomes[0].failure_classification,
-        Some(AgentTaskFailureClassification::ExecutionFailed)
-    );
-    assert_eq!(
-        aggregate.outcomes[0].diagnostics[0].class,
-        "agent_task.nested_executor_failed_status"
-    );
-    assert_eq!(
-        aggregate.outcomes[0].diagnostics[0].data["path"],
-        json!("outputs.provider_run_result.job_status")
-    );
+        assert_eq!(aggregate.status(), RunExecutionState::Failed, "{path}");
+        assert_eq!(aggregate.totals.failed, 1, "{path}");
+        assert_eq!(aggregate.totals.succeeded, 0, "{path}");
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed, "{path}");
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::ExecutionFailed),
+            "{path}"
+        );
+        let diagnostic = &outcome.diagnostics[0];
+        assert_eq!(diagnostic.class, "agent_task.nested_executor_failed_status");
+        assert_eq!(diagnostic.data["path"], json!(path));
+        if let Some((key, value)) = key_value {
+            assert_eq!(diagnostic.data["key"], json!(key));
+            assert_eq!(diagnostic.data["value"], json!(value));
+        }
+    }
 }
 
 #[test]
@@ -326,75 +347,46 @@ fn nested_executor_failure_context_wins_over_missing_required_artifacts() {
 }
 
 #[test]
-fn empty_required_artifact_is_invalid_regardless_of_patch_kind() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let patch_path = temp.path().join("patch.diff");
-    fs::write(&patch_path, "").expect("empty patch");
-    let scheduler = AgentTaskScheduler::new(Arc::new(SuccessEmptyRequiredTypedArtifactExecutor {
-        artifact_path: patch_path.clone(),
-        artifact_name: "patch",
-        artifact_kind: "patch",
-    }));
+fn empty_required_artifact_fails_with_operator_pointer_regardless_of_kind() {
+    for (name, kind, file) in [
+        ("patch", "patch", "patch.diff"),
+        ("agent_result", "json", "report.json"),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact_path = temp.path().join(file);
+        fs::write(&artifact_path, "").expect("empty artifact");
+        let scheduler =
+            AgentTaskScheduler::new(Arc::new(SuccessEmptyRequiredTypedArtifactExecutor {
+                artifact_path: artifact_path.clone(),
+                artifact_name: name,
+                artifact_kind: kind,
+            }));
 
-    let aggregate = scheduler.run(plan_with_required_artifacts(&["patch"]));
-    assert_eq!(aggregate.status(), RunExecutionState::Failed);
-    assert!(aggregate.outcomes[0]
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.class == "agent_task.required_typed_artifacts_invalid"));
-}
+        let aggregate = scheduler.run(plan_with_required_artifacts(&[name]));
 
-#[test]
-fn empty_required_non_patch_typed_artifact_fails_with_operator_pointer() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let report_path = temp.path().join("report.json");
-    fs::write(&report_path, "").expect("empty report");
-    let scheduler = AgentTaskScheduler::new(Arc::new(SuccessEmptyRequiredTypedArtifactExecutor {
-        artifact_path: report_path.clone(),
-        artifact_name: "agent_result",
-        artifact_kind: "json",
-    }));
-
-    let plan = plan_with_required_artifacts(&["agent_result"]);
-    assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
-    assert_eq!(
-        plan.clone()
-            .canonicalize()
-            .options
-            .execution_budget
-            .max_provider_executions,
-        1,
-        "the scheduler's canonical plan must retain the explicit test execution budget"
-    );
-    let aggregate = scheduler.run(plan);
-
-    assert_eq!(aggregate.status(), RunExecutionState::Failed);
-    assert_eq!(aggregate.totals.failed, 1);
-    assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
-    assert_eq!(
-        aggregate.outcomes[0].failure_classification,
-        Some(AgentTaskFailureClassification::ExecutionFailed)
-    );
-    let diagnostic = aggregate.outcomes[0]
-        .diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.class == "agent_task.required_typed_artifacts_invalid")
-        .expect("invalid required typed artifact diagnostic");
-    assert_eq!(diagnostic.data["invalid"][0]["task_id"], json!("task-1"));
-    assert_eq!(diagnostic.data["invalid"][0]["name"], json!("agent_result"));
-    assert_eq!(
-        diagnostic.data["invalid"][0]["artifact_id"],
-        json!("empty-agent_result")
-    );
-    assert_eq!(
-        diagnostic.data["invalid"][0]["path"],
-        json!(report_path.display().to_string())
-    );
-    assert_eq!(diagnostic.data["invalid"][0]["size_bytes"], json!(0));
-    assert_eq!(
-        diagnostic.data["invalid"][0]["reason"],
-        json!("declared artifact size is zero bytes")
-    );
+        assert_eq!(aggregate.status(), RunExecutionState::Failed, "{kind}");
+        assert_eq!(aggregate.totals.failed, 1, "{kind}");
+        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::ExecutionFailed)
+        );
+        let diagnostic = aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.required_typed_artifacts_invalid")
+            .expect("invalid required typed artifact diagnostic");
+        let invalid = &diagnostic.data["invalid"][0];
+        assert_eq!(invalid["task_id"], json!("task-1"));
+        assert_eq!(invalid["name"], json!(name));
+        assert_eq!(invalid["artifact_id"], json!(format!("empty-{name}")));
+        assert_eq!(invalid["path"], json!(artifact_path.display().to_string()));
+        assert_eq!(invalid["size_bytes"], json!(0));
+        assert_eq!(
+            invalid["reason"],
+            json!("declared artifact size is zero bytes")
+        );
+    }
 }
 
 #[test]
@@ -415,9 +407,10 @@ fn nested_terminal_status_detection_is_terminal_status_key_contract() {
     assert!(!is_terminal_status_key("status_code"));
 }
 
+/// The failing shape is covered end to end above; this pins that a
+/// non-failure terminal value never trips detection.
 #[test]
-fn nested_terminal_status_detection_only_flags_failure_values() {
-    // A terminal_state that is not a failure value does not trip detection.
+fn nested_terminal_status_detection_ignores_non_failure_values() {
     let succeeded_state = AgentTaskOutcome {
         outputs: json!({
             "provider_run_result": {
@@ -428,30 +421,6 @@ fn nested_terminal_status_detection_only_flags_failure_values() {
         ..outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded)
     };
     assert!(nested_failed_executor_status(&succeeded_state).is_none());
-
-    // A failed terminal_state nested under wait_result is detected and
-    // reported with its full dotted path.
-    let failed_state = AgentTaskOutcome {
-        outputs: json!({
-            "provider_run_result": {
-                "completion_status": "partial",
-                "wait_result": {
-                    "terminal_state": "failed - completion_required_tool_unavailable"
-                }
-            }
-        }),
-        ..outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded)
-    };
-    let detected = nested_failed_executor_status(&failed_state).expect("detect failed state");
-    assert_eq!(detected.key, "terminal_state");
-    assert_eq!(
-        detected.path,
-        "outputs.provider_run_result.wait_result.terminal_state"
-    );
-    assert_eq!(
-        detected.value,
-        "failed - completion_required_tool_unavailable"
-    );
 }
 
 #[test]
@@ -480,24 +449,28 @@ fn incomplete_empty_executor_result_is_retryable_provider_failure() {
 
 #[test]
 fn incomplete_empty_executor_result_fails_when_retries_are_unavailable() {
-    let scheduler = AgentTaskScheduler::new(Arc::new(EmptyIncompleteExecutor));
+    let executors: [SharedAgentTaskExecutor; 2] = [
+        Arc::new(EmptyIncompleteExecutor),
+        Arc::new(NestedOutputsIncompleteExecutor),
+    ];
+    for executor in executors {
+        let aggregate = AgentTaskScheduler::new(executor).run(plan_with_tasks(1));
 
-    let aggregate = scheduler.run(plan_with_tasks(1));
-
-    assert_eq!(aggregate.status(), RunExecutionState::Failed);
-    assert_eq!(aggregate.totals.failed, 1);
-    assert_eq!(
-        aggregate.outcomes[0].status,
-        AgentTaskOutcomeStatus::ProviderError
-    );
-    assert_eq!(
-        aggregate.outcomes[0].failure_classification,
-        Some(AgentTaskFailureClassification::Provider)
-    );
-    assert_eq!(
-        aggregate.outcomes[0].diagnostics[0].class,
-        "agent_task.executor_incomplete_empty_result"
-    );
+        assert_eq!(aggregate.status(), RunExecutionState::Failed);
+        assert_eq!(aggregate.totals.failed, 1);
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::ProviderError
+        );
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::Provider)
+        );
+        assert_eq!(
+            aggregate.outcomes[0].diagnostics[0].class,
+            "agent_task.executor_incomplete_empty_result"
+        );
+    }
 }
 
 #[test]
@@ -574,11 +547,10 @@ fn candidate_commit_survives_policy_denial_and_missing_review_form_for_fresh_rev
 }
 
 #[test]
-fn incomplete_nested_outputs_provider_result_is_detected() {
-    // Mirrors a provider wrapper shape: the provider claims
-    // top-level success/completed, but `outputs.completed` is false, the reply
-    // is empty, and `messages` only contains the initial user prompt.
-    let result = json!({
+fn empty_incomplete_provider_results_are_detected_in_nested_and_flat_shapes() {
+    // Nested wrapper: top-level success/completed, but `outputs.completed` is
+    // false, the reply is empty, and `messages` only holds the user prompt.
+    let nested_incomplete = json!({
         "success": true,
         "status": "completed",
         "outputs": {
@@ -590,13 +562,13 @@ fn incomplete_nested_outputs_provider_result_is_detected() {
         "structured_artifacts": [],
         "diagnostics": {}
     });
-
-    assert!(provider_run_result_is_empty_incomplete(&result));
-}
-
-#[test]
-fn completed_provider_result_with_assistant_message_is_not_flagged() {
-    let result = json!({
+    let flat_incomplete = json!({
+        "completed": false,
+        "reply": "",
+        "messages": [],
+        "tool_calls": []
+    });
+    let completed = json!({
         "success": true,
         "status": "completed",
         "outputs": {
@@ -610,37 +582,9 @@ fn completed_provider_result_with_assistant_message_is_not_flagged() {
         }
     });
 
-    assert!(!provider_run_result_is_empty_incomplete(&result));
-}
-
-#[test]
-fn flat_incomplete_provider_result_is_still_detected() {
-    let result = json!({
-        "completed": false,
-        "reply": "",
-        "messages": [],
-        "tool_calls": []
-    });
-
-    assert!(provider_run_result_is_empty_incomplete(&result));
-}
-
-#[test]
-fn incomplete_nested_outputs_executor_result_fails_when_retries_are_unavailable() {
-    let scheduler = AgentTaskScheduler::new(Arc::new(NestedOutputsIncompleteExecutor));
-
-    let aggregate = scheduler.run(plan_with_tasks(1));
-
-    assert_eq!(aggregate.status(), RunExecutionState::Failed);
-    assert_eq!(aggregate.totals.failed, 1);
-    assert_eq!(
-        aggregate.outcomes[0].status,
-        AgentTaskOutcomeStatus::ProviderError
-    );
-    assert_eq!(
-        aggregate.outcomes[0].diagnostics[0].class,
-        "agent_task.executor_incomplete_empty_result"
-    );
+    assert!(provider_run_result_is_empty_incomplete(&nested_incomplete));
+    assert!(provider_run_result_is_empty_incomplete(&flat_incomplete));
+    assert!(!provider_run_result_is_empty_incomplete(&completed));
 }
 
 /// #15440: a provider that finished but omitted only the `review_form` is not a
@@ -672,8 +616,12 @@ fn missing_only_review_form_is_deferred_to_the_cook_loop() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.class == "agent_task.review_form_deferred_to_cook_loop"));
+    // #15880: only a KNOWN-empty change set refuses the deferral.
+    assert!(!outcome.diagnostics.iter().any(
+        |diagnostic| diagnostic.class == "agent_task.review_form_deferral_refused_empty_change"
+    ));
 
-    // A deferred outcome is no longer a provider failure, so the recoverable
+    // A deferred outcome is not a provider failure, so the recoverable
     // retention never parks its patch.
     AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(&mut outcome);
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
@@ -710,39 +658,4 @@ fn other_missing_outputs_stay_provider_failures() {
         Some("Pi completed without required structured output(s): review_form.".to_string());
     AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &undeclared);
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
-}
-
-/// #15880's #15440 half: the empty-change refusal must not hijack the ordinary
-/// deferral. A candidate with a real patch whose only missing required output is
-/// the `review_form` still defers so the gated candidate publishes as a draft.
-#[test]
-fn non_empty_candidate_missing_only_review_form_is_still_deferred() {
-    let mut form_request = request("form-task");
-    form_request.output_declarations.push(
-        crate::agent_task_review_dossier::review_form_output_declaration(
-            crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit,
-        ),
-    );
-    let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
-    outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
-    outcome.summary =
-        Some("Pi completed without required structured output(s): review_form.".to_string());
-    outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
-        base_sha: "base".into(),
-        candidate_sha: "candidate".into(),
-        tree_sha: "tree".into(),
-    });
-
-    AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &form_request);
-
-    // #15440/#15880: only a KNOWN-empty change set refuses the deferral; a
-    // candidate missing only the review form still defers to the cook loop.
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.class == "agent_task.review_form_deferred_to_cook_loop"));
-    assert!(!outcome.diagnostics.iter().any(
-        |diagnostic| diagnostic.class == "agent_task.review_form_deferral_refused_empty_change"
-    ));
 }

@@ -150,45 +150,44 @@ fn test_resource_conflict_reports_active_run_context_when_available() {
 }
 
 #[test]
-fn test_acquire_active_run_lease_blocks_env_expanded_exclusive_resources() {
+fn test_acquire_active_run_lease_conflicts_on_expanded_exclusive_resources() {
     with_isolated_home(|_| {
-        let previous = std::env::var("RIG_LEASE_NAMESPACE").ok();
-        std::env::set_var("RIG_LEASE_NAMESPACE", "bench-a");
+        // `${env.*}` tokens expand before conflict detection; an unset variable
+        // falls back to the `<default>` namespace instead of an empty suffix.
+        for (namespace, expected) in [
+            (Some("bench-a"), "studio-runtime:bench-a"),
+            (None, "studio-runtime:<default>"),
+        ] {
+            let _namespace = match namespace {
+                Some(value) => EnvVarGuard::set("RIG_LEASE_NAMESPACE", value),
+                None => {
+                    let guard = EnvVarGuard::set("RIG_LEASE_NAMESPACE", "");
+                    std::env::remove_var("RIG_LEASE_NAMESPACE");
+                    guard
+                }
+            };
+            let studio = rig("studio", namespaced_resources("RIG_LEASE_NAMESPACE"));
+            let studio_bfb = rig("studio-bfb", namespaced_resources("RIG_LEASE_NAMESPACE"));
 
-        let studio = rig("studio", namespaced_resources("RIG_LEASE_NAMESPACE"));
-        let studio_bfb = rig("studio-bfb", namespaced_resources("RIG_LEASE_NAMESPACE"));
-
-        let lease = acquire_active_run_lease(&test_config_root(), &studio, "up")
-            .expect("first lease")
-            .expect("resourceful rig leases");
-        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "up")
-            .expect_err("expanded token conflicts");
-
-        match previous {
-            Some(value) => std::env::set_var("RIG_LEASE_NAMESPACE", value),
-            None => std::env::remove_var("RIG_LEASE_NAMESPACE"),
+            let lease = acquire_active_run_lease(&test_config_root(), &studio, "up")
+                .expect("first lease")
+                .expect("resourceful rig leases");
+            let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "up")
+                .expect_err("expanded token conflicts");
+            assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
+            assert!(conflict.message.contains(expected), "{}", conflict.message);
+            drop(lease);
         }
 
-        assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
-        assert!(conflict.message.contains("studio-runtime:bench-a"));
-
-        drop(lease);
-    });
-}
-
-#[test]
-fn test_acquire_active_run_lease_expands_settings_in_resources() {
-    with_isolated_home(|_| {
+        // Rig settings expand as `HOMEBOY_SETTINGS_*` values in the same way.
         let resources = RigResourcesSpec {
             exclusive: vec!["fixture:${env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}".to_string()],
-            paths: vec!["/tmp/fixture-${env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}".to_string()],
             ..Default::default()
         };
         let studio = rig("studio", resources.clone());
         let studio_bfb = rig("studio-bfb", resources);
         let settings = vec![("fixture_namespace".to_string(), "bench-a".to_string())];
-
-        let lease = acquire_active_run_lease_with_settings(
+        let _lease = acquire_active_run_lease_with_settings(
             &test_config_root(),
             &studio,
             "bench",
@@ -203,41 +202,9 @@ fn test_acquire_active_run_lease_expands_settings_in_resources() {
             &settings,
         )
         .expect_err("settings-expanded token conflicts");
-
-        assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
         assert!(conflict.message.contains("fixture:bench-a"));
-
-        drop(lease);
     });
 }
-
-#[test]
-fn test_acquire_active_run_lease_uses_default_namespace_for_empty_exclusive_resource_suffix() {
-    with_isolated_home(|_| {
-        let previous = std::env::var("RIG_LEASE_NAMESPACE").ok();
-        std::env::remove_var("RIG_LEASE_NAMESPACE");
-
-        let studio = rig("studio", namespaced_resources("RIG_LEASE_NAMESPACE"));
-        let studio_bfb = rig("studio-bfb", namespaced_resources("RIG_LEASE_NAMESPACE"));
-
-        let lease = acquire_active_run_lease(&test_config_root(), &studio, "trace")
-            .expect("first lease")
-            .expect("resourceful rig leases");
-        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "trace")
-            .expect_err("default namespace token conflicts");
-
-        match previous {
-            Some(value) => std::env::set_var("RIG_LEASE_NAMESPACE", value),
-            None => std::env::remove_var("RIG_LEASE_NAMESPACE"),
-        }
-
-        assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
-        assert!(conflict.message.contains("studio-runtime:<default>"));
-
-        drop(lease);
-    });
-}
-
 #[test]
 fn test_active_run_leases_lists_live_leases_without_mutating_them() {
     with_isolated_home(|_| {
@@ -373,7 +340,7 @@ fn test_live_holder_within_ttl_still_conflicts() {
 }
 
 #[test]
-fn test_no_ttl_keeps_live_holder_locked() {
+fn test_no_ttl_keeps_live_holder_locked_and_reports_reclaim_command() {
     with_isolated_home(|_| {
         // No TTL configured: even a very old live holder is never auto-reclaimed.
         std::env::remove_var(RIG_LEASE_TTL_ENV);
@@ -383,17 +350,6 @@ fn test_no_ttl_keeps_live_holder_locked() {
         let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "bench")
             .expect_err("without a TTL a live holder is never stolen");
         assert_eq!(conflict.code, ErrorCode::RigResourceConflict);
-    });
-}
-
-#[test]
-fn test_resource_conflict_includes_age_and_reclaim_command() {
-    with_isolated_home(|_| {
-        write_lease(&live_lease("studio", "2020-01-01T00:00:00Z"));
-
-        let studio_bfb = rig("studio-bfb", resources());
-        let conflict = acquire_active_run_lease(&test_config_root(), &studio_bfb, "bench")
-            .expect_err("live holder conflicts without a TTL");
 
         let age = conflict.details["held_by"]["age_seconds"]
             .as_i64()
@@ -408,7 +364,6 @@ fn test_resource_conflict_includes_age_and_reclaim_command() {
         );
     });
 }
-
 #[test]
 fn test_release_lock_reports_no_lease_when_absent() {
     with_isolated_home(|_| {

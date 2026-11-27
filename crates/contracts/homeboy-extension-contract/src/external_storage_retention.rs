@@ -240,7 +240,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inventory_contract_round_trips_liveness_and_unknown_bytes() {
+    fn provider_inventory_decodes_with_v1_defaults() {
         let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
             "provider_id": "fixture-runtime",
             "generation": "generation-1",
@@ -256,66 +256,35 @@ mod tests {
         assert_eq!(inventory.schema, EXTERNAL_STORAGE_RETENTION_SCHEMA);
         assert_eq!(inventory.unknown_bytes, 9);
         assert!(inventory.completeness.is_none());
-    }
-
-    #[test]
-    fn native_contracts_omission_defaults_empty_for_existing_v1_providers() {
-        let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
-            "provider_id": "fixture-runtime",
-            "generation": "generation-1",
-        }))
-        .expect("inventory without native_contracts parses");
         assert!(inventory.native_contracts.is_empty());
     }
 
     #[test]
-    fn unsatisfied_native_contract_round_trips_invocation_and_failure() {
+    fn native_contract_status_decodes_satisfied_and_unsatisfied_reports() {
         let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
             "provider_id": "pi.external-storage-retention",
             "generation": "generation-1",
-            "native_contracts": [{
-                "contract_id": "pi.db.compact-events.v1",
-                "status": "unsatisfied",
-                "invocation": "pi db event-log-status",
-                "failure": "SQL syntax error near 'event-log-status'",
-            }]
+            "native_contracts": [
+                { "contract_id": "pi.db.vacuum.v1", "status": "satisfied" },
+                {
+                    "contract_id": "pi.db.compact-events.v1",
+                    "status": "unsatisfied",
+                    "invocation": "pi db event-log-status",
+                    "failure": "SQL syntax error near 'event-log-status'",
+                }
+            ]
         }))
-        .expect("inventory with an unsatisfied native contract parses");
-        assert_eq!(inventory.native_contracts.len(), 1);
-        let contract = &inventory.native_contracts[0];
-        assert_eq!(contract.contract_id, "pi.db.compact-events.v1");
-        match &contract.status {
-            ExternalStorageNativeContractStatus::Unsatisfied {
-                invocation,
-                failure,
-            } => {
-                assert_eq!(invocation, "pi db event-log-status");
-                assert_eq!(failure, "SQL syntax error near 'event-log-status'");
-            }
-            ExternalStorageNativeContractStatus::Satisfied => {
-                panic!("expected an unsatisfied native contract")
-            }
-        }
-        let round_tripped = serde_json::to_value(&inventory).expect("re-serializes");
-        let reparsed: ExternalStorageInventory =
-            serde_json::from_value(round_tripped).expect("round trip parses");
-        assert_eq!(reparsed, inventory);
-    }
-
-    #[test]
-    fn satisfied_native_contract_carries_no_failure_fields() {
-        let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
-            "provider_id": "pi.external-storage-retention",
-            "generation": "generation-1",
-            "native_contracts": [{
-                "contract_id": "pi.db.compact-events.v1",
-                "status": "satisfied",
-            }]
-        }))
-        .expect("inventory with a satisfied native contract parses");
+        .expect("inventory with native contracts parses");
         assert_eq!(
             inventory.native_contracts[0].status,
             ExternalStorageNativeContractStatus::Satisfied
+        );
+        assert_eq!(
+            inventory.native_contracts[1].status,
+            ExternalStorageNativeContractStatus::Unsatisfied {
+                invocation: "pi db event-log-status".to_string(),
+                failure: "SQL syntax error near 'event-log-status'".to_string(),
+            }
         );
     }
 }

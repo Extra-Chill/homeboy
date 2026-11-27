@@ -170,16 +170,18 @@ pub(super) fn preflight_gate_toolchains_local(
     if prepare_runner_cache && !requirements.is_empty() {
         selected_environment.configure_rust_cache(cwd)?;
     }
-    selected_environment.configure_component_inputs(cwd)?;
+    // Probes run the gate commands they front, so carry those gates' secrets.
+    let gate_argvs: Vec<Vec<String>> = requirements
+        .iter()
+        .flat_map(|requirement| &requirement.probe_arguments)
+        .map(|probe| legacy_gate_argv(probe))
+        .collect();
+    selected_environment.configure_component_inputs(cwd, &gate_argvs)?;
     // The deadline covers declared probe execution. Controller scheduling before
     // the first child starts cannot make an otherwise successful probe fail.
     let mut started = None;
     for requirement in requirements {
-        // #18051: accept older controllers' sentinel for one compatibility
-        // window; remove this legacy branch once those controllers converge.
-        let legacy_resolve_only = requirement.probe_arguments.first().map(String::as_str)
-            == Some(gate_runtime::RESOLVE_ONLY);
-        if requirement.resolve_only || legacy_resolve_only {
+        if requirement.resolve_only {
             let path = selected_environment
                 .values
                 .get("PATH")
@@ -199,7 +201,7 @@ pub(super) fn preflight_gate_toolchains_local(
                 return Err(gate_runtime::unavailable(
                     requirement
                         .probe_arguments
-                        .get(usize::from(legacy_resolve_only))
+                        .first()
                         .map(String::as_str)
                         .unwrap_or(command),
                     command,

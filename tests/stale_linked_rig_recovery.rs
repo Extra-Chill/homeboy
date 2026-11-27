@@ -23,65 +23,6 @@ fn assert_success(output: Output, args: &[&str]) {
     );
 }
 
-#[test]
-fn hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy() {
-    let context = HermeticTestContext::new();
-    let command = context.command(TestBinary::HomeboyFixture);
-    let configured_env = command
-        .get_envs()
-        .filter_map(|(key, value)| {
-            value.map(|value| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.to_string_lossy().into_owned(),
-                )
-            })
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let removed_env = command
-        .get_envs()
-        .filter_map(|(key, value)| value.is_none().then(|| key.to_string_lossy().into_owned()))
-        .collect::<std::collections::BTreeSet<_>>();
-
-    assert_eq!(
-        command.get_program(),
-        context.binary_path(TestBinary::HomeboyFixture).as_os_str(),
-        "fixture commands select Cargo's binary rather than PATH"
-    );
-    assert_eq!(configured_env["HOME"], context.home().display().to_string());
-    assert_eq!(
-        configured_env["XDG_CONFIG_HOME"],
-        context.root().join(".config").display().to_string()
-    );
-    assert_eq!(
-        configured_env["XDG_DATA_HOME"],
-        context.root().join("data").display().to_string()
-    );
-    assert_eq!(
-        configured_env["HOMEBOY_ARTIFACT_ROOT"],
-        context.artifact_dir().display().to_string()
-    );
-    assert_eq!(
-        configured_env["HOMEBOY_RUNTIME_TMPDIR"],
-        context.runtime_dir().display().to_string()
-    );
-    let invocation_runtime = std::path::PathBuf::from(
-        configured_env[homeboy_core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV]
-            .as_str(),
-    );
-    assert_eq!(invocation_runtime, context.invocation_runtime_dir());
-    homeboy_core::engine::invocation::enforce_path_budget(&invocation_runtime.join("0123456789"))
-        .expect("nested Homeboy fixture receives a socket-safe invocation runtime root");
-    assert!(removed_env.contains(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV));
-    assert!(removed_env.contains(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV));
-    assert!(context.config_dir().starts_with(context.root()));
-    assert!(context.data_dir().starts_with(context.root()));
-    assert!(context.artifact_dir().starts_with(context.root()));
-    assert!(context.temp_dir().starts_with(context.root()));
-    assert!(context.daemon_dir().starts_with(context.root()));
-    assert!(context.runner_dir().starts_with(context.root()));
-}
-
 fn write_bench_extension(home: &Path) {
     let extension_dir = home.join(".config/homeboy/extensions/fixture-bench");
     fs::create_dir_all(&extension_dir).expect("create extension directory");

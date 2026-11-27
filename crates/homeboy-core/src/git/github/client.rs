@@ -143,9 +143,8 @@ pub(super) fn parse_issue_number_from_url(url: &str) -> Option<u64> {
 }
 
 /// Extract `html_url` from a `gh api` REST response. The REST mutation paths
-/// (`pr_edit`, `issue_edit`) use this instead of trusting `gh pr edit`/`gh
-/// issue edit` stdout, which no longer exists once those mutations go through
-/// `gh api`.
+/// (`pr_edit`, `issue_edit`) go through `gh api`, so the URL comes from the
+/// REST response body rather than `gh pr edit`/`gh issue edit` stdout.
 pub(super) fn parse_html_url(raw: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(raw.trim())
         .ok()?
@@ -159,56 +158,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn github_token_prefers_gh_token_env() {
-        let token = select_github_token(
-            Some(" env-gh-token \n".to_string()),
-            Some("github-token".to_string()),
-            || Some("cli-token".to_string()),
-        );
-
-        assert_eq!(token.as_deref(), Some("env-gh-token"));
+    fn github_token_prefers_gh_token_then_github_token_then_gh_cli() {
+        let cli = || Some("cli-token".to_string());
+        for (gh_token, github_token, expected) in [
+            (
+                Some(" env-gh-token \n"),
+                Some("github-token"),
+                "env-gh-token",
+            ),
+            (Some("  "), Some("github-token"), "github-token"),
+            (None, None, "cli-token"),
+        ] {
+            let token = select_github_token(
+                gh_token.map(str::to_string),
+                github_token.map(str::to_string),
+                cli,
+            );
+            assert_eq!(token.as_deref(), Some(expected));
+        }
     }
 
     #[test]
-    fn github_token_falls_back_to_github_token_env() {
-        let token = select_github_token(
-            Some("  ".to_string()),
-            Some("github-token".to_string()),
-            || Some("cli-token".to_string()),
-        );
-
-        assert_eq!(token.as_deref(), Some("github-token"));
-    }
-
-    #[test]
-    fn github_token_falls_back_to_gh_auth_token() {
-        let token = select_github_token(None, None, || Some("cli-token".to_string()));
-
-        assert_eq!(token.as_deref(), Some("cli-token"));
-    }
-
-    #[test]
-    fn parse_issue_number_from_issue_url() {
-        assert_eq!(
-            parse_issue_number_from_url("https://github.com/owner/repo/issues/42"),
-            Some(42)
-        );
-    }
-
-    #[test]
-    fn parse_issue_number_from_pr_url() {
-        assert_eq!(
-            parse_issue_number_from_url("https://github.com/owner/repo/pull/1337"),
-            Some(1337)
-        );
-    }
-
-    #[test]
-    fn parse_issue_number_handles_trailing_slash() {
-        assert_eq!(
-            parse_issue_number_from_url("https://github.com/owner/repo/issues/42/"),
-            Some(42)
-        );
+    fn parse_issue_number_from_issue_and_pr_urls() {
+        for (url, expected) in [
+            ("https://github.com/owner/repo/issues/42", Some(42)),
+            ("https://github.com/owner/repo/pull/1337", Some(1337)),
+            ("https://github.com/owner/repo/issues/42/", Some(42)),
+            ("https://github.com/owner/repo/issues/not-a-number", None),
+        ] {
+            assert_eq!(parse_issue_number_from_url(url), expected, "{url}");
+        }
     }
 
     #[test]
@@ -219,13 +198,5 @@ mod tests {
         );
         assert_eq!(parse_html_url("not json"), None);
         assert_eq!(parse_html_url("{}"), None);
-    }
-
-    #[test]
-    fn parse_issue_number_none_for_non_numeric() {
-        assert_eq!(
-            parse_issue_number_from_url("https://github.com/owner/repo/issues/not-a-number"),
-            None
-        );
     }
 }

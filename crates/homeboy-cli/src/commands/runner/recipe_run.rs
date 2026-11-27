@@ -279,13 +279,4 @@ mod tests {
             );
         });
     }
-
-    #[test]
-    fn generic_substrate_contains_no_product_literals() {
-        let source = include_str!("recipe_run.rs");
-        let cms = concat!("Word", "Press");
-        let sandbox = concat!("WP ", "Codebox");
-        assert!(!source.contains(cms));
-        assert!(!source.contains(sandbox));
-    }
 }

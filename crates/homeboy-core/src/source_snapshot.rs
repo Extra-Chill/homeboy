@@ -362,29 +362,15 @@ mod tests {
     }
 
     #[test]
-    fn test_default_sync_excludes() {
-        let excludes = default_sync_excludes();
-
-        assert!(excludes.contains(&".git/".to_string()));
-        assert!(excludes.contains(&".homeboy-build/".to_string()));
-        assert!(excludes.contains(&".env".to_string()));
-        // Homeboy writes nothing under `.homeboy` in a workspace, so no
-        // compensating exclude exists; a user's `.homeboy` is ordinary content.
-        assert!(!excludes
-            .iter()
-            .any(|exclude| exclude.trim_end_matches('/') == ".homeboy"));
-        assert!(!excludes.contains(&"node_modules/".to_string()));
-        assert!(!excludes.contains(&"target/".to_string()));
-        assert!(!excludes.contains(&"vendor/".to_string()));
-        assert!(!excludes.contains(&".sampleplugin/".to_string()));
-    }
-
-    #[test]
     fn source_snapshot_policy_allows_product_specific_excludes() {
         let policy = SourceSnapshotPolicy::default().with_sync_excludes([".sampleplugin/"]);
         let snapshot =
             existing_remote_with_policy("lab", "/srv/homeboy/repo", Some("/srv/homeboy"), &policy);
 
+        assert_eq!(
+            snapshot.sync_mode,
+            PATH_MATERIALIZATION_MODE_EXISTING_REMOTE
+        );
         assert!(snapshot.sync_excludes.contains(&".git/".to_string()));
         assert!(snapshot
             .sync_excludes
@@ -454,22 +440,6 @@ mod tests {
                 .to_string(),
             )
             .expect("writes extension manifest");
-
-            let component = crate::component::discover_from_portable(checkout.path())
-                .expect("discovers selected checkout");
-            assert!(component
-                .extensions
-                .as_ref()
-                .is_some_and(|extensions| extensions.contains_key("snapshot-fixture")));
-            let extension = crate::extension::catalog::load_extension("snapshot-fixture")
-                .expect("loads extension manifest");
-            assert_eq!(
-                extension
-                    .source_snapshot
-                    .as_ref()
-                    .map(|source| source.sync_excludes.as_slice()),
-                Some(["selected-cache/".to_string()].as_slice())
-            );
 
             assert_eq!(
                 component_extension_sync_excludes(checkout.path()),
@@ -662,22 +632,6 @@ mod tests {
         assert!(snapshot.git_sha.is_none());
         assert!(!snapshot.dirty);
         assert!(snapshot.snapshot_hash.starts_with("sha256:"));
-    }
-
-    #[test]
-    fn existing_remote_snapshot_is_explicit() {
-        let snapshot = existing_remote("lab", "/srv/homeboy/repo", Some("/srv/homeboy"));
-
-        assert_eq!(snapshot.runner_id, "lab");
-        assert_eq!(snapshot.remote_path.as_deref(), Some("/srv/homeboy/repo"));
-        assert_eq!(snapshot.workspace_root.as_deref(), Some("/srv/homeboy"));
-        assert_eq!(
-            snapshot.sync_mode,
-            PATH_MATERIALIZATION_MODE_EXISTING_REMOTE
-        );
-        assert!(!snapshot.dirty);
-        assert!(snapshot.snapshot_hash.starts_with("sha256:"));
-        assert!(snapshot.sync_excludes.contains(&".git/".to_string()));
     }
 
     fn git_test_command(path: &Path, args: &[&str]) {

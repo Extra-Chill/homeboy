@@ -899,26 +899,21 @@ mod tests {
     }
 
     #[test]
-    fn extension_converge_is_declared_mutating() {
+    fn mutating_paths_declare_their_safety_contract() {
         let extension = registered_command("extension").expect("extension command spec");
-        let safety = extension
+        let converge = extension
             .path_safety(&["converge"])
             .expect("extension converge safety");
+        assert!(converge.safety.mutates);
+        assert!(!converge.safety.operator);
 
-        assert!(safety.safety.mutates);
-        assert!(!safety.safety.operator);
-    }
-
-    #[test]
-    fn recover_is_declared_mutating_shell_execution_with_preflight() {
         let agent_task = registered_command("agent-task").expect("agent-task command spec");
-        let safety = agent_task
+        let recover = agent_task
             .path_safety(&["recover"])
             .expect("recover safety");
-
-        assert!(safety.safety.mutates);
-        assert_eq!(safety.safety.dry_run_flag, Some("--preflight"));
-        assert!(safety
+        assert!(recover.safety.mutates);
+        assert_eq!(recover.safety.dry_run_flag, Some("--preflight"));
+        assert!(recover
             .output_notes
             .is_some_and(|notes| notes.contains("shell gates")));
     }

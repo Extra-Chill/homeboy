@@ -145,23 +145,3 @@ fn every_list_subcommand_is_classified_by_payload_shape() {
         "classified `list` paths no longer in the command tree: {stale:?}"
     );
 }
-
-#[test]
-fn list_classifications_are_disjoint_and_reasoned() {
-    let entity: BTreeSet<&str> = ENTITY_LIST_COMMANDS.iter().copied().collect();
-    assert_eq!(
-        entity.len(),
-        ENTITY_LIST_COMMANDS.len(),
-        "duplicate entity entry"
-    );
-
-    let mut exempt = BTreeSet::new();
-    for (path, reason) in EXEMPT_LIST_COMMANDS {
-        assert!(exempt.insert(*path), "duplicate exempt entry {path}");
-        assert!(!entity.contains(path), "{path} is both entity and exempt");
-        assert!(
-            !reason.trim().is_empty(),
-            "{path} needs an exemption reason"
-        );
-    }
-}

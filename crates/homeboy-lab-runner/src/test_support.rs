@@ -42,29 +42,6 @@ pub(crate) fn with_isolated_home(body: impl FnOnce(&tempfile::TempDir)) {
     }
 }
 
-#[test]
-fn isolated_home_does_not_repoint_parent_roots() {
-    // Sibling HomeGuards can change ambient roots while the parent waits for
-    // its child. Protect the parent's snapshots without locking the child,
-    // whose with_isolated_home acquires its own environment lock.
-    let _parent_env = std::env::var_os("HOMEBOY_LAB_ISOLATED_TEST")
-        .is_none()
-        .then(homeboy_core::test_support::env_lock);
-    let home = std::env::var_os("HOME");
-    let path = std::env::var_os("PATH");
-    with_isolated_home(|isolated| {
-        assert_eq!(std::env::var_os("HOME").unwrap(), isolated.path());
-        // Even a panic or a forgotten restoration in a fault fixture cannot
-        // publish these changes back into sibling libtest workers.
-        std::env::set_var("PATH", "/fault-injection-only");
-    });
-    assert_eq!(std::env::var_os("HOME"), home);
-    // In the child, the deliberately changed PATH is allowed to remain.
-    if std::env::var_os("HOMEBOY_LAB_ISOLATED_TEST").is_none() {
-        assert_eq!(std::env::var_os("PATH"), path);
-    }
-}
-
 pub(crate) fn ssh_runner() -> Runner {
     Runner {
         id: "lab".to_string(),

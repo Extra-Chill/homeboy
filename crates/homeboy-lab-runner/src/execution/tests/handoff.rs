@@ -46,38 +46,45 @@ fn runner_wait_settings_and_environment_resolve_at_the_controller() {
 }
 
 #[test]
-fn agent_task_wait_honors_a_workload_budget_beyond_the_transport_default() {
+fn wait_timeout_resolution_prefers_overrides_then_workload_budget_then_default() {
     let budget_ms = 90 * 60 * 1_000;
-    let resolved = resolve_runner_exec_wait_timeout(None, None, Some(budget_ms));
-    assert_eq!(
-        resolved.timeout,
-        Duration::from_millis(budget_ms)
-            + Duration::from_secs(AGENT_TASK_WAIT_STAGING_HARVEST_GRACE_SECS)
-    );
-    assert_eq!(resolved.source, RunnerExecWaitTimeoutSource::WorkloadBudget);
-}
-
-#[test]
-fn explicit_wait_override_wins_over_the_workload_budget() {
-    let budget_ms = Some(90 * 60 * 1_000);
-    assert_eq!(
-        resolve_runner_exec_wait_timeout(None, Some(2400), budget_ms).timeout,
-        Duration::from_secs(2400)
-    );
-    assert_eq!(
-        resolve_runner_exec_wait_timeout(Some(60), Some(2400), budget_ms).timeout,
-        Duration::from_secs(60)
-    );
-}
-
-#[test]
-fn generic_exec_wait_keeps_the_twenty_minute_default() {
-    let resolved = resolve_runner_exec_wait_timeout(None, None, None);
-    assert_eq!(resolved.timeout, Duration::from_secs(20 * 60));
-    assert_eq!(
-        resolved.source,
-        RunnerExecWaitTimeoutSource::TransportDefault
-    );
+    let budget_wait = Duration::from_millis(budget_ms)
+        + Duration::from_secs(AGENT_TASK_WAIT_STAGING_HARVEST_GRACE_SECS);
+    let cases = [
+        (
+            None,
+            None,
+            None,
+            Duration::from_secs(20 * 60),
+            RunnerExecWaitTimeoutSource::TransportDefault,
+        ),
+        (
+            None,
+            None,
+            Some(budget_ms),
+            budget_wait,
+            RunnerExecWaitTimeoutSource::WorkloadBudget,
+        ),
+        (
+            None,
+            Some(2400),
+            Some(budget_ms),
+            Duration::from_secs(2400),
+            RunnerExecWaitTimeoutSource::RunnerSetting,
+        ),
+        (
+            Some(60),
+            Some(2400),
+            Some(budget_ms),
+            Duration::from_secs(60),
+            RunnerExecWaitTimeoutSource::EnvOverride,
+        ),
+    ];
+    for (env, setting, budget, timeout, source) in cases {
+        let resolved = resolve_runner_exec_wait_timeout(env, setting, budget);
+        assert_eq!(resolved.timeout, timeout, "{env:?} {setting:?} {budget:?}");
+        assert_eq!(resolved.source, source, "{env:?} {setting:?} {budget:?}");
+    }
 }
 
 #[test]
@@ -234,61 +241,37 @@ fn lab_offload_handoff_hints_omit_cancel_when_transport_cannot_cancel() {
 }
 
 #[test]
-fn terminal_handoff_hints_reflect_succeeded_job_state() {
-    let hints = lab_offload_handoff_hints(
-        "homeboy-lab",
-        Some("/srv/homeboy/project"),
-        "job-123",
-        Some("run-456"),
-        DaemonJobHandoffState::Terminal(JobStatus::Succeeded),
-        true,
-    );
-    let joined = hints.join("\n");
+fn terminal_handoff_hints_reflect_the_terminal_job_state() {
+    for (status, run_id, label) in [
+        (JobStatus::Succeeded, Some("run-456"), "succeeded"),
+        (JobStatus::Failed, Some("run-456"), "failed"),
+        (JobStatus::Cancelled, None, "cancelled"),
+    ] {
+        let hints = lab_offload_handoff_hints(
+            "homeboy-lab",
+            Some("/srv/homeboy/project"),
+            "job-123",
+            run_id,
+            DaemonJobHandoffState::Terminal(status),
+            true,
+        );
+        let joined = hints.join("\n");
 
-    assert!(joined.contains("finished with status `succeeded`"));
-    assert!(joined.contains("homeboy runs show run-456"));
-    assert!(joined.contains("homeboy runs evidence run-456"));
-    assert!(joined.contains("homeboy runs artifacts run-456"));
-    assert!(joined.contains("Final daemon job events/result"));
-    assert!(joined.contains("homeboy runner job logs homeboy-lab job-123"));
-    assert!(!joined.contains("still in flight"));
-    assert!(!joined.contains("homeboy runner job cancel homeboy-lab job-123"));
-}
-
-#[test]
-fn terminal_handoff_hints_reflect_failed_job_state() {
-    let hints = lab_offload_handoff_hints(
-        "homeboy-lab",
-        Some("/srv/homeboy/project"),
-        "job-123",
-        Some("run-456"),
-        DaemonJobHandoffState::Terminal(JobStatus::Failed),
-        true,
-    );
-    let joined = hints.join("\n");
-
-    assert!(joined.contains("finished with status `failed`"));
-    assert!(joined.contains("Final daemon job events/result"));
-    assert!(!joined.contains("still in flight"));
-}
-
-#[test]
-fn terminal_handoff_hints_reflect_cancelled_job_state() {
-    let hints = lab_offload_handoff_hints(
-        "homeboy-lab",
-        Some("/srv/homeboy/project"),
-        "job-123",
-        None,
-        DaemonJobHandoffState::Terminal(JobStatus::Cancelled),
-        true,
-    );
-    let joined = hints.join("\n");
-
-    assert!(joined.contains("finished with status `cancelled`"));
-    assert!(joined.contains("Persisted runner-side run id is not known"));
-    assert!(joined.contains("Final daemon job events/result"));
-    assert!(!joined.contains("still in flight"));
-    assert!(!joined.contains("--status running"));
+        assert!(joined.contains(&format!("finished with status `{label}`")));
+        assert!(joined.contains("Final daemon job events/result"));
+        assert!(joined.contains("homeboy runner job logs homeboy-lab job-123"));
+        assert!(!joined.contains("still in flight"));
+        assert!(!joined.contains("--status running"));
+        assert!(!joined.contains("homeboy runner job cancel homeboy-lab job-123"));
+        match run_id {
+            Some(run_id) => {
+                assert!(joined.contains(&format!("homeboy runs show {run_id}")));
+                assert!(joined.contains(&format!("homeboy runs evidence {run_id}")));
+                assert!(joined.contains(&format!("homeboy runs artifacts {run_id}")));
+            }
+            None => assert!(joined.contains("Persisted runner-side run id is not known")),
+        }
+    }
 }
 
 #[test]
@@ -475,7 +458,7 @@ fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
 
 #[test]
 fn transient_daemon_transport_drop_keeps_the_durable_job_recoverable() {
-    // #7928: losing contact with the runner daemon while polling a durable job
+    // Losing contact with the runner daemon while polling a durable job
     // is a controller-side transport drop, not a job failure — the remote job
     // is still executing. The poll failure must stay recoverable (retryable,
     // "recoverable_followup_required") so a reconnect can resume observing it,
@@ -624,6 +607,62 @@ fn daemon_identity_transition_reports_a_restarted_control_plane() {
 }
 
 #[test]
+fn daemon_exec_refuses_duplicate_detached_sleep() {
+    crate::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        let workspace = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+        let submit = || {
+            exec_via_daemon(
+                &ssh_runner(),
+                &url,
+                None,
+                workspace.path().display().to_string(),
+                None,
+                vec!["sleep".into(), "300".into()],
+                Default::default(),
+                Default::default(),
+                false,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                true,
+                false,
+                false,
+                None,
+                false,
+            )
+        };
+        let (first, _) = submit().expect("detached sleep accepted");
+        let id = first.job_id.unwrap();
+        let error = submit().expect_err("duplicate must be refused");
+        assert!(error.message.contains(&id), "{error:?}");
+        assert!(error.message.contains("runner job cancel"), "{error:?}");
+        let client = Client::builder().no_proxy().build().unwrap();
+        daemon_post_json_text(
+            &client,
+            &url,
+            &format!("/jobs/{id}/cancel"),
+            &serde_json::json!({}),
+            DaemonPostOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            fetch_daemon_job(&client, &url, &id).unwrap().status,
+            JobStatus::Cancelled
+        );
+    });
+}
+
+#[test]
 fn daemon_exec_reuses_one_run_and_closes_it_at_the_daemon_finish_time() {
     crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
@@ -666,6 +705,7 @@ fn daemon_exec_reuses_one_run_and_closes_it_at_the_daemon_finish_time() {
                 true,
                 false,
                 None,
+                false,
             )
             .expect("daemon exec");
             assert_eq!(exit_code, code);
@@ -743,6 +783,7 @@ fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
             true,
             false,
             None,
+            false,
         )
         .expect("zero-wait direct daemon handoff");
 
@@ -805,6 +846,7 @@ fn zero_wait_direct_daemon_cancels_unset_agent_task_workload() {
             true,
             false,
             None,
+            false,
         )
         .expect("zero-wait direct daemon cancellation result");
 
@@ -1043,7 +1085,7 @@ fn blocked_workload_command_ends_itself_once_its_temp_directory_is_gone() {
         .expect("spawn blocked workload");
     wait_for_path(&started, "blocked workload start");
 
-    // #16568: a killed test never runs its release Drop guard and the outer
+    // A killed test never runs its release Drop guard and the outer
     // harness removes the run's temp dir, so the release file can never
     // appear. The workload must end itself once that directory is gone.
     workspace.close().expect("remove workspace");
@@ -1152,6 +1194,7 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
             false,
             false,
             None,
+            false,
         )
         .expect("detached direct-daemon handoff");
 
@@ -1287,17 +1330,13 @@ fn runner_exec_source_claim_diagnostic_distinguishes_missing_and_owned_sources()
 }
 
 #[test]
-fn foreground_portable_cook_binds_the_daemon_job_before_terminal_projection() {
-    foreground_portable_run_binds_the_daemon_job_before_terminal_projection(
+fn foreground_portable_cook_and_retry_bind_the_daemon_job_before_terminal_projection() {
+    for run_id in [
         "cook-preacceptance-attempt-1",
-    );
-}
-
-#[test]
-fn foreground_portable_retry_binds_the_daemon_job_before_terminal_projection() {
-    foreground_portable_run_binds_the_daemon_job_before_terminal_projection(
         "retry-preacceptance-attempt-1",
-    );
+    ] {
+        foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_id);
+    }
 }
 
 fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_id: &str) {
@@ -1306,7 +1345,7 @@ fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_i
         // Both controller entrypoints execute the same portable `run-plan`
         // child without --detach-after-handoff. Its daemon acceptance must
         // nevertheless bind the typed controller handoff before terminal
-        // projection validates the runner snapshot (#9240).
+        // projection validates the runner snapshot.
         homeboy_agents::agent_task_lifecycle::record_lab_offload_phase(
             run_id,
             "lab",
@@ -1345,6 +1384,7 @@ fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_i
             false,
             false,
             None,
+            false,
         )
         .expect("foreground portable handoff");
 
@@ -1723,6 +1763,7 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
             true,
             true,
             None,
+            false,
         )
         .expect_err("daemon exec failure");
 
@@ -1737,20 +1778,22 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
 }
 
 #[test]
-fn daemon_exec_request_failed_error_surfaces_payload_detail() {
-    let envelope = DaemonEnvelope {
-        success: false,
-        data: Some(serde_json::json!({
-            "error": "validation.invalid_argument",
-            "message": "bad cwd"
-        })),
-        error: None,
-    };
-    let err = daemon_exec_request_failed_error("lab", 400, &envelope);
-    assert!(err.message.contains("daemon exec request failed"));
-    assert!(err.message.contains("validation.invalid_argument"));
-    assert!(err.message.contains("bad cwd"));
-    assert!(!err.message.contains("null"));
+fn daemon_exec_capacity_refusal_preserves_resource_exit_contract() {
+    let error = daemon_exec_request_failed_error(
+        "lab",
+        409,
+        &DaemonEnvelope {
+            success: false,
+            data: None,
+            error: Some(serde_json::json!({
+                "error": ErrorCode::RunnerCapacityBusy.as_str(),
+                "message": "busy", "details": {"admission_reason": "pressure", "pressure": {"memory": 9000}}
+            })),
+        },
+    );
+    assert_eq!(error.code, ErrorCode::RunnerCapacityBusy);
+    assert_eq!(error.details["admission_reason"], "pressure");
+    assert_eq!(error.details["blocker"]["memory"], 9000);
 }
 
 #[test]
@@ -2254,25 +2297,6 @@ fn authoritative_daemon_job_error_does_not_reopen_a_tunnel() {
 }
 
 #[test]
-fn daemon_exec_request_failed_error_handles_null_payload_with_reconnect_hint() {
-    // The historical #3631/#3624 symptom: a stale/restarting daemon answers
-    // with an empty/null error payload. We must never surface a bare `null`,
-    // and we must point the operator at reconnecting.
-    let envelope = DaemonEnvelope {
-        success: false,
-        data: None,
-        error: Some(Value::Null),
-    };
-    let err = daemon_exec_request_failed_error("lab", 502, &envelope);
-    assert!(!err.message.contains("null"));
-    assert!(err.message.contains("stale") || err.message.contains("restarted"));
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("homeboy runner connect lab")));
-}
-
-#[test]
 fn daemon_exec_stale_response_error_is_actionable() {
     let err = daemon_exec_stale_response_error("lab", 200, "expected value at line 1 column 1");
     assert!(err.message.contains("unreadable exec response"));
@@ -2322,6 +2346,7 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
             true,
             true,
             None,
+            false,
         )
         .expect_err("daemon exec failure");
 

@@ -3,18 +3,11 @@
 //! Owns execution-owner observations and their shared liveness decision.
 //! Discovery, stale annotation and action eligibility project this decision;
 //! provider process candidates never substitute for an execution owner.
-//! A Cook run's state used to be re-derived by every verb from raw record
-//! fields: `status` read the lifecycle state, `recover` read a progress
-//! label, `regate` read the same label again, and action eligibility kept its
-//! own per-action state tests. When the label and the state disagreed (a
-//! terminal `candidate_recoverable` record whose last Cook exit reported
-//! `in_flight`), `status` named `recover` and `recover` refused the run as
-//! still in flight (#17976, #17384, #17489, #17295).
-//!
-//! [`CookRunState::of`] is now the single classifier over the authoritative
+//! [`CookRunState::of`] is the single classifier over the authoritative
 //! lifecycle record, and [`legal_actions`] is the single eligibility table.
-//! Status, recover, regate and the action-eligibility report read both instead
-//! of classifying on their own. [`CookRunPhase::transition`] is the phase
+//! Status, recover, regate and the action-eligibility report read both rather
+//! than classifying from raw record fields, so they cannot disagree about a
+//! run (#17976, #17384, #17489, #17295). [`CookRunPhase::transition`] is the phase
 //! transition table the record's writers are held to.
 //!
 //! The record's `RunExecutionState` is the only owner of the execution phase;
@@ -104,6 +97,101 @@ pub(crate) fn continuation_child_owner(record: &AgentTaskRunRecord) -> Option<u3
         .flatten()
         .filter(|pid| homeboy_core::process::pid_is_running(*pid));
     child_provider_owner_pid.or(child_gate_owner_pid)
+}
+
+/// How recently a gate owner must have heartbeat for its gate phase to count
+/// as live (#19108). Gate heartbeats default to every five seconds; a window
+/// of several minutes tolerates a slow store write without letting a stalled
+/// owner hide a recoverable candidate for long.
+pub const LIVE_GATE_HEARTBEAT_WINDOW_SECONDS: i64 = 180;
+
+/// A deterministic gate phase whose owner is still running it (#19108).
+///
+/// A promotion latches `candidate_recoverable` before its gates start so a
+/// controller that dies mid-gate leaves a recoverable candidate. While the
+/// gate owner is alive and heartbeating, that latch is not the run's verdict:
+/// read surfaces report it as gating and recovery refuses to start a second
+/// gate run on top of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LiveGateOwner {
+    pub owner_pid: u32,
+    /// The gate the owner last reported, when it named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate: Option<String>,
+    /// Seconds since the gate phase started, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_seconds: Option<u64>,
+    /// The owner's latest gate heartbeat.
+    pub heartbeat_at: String,
+}
+
+impl LiveGateOwner {
+    /// `gate `cargo test` running 3.4m (owner pid 42)`
+    pub fn describe(&self) -> String {
+        let mut line = match self.gate.as_deref() {
+            Some(gate) => format!("gate `{gate}` running"),
+            None => "gates running".to_string(),
+        };
+        if let Some(elapsed) = self.elapsed_seconds {
+            line.push_str(&format!(" {:.1}m", elapsed as f64 / 60.0));
+        }
+        line.push_str(&format!(" (owner pid {})", self.owner_pid));
+        line
+    }
+}
+
+/// The live owner of `record`'s gate phase, if any: the promoted candidate
+/// still awaits its gate verdict (`verification_pending`), the durable
+/// promotion progress is active in its `gate` phase, its owner process is
+/// running and its latest heartbeat is within
+/// [`LIVE_GATE_HEARTBEAT_WINDOW_SECONDS`]. A recorded gate verdict ends the
+/// gate phase whatever its progress record last said.
+pub fn live_gate_owner(record: &AgentTaskRunRecord) -> Option<LiveGateOwner> {
+    live_gate_owner_at(record, chrono::Utc::now())
+}
+
+pub(crate) fn live_gate_owner_at(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<LiveGateOwner> {
+    let progress = record.metadata.get("promotion_progress")?;
+    if progress["active"] != true || progress["phase"] != "gate" {
+        return None;
+    }
+    if !crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
+        .is_some_and(|delivery| !delivery.published() && delivery.awaits_verification())
+    {
+        return None;
+    }
+    let owner_pid = progress["owner_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| homeboy_core::process::pid_is_running(*pid))?;
+    let heartbeat_at = progress["updated_at"].as_str()?.to_string();
+    let heartbeat = chrono::DateTime::parse_from_rfc3339(&heartbeat_at).ok()?;
+    if (now - heartbeat.with_timezone(&chrono::Utc)).num_seconds()
+        > LIVE_GATE_HEARTBEAT_WINDOW_SECONDS
+    {
+        return None;
+    }
+    let elapsed_seconds = progress["started_at"]
+        .as_str()
+        .and_then(|started| chrono::DateTime::parse_from_rfc3339(started).ok())
+        .map(|started| {
+            (now - started.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0) as u64
+        });
+    Some(LiveGateOwner {
+        owner_pid,
+        gate: progress["gate"]
+            .as_str()
+            .map(str::trim)
+            .filter(|gate| !gate.is_empty())
+            .map(str::to_string),
+        elapsed_seconds,
+        heartbeat_at,
+    })
 }
 
 pub(crate) fn continuation_owner_expired(value: &Value) -> bool {
@@ -564,35 +652,33 @@ impl CookRunPhase {
     }
 }
 
-/// End-to-end outcome from durable Cook evidence, without recipe reads.
+/// End-to-end outcome from durable Cook evidence, without recipe reads: the
+/// stored `RunExecutionState` plus the refinements its `cook_delivery` record
+/// (delivery facts and the Cook's recorded [`CookOutcome`]) defines. Live
+/// `cook_progress` is never read as a verdict (#18920).
+///
+/// [`CookOutcome`]: crate::agent_task_service::CookOutcome
 fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
     let stored = record.state();
+    let delivery = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata);
     // Publication is the end-to-end receipt, not a second verdict derived
-    // from a possibly older promotion or terminal-progress snapshot.
-    if crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
-        .is_some_and(|d| d.published())
-    {
+    // from a possibly older promotion snapshot.
+    if delivery.as_ref().is_some_and(|d| d.published()) {
         return RunExecutionState::Succeeded;
     }
-    if stored != RunExecutionState::Succeeded {
+    if stored != RunExecutionState::Succeeded || record.metadata["cook_id"].as_str().is_none() {
         return stored;
     }
-    if record.metadata["cook_id"].as_str().is_none() {
-        return stored;
-    }
-    let terminal = &record.metadata["cook_progress"];
-    if terminal["phase"] == "terminal"
-        && terminal["terminal_status"] == CookStatus::IntentionalNoChange.as_str()
-        && terminal["exit_code"] == 0
+    let outcome = crate::agent_task_service::CookOutcome::from_run_metadata(&record.metadata);
+    let status = outcome.and_then(|outcome| outcome.status);
+    if status == Some(CookStatus::IntentionalNoChange)
+        && outcome.is_some_and(|outcome| outcome.exit_code == 0)
     {
         return stored;
     }
-    // The provider finished, but the Cook ended without a change. There is no
-    // candidate to recover, so it must not read as `candidate_recoverable`
-    // (#15294).
-    if terminal["phase"] == "terminal"
-        && terminal["terminal_status"] == CookStatus::Gate(GateVerdict::NoChanges).as_str()
-    {
+    // Delivery finished without a change: there is no candidate to recover,
+    // so it must not read as `candidate_recoverable` (#15294).
+    if outcome.is_none() && delivery.as_ref().is_some_and(|d| d.is_no_change()) {
         return RunExecutionState::PartialFailure;
     }
     let verified =
@@ -609,8 +695,7 @@ fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
                         | crate::agent_task_promotion::AgentTaskPromotionStatus::VerifiedNoChanges
                 ) && promotion.finalization_eligible()
             });
-    let no_finalize = terminal["terminal_status"] == "green_no_finalize";
-    if !(verified && no_finalize) {
+    if !(verified && status == Some(CookStatus::GreenNoFinalize)) {
         return RunExecutionState::CandidateRecoverable;
     }
     stored
@@ -681,8 +766,11 @@ pub struct CookRunState {
     /// [`super::cook_cancellation_fence`] through [`CookRunState::with_cook_index_fence`].
     pub fenced: bool,
     /// The recorded controller process is still alive, even after execution
-    /// ended, so the run can still be cancelled.
+    /// ended, so the run can still be cancelled. A live gate owner counts.
     pub live_owner: bool,
+    /// A gate phase still owned by a live, heartbeating process (#19108).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_gate: Option<LiveGateOwner>,
     /// The Cook status label this state reports. A label that reads as in
     /// flight never survives on a terminal record: the record's execution
     /// state outranks a stale label from an earlier exit.
@@ -718,8 +806,9 @@ impl CookRunState {
             CookRunPhase::Queued | CookRunPhase::Running | CookRunPhase::Continuing => {
                 CookRunStatus::of_phase(phase)
             }
-            _ => terminal_status(record, phase),
+            _ => settled_status(record, phase),
         };
+        let live_gate = live_gate_owner(record);
         Self {
             liveness,
             phase,
@@ -731,7 +820,8 @@ impl CookRunState {
             ),
             recoverable: phase == CookRunPhase::CandidateRecoverable,
             fenced: false,
-            live_owner: record.owner_process_is_running(),
+            live_owner: record.owner_process_is_running() || live_gate.is_some(),
+            live_gate,
             status,
         }
     }
@@ -861,9 +951,10 @@ pub(crate) fn transition_record(
 }
 
 /// The status of a terminal attempt: delivery's typed read model first, then
-/// the attempt's own failure and terminal evidence, then its execution state.
+/// the attempt's own failure evidence and recorded Cook outcome, then its
+/// execution state.
 /// Labels that read as in flight are stale on a terminal record and ignored.
-fn terminal_status(record: &AgentTaskRunRecord, phase: CookRunPhase) -> CookRunStatus {
+fn settled_status(record: &AgentTaskRunRecord, phase: CookRunPhase) -> CookRunStatus {
     let settled = |status: CookStatus| (!status.is_in_flight()).then_some(status);
     let delivery = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
         .and_then(|delivery| delivery.lifecycle().cook_status)
@@ -878,11 +969,10 @@ fn terminal_status(record: &AgentTaskRunRecord, phase: CookRunPhase) -> CookRunS
     {
         return CookRunStatus::Cook(CookStatus::PreExecutionFailure);
     }
-    if let Some(status) = record
-        .metadata
-        .pointer("/cook_progress/terminal_status")
-        .and_then(|status| CookStatus::deserialize(status).ok())
-        .and_then(settled)
+    if let Some(status) =
+        crate::agent_task_service::CookOutcome::from_run_metadata(&record.metadata)
+            .and_then(|outcome| outcome.status)
+            .and_then(settled)
     {
         return CookRunStatus::Cook(status);
     }
@@ -949,48 +1039,34 @@ mod tests {
             recoverable: phase == P::CandidateRecoverable,
             fenced,
             live_owner,
+            live_gate: None,
             status: CookRunStatus::of_phase(phase),
         }
     }
 
+    /// A provider that never launched or a controller restart (dead pid) is
+    /// reconcilable; a live owner outranks an expired heartbeat and a stale
+    /// projection.
     #[test]
-    fn provider_never_launched_and_controller_restart_are_reconcilable() {
-        for metadata in [
-            serde_json::json!({}),
-            serde_json::json!({"runner_pid": 99_999_999}),
+    fn owner_liveness_gates_recover_while_cancel_stays_available() {
+        for (metadata, liveness, recover) in [
+            (serde_json::json!({}), AgentTaskLiveness::Stale, true),
+            (
+                serde_json::json!({"runner_pid": 99_999_999}),
+                AgentTaskLiveness::Stale,
+                true,
+            ),
+            (
+                serde_json::json!({"runner_pid": std::process::id(), "stale_running": true}),
+                AgentTaskLiveness::Active,
+                false,
+            ),
         ] {
-            let run = record(RunExecutionState::Running, metadata);
-            let state = CookRunState::of(&run);
-            assert_eq!(state.liveness, AgentTaskLiveness::Stale);
-            assert!(state.allows(A::Cancel));
-            assert!(state.allows(A::Recover));
+            let state = CookRunState::of(&record(RunExecutionState::Running, metadata.clone()));
+            assert_eq!(state.liveness, liveness, "{metadata}");
+            assert!(state.allows(A::Cancel), "{metadata}");
+            assert_eq!(state.allows(A::Recover), recover, "{metadata}");
         }
-    }
-
-    #[test]
-    fn live_owner_outranks_expired_heartbeat_and_stale_projection() {
-        let run = record(
-            RunExecutionState::Running,
-            serde_json::json!({
-                "runner_pid": std::process::id(), "stale_running": true,
-            }),
-        );
-        let state = CookRunState::of(&run);
-        assert_eq!(state.liveness, AgentTaskLiveness::Active);
-        assert!(state.allows(A::Cancel));
-        assert!(!state.allows(A::Recover));
-    }
-
-    #[test]
-    fn discovery_and_record_annotation_delegate_liveness() {
-        let discovery = include_str!("../agent_task_service/discovery.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap();
-        assert!(!discovery.contains("fn classify_liveness("));
-        assert!(!discovery.contains("process_identity_state_with_start_identity("));
-        let records = include_str!("records.rs");
-        assert!(!records.contains("process_identity_state_with_start_identity(\n            pid,"));
     }
 
     #[test]
@@ -1316,6 +1392,15 @@ mod tests {
             assert!(!production.contains("AgentTaskLabHandoffState::"));
             assert!(!production.contains("CookDeliveryState::"));
         }
+        // Verbs read the run state rather than reclassifying status.
+        for source in [
+            include_str!("action_eligibility.rs"),
+            include_str!("../agent_task_service/cook_recovery.rs"),
+        ] {
+            let production = source.split("#[cfg(test)]").next().expect("source");
+            assert!(!production.contains("CookStatus::CandidateRecoverable"));
+            assert!(!production.contains(".is_in_flight()"));
+        }
     }
 
     #[test]
@@ -1381,74 +1466,181 @@ mod tests {
         }
     }
 
+    /// Status, diagnose, recover and notifications all read one
+    /// classification. The phase comes from the record's execution state and
+    /// the outcome detail from its `cook_delivery` record; a `cook_progress`
+    /// label is never a verdict (#18920).
     #[test]
-    fn record_with_retired_cook_run_state_key_still_loads() {
-        let legacy = record(RunExecutionState::Running, serde_json::json!({}));
-        let mut fixture = serde_json::to_value(&legacy).unwrap();
-        fixture["cook_run_state"] = serde_json::json!({
-            "phase": "running"
-        });
-        fixture["lab_handoff"] = serde_json::json!({
-            "state": "accepted", "authority": "runner_daemon", "runner_id": "lab",
-            "runner_job_id": "job", "accepted_at": "2026-06-01T00:00:00Z",
-            "workspace_lifecycle_revision": 0
-        });
-        let loaded: AgentTaskRunRecord = serde_json::from_value(fixture.clone()).unwrap();
-        assert!(serde_json::to_value(&loaded)
-            .unwrap()
-            .get("cook_run_state")
-            .is_none());
-        assert_eq!(
-            serde_json::to_value(&loaded).unwrap()["lab_handoff"],
-            fixture["lab_handoff"]
-        );
-        assert_eq!(CookRunState::of(&loaded).phase, P::Running);
-    }
-
-    #[test]
-    fn verbs_do_not_reclassify_candidate_or_in_flight_status() {
-        for source in [
-            include_str!("action_eligibility.rs"),
-            include_str!("../agent_task_service/cook_recovery.rs"),
-        ] {
-            let production = source.split("#[cfg(test)]").next().expect("source");
-            assert!(!production.contains("AgentTaskLabHandoffState::"));
-            assert!(!production.contains("CookDeliveryState::"));
-            assert!(!production.contains("CookStatus::CandidateRecoverable"));
-            assert!(!production.contains(".is_in_flight()"));
-        }
-    }
-
-    #[test]
-    fn a_stale_in_flight_label_never_classifies_a_terminal_record() {
-        for label in ["queued", "in_flight", "awaiting_ci"] {
-            let classified = CookRunState::of(&record(
-                RunExecutionState::CandidateRecoverable,
-                serde_json::json!({ "cook_progress": { "phase": "terminal", "terminal_status": label } }),
-            ));
-            assert_eq!(
-                classified.status,
-                CookRunStatus::Cook(CookStatus::CandidateRecoverable),
-                "{label}"
+    fn cook_outcomes_classify_from_phase_and_delivery_only() {
+        use crate::agent_task_service::{set_cook_delivery_artifact_for_test, CookOutcome};
+        let outcome = |metadata: &mut Value, status: CookStatus, exit_code: i32| {
+            CookOutcome::write(
+                metadata,
+                Some(CookOutcome {
+                    status: Some(status),
+                    exit_code,
+                }),
             );
-            assert!(classified.allows(A::Recover), "{label}");
-        }
-        let settled = CookRunState::of(&record(
-            RunExecutionState::Failed,
-            serde_json::json!({ "cook_progress": { "terminal_status": "gate_failed" } }),
-        ));
-        assert_eq!(
-            settled.status,
-            CookRunStatus::Cook(CookStatus::Gate(GateVerdict::GateFailed))
+        };
+        let cook =
+            || serde_json::json!({ "cook_id": "cook", "cook_progress": { "phase": "terminal" } });
+        let mut no_changes = cook();
+        outcome(&mut no_changes, CookStatus::Gate(GateVerdict::NoChanges), 2);
+        let mut intentional = cook();
+        outcome(&mut intentional, CookStatus::IntentionalNoChange, 0);
+        let mut gate_failed = cook();
+        set_cook_delivery_artifact_for_test(
+            &mut gate_failed,
+            "/promotion",
+            serde_json::json!({ "status": "gate_failed" }),
         );
+        outcome(
+            &mut gate_failed,
+            CookStatus::Gate(GateVerdict::GateFailed),
+            1,
+        );
+        let mut published = cook();
+        set_cook_delivery_artifact_for_test(
+            &mut published,
+            "/promotion",
+            serde_json::json!({ "status": "applied" }),
+        );
+        set_cook_delivery_artifact_for_test(
+            &mut published,
+            "/finalization",
+            serde_json::json!({ "status": "review_ready", "pr_url": "https://example.test/pull/1" }),
+        );
+        outcome(&mut published, CookStatus::ReviewReady, 0);
+        // A record written before #18920 keeps its verdict label in
+        // `cook_progress`; it reads from its phase instead.
+        let legacy_label = serde_json::json!({
+            "cook_id": "cook",
+            "cook_progress": { "phase": "terminal", "terminal_status": "gate_failed", "exit_code": 1 },
+        });
+        let legacy_in_flight = serde_json::json!({
+            "cook_id": "cook",
+            "cook_progress": { "phase": "terminal", "terminal_status": "in_flight" },
+        });
 
-        let unrecognized = CookRunState::of(&record(
-            RunExecutionState::CandidateRecoverable,
-            serde_json::json!({ "cook_progress": { "phase": "terminal", "terminal_status": "moving_base" } }),
-        ));
-        assert_eq!(
-            unrecognized.status,
-            CookRunStatus::Cook(CookStatus::CandidateRecoverable)
-        );
+        for (name, stored, metadata, phase, status, recoverable) in [
+            (
+                "no_changes",
+                RunExecutionState::PartialFailure,
+                no_changes,
+                P::PartialFailure,
+                CookStatus::Gate(GateVerdict::NoChanges),
+                false,
+            ),
+            (
+                "intentional_no_change",
+                RunExecutionState::Succeeded,
+                intentional,
+                P::Succeeded,
+                CookStatus::IntentionalNoChange,
+                false,
+            ),
+            (
+                "gate_failed",
+                RunExecutionState::CandidateRecoverable,
+                gate_failed,
+                P::CandidateRecoverable,
+                CookStatus::Gate(GateVerdict::GateFailed),
+                true,
+            ),
+            (
+                "published",
+                RunExecutionState::Running,
+                published,
+                P::Succeeded,
+                CookStatus::ReviewReady,
+                false,
+            ),
+            (
+                "legacy_label",
+                RunExecutionState::PartialFailure,
+                legacy_label,
+                P::PartialFailure,
+                CookStatus::Failed,
+                false,
+            ),
+            (
+                "legacy_in_flight",
+                RunExecutionState::CandidateRecoverable,
+                legacy_in_flight,
+                P::CandidateRecoverable,
+                CookStatus::CandidateRecoverable,
+                true,
+            ),
+        ] {
+            let classified = CookRunState::of(&record(stored, metadata));
+            assert_eq!(classified.phase, phase, "{name}");
+            assert!(classified.terminal, "{name}");
+            assert_eq!(classified.status, CookRunStatus::Cook(status), "{name}");
+            assert_eq!(classified.recoverable, recoverable, "{name}");
+            assert_eq!(classified.retryable, phase == P::PartialFailure, "{name}");
+            assert!(classified.allows(A::Recover), "{name}");
+            assert!(classified.allows_regate(), "{name}");
+        }
+    }
+
+    /// #19108: a candidate latched recoverable while a live owner still runs
+    /// its gates is not recoverable; a stale or dead gate owner is.
+    #[test]
+    fn live_gate_owner_blocks_recovery_until_it_stops() {
+        use crate::agent_task_service::set_cook_delivery_artifact_for_test;
+        let now = chrono::Utc::now();
+        let gating_with = |promotion: &str, phase: &str, pid: u64, heartbeat_age: i64| {
+            let mut metadata = serde_json::json!({
+                "cook_id": "cook",
+                "promotion_progress": {
+                    "active": true,
+                    "phase": phase,
+                    "gate": "cargo check",
+                    "started_at": (now - chrono::Duration::seconds(204)).to_rfc3339(),
+                    "updated_at": (now - chrono::Duration::seconds(heartbeat_age)).to_rfc3339(),
+                    "owner_pid": pid,
+                },
+            });
+            set_cook_delivery_artifact_for_test(
+                &mut metadata,
+                "/promotion",
+                serde_json::json!({ "status": promotion }),
+            );
+            record(RunExecutionState::CandidateRecoverable, metadata)
+        };
+        let gating = |phase: &str, pid: u64, heartbeat_age: i64| {
+            gating_with("verification_pending", phase, pid, heartbeat_age)
+        };
+        let live_pid = u64::from(std::process::id());
+
+        let live = gating("gate", live_pid, 5);
+        let owner = live_gate_owner_at(&live, now).expect("live gate owner");
+        assert_eq!(owner.gate.as_deref(), Some("cargo check"));
+        assert_eq!(owner.elapsed_seconds, Some(204));
+        assert!(owner
+            .describe()
+            .starts_with("gate `cargo check` running 3.4m"));
+        let state = CookRunState::of(&live);
+        assert_eq!(state.phase, P::CandidateRecoverable);
+        assert!(state.live_gate.is_some());
+        assert!(!state.allows(A::Recover));
+        assert!(!state.allows_regate());
+        assert!(state.allows(A::Cancel));
+
+        for (name, record) in [
+            (
+                "stale heartbeat",
+                gating("gate", live_pid, LIVE_GATE_HEARTBEAT_WINDOW_SECONDS + 1),
+            ),
+            ("dead owner", gating("gate", 99_999_999, 5)),
+            ("gates finished", gating("finalization", live_pid, 5)),
+            (
+                "gate verdict recorded",
+                gating_with("gate_environment_unavailable", "gate", live_pid, 5),
+            ),
+        ] {
+            assert_eq!(live_gate_owner_at(&record, now), None, "{name}");
+            assert!(CookRunState::of(&record).allows_regate(), "{name}");
+        }
     }
 }

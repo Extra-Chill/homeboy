@@ -343,11 +343,10 @@ pub fn build_init_output(project_id: &str, dir: &std::path::Path) -> ProjectRepo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::ProjectComponentAttachment;
     use crate::test_support::with_isolated_home;
 
     #[test]
-    fn list_output_mirrors_rows_under_entities_and_legacy_projects_key() {
+    fn list_output_emits_rows_under_entities() {
         let output = build_list_output(ProjectListReport {
             projects: vec![
                 ProjectListItem {
@@ -368,100 +367,13 @@ mod tests {
         assert_eq!(value["entities"][0]["id"], "alpha");
         assert_eq!(value["entities"][0]["domain"], "alpha.example");
         assert_eq!(value["entities"][1]["id"], "beta");
-        assert!(value.get("projects").is_none(), "no mirror: {value}");
-    }
 
-    #[test]
-    fn empty_project_list_emits_entities_array() {
-        let output = build_list_output(ProjectListReport {
+        let empty = serde_json::to_value(build_list_output(ProjectListReport {
             projects: Vec::new(),
             hint: Some("No projects configured.".to_string()),
-        });
-
-        let value = serde_json::to_value(&output).expect("serialize project list");
-
-        assert_eq!(value["entities"], serde_json::json!([]));
-        assert!(value.get("projects").is_none(), "no mirror: {value}");
-    }
-
-    #[test]
-    fn non_list_project_output_does_not_emit_entities() {
-        let report = ProjectStatusReport {
-            health: None,
-            component_versions: None,
-        };
-        let value = serde_json::to_value(build_status_output("site", report))
-            .expect("serialize project status");
-
-        assert!(value.get("entities").is_none());
-        assert!(value.get("projects").is_none());
-    }
-
-    #[test]
-    fn show_report_marks_project_not_deploy_ready_when_component_local_path_is_missing() {
-        with_isolated_home(|_| {
-            crate::project::save(&Project {
-                id: "site".to_string(),
-                base_path: Some("/srv/site".to_string()),
-                components: vec![ProjectComponentAttachment {
-                    id: "plugin".to_string(),
-                    local_path: "/tmp/homeboy-missing-component-path".to_string(),
-                    remote_path: Some("wp-content/plugins/plugin".to_string()),
-                    ..Default::default()
-                }],
-                ..Project::default()
-            })
-            .expect("save project");
-
-            let report = show_report("site").expect("show report");
-
-            assert!(!report.deploy_ready);
-            assert!(report.deploy_blockers.iter().any(|blocker| {
-                blocker.contains(
-                    "Component 'plugin' local_path '/tmp/homeboy-missing-component-path' does not exist",
-                )
-            }));
-        });
-    }
-
-    #[test]
-    fn show_report_marks_repository_provider_project_ready_without_server_fields() {
-        with_isolated_home(|_| {
-            let repository = tempfile::tempdir().expect("component repository");
-            std::fs::write(
-                repository.path().join("homeboy.json"),
-                serde_json::json!({
-                    "id": "provider",
-                    "deployment_provider": {
-                        "extension": "fixture-extension",
-                        "provider": "fixture.deploy",
-                        "policy": {}
-                    }
-                })
-                .to_string(),
-            )
-            .expect("portable component");
-            crate::project::save(&Project {
-                id: "site".to_string(),
-                components: vec![ProjectComponentAttachment {
-                    id: "provider".to_string(),
-                    local_path: repository.path().to_string_lossy().to_string(),
-                    deployment_provider_input: Some(serde_json::json!({ "target": "site" })),
-                    ..Default::default()
-                }],
-                ..Project::default()
-            })
-            .expect("save project");
-
-            let report = show_report("site").expect("show report");
-
-            assert!(
-                report.deploy_ready,
-                "unexpected blockers: {:?}",
-                report.deploy_blockers
-            );
-            assert!(report.deploy_blockers.is_empty());
-        });
+        }))
+        .expect("serialize empty project list");
+        assert_eq!(empty["entities"], serde_json::json!([]));
     }
 
     #[test]

@@ -285,30 +285,15 @@ mod tests {
     }
 
     #[test]
-    fn pr_with_base_ref_resolves_to_changed_scope() {
-        let request =
-            ScopeRequest::new(ScopeContext::PullRequest).with_base_ref(Some("abc123".to_string()));
-        let resolved = resolve_scope(&request, MergeBaseResolver::TrustBaseRef).expect("resolve");
-        assert_eq!(resolved.mode, ScopeMode::Changed);
-        assert_eq!(resolved.base_ref.as_deref(), Some("abc123"));
-        assert!(resolved.fallback_reason.is_none());
-    }
-
-    #[test]
-    fn pr_without_base_ref_falls_back_to_full_scope() {
-        let request = ScopeRequest::new(ScopeContext::PullRequest);
-        let resolved = resolve_scope(&request, MergeBaseResolver::TrustBaseRef).expect("resolve");
-        assert_eq!(resolved.mode, ScopeMode::Full);
-        assert!(resolved.fallback_reason.is_some());
-    }
-
-    #[test]
-    fn empty_base_ref_is_treated_as_missing() {
-        let request =
-            ScopeRequest::new(ScopeContext::PullRequest).with_base_ref(Some(String::new()));
-        assert_eq!(request.base_ref, None);
-        let resolved = resolve_scope(&request, MergeBaseResolver::TrustBaseRef).expect("resolve");
-        assert_eq!(resolved.mode, ScopeMode::Full);
+    fn pr_without_a_usable_base_ref_falls_back_to_full_scope() {
+        for base_ref in [None, Some(String::new())] {
+            let request = ScopeRequest::new(ScopeContext::PullRequest).with_base_ref(base_ref);
+            assert_eq!(request.base_ref, None);
+            let resolved =
+                resolve_scope(&request, MergeBaseResolver::TrustBaseRef).expect("resolve");
+            assert_eq!(resolved.mode, ScopeMode::Full);
+            assert!(resolved.fallback_reason.is_some());
+        }
     }
 
     #[test]
@@ -342,13 +327,11 @@ mod tests {
                 "command {cmd} must not be scoped"
             );
         }
-    }
 
-    #[test]
-    fn full_scope_emits_no_flags() {
-        let resolved = ResolvedScope::full(ScopeContext::Push, false, None);
+        // Full scope never emits flags, even for scoped commands.
+        let full = ResolvedScope::full(ScopeContext::Push, false, None);
         for cmd in SCOPED_COMMANDS {
-            assert!(resolved.command_flags(cmd).is_empty());
+            assert!(full.command_flags(cmd).is_empty());
         }
     }
 
@@ -369,12 +352,10 @@ mod tests {
             };
             assert_eq!(ctx.context(), expected, "event {event}");
         }
-    }
-
-    #[test]
-    fn missing_event_name_falls_back_to_manual() {
-        let ctx = GithubActionsContext::default();
-        assert_eq!(ctx.context(), ScopeContext::Manual);
+        assert_eq!(
+            GithubActionsContext::default().context(),
+            ScopeContext::Manual
+        );
     }
 
     #[test]

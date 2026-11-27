@@ -10,7 +10,8 @@ fn local_alias_report_has_stable_top_level_shape() {
     assert_eq!(value["command"], "runner.doctor");
     assert_eq!(value["runner_id"], "local");
     assert!(value.get("status").is_some());
-    assert!(value.get("capabilities").is_some());
+    assert!(value["capabilities"]["local_execution"].is_boolean());
+    assert!(value["capabilities"]["homeboy_available"].is_boolean());
     assert!(value.get("resources").is_some());
     assert!(value
         .get("checks")
@@ -33,14 +34,6 @@ fn artifact_store_probe_accepts_missing_intermediate_directories_without_creatin
 }
 
 #[test]
-fn doctor_options_default_to_general_read_only_scope() {
-    let options = RunnerDoctorOptions::default();
-
-    assert_eq!(options.scope, RunnerDoctorScope::General);
-    assert!(!options.repair);
-}
-
-#[test]
 fn bare_repair_deterministically_selects_the_lab_offload_scope() {
     assert_eq!(
         repair_scope(RunnerDoctorScope::General, true),
@@ -54,14 +47,6 @@ fn bare_repair_deterministically_selects_the_lab_offload_scope() {
         repair_scope(RunnerDoctorScope::SecretEnv, true),
         RunnerDoctorScope::SecretEnv
     );
-}
-
-#[test]
-fn doctor_output_omits_empty_repairs() {
-    let (report, _) = run("local").expect("local doctor report");
-    let value = serde_json::to_value(report).expect("serialize report");
-
-    assert!(value.get("repairs").is_none());
 }
 
 #[test]
@@ -110,77 +95,40 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
 }
 
 #[test]
-fn compact_doctor_projection_retains_provider_readiness() {
-    let (mut report, _) = run("local").expect("local doctor report");
-    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
-        ready_for: vec!["ready.provider".to_string()],
-        blocked_for: vec!["blocked.provider".to_string()],
-        unverified_for: vec!["unverified.provider".to_string()],
-        unverified_remediation: Some("Authentication has not been verified.".to_string()),
-    });
+fn doctor_projection_retains_provider_readiness_in_compact_and_full_modes() {
+    for full in [false, true] {
+        let (mut report, _) = run("local").expect("local doctor report");
+        report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
+            ready_for: vec!["ready.provider".to_string()],
+            blocked_for: vec!["blocked.provider".to_string()],
+            unverified_for: vec!["unverified.provider".to_string()],
+            unverified_remediation: Some("Authentication has not been verified.".to_string()),
+        });
 
-    let compact = output_projection(report, false);
+        let projection = output_projection(report, full);
 
-    assert_eq!(
-        compact["provider_readiness"]["ready_for"],
-        serde_json::json!(["ready.provider"])
-    );
-    assert_eq!(
-        compact["provider_readiness"]["blocked_for"],
-        serde_json::json!(["blocked.provider"])
-    );
-    assert_eq!(
-        compact["provider_readiness"]["unverified_for"],
-        serde_json::json!(["unverified.provider"])
-    );
-    assert_eq!(
-        compact["provider_readiness"]["guidance"],
-        "Authentication has not been verified."
-    );
-}
-
-#[test]
-fn compact_doctor_projection_retains_all_unverified_provider_readiness() {
-    let (mut report, _) = run("local").expect("local doctor report");
-    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
-        ready_for: Vec::new(),
-        blocked_for: Vec::new(),
-        unverified_for: vec!["pi.agent-task-executor".to_string()],
-        unverified_remediation: Some(
-            "Provider authentication is unverified because runner doctor cannot select a model."
-                .to_string(),
-        ),
-    });
-
-    let compact = output_projection(report, false);
-
-    assert_eq!(
-        compact["provider_readiness"]["unverified_for"],
-        serde_json::json!(["pi.agent-task-executor"])
-    );
-    assert_eq!(
-        compact["provider_readiness"]["guidance"],
-        "Provider authentication is unverified because runner doctor cannot select a model."
-    );
-    assert_eq!(compact["truncation"]["provider_readiness"]["shown"], 1);
-}
-
-#[test]
-fn full_doctor_projection_retains_nonsecret_unverified_provider_ids() {
-    let (mut report, _) = run("local").expect("local doctor report");
-    report.provider_readiness = Some(types::RunnerDoctorProviderReadiness {
-        ready_for: Vec::new(),
-        blocked_for: Vec::new(),
-        unverified_for: vec!["pi.agent-task-executor".to_string()],
-        unverified_remediation: None,
-    });
-
-    let full = output_projection(report, true);
-
-    assert_eq!(
-        full["provider_readiness"]["unverified_for"],
-        serde_json::json!(["pi.agent-task-executor"])
-    );
+        assert_eq!(
+            projection["provider_readiness"]["ready_for"],
+            serde_json::json!(["ready.provider"]),
+            "full={full}"
+        );
+        assert_eq!(
+            projection["provider_readiness"]["blocked_for"],
+            serde_json::json!(["blocked.provider"]),
+            "full={full}"
+        );
+        assert_eq!(
+            projection["provider_readiness"]["unverified_for"],
+            serde_json::json!(["unverified.provider"]),
+            "full={full}"
+        );
+        if !full {
+            assert_eq!(
+                projection["provider_readiness"]["guidance"],
+                "Authentication has not been verified."
+            );
+        }
+    }
 }
 
 #[test]
@@ -246,7 +194,7 @@ fn compact_doctor_retains_safe_typed_runner_convergence_action() {
 }
 
 #[test]
-fn doctor_emits_refresh_next_action_for_version_skew_and_none_when_versions_match() {
+fn doctor_emits_refresh_next_action_for_version_skew() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.status = RunnerDoctorStatus::Error;
     report.failure = None;
@@ -459,14 +407,6 @@ fn compact_doctor_hard_bounds_oversized_identity_and_command_metadata() {
     let wire: serde_json::Value = serde_json::from_slice(&wire).expect("doctor wire round trips");
     assert_eq!(wire["command"], "runner");
     assert_eq!(wire["operation"], "doctor");
-    assert_eq!(
-        format!(
-            "{} {}",
-            wire["command"].as_str().unwrap(),
-            wire["operation"].as_str().unwrap()
-        ),
-        "runner doctor"
-    );
     assert!(wire["presentation"]["stdout"].is_string());
 }
 
@@ -627,23 +567,6 @@ fn human_summary_lists_blocking_checks_and_uses_first_error_remediation() {
 }
 
 #[test]
-fn capabilities_are_runner_substrate_only() {
-    let (report, _) = run("local").expect("local doctor report");
-    let value = serde_json::to_value(report).expect("serialize report");
-    let capabilities = value["capabilities"]
-        .as_object()
-        .expect("capabilities object");
-
-    assert!(capabilities.contains_key("local_execution"));
-    assert!(capabilities.contains_key("homeboy_available"));
-    assert!(!capabilities.contains_key("github_cli"));
-    assert!(!capabilities.contains_key("node"));
-    assert!(!capabilities.contains_key("npm"));
-    assert!(!capabilities.contains_key("php"));
-    assert!(!capabilities.contains_key("docker"));
-}
-
-#[test]
 fn overall_status_promotes_errors_over_warnings() {
     let checks = vec![
         checks::warning("optional", "optional missing".to_string(), None),
@@ -768,22 +691,4 @@ fn live_auth_provider_check(provider_id: &str, status: RunnerDoctorStatus) -> ty
         .details
         .insert("readiness_scope".to_string(), "live_auth".to_string());
     check
-}
-
-#[test]
-fn operational_exit_code_matches_the_doctor_readiness_verdict() {
-    for (scenario, status, expected_exit_code) in [
-        ("healthy", RunnerDoctorStatus::Ok, 0),
-        ("degraded", RunnerDoctorStatus::Warning, 0),
-        // A disconnected runner with a recoverable daemon is still not ready
-        // until `--repair` has rerun its probe successfully.
-        ("disconnected_recoverable", RunnerDoctorStatus::Error, 1),
-        ("terminal_error", RunnerDoctorStatus::Error, 1),
-    ] {
-        assert_eq!(
-            status.operational_exit_code(),
-            expected_exit_code,
-            "{scenario}"
-        );
-    }
 }

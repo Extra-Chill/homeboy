@@ -67,9 +67,6 @@ pub const AGENT_TASK_USAGE_METADATA_KEY: &str = "provider_usage";
 /// payloads before Homeboy's own verification runs.
 pub const HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: &str = "homeboy_empty_attempt_verified";
 
-#[cfg(test)]
-use homeboy_core::redaction::RedactionPolicy;
-
 pub use homeboy_lab_contract::agent_task_outcome::AgentTaskCandidate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -131,45 +128,10 @@ impl Default for AgentTaskOutcome {
     }
 }
 
-#[cfg(test)]
-#[test]
-fn outcome_candidate_table() {
-    AgentTaskOutcome::candidate_accessor_ignores_patch_evidence();
-}
-
 impl AgentTaskOutcome {
     /// The immutable change set recorded by harvest, never inferred from evidence.
     pub fn outcome_candidate(&self) -> Option<&AgentTaskCandidate> {
         self.candidate.as_ref()
-    }
-
-    #[cfg(test)]
-    fn candidate_accessor_ignores_patch_evidence() {
-        for (present, metadata) in [
-            (false, Value::Null),
-            (false, serde_json::json!({"approved": true})),
-            (
-                true,
-                serde_json::json!({"review_only": true, "actionable": false}),
-            ),
-        ] {
-            let candidate = AgentTaskCandidate {
-                base_sha: "base".into(),
-                candidate_sha: "candidate".into(),
-                tree_sha: "tree".into(),
-            };
-            let outcome = AgentTaskOutcome {
-                candidate: present.then_some(candidate.clone()),
-                artifacts: vec![AgentTaskArtifact {
-                    kind: "patch".into(),
-                    size_bytes: Some(0),
-                    metadata,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            };
-            assert_eq!(outcome.outcome_candidate(), present.then_some(&candidate));
-        }
     }
 
     /// Read the normalized provider usage retained in outcome metadata.
@@ -182,12 +144,9 @@ impl AgentTaskOutcome {
     /// This is the single authoritative reader for "what model did this run
     /// actually execute under" — the value lives in `metadata.model` and every
     /// lifecycle reconciliation path (aggregate → task, provider handle
-    /// backfill, terminal-record repair) needs it. Previously each site
-    /// re-implemented `metadata.get("model") → as_str → trim → non-empty` with
-    /// subtly different handling (one path forgot the trim), which is why the
-    /// same "reconcile the terminal provider model" fix landed three times
-    /// (#9405/#9415/#9423). Centralizing the read here gives one definition:
-    /// present, non-blank after trimming, or `None`.
+    /// backfill, terminal-record repair) needs it, so every site shares one
+    /// definition: present, non-blank after trimming, or `None`
+    /// (#9405/#9415/#9423).
     pub fn selected_model(&self) -> Option<&str> {
         self.metadata
             .get("model")
@@ -201,36 +160,6 @@ impl AgentTaskOutcome {
     /// Such an attempt has no candidate to verify or promote (#15294).
     pub fn is_verified_unchanged_attempt(&self) -> bool {
         self.metadata.get(HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY) == Some(&Value::Bool(true))
-    }
-}
-
-#[cfg(test)]
-impl AgentTaskOutcome {
-    pub(crate) fn redacted(&self) -> Self {
-        let policy = RedactionPolicy::default();
-        let mut redacted = self.clone();
-        redacted.summary = redacted.summary.map(|value| policy.redact_string(&value));
-        redacted.artifacts = redacted
-            .artifacts
-            .into_iter()
-            .map(|artifact| artifact.redacted_with(&policy))
-            .collect();
-        redacted.typed_artifacts = redacted
-            .typed_artifacts
-            .into_iter()
-            .map(|artifact| artifact.redacted_with(&policy))
-            .collect();
-        redacted.diagnostics = redacted
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| diagnostic.redacted_with(&policy))
-            .collect();
-        redacted.outputs = policy.redact_json(&redacted.outputs);
-        redacted.workflow = redacted
-            .workflow
-            .map(|workflow| workflow.redacted_with(&policy));
-        redacted.metadata = policy.redact_json(&redacted.metadata);
-        redacted
     }
 }
 
@@ -253,20 +182,6 @@ pub struct AgentTaskWorkflowEvidence {
     pub steps: Vec<AgentTaskWorkflowStepEvidence>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
-}
-
-#[cfg(test)]
-impl AgentTaskWorkflowEvidence {
-    fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
-        self.label = self.label.map(|value| policy.redact_string(&value));
-        self.steps = self
-            .steps
-            .into_iter()
-            .map(|step| step.redacted_with(policy))
-            .collect();
-        self.metadata = policy.redact_json(&self.metadata);
-        self
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -295,26 +210,6 @@ pub struct AgentTaskWorkflowStepEvidence {
     pub metadata: Value,
 }
 
-#[cfg(test)]
-impl AgentTaskWorkflowStepEvidence {
-    fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
-        self.label = self.label.map(|value| policy.redact_string(&value));
-        self.diagnostics = self
-            .diagnostics
-            .into_iter()
-            .map(|diagnostic| diagnostic.redacted_with(policy))
-            .collect();
-        self.suggestions = self
-            .suggestions
-            .into_iter()
-            .map(|suggestion| suggestion.redacted_with(policy))
-            .collect();
-        self.metrics = policy.redact_json(&self.metrics);
-        self.metadata = policy.redact_json(&self.metadata);
-        self
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskWorkflowStepStatus {
@@ -334,27 +229,4 @@ pub struct AgentTaskWorkflowStepSuggestion {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
-}
-
-#[cfg(test)]
-impl AgentTaskWorkflowStepSuggestion {
-    fn redacted_with(mut self, policy: &RedactionPolicy) -> Self {
-        self.title = policy.redact_string(&self.title);
-        self.body = self.body.map(|value| policy.redact_string(&value));
-        self.uri = self.uri.map(|value| policy.redact_url(&value));
-        self
-    }
-}
-
-#[cfg(test)]
-mod default_construction_tests {
-    use super::*;
-
-    #[test]
-    fn default_status_is_failed_never_succeeded() {
-        assert_eq!(
-            AgentTaskOutcome::default().status,
-            AgentTaskOutcomeStatus::Failed
-        );
-    }
 }

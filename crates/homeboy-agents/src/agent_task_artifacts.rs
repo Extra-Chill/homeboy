@@ -73,36 +73,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn artifact_projection_preserves_safe_relative_path() {
-        let artifact = AgentTaskArtifact {
-            id: "patch".to_string(),
-            kind: "patch".to_string(),
-            path: Some("artifacts/patch.diff".to_string()),
-            url: Some(
-                "homeboy://agent-task/run/run-1/artifacts#task=task-1&artifact=patch".to_string(),
-            ),
-            ..Default::default()
-        };
-        assert_eq!(
-            reviewer_facing_artifact(&artifact).path.as_deref(),
-            Some("artifacts/patch.diff")
-        );
-        assert_eq!(artifact.path.as_deref(), Some("artifacts/patch.diff"));
-    }
-
-    #[test]
-    fn local_only_artifact_projection_omits_operator_local_path() {
-        let artifact = AgentTaskArtifact {
-            id: "local".to_string(),
-            kind: "report".to_string(),
-            path: Some("/private/operator/report.json".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(reviewer_facing_artifact(&artifact).path, None);
-        assert_eq!(
-            artifact.path.as_deref(),
-            Some("/private/operator/report.json")
-        );
+    fn artifact_projection_keeps_safe_relative_paths_and_omits_operator_local_paths() {
+        for (path, expected) in [
+            ("artifacts/patch.diff", Some("artifacts/patch.diff")),
+            ("/private/operator/report.json", None),
+        ] {
+            let artifact = AgentTaskArtifact {
+                id: "artifact".to_string(),
+                kind: "report".to_string(),
+                path: Some(path.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                reviewer_facing_artifact(&artifact).path.as_deref(),
+                expected,
+                "{path}"
+            );
+        }
     }
 
     #[test]
@@ -121,7 +108,7 @@ mod tests {
             artifact_type: None,
             artifact_schema: None,
             payload: serde_json::Value::Null,
-            artifact: Some(artifact.clone()),
+            artifact: Some(artifact),
             metadata: serde_json::Value::Null,
         };
         assert_eq!(
@@ -131,7 +118,6 @@ mod tests {
                 .path,
             Some("artifacts/patch.diff".to_string())
         );
-        assert_eq!(typed.artifact.unwrap().path, artifact.path);
     }
 
     #[test]

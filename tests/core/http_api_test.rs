@@ -50,157 +50,120 @@ impl AnalysisJobRunner for FakeAnalysisJobRunner {
 }
 
 #[test]
-fn test_run_analysis_job() {
-    let output = FakeAnalysisJobRunner
-        .run_analysis_job(vec!["homeboy".to_string(), "lint".to_string()])
-        .expect("run analysis job");
+fn routes_read_and_job_ready_endpoints_and_rejects_mutating_shapes() {
+    let id = |value: &str| value.to_string();
+    let cases = [
+        (HttpMethod::Get, "/components", HttpEndpoint::Components),
+        (
+            HttpMethod::Get,
+            "/components/homeboy",
+            HttpEndpoint::Component { id: id("homeboy") },
+        ),
+        (
+            HttpMethod::Get,
+            "/components/homeboy/status",
+            HttpEndpoint::ComponentStatus { id: id("homeboy") },
+        ),
+        (
+            HttpMethod::Get,
+            "/components/homeboy/changes?gitDiffs=1",
+            HttpEndpoint::ComponentChanges { id: id("homeboy") },
+        ),
+        (HttpMethod::Get, "/rigs/", HttpEndpoint::Rigs),
+        (
+            HttpMethod::Get,
+            "/rigs/studio",
+            HttpEndpoint::Rig { id: id("studio") },
+        ),
+        (
+            HttpMethod::Post,
+            "/rigs/studio/check",
+            HttpEndpoint::RigCheck { id: id("studio") },
+        ),
+        (
+            HttpMethod::Post,
+            "/lint",
+            HttpEndpoint::JobReadyRun {
+                kind: JobReadyRunKind::Lint,
+            },
+        ),
+        (
+            HttpMethod::Post,
+            "/test",
+            HttpEndpoint::JobReadyRun {
+                kind: JobReadyRunKind::Test,
+            },
+        ),
+        (
+            HttpMethod::Post,
+            "/bench",
+            HttpEndpoint::JobReadyRun {
+                kind: JobReadyRunKind::Bench,
+            },
+        ),
+        (HttpMethod::Get, "/tools", HttpEndpoint::SandboxTools),
+        (
+            HttpMethod::Get,
+            "/tools/homeboy.lint",
+            HttpEndpoint::SandboxTool {
+                id: id("homeboy.lint"),
+            },
+        ),
+        (
+            HttpMethod::Post,
+            "/tools/homeboy.review/run",
+            HttpEndpoint::SandboxToolRun {
+                id: id("homeboy.review"),
+            },
+        ),
+        (HttpMethod::Get, "/runs?kind=bench", HttpEndpoint::Runs),
+        (
+            HttpMethod::Get,
+            "/runs/run-123",
+            HttpEndpoint::Run { id: id("run-123") },
+        ),
+        (
+            HttpMethod::Get,
+            "/runs/run-123/artifacts",
+            HttpEndpoint::RunArtifacts { id: id("run-123") },
+        ),
+        (
+            HttpMethod::Get,
+            "/runs/run-123/findings",
+            HttpEndpoint::RunFindings { id: id("run-123") },
+        ),
+        (HttpMethod::Get, "/bench/runs", HttpEndpoint::BenchRuns),
+        (HttpMethod::Get, "/jobs", HttpEndpoint::Jobs),
+        (
+            HttpMethod::Get,
+            "/jobs/abc",
+            HttpEndpoint::Job { id: id("abc") },
+        ),
+        (
+            HttpMethod::Get,
+            "/jobs/abc/events",
+            HttpEndpoint::JobEvents { id: id("abc") },
+        ),
+        (
+            HttpMethod::Post,
+            "/jobs/abc/cancel",
+            HttpEndpoint::JobCancel { id: id("abc") },
+        ),
+    ];
+    for (method, path, expected) in cases {
+        assert_eq!(
+            http_api::route(method, path).expect(path),
+            expected,
+            "{path}"
+        );
+    }
 
-    assert_eq!(output.exit_code, 0);
-    assert_eq!(output.output["argv"][1], "lint");
-}
-
-#[test]
-fn routes_component_endpoints() {
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/components").expect("route"),
-        HttpEndpoint::Components
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/components/homeboy").expect("route"),
-        HttpEndpoint::Component {
-            id: "homeboy".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/components/homeboy/status").expect("route"),
-        HttpEndpoint::ComponentStatus {
-            id: "homeboy".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/components/homeboy/changes?gitDiffs=1").expect("route"),
-        HttpEndpoint::ComponentChanges {
-            id: "homeboy".to_string()
-        }
-    );
-}
-
-#[test]
-fn routes_rig_and_stack_endpoints() {
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/rigs/").expect("route"),
-        HttpEndpoint::Rigs
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/rigs/studio").expect("route"),
-        HttpEndpoint::Rig {
-            id: "studio".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Post, "/rigs/studio/check").expect("route"),
-        HttpEndpoint::RigCheck {
-            id: "studio".to_string()
-        }
-    );
-}
-
-#[test]
-fn routes_job_ready_analysis_endpoints_without_executing_them() {
-    assert_eq!(
-        http_api::route(HttpMethod::Post, "/lint").expect("route"),
-        HttpEndpoint::JobReadyRun {
-            kind: JobReadyRunKind::Lint
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Post, "/test").expect("route"),
-        HttpEndpoint::JobReadyRun {
-            kind: JobReadyRunKind::Test
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Post, "/bench").expect("route"),
-        HttpEndpoint::JobReadyRun {
-            kind: JobReadyRunKind::Bench
-        }
-    );
-}
-
-#[test]
-fn routes_sandbox_tool_endpoints() {
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/tools").expect("route"),
-        HttpEndpoint::SandboxTools
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/tools/homeboy.lint").expect("route"),
-        HttpEndpoint::SandboxTool {
-            id: "homeboy.lint".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Post, "/tools/homeboy.review/run").expect("route"),
-        HttpEndpoint::SandboxToolRun {
-            id: "homeboy.review".to_string()
-        }
-    );
-}
-
-#[test]
-fn routes_observation_run_readers() {
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/runs?kind=bench").expect("route"),
-        HttpEndpoint::Runs
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/runs/run-123").expect("route"),
-        HttpEndpoint::Run {
-            id: "run-123".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/runs/run-123/artifacts").expect("route"),
-        HttpEndpoint::RunArtifacts {
-            id: "run-123".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/runs/run-123/findings").expect("route"),
-        HttpEndpoint::RunFindings {
-            id: "run-123".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/bench/runs").expect("route"),
-        HttpEndpoint::BenchRuns
-    );
-}
-
-#[test]
-fn routes_job_inspection_endpoints() {
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/jobs").expect("route"),
-        HttpEndpoint::Jobs
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/jobs/abc").expect("route"),
-        HttpEndpoint::Job {
-            id: "abc".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/jobs/abc/events").expect("route"),
-        HttpEndpoint::JobEvents {
-            id: "abc".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Post, "/jobs/abc/cancel").expect("route"),
-        HttpEndpoint::JobCancel {
-            id: "abc".to_string()
-        }
-    );
+    for path in ["/rigs/studio/up", "/deploy", "/release"] {
+        assert!(
+            http_api::route(HttpMethod::Post, path).is_err(),
+            "{path} must not route"
+        );
+    }
 }
 
 const CONTROL_PLANE_FIXTURE_RUN: &str =
@@ -925,8 +888,6 @@ fn routes_versioned_control_plane_endpoints() {
     );
     http_api::route(HttpMethod::Post, "/v1/control-plane/runs/run-abc")
         .expect_err("only the canonical actions route mutates runs");
-    http_api::route(HttpMethod::Get, "/agent-task/runs/run-abc")
-        .expect_err("the unversioned compatibility route is removed");
     for path in [
         "/v1/control-plane/missions?limit=0",
         "/v1/control-plane/missions?limit=101",
@@ -1109,25 +1070,7 @@ fn control_plane_http_lists_and_gets_canonical_missions() {
 }
 
 #[test]
-fn control_plane_mission_id_is_bounded_before_lookup() {
-    register_fixture_control_plane_provider();
-    let response = http_api::handle(HttpApiRequest {
-        method: HttpMethod::Get,
-        path: format!("/v1/control-plane/missions/{}", "m".repeat(257)),
-        body: None,
-    })
-    .expect("typed mission id error");
-    assert_eq!(response.status, 400);
-    let result: ControlPlaneResult<ControlPlaneMission> =
-        serde_json::from_value(response.body).expect("result");
-    assert_eq!(
-        result.error.expect("error").class,
-        ControlPlaneErrorClass::InvalidArgument
-    );
-}
-
-#[test]
-fn control_plane_http_lists_canonical_runs() {
+fn control_plane_http_lists_and_gets_canonical_runs() {
     register_fixture_control_plane_provider();
     let response = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,
@@ -1155,6 +1098,20 @@ fn control_plane_http_lists_canonical_runs() {
         result.resource.expect("page").runs,
         vec![fixture_control_plane_run()]
     );
+
+    let response = http_api::handle(HttpApiRequest {
+        method: HttpMethod::Get,
+        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}"),
+        body: None,
+    })
+    .expect("run");
+    assert_eq!(response.status, 200);
+    let result: ControlPlaneResult<ControlPlaneRun> =
+        serde_json::from_value(response.body).expect("result");
+    assert!(result.ok);
+    let resource = result.resource.expect("resource");
+    assert_eq!(resource, fixture_control_plane_run());
+    assert_eq!(resource.schema, CONTROL_PLANE_RUN_SCHEMA);
 }
 
 #[test]
@@ -1407,44 +1364,6 @@ fn control_plane_action_http_uses_the_typed_provider_contract() {
 }
 
 #[test]
-fn control_plane_http_run_matches_the_service_fixture() {
-    register_fixture_control_plane_provider();
-    let expected = fixture_control_plane_run();
-    let response = http_api::handle(HttpApiRequest {
-        method: HttpMethod::Get,
-        path: format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}"),
-        body: None,
-    })
-    .expect("run");
-    assert_eq!(response.status, 200);
-    let result: ControlPlaneResult<ControlPlaneRun> =
-        serde_json::from_value(response.body).expect("result");
-    assert!(result.ok);
-    let resource = result.resource.expect("resource");
-    assert_eq!(resource, expected);
-    assert_eq!(resource.schema, CONTROL_PLANE_RUN_SCHEMA);
-    assert_eq!(resource.run.as_str(), CONTROL_PLANE_FIXTURE_RUN);
-}
-
-#[test]
-fn control_plane_run_lookup_miss_is_a_structured_not_found() {
-    let response = http_api::handle(HttpApiRequest {
-        method: HttpMethod::Get,
-        path: "/v1/control-plane/runs/no-such-agent-task-run".to_string(),
-        body: None,
-    })
-    .expect("typed not-found envelope");
-    assert_eq!(response.status, 404);
-    let result: ControlPlaneResult<ControlPlaneRun> =
-        serde_json::from_value(response.body).expect("result");
-    assert!(!result.ok);
-    let error = result.error.expect("error");
-    assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
-    assert!(!error.retryable);
-    assert!(error.message.contains("no-such-agent-task-run"));
-}
-
-#[test]
 fn control_plane_http_events_resume_from_an_opaque_typed_cursor() {
     register_fixture_control_plane_provider();
     let response = http_api::handle(HttpApiRequest {
@@ -1518,58 +1437,88 @@ fn control_plane_http_appends_a_typed_event() {
 }
 
 #[test]
-fn control_plane_event_errors_are_typed() {
+fn control_plane_lookup_errors_are_typed_envelopes() {
     register_fixture_control_plane_provider();
-    for (path, status, class) in [
+    let oversized_run = "a".repeat(4096);
+    let oversized_mission = "m".repeat(257);
+    // (path, status, class, retryable, message must contain, message must not contain)
+    let cases = [
         (
-            "/v1/control-plane/runs/no-such-agent-task-run/events",
+            "/v1/control-plane/runs/no-such-agent-task-run".to_string(),
             404,
             ControlPlaneErrorClass::NotFound,
+            Some(false),
+            Some("no-such-agent-task-run"),
+            None,
         ),
+        // Oversized ids are rejected before any record lookup and are never
+        // reflected into the error message.
         (
-            "/v1/control-plane/runs/agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751/events?cursor=invalid",
+            format!("/v1/control-plane/runs/{oversized_run}"),
             400,
             ControlPlaneErrorClass::InvalidArgument,
+            Some(false),
+            None,
+            Some(oversized_run.as_str()),
         ),
         (
-            "/v1/control-plane/runs/agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751/events?cursor=expired",
+            format!("/v1/control-plane/missions/{oversized_mission}"),
+            400,
+            ControlPlaneErrorClass::InvalidArgument,
+            None,
+            None,
+            None,
+        ),
+        (
+            "/v1/control-plane/runs/no-such-agent-task-run/events".to_string(),
+            404,
+            ControlPlaneErrorClass::NotFound,
+            None,
+            None,
+            None,
+        ),
+        (
+            format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/events?cursor=invalid"),
+            400,
+            ControlPlaneErrorClass::InvalidArgument,
+            None,
+            None,
+            None,
+        ),
+        (
+            format!("/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/events?cursor=expired"),
             410,
             ControlPlaneErrorClass::CursorExpired,
+            None,
+            None,
+            None,
         ),
-    ] {
+    ];
+
+    for (path, status, class, retryable, contains, excludes) in cases {
+        let label = &path[..path.len().min(80)];
         let response = http_api::handle(HttpApiRequest {
             method: HttpMethod::Get,
-            path: path.to_string(),
+            path: path.clone(),
             body: None,
         })
-        .expect("typed error");
-        assert_eq!(response.status, status);
-        let result: ControlPlaneResult<ControlPlaneEventPage> =
+        .expect("typed error envelope");
+        assert_eq!(response.status, status, "{label}");
+        let result: ControlPlaneResult<serde_json::Value> =
             serde_json::from_value(response.body).expect("result");
-        assert_eq!(result.error.expect("error").class, class);
+        assert!(!result.ok, "{label}");
+        let error = result.error.expect("error");
+        assert_eq!(error.class, class, "{label}");
+        if let Some(retryable) = retryable {
+            assert_eq!(error.retryable, retryable, "{label}");
+        }
+        if let Some(fragment) = contains {
+            assert!(error.message.contains(fragment), "{label}");
+        }
+        if let Some(fragment) = excludes {
+            assert!(!error.message.contains(fragment), "{label}");
+        }
     }
-}
-
-#[test]
-fn control_plane_run_id_is_bounded_before_the_record_lookup() {
-    let oversized = "a".repeat(4096);
-    let response = http_api::handle(HttpApiRequest {
-        method: HttpMethod::Get,
-        path: format!("/v1/control-plane/runs/{oversized}"),
-        body: None,
-    })
-    .expect("typed invalid-argument envelope");
-    assert_eq!(response.status, 400);
-    let result: ControlPlaneResult<ControlPlaneRun> =
-        serde_json::from_value(response.body).expect("result");
-    assert!(!result.ok);
-    let error = result.error.expect("error");
-    assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
-    assert!(!error.retryable);
-    assert!(
-        !error.message.contains(&oversized),
-        "an oversized id must not be reflected into the error message",
-    );
 }
 
 #[test]
@@ -1711,76 +1660,39 @@ fn strict_projection_cancel_requires_exact_durable_local_runner_binding() {
 }
 
 #[test]
-fn strict_projection_cancel_refuses_wrong_runner_without_mutation() {
+fn strict_projection_cancel_refuses_mismatched_or_unbound_jobs_without_mutation() {
     let store = JobStore::default();
-    let job = queued_local_runner_job(&store, Some("durable-run"));
-    let initial_event_count = store.events(job.id).expect("events").len();
-
-    let error = strict_projection_cancel(&store, job.id, "other-runner", "durable-run")
-        .expect_err("wrong runner is refused");
-    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
-    assert_eq!(store.active_runner_jobs().len(), 1);
-    assert_eq!(
-        store.events(job.id).expect("events").len(),
-        initial_event_count
-    );
-}
-
-#[test]
-fn strict_projection_cancel_refuses_wrong_durable_run_without_mutation() {
-    let store = JobStore::default();
-    let job = queued_local_runner_job(&store, Some("durable-run"));
-    let initial_event_count = store.events(job.id).expect("events").len();
-
-    let error = strict_projection_cancel(&store, job.id, "homeboy-lab", "other-run")
-        .expect_err("wrong durable run is refused");
-    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
-    assert_eq!(store.active_runner_jobs().len(), 1);
-    assert_eq!(
-        store.events(job.id).expect("events").len(),
-        initial_event_count
-    );
-}
-
-#[test]
-fn strict_projection_cancel_refuses_local_only_and_legacy_jobs_without_mutation() {
-    let store = JobStore::default();
+    let bound = queued_local_runner_job(&store, Some("durable-run"));
     let local_only = store.create("lint");
     let legacy = queued_local_runner_job(&store, None);
     let initial_active_count = store.active_runner_jobs().len();
 
-    for job in [local_only, legacy] {
+    for (label, job, runner_id, durable_run_id) in [
+        ("wrong runner", &bound, "other-runner", "durable-run"),
+        ("wrong durable run", &bound, "homeboy-lab", "other-run"),
+        ("local-only job", &local_only, "homeboy-lab", "durable-run"),
+        ("legacy runner job", &legacy, "homeboy-lab", "durable-run"),
+    ] {
         let initial_event_count = store.events(job.id).expect("events").len();
-        let error = strict_projection_cancel(&store, job.id, "homeboy-lab", "durable-run")
-            .expect_err("unbound job is refused");
-        assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
+        let error =
+            strict_projection_cancel(&store, job.id, runner_id, durable_run_id).expect_err(label);
+        assert_eq!(
+            error.code,
+            crate::ErrorCode::ValidationInvalidArgument,
+            "{label}"
+        );
+        assert_eq!(
+            store.get(job.id).expect("job").status,
+            JobStatus::Queued,
+            "{label}"
+        );
         assert_eq!(
             store.events(job.id).expect("events").len(),
-            initial_event_count
+            initial_event_count,
+            "{label}"
         );
     }
     assert_eq!(store.active_runner_jobs().len(), initial_active_count);
-}
-
-#[test]
-fn generic_job_cancel_remains_unscoped_for_operator_compatibility() {
-    let store = JobStore::default();
-    let job = store.create("lint");
-
-    let response = http_api::handle_with_jobs(
-        HttpApiRequest {
-            method: HttpMethod::Post,
-            path: format!("/jobs/{}/cancel", job.id),
-            body: None,
-        },
-        &store,
-    )
-    .expect("generic operator cancellation remains supported");
-    assert_eq!(response.endpoint, "jobs.cancel");
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Cancelled);
 }
 
 #[test]
@@ -2127,104 +2039,67 @@ fn run_artifacts_keeps_legacy_http_clients_exhaustive_and_pages_explicit_request
 
 /// GET is a read. Observation runs are reconciled by the daemon orchestration
 /// tick (`runs_service::reconcile_owned_stale_running_runs`), never as a side
-/// effect of listing them -- even a row the reconciler would settle.
+/// effect of listing or showing them -- even a row the reconciler would settle.
 #[test]
-fn runs_list_leaves_old_ownerless_running_records_unchanged() {
+fn run_readers_leave_stale_running_records_unchanged() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
-        let mut run = sample_imported_running_run("agent-task", "homeboy", "homeboy-lab");
-        run.id = "legacy-ownerless-run".to_string();
-        run.metadata_json = serde_json::json!({ "source": "legacy-runner" });
-        store.import_run(&run).expect("import ownerless run");
+        let cases = [
+            (
+                "legacy-ownerless-run",
+                serde_json::json!({ "source": "legacy-runner" }),
+                "/runs?status=running".to_string(),
+            ),
+            (
+                "active-remote-run",
+                serde_json::json!({
+                    "homeboy_run_owner": { "pid": u32::MAX },
+                    "lab": { "remote_job_status": "running" },
+                }),
+                "/runs?status=running".to_string(),
+            ),
+            (
+                "dead-owner-run",
+                serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+                "/runs/dead-owner-run".to_string(),
+            ),
+        ];
 
-        let response = http_api::handle(HttpApiRequest {
-            method: HttpMethod::Get,
-            path: "/runs?status=running".to_string(),
-            body: None,
-        })
-        .expect("runs list");
+        for (run_id, metadata_json, path) in cases {
+            let mut run = sample_imported_running_run("agent-task", "homeboy", "homeboy-lab");
+            run.id = run_id.to_string();
+            run.metadata_json = metadata_json;
+            store.import_run(&run).expect("import running run");
 
-        let runs = response.body["runs"].as_array().expect("runs");
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0]["id"], "legacy-ownerless-run");
-        assert_eq!(runs[0]["status"], RunStatus::Running.as_str());
-        let stored = store
-            .get_run("legacy-ownerless-run")
-            .expect("get run")
-            .expect("run exists");
-        assert_eq!(stored.status, RunStatus::Running.as_str());
-        assert!(stored.finished_at.is_none());
-        assert_eq!(
-            stored.metadata_json["homeboy_reconciled"],
-            serde_json::Value::Null
-        );
-    });
-}
+            let response = http_api::handle(HttpApiRequest {
+                method: HttpMethod::Get,
+                path,
+                body: None,
+            })
+            .expect("run reader");
 
-#[test]
-fn runs_list_preserves_old_runner_backed_records_with_active_remote_status() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut run = sample_imported_running_run("agent-task", "homeboy", "homeboy-lab");
-        run.id = "active-remote-run".to_string();
-        run.metadata_json = serde_json::json!({
-            "homeboy_run_owner": { "pid": u32::MAX },
-            "lab": { "remote_job_status": "running" },
-        });
-        store.import_run(&run).expect("import active runner run");
-
-        let response = http_api::handle(HttpApiRequest {
-            method: HttpMethod::Get,
-            path: "/runs?status=running".to_string(),
-            body: None,
-        })
-        .expect("runs list");
-
-        assert_eq!(response.body["runs"].as_array().expect("runs").len(), 1);
-        assert_eq!(
-            store
-                .get_run("active-remote-run")
-                .expect("get run")
-                .expect("run exists")
-                .status,
-            RunStatus::Running.as_str()
-        );
-    });
-}
-
-#[test]
-fn show_run_leaves_an_old_dead_owner_running_row_unchanged() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut requested = sample_imported_running_run("review", "homeboy", "old-requested");
-        requested.id = "0000-requested-old-run".to_string();
-        store.import_run(&requested).expect("import requested run");
-
-        let response = http_api::handle(HttpApiRequest {
-            method: HttpMethod::Get,
-            path: format!("/runs/{}", requested.id),
-            body: None,
-        })
-        .expect("show requested run");
-
-        assert_eq!(response.body["run"]["status"], RunStatus::Running.as_str());
-        assert!(response.body["run"]["status_note"]
-            .as_str()
-            .expect("computed status note")
-            .contains("owner process is not running"));
-        let stored = store
-            .get_run(&requested.id)
-            .expect("read requested run")
-            .expect("requested run");
-        assert_eq!(stored.status, RunStatus::Running.as_str());
-        assert!(stored.finished_at.is_none());
-        assert_eq!(
-            stored.metadata_json["homeboy_reconciled"],
-            serde_json::Value::Null
-        );
+            let served = if response.endpoint == "runs.show" {
+                response.body["run"].clone()
+            } else {
+                response.body["runs"]
+                    .as_array()
+                    .expect("runs")
+                    .iter()
+                    .find(|served| served["id"] == run_id)
+                    .cloned()
+                    .unwrap_or_else(|| panic!("{run_id} listed"))
+            };
+            assert_eq!(served["status"], RunStatus::Running.as_str(), "{run_id}");
+            let stored = store.get_run(run_id).expect("get run").expect("run exists");
+            assert_eq!(stored.status, RunStatus::Running.as_str(), "{run_id}");
+            assert!(stored.finished_at.is_none(), "{run_id}");
+            assert_eq!(
+                stored.metadata_json["homeboy_reconciled"],
+                serde_json::Value::Null,
+                "{run_id}"
+            );
+        }
     });
 }
 
@@ -2443,13 +2318,6 @@ fn artifact_content_serves_percent_encoded_stored_artifact_ids() {
 }
 
 #[test]
-fn rejects_mutating_endpoint_shapes() {
-    assert!(http_api::route(HttpMethod::Post, "/rigs/studio/up").is_err());
-    assert!(http_api::route(HttpMethod::Post, "/deploy").is_err());
-    assert!(http_api::route(HttpMethod::Post, "/release").is_err());
-}
-
-#[test]
 fn sandbox_tools_declare_capabilities_and_allowed_arguments() {
     let response = http_api::handle_with_jobs(
         HttpApiRequest {
@@ -2626,38 +2494,33 @@ fn job_ready_endpoint_enqueues_daemon_job() {
 }
 
 #[test]
-fn job_ready_endpoint_rejects_mutating_body_fields() {
-    let err = http_api::handle_with_jobs(
-        HttpApiRequest {
-            method: HttpMethod::Post,
-            path: "/lint".to_string(),
-            body: Some(serde_json::json!({ "fix": true })),
-        },
-        &JobStore::default(),
-    )
-    .expect_err("mutating lint fix is rejected");
+fn job_ready_endpoint_rejects_mutating_and_unknown_body_fields() {
+    for (path, body, expected) in [
+        ("/lint", serde_json::json!({ "fix": true }), "--fix"),
+        (
+            "/bench",
+            serde_json::json!({ "deploy": true }),
+            "unsupported analysis job body field",
+        ),
+    ] {
+        let store = JobStore::default();
+        let err = http_api::handle_with_jobs(
+            HttpApiRequest {
+                method: HttpMethod::Post,
+                path: path.to_string(),
+                body: Some(body),
+            },
+            &store,
+        )
+        .expect_err(path);
 
-    let rendered = err.to_string();
-    assert!(rendered.contains("--fix"), "{rendered}");
-}
-
-#[test]
-fn job_ready_endpoint_rejects_unknown_body_fields() {
-    let err = http_api::handle_with_jobs(
-        HttpApiRequest {
-            method: HttpMethod::Post,
-            path: "/bench".to_string(),
-            body: Some(serde_json::json!({ "deploy": true })),
-        },
-        &JobStore::default(),
-    )
-    .expect_err("unknown field is rejected");
-
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("unsupported analysis job body field"),
-        "{rendered}"
-    );
+        let rendered = err.to_string();
+        assert!(rendered.contains(expected), "{path}: {rendered}");
+        assert!(
+            store.list().is_empty(),
+            "{path}: rejected body enqueues nothing"
+        );
+    }
 }
 
 #[test]

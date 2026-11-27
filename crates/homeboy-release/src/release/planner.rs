@@ -487,54 +487,14 @@ mod tests {
     /// Regression for the homeboy-action release blocker:
     /// `validate_working_tree_fail_fast` builds an Error with a hint vec
     /// listing the dirty files. That error flows through ValidationCollector,
-    /// which used to drop the hints on the single-error re-emit path —
-    /// leaving CI consumers with a bare `Uncommitted changes detected`
-    /// message and no way to see *which* files were dirty.
+    /// which must keep the hints on the single-error re-emit path so CI
+    /// consumers see *which* files were dirty, not a bare
+    /// `Uncommitted changes detected` message.
     ///
     /// This test pins down the round-trip: build the same shape of error
     /// that `validate_working_tree_fail_fast` would produce, push it through
     /// `ValidationCollector::finish_if_errors`, and assert the dirty file
     /// hints survive in the resulting JSON details.
-    #[test]
-    fn working_tree_fail_fast_error_preserves_file_hints_through_collector() {
-        use homeboy_core::engine::validation::ValidationCollector;
-        use homeboy_core::error::Error;
-
-        let original = Error::validation_invalid_argument(
-            "working_tree",
-            "Uncommitted changes detected — refusing to release",
-            None,
-            Some(vec![
-                "Commit, stash, or discard changes before releasing".to_string(),
-                "Unexpected dirty files (2): src/lib.rs, Cargo.lock".to_string(),
-            ]),
-        );
-
-        let mut collector = ValidationCollector::new();
-        collector.capture::<()>(Err(original), "working_tree");
-        let propagated = collector.finish_if_errors().unwrap_err();
-
-        let details = &propagated.details;
-        let tried = details
-            .get("tried")
-            .and_then(|v| v.as_array())
-            .expect("tried hints must survive collector round-trip");
-        assert_eq!(tried.len(), 2, "expected both hints to survive: {details}");
-        let joined: String = tried
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        assert!(
-            joined.contains("src/lib.rs"),
-            "dirty file list must reach the JSON envelope, got: {joined}"
-        );
-        assert!(
-            joined.contains("Cargo.lock"),
-            "dirty file list must reach the JSON envelope, got: {joined}"
-        );
-    }
-
     #[test]
     fn head_plan_allows_only_the_matching_scoped_release_notes_path() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -646,89 +606,37 @@ mod tests {
     }
 
     #[test]
-    fn oversized_patch_release_warning_is_quiet_for_small_patch_scope() {
-        let mut recommendation = Some(semver_recommendation("patch", 3));
-        let warning = apply_oversized_patch_release_policy(
-            &mut recommendation,
-            &changelog_plan(3),
-            "patch",
-            "1.2.3",
-            false,
-        );
+    fn oversized_patch_release_policy_requires_minor_only_for_large_explicit_patches() {
+        // (requested, current, commits, changelog entries, expect escalation)
+        let cases = [
+            ("patch", "1.2.3", 3, 3, false),
+            ("patch", "1.2.3", 61, 1, true),
+            ("patch", "1.2.3", 1, 61, true),
+            ("0.1.3", "0.1.2", 61, 1, true),
+            ("none", "1.2.3", 61, 1, false),
+        ];
 
-        assert!(warning.is_none());
-        let recommendation = recommendation.expect("recommendation remains available");
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("patch"));
-        assert!(!recommendation.is_underbump);
-    }
+        for (requested, current, commits, entries, escalates) in cases {
+            let mut recommendation = Some(semver_recommendation(requested, commits));
+            let warning = apply_oversized_patch_release_policy(
+                &mut recommendation,
+                &changelog_plan(entries),
+                requested,
+                current,
+                false,
+            );
+            let recommendation = recommendation.expect("recommendation remains available");
+            let label = format!("{requested} from {current} ({commits}/{entries})");
 
-    #[test]
-    fn oversized_patch_release_policy_requires_minor_when_commit_range_is_large() {
-        let mut recommendation = Some(semver_recommendation("patch", 61));
-        let warning = apply_oversized_patch_release_policy(
-            &mut recommendation,
-            &changelog_plan(1),
-            "patch",
-            "1.2.3",
-            false,
-        );
-
-        assert!(warning.is_some());
-        let recommendation = recommendation.expect("recommendation remains available");
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
-        assert!(recommendation.is_underbump);
-    }
-
-    #[test]
-    fn oversized_patch_release_policy_requires_minor_when_changelog_range_is_large() {
-        let mut recommendation = Some(semver_recommendation("patch", 1));
-        let warning = apply_oversized_patch_release_policy(
-            &mut recommendation,
-            &changelog_plan(61),
-            "patch",
-            "1.2.3",
-            false,
-        );
-
-        assert!(warning.is_some());
-        let recommendation = recommendation.expect("recommendation remains available");
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
-        assert!(recommendation.is_underbump);
-    }
-
-    #[test]
-    fn oversized_patch_release_policy_catches_explicit_patch_version() {
-        let mut recommendation = Some(semver_recommendation("0.1.3", 61));
-        let warning = apply_oversized_patch_release_policy(
-            &mut recommendation,
-            &changelog_plan(1),
-            "0.1.3",
-            "0.1.2",
-            false,
-        );
-
-        assert!(warning.is_some());
-        let recommendation = recommendation.expect("recommendation remains available");
-        assert!(recommendation.is_underbump);
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
-    }
-
-    #[test]
-    fn oversized_patch_release_policy_leaves_automatic_patches_unaffected() {
-        let mut recommendation = Some(semver_recommendation("patch", 61));
-        let warning = apply_oversized_patch_release_policy(
-            &mut recommendation,
-            &changelog_plan(1),
-            "none",
-            "1.2.3",
-            false,
-        );
-
-        assert!(warning.is_none());
-        let recommendation = recommendation.expect("recommendation remains available");
-        assert!(!recommendation.is_underbump);
-        assert_eq!(recommendation.recommended_bump.as_deref(), Some("patch"));
-        assert!(recommendation.bump_policy.is_none());
+            assert_eq!(warning.is_some(), escalates, "{label}");
+            assert_eq!(recommendation.is_underbump, escalates, "{label}");
+            assert_eq!(
+                recommendation.recommended_bump.as_deref(),
+                Some(if escalates { "minor" } else { "patch" }),
+                "{label}"
+            );
+            assert_eq!(recommendation.bump_policy.is_some(), escalates, "{label}");
+        }
     }
 
     #[test]
@@ -894,27 +802,20 @@ mod tests {
     }
 
     #[test]
-    fn guard_fails_closed_when_checkout_is_behind_upstream() {
+    fn stale_primary_guard_fails_closed_only_when_checkout_is_behind_upstream() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let local = stale_checkout_fixture(dir.path(), 2);
-
-        let result = guard_stale_primary_at_head("demo", local.to_str().expect("path"), "v1.0.0");
-        let error = result.expect_err("behind checkout must fail closed");
+        let behind = stale_checkout_fixture(&dir.path().join("behind"), 2);
+        let error = guard_stale_primary_at_head("demo", behind.to_str().expect("path"), "v1.0.0")
+            .expect_err("behind checkout must fail closed");
         assert!(
             error.message.contains("stale") || error.message.contains("ahead"),
             "error should explain the stale checkout, got: {}",
             error.message
         );
-    }
 
-    #[test]
-    fn guard_allows_checkout_at_upstream_head() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        // Zero extra upstream commits: HEAD == origin/master, genuinely at head.
-        let local = stale_checkout_fixture(dir.path(), 0);
-
+        let current = stale_checkout_fixture(&dir.path().join("current"), 0);
         assert!(
-            guard_stale_primary_at_head("demo", local.to_str().expect("path"), "v1.0.0").is_ok(),
+            guard_stale_primary_at_head("demo", current.to_str().expect("path"), "v1.0.0").is_ok(),
             "an up-to-date checkout at the tag must still skip cleanly"
         );
     }

@@ -81,97 +81,104 @@ fn source_snapshot(local_path: String) -> SourceSnapshot {
 }
 
 #[test]
-fn lab_source_snapshot_handoff_accepts_matching_materialized_workspace() {
+fn lab_source_snapshot_handoff_requires_the_materialized_workspace() {
     let dir = tempfile::tempdir().expect("temp dir");
     let local_path = dir.path().canonicalize().unwrap().display().to_string();
     let synced = synced_workspace(local_path.clone());
-    let snapshot = source_snapshot(local_path);
 
-    validate_lab_source_snapshot_handoff(dir.path(), &synced, &snapshot)
+    validate_lab_source_snapshot_handoff(dir.path(), &synced, &source_snapshot(local_path))
         .expect("matching snapshot should pass");
-}
 
-#[test]
-fn lab_source_snapshot_handoff_rejects_mismatched_source_paths() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let local_path = dir.path().canonicalize().unwrap().display().to_string();
-    let synced = synced_workspace(local_path);
     let mut snapshot = source_snapshot("/Users/user/Developer/other-worktree".to_string());
     snapshot.remote_path = Some("/srv/homeboy/_lab_workspaces/other".to_string());
     snapshot.workspace_snapshot_identity = Some("snapshot:other".to_string());
-
     let err = validate_lab_source_snapshot_handoff(dir.path(), &synced, &snapshot)
         .expect_err("mismatched snapshot should fail before dispatch");
 
     assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
     assert!(err.message.contains("source snapshot does not match"));
     let detail = err.details.to_string();
-    assert!(detail.contains("requested_source_path"));
-    assert!(detail.contains("snapshot_remote_path"));
-    assert!(detail.contains("snapshot_workspace_identity"));
-    assert!(err.details["tried"]
-        .as_array()
-        .expect("mismatch diagnostics")
-        .iter()
-        .any(|hint| hint
-            .as_str()
-            .is_some_and(|hint| hint.contains("source snapshot remote_path"))));
+    for field in [
+        "requested_source_path",
+        "snapshot_remote_path",
+        "snapshot_workspace_identity",
+    ] {
+        assert!(detail.contains(field), "missing {field}: {detail}");
+    }
 }
 
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// A fresh git checkout with an optional `origin` remote.
+fn git_checkout(origin: Option<&str>) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    if let Some(origin) = origin {
+        git(dir.path(), &["remote", "add", "origin", origin]);
+    }
+    dir
+}
+
+fn tried_hints(err: &Error) -> Vec<String> {
+    err.details["tried"]
+        .as_array()
+        .expect("tried hints")
+        .iter()
+        .filter_map(|hint| hint.as_str().map(str::to_string))
+        .collect()
+}
+
+const PUBLIC_ORIGIN: &str = "https://github.com/Extra-Chill/homeboy.git";
+const PRIVATE_ORIGIN: &str = "git@github.example.com:example-org/example-repo.git";
+
 #[test]
-fn lab_git_workspace_sync_uses_snapshot_for_private_proxied_sources() {
-    let source_policy = crate::source_materialization::SourceMaterializationPolicy {
+fn lab_workspace_sync_mode_follows_source_privacy_and_policy() {
+    let private_policy = crate::source_materialization::SourceMaterializationPolicy {
         private_proxied_source_hosts: vec!["github.example.com".to_string()],
     };
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .status()
-        .expect("init git repo");
-    std::process::Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "git@github.example.com:example-org/example-repo.git",
-        ])
-        .current_dir(dir.path())
-        .status()
-        .expect("add origin");
-
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-    ];
-    let mode = lab_workspace_sync_mode_with_source_policy(
-        LabOffloadWorkspaceModePolicy::Git,
-        &args,
-        dir.path(),
-        &source_policy,
-    )
-    .expect("sync mode");
-
-    assert_eq!(mode, RunnerWorkspaceSyncMode::Snapshot);
+    let args = ["homeboy", "agent-task", "cook"].map(str::to_string);
+    for (origin, policy, expected) in [
+        // Private proxied sources cannot be cloned by the runner.
+        (
+            PRIVATE_ORIGIN,
+            LabOffloadWorkspaceModePolicy::Git,
+            RunnerWorkspaceSyncMode::Snapshot,
+        ),
+        (
+            PUBLIC_ORIGIN,
+            LabOffloadWorkspaceModePolicy::Git,
+            RunnerWorkspaceSyncMode::Git,
+        ),
+        // A required git checkout keeps git even for private sources.
+        (
+            PRIVATE_ORIGIN,
+            LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+            RunnerWorkspaceSyncMode::Git,
+        ),
+    ] {
+        let dir = git_checkout(Some(origin));
+        let mode =
+            lab_workspace_sync_mode_with_source_policy(policy, &args, dir.path(), &private_policy)
+                .expect("sync mode");
+        assert_eq!(mode, expected, "{origin} {policy:?}");
+    }
 }
 
 #[test]
 fn lab_source_snapshot_uses_git_workspace_for_committed_git_source() {
-    let dir = tempfile::tempdir().expect("temp dir");
+    let dir = git_checkout(None);
     std::fs::write(dir.path().join("package.json"), "{}\n").expect("source file");
-    std::process::Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(dir.path())
-        .status()
-        .expect("init git repo");
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(dir.path())
-        .status()
-        .expect("stage source");
-    std::process::Command::new("git")
-        .args([
+    git(dir.path(), &["add", "."]);
+    git(
+        dir.path(),
+        &[
             "-c",
             "user.name=Homeboy Test",
             "-c",
@@ -180,10 +187,8 @@ fn lab_source_snapshot_uses_git_workspace_for_committed_git_source() {
             "--quiet",
             "-m",
             "source",
-        ])
-        .current_dir(dir.path())
-        .status()
-        .expect("commit source");
+        ],
+    );
 
     let mode = lab_workspace_sync_mode(
         LabOffloadWorkspaceModePolicy::RunnerResident,
@@ -196,248 +201,95 @@ fn lab_source_snapshot_uses_git_workspace_for_committed_git_source() {
 }
 
 #[test]
-fn required_git_checkout_sync_keeps_git_for_private_sources() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .status()
-        .expect("init git repo");
-    std::process::Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "git@github.example.com:example-org/conductor.git",
-        ])
-        .current_dir(dir.path())
-        .status()
-        .expect("add origin");
+fn required_git_checkout_preflight_requires_a_clean_checkout_with_origin() {
+    let clean = git_checkout(Some(PUBLIC_ORIGIN));
+    preflight_patch_provider_git_checkout(clean.path()).expect("clean checkout should pass");
 
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--prompt".to_string(),
-        "prove it".to_string(),
-    ];
-    let mode = lab_workspace_sync_mode(
-        LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-        &args,
-        dir.path(),
-    )
-    .expect("sync mode");
+    let non_git = tempfile::tempdir().expect("temp dir");
+    let without_origin = git_checkout(None);
+    let dirty = git_checkout(Some(PUBLIC_ORIGIN));
+    std::fs::write(dirty.path().join("dirty.txt"), "dirty").expect("write dirty file");
 
-    assert_eq!(mode, RunnerWorkspaceSyncMode::Git);
+    for (dir, message, hints) in [
+        (
+            non_git.path(),
+            "requires --cwd to be a git checkout",
+            &["Homeboy worktree"][..],
+        ),
+        (
+            without_origin.path(),
+            "remote.origin.url",
+            &["Set remote.origin.url"][..],
+        ),
+        (
+            dirty.path(),
+            "clean git checkout",
+            &["clean task worktree", "dirty.txt"][..],
+        ),
+    ] {
+        let err = preflight_patch_provider_git_checkout(dir).expect_err("preflight must refuse");
+        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
+        assert!(err.message.contains(message), "{}", err.message);
+        let tried = tried_hints(&err);
+        for hint in hints {
+            assert!(tried.iter().any(|tried| tried.contains(hint)), "{tried:?}");
+        }
+        // A dirty task worktree is never solved by stashing or running locally.
+        assert!(!tried
+            .iter()
+            .any(|hint| hint.contains("Commit or stash") || hint.contains("--placement local")));
+    }
 }
 
+/// Regression for #16166: changed-since staging must name the directory its
+/// remote read checked. A checkout without origin is caller input with a fix
+/// hint; a non-git directory (daemon cwd, scratch dir, deleted checkout) is a
+/// controller staging failure classified as infrastructure (internal.io).
 #[test]
-fn required_git_checkout_preflight_rejects_non_git_source_before_offload() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn changed_since_git_sync_mode_names_the_checked_directory() {
+    let args = [
+        "homeboy",
+        "review",
+        "test",
+        "--changed-since",
+        "origin/main",
+    ]
+    .map(str::to_string);
+    let without_origin = git_checkout(None);
+    let non_git = tempfile::tempdir().expect("temp dir");
 
-    let err =
-        preflight_patch_provider_git_checkout(dir.path()).expect_err("non-git source should fail");
+    for (dir, code, message) in [
+        (
+            without_origin.path(),
+            ErrorCode::ValidationInvalidArgument,
+            "remote.origin.url",
+        ),
+        (
+            non_git.path(),
+            ErrorCode::InternalIoError,
+            "not a Git work tree",
+        ),
+    ] {
+        let err = lab_workspace_sync_mode(
+            LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
+            &args,
+            dir,
+        )
+        .expect_err("changed-since staging must fail with named evidence");
 
-    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    assert!(err.message.contains("requires --cwd to be a git checkout"));
-    assert!(err.details["tried"]
-        .as_array()
-        .expect("tried hints")
-        .iter()
-        .any(|hint| hint
-            .as_str()
-            .is_some_and(|hint| hint.contains("Homeboy worktree"))));
-}
-
-#[test]
-fn required_git_checkout_preflight_rejects_checkout_without_origin() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .status()
-        .expect("init git repo");
-
-    let err = preflight_patch_provider_git_checkout(dir.path())
-        .expect_err("checkout without origin should fail");
-
-    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    assert!(err.message.contains("remote.origin.url"));
-    assert!(err.details["tried"]
-        .as_array()
-        .expect("tried hints")
-        .iter()
-        .any(|hint| hint
-            .as_str()
-            .is_some_and(|hint| hint.contains("Set remote.origin.url"))));
-}
-
-#[test]
-fn required_git_checkout_preflight_rejects_dirty_checkout() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .status()
-        .expect("init git repo");
-    std::process::Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/Extra-Chill/homeboy.git",
-        ])
-        .current_dir(dir.path())
-        .status()
-        .expect("add origin");
-    std::fs::write(dir.path().join("dirty.txt"), "dirty").expect("write dirty file");
-
-    let err =
-        preflight_patch_provider_git_checkout(dir.path()).expect_err("dirty checkout should fail");
-
-    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    assert!(err.message.contains("clean git checkout"));
-    let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("clean task worktree"))));
-    assert!(tried
-        .iter()
-        .any(|hint| hint.as_str().is_some_and(|hint| hint.contains("dirty.txt"))));
-    assert!(!tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("Commit or stash"))));
-    assert!(!tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("--placement local"))));
-}
-
-#[test]
-fn required_git_checkout_preflight_accepts_clean_checkout_with_origin() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .status()
-        .expect("init git repo");
-    std::process::Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/Extra-Chill/homeboy.git",
-        ])
-        .current_dir(dir.path())
-        .status()
-        .expect("add origin");
-
-    preflight_patch_provider_git_checkout(dir.path()).expect("clean checkout should pass");
-}
-
-#[test]
-fn lab_git_workspace_sync_keeps_git_for_public_sources() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .status()
-        .expect("init git repo");
-    std::process::Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/Extra-Chill/homeboy.git",
-        ])
-        .current_dir(dir.path())
-        .status()
-        .expect("add origin");
-
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-    ];
-    let mode = lab_workspace_sync_mode(LabOffloadWorkspaceModePolicy::Git, &args, dir.path())
-        .expect("sync mode");
-
-    assert_eq!(mode, RunnerWorkspaceSyncMode::Git);
-}
-
-/// Regression for #16166: the sync-mode remote read used to fail as
-/// `git config --get remote.origin.url failed: ` — internal.unexpected, empty
-/// stderr, no directory — and was recorded as invalid input. A checkout that
-/// really has no origin must instead name the directory it checked and carry a
-/// fix hint.
-#[test]
-fn changed_since_git_sync_mode_names_checkout_without_origin() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(dir.path())
-        .status()
-        .expect("init git repo");
-
-    let args = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "test".to_string(),
-        "--changed-since".to_string(),
-        "origin/main".to_string(),
-    ];
-    let err = lab_workspace_sync_mode(
-        LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-        &args,
-        dir.path(),
-    )
-    .expect_err("checkout without origin must fail with named evidence");
-
-    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    assert!(
-        err.message.contains(&dir.path().display().to_string()),
-        "error must name the directory it checked: {}",
-        err.message
-    );
-    assert!(err.message.contains("remote.origin.url"));
-    assert!(err.details["tried"]
-        .as_array()
-        .expect("tried hints")
-        .iter()
-        .any(|hint| hint
-            .as_str()
-            .is_some_and(|hint| hint.contains("Set remote.origin.url"))));
-}
-
-/// Regression for #16166: when staging runs its Git evidence read somewhere
-/// that is not a Git work tree (the daemon's cwd, a scratch directory, a
-/// deleted checkout), that is a controller staging failure — classified as
-/// infrastructure (internal.io), not caller input — and it must name the
-/// directory it checked.
-#[test]
-fn changed_since_git_sync_mode_reports_non_git_directory_as_staging_failure() {
-    let dir = tempfile::tempdir().expect("temp dir");
-
-    let args = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "test".to_string(),
-        "--changed-since".to_string(),
-        "origin/main".to_string(),
-    ];
-    let err = lab_workspace_sync_mode(
-        LabOffloadWorkspaceModePolicy::ChangedSinceGitElseSnapshot,
-        &args,
-        dir.path(),
-    )
-    .expect_err("non-git directory must fail as a staging bug");
-
-    assert_eq!(err.code, ErrorCode::InternalIoError);
-    assert!(
-        err.message.contains(&dir.path().display().to_string()),
-        "error must name the directory it checked: {}",
-        err.message
-    );
-    assert!(err.message.contains("not a Git work tree"));
+        assert_eq!(err.code, code);
+        assert!(
+            err.message.contains(&dir.display().to_string()),
+            "error must name the directory it checked: {}",
+            err.message
+        );
+        assert!(err.message.contains(message), "{}", err.message);
+        if code == ErrorCode::ValidationInvalidArgument {
+            assert!(tried_hints(&err)
+                .iter()
+                .any(|hint| hint.contains("Set remote.origin.url")));
+        }
+    }
 }
 
 #[test]
@@ -481,10 +333,6 @@ fn in_flight_daemon_disconnect_error_surfaces_inspection_commands() {
     assert!(err.hints.iter().any(|hint| hint
         .message
         .contains("homeboy runner exec homeboy-lab -- homeboy runs list --status running")));
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("homeboy runner exec homeboy-lab")));
 }
 
 #[test]

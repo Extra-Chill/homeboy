@@ -29,7 +29,7 @@ use homeboy_core::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRe
 use homeboy_core::{Error, ErrorCode, Result};
 use serde_json::{json, Value};
 
-use crate::agent_task_lifecycle;
+use crate::agent_task_lifecycle::{self, CookAdmissionPhase};
 
 /// Idempotency-key prefix of the step that runs an initial detached Cook.
 pub const COOK_LAUNCH_STEP_KEY_PREFIX: &str = "agent-task-cook-launch:";
@@ -243,9 +243,8 @@ fn workflow_cook_record(
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .map_err(|_| WorkflowRunOutcome::Pending)?;
     let parent = store.read_record(cook_id).ok();
-    let redirected = parent
-        .as_ref()
-        .is_some_and(|parent| parent.metadata["detached_cook_handoff"]["state"] == "redirected");
+    let redirected =
+        parent.as_ref().and_then(CookAdmissionPhase::of) == Some(CookAdmissionPhase::Materialized);
     let latest = super::load_recipe(cook_id)
         .ok()
         .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()));
@@ -408,7 +407,6 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
         return Ok(());
     }
     if !parent.state().is_terminal()
-        && parent.metadata["detached_cook_handoff"]["state"] != "redirected"
         && agent_task_lifecycle::is_unmaterialized_cook_admission(&parent)
     {
         // The launcher transferred custody in the lifecycle transaction.
@@ -430,7 +428,7 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
         cook_id,
         &launch_exit_reason(exit),
     )?;
-    if parent.metadata["detached_cook_handoff"]["state"] != "redirected" {
+    if CookAdmissionPhase::of(&parent) != Some(CookAdmissionPhase::Materialized) {
         return Ok(());
     }
     let index = match store.read_cook_index(cook_id) {
@@ -504,7 +502,7 @@ fn settle_missing_launch_index(
     store.transition_when(cook_id, |record| {
         if record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
             || record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
-            || record.metadata["detached_cook_handoff"]["state"] != "redirected"
+            || CookAdmissionPhase::of(record) != Some(CookAdmissionPhase::Materialized)
         {
             return None;
         }
@@ -522,7 +520,6 @@ fn settle_missing_launch_index(
             }
         }
         let mut handoff = record.metadata["detached_cook_handoff"].clone();
-        handoff["state"] = json!("exited_before_handoff");
         handoff["admission_state"] = json!("failed");
         handoff["reason"] = json!(diagnostic.message);
         Some(agent_task_lifecycle::AgentTaskTransition::Terminate {
@@ -554,22 +551,6 @@ fn settle_missing_launch_index(
 pub(crate) fn finalize_detached_cook_attempt(cook_id: &str, _attempt_run_id: &str) -> Result<()> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     super::finish_cook_terminal(&store, cook_id)
-}
-
-pub(super) fn attempt_status_label(
-    state: homeboy_lifecycle_contract::RunExecutionState,
-) -> &'static str {
-    use homeboy_lifecycle_contract::RunExecutionState;
-    match state {
-        RunExecutionState::Queued => "queued",
-        RunExecutionState::Running => "running",
-        RunExecutionState::Succeeded => "succeeded",
-        RunExecutionState::CandidateRecoverable => "candidate_recoverable",
-        RunExecutionState::PartialFailure => "partial_failure",
-        RunExecutionState::Failed => "failed",
-        RunExecutionState::Unknown => "unknown",
-        RunExecutionState::Cancelled => "cancelled",
-    }
 }
 
 pub(super) fn last_failed_command_result(log_path: &Path) -> Option<Value> {
@@ -612,7 +593,7 @@ mod tests {
                     record,
                     homeboy_lifecycle_contract::RunExecutionState::Cancelled,
                 );
-                record.metadata["detached_cook_handoff"]["state"] = json!("redirected");
+                record.metadata["detached_cook_handoff"]["admission_state"] = json!("materialized");
             })
             .unwrap();
             let before = store.read_record(cook_id).unwrap();

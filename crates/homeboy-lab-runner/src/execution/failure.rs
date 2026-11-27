@@ -449,6 +449,23 @@ pub(super) fn daemon_exec_request_failed_error(
     status_code: u16,
     envelope: &DaemonEnvelope,
 ) -> Error {
+    if let Some(wire) = envelope.error.as_ref() {
+        if wire["error"].as_str() == Some(ErrorCode::RunnerCapacityBusy.as_str()) {
+            return Error::new(
+                ErrorCode::RunnerCapacityBusy,
+                wire["message"]
+                    .as_str()
+                    .unwrap_or("runner admission refused"),
+                {
+                    let mut details = wire["details"].clone();
+                    if details.is_object() && details.get("blocker").is_none() {
+                        details["blocker"] = details["pressure"].clone();
+                    }
+                    details
+                },
+            );
+        }
+    }
     match daemon_failure_payload_message(envelope) {
         Some(detail) => Error::internal_unexpected(format!(
             "daemon exec request failed: {detail}"

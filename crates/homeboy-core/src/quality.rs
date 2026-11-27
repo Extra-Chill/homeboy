@@ -178,50 +178,38 @@ mod tests {
     use crate::plan::{PlanKind, PlanStepDependencyKind, PlanStepStatus};
 
     #[test]
-    fn test_release_preflight() {
-        let options = QualityPlanOptions::release_preflight("fixture", false);
-
-        assert_eq!(options.component_id, "fixture");
-        assert_eq!(options.mode.as_deref(), Some("release-preflight"));
-        assert_eq!(options.step_prefix, "preflight");
-        assert_eq!(options.skip_reason, "--skip-checks");
-        assert_eq!(options.lint_needs, vec!["preflight.bump_policy"]);
-        assert_eq!(options.test_needs, vec!["preflight.lint"]);
+    fn blanket_skip_disables_every_check_with_its_reason() {
+        for (options, reason) in [
+            (
+                QualityPlanOptions::skipped_review("fixture", "no files changed"),
+                "no files changed",
+            ),
+            (
+                QualityPlanOptions::release_preflight("fixture", true),
+                "--skip-checks",
+            ),
+            (
+                QualityPlanOptions::release_preflight("fixture", true)
+                    .with_granular_skips(&["lint".to_string()]),
+                "--skip-checks",
+            ),
+        ] {
+            let steps = build_quality_steps(&options);
+            assert_eq!(steps.len(), 2);
+            for step in steps {
+                assert_eq!(step.status, PlanStepStatus::Disabled, "{}", step.id);
+                assert_eq!(
+                    step.inputs.get("reason").and_then(|value| value.as_str()),
+                    Some(reason),
+                    "{}",
+                    step.id
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_review() {
-        let options = QualityPlanOptions::review("fixture");
-
-        assert_eq!(options.component_id, "fixture");
-        assert_eq!(options.mode.as_deref(), Some("review"));
-        assert_eq!(options.step_prefix, "review");
-        assert!(options.lint_needs.is_empty());
-        assert_eq!(options.test_needs, vec!["review.lint"]);
-        assert_eq!(options.needs_kind, PlanStepDependencyKind::DisplayOrder);
-    }
-
-    #[test]
-    fn test_skipped_review() {
-        let plan = build_quality_plan(QualityPlanOptions::skipped_review(
-            "fixture",
-            "no files changed",
-        ));
-
-        assert_eq!(plan.mode.as_deref(), Some("review"));
-        assert!(plan
-            .steps
-            .iter()
-            .all(|step| step.status == PlanStepStatus::Disabled));
-        assert!(plan.steps.iter().all(|step| step
-            .inputs
-            .get("reason")
-            .and_then(|value| value.as_str())
-            == Some("no files changed")));
-    }
-
-    #[test]
-    fn test_build_quality_plan() {
+    fn release_preflight_edges_execute_while_review_edges_only_order_display() {
         let plan = build_quality_plan(QualityPlanOptions::release_preflight("fixture", false));
         let ids: Vec<&str> = plan.steps.iter().map(|step| step.id.as_str()).collect();
 
@@ -232,73 +220,36 @@ mod tests {
         assert_eq!(plan.steps[0].needs, vec!["preflight.bump_policy"]);
         assert_eq!(plan.steps[1].needs, vec!["preflight.lint"]);
         assert_eq!(plan.steps[0].needs_kind, PlanStepDependencyKind::Execution);
-    }
 
-    #[test]
-    fn review_quality_edges_are_display_order_only() {
-        let plan = build_quality_plan(QualityPlanOptions::review("fixture"));
-
-        assert!(plan.steps[0].needs.is_empty());
-        assert_eq!(plan.steps[1].needs, vec!["review.lint"]);
+        let review = build_quality_plan(QualityPlanOptions::review("fixture"));
+        assert!(review.steps[0].needs.is_empty());
+        assert_eq!(review.steps[1].needs, vec!["review.lint"]);
         assert_eq!(
-            plan.steps[1].needs_kind,
+            review.steps[1].needs_kind,
             PlanStepDependencyKind::DisplayOrder
         );
     }
 
     #[test]
-    fn test_build_quality_steps() {
-        let options = QualityPlanOptions::release_preflight("fixture", true);
-        let steps = build_quality_steps(&options);
-
-        assert!(steps
-            .iter()
-            .all(|step| step.status == PlanStepStatus::Disabled));
-        assert!(steps.iter().all(|step| step
-            .inputs
-            .get("reason")
-            .and_then(|value| value.as_str())
-            == Some("--skip-checks")));
-    }
-
-    #[test]
-    fn granular_skip_disables_only_named_checks() {
-        // --skip-checks=lint disables only lint; test stays active.
-        let options = QualityPlanOptions::release_preflight("fixture", false)
-            .with_granular_skips(&["lint".to_string()]);
-        let steps = build_quality_steps(&options);
-
-        let lint = steps
-            .iter()
-            .find(|s| s.id == "preflight.lint")
-            .expect("lint step");
-        assert_eq!(lint.status, PlanStepStatus::Disabled);
-
-        let test = steps
-            .iter()
-            .find(|s| s.id == "preflight.test")
-            .expect("test step");
-        assert_ne!(test.status, PlanStepStatus::Disabled);
-    }
-
-    #[test]
-    fn granular_skip_accepts_multiple_checks_case_insensitively() {
-        let options = QualityPlanOptions::release_preflight("fixture", false)
-            .with_granular_skips(&["LINT".to_string(), "Tests".to_string()]);
-        assert!(options.skip_lint);
-        assert!(options.skip_test);
-    }
-
-    #[test]
-    fn granular_skip_does_not_affect_skip_checks_all() {
-        // When skip_checks (all) is true, granular flags are irrelevant — every
-        // gate is disabled by the blanket skip.
-        let options = QualityPlanOptions::release_preflight("fixture", true)
-            .with_granular_skips(&["lint".to_string()]);
-        let steps = build_quality_steps(&options);
-
-        assert!(steps
-            .iter()
-            .all(|step| step.status == PlanStepStatus::Disabled));
+    fn granular_skip_disables_only_named_checks_case_insensitively() {
+        for (checks, lint_disabled, test_disabled) in [
+            (vec!["lint"], true, false),
+            (vec!["LINT", "Tests"], true, true),
+            (vec!["test", "unknown"], false, true),
+        ] {
+            let checks: Vec<String> = checks.into_iter().map(str::to_string).collect();
+            let options = QualityPlanOptions::release_preflight("fixture", false)
+                .with_granular_skips(&checks);
+            let steps = build_quality_steps(&options);
+            let disabled = |id: &str| {
+                steps
+                    .iter()
+                    .find(|step| step.id == id)
+                    .map(|step| step.status == PlanStepStatus::Disabled)
+                    .expect(id)
+            };
+            assert_eq!(disabled("preflight.lint"), lint_disabled, "{checks:?}");
+            assert_eq!(disabled("preflight.test"), test_disabled, "{checks:?}");
+        }
     }
 }

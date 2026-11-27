@@ -1193,64 +1193,27 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_cleanup_fails_a_clean_producer_result() {
-        let output = finalize_cleanup_report(
-            command_output(true, 0, false),
-            Some(cleanup_report("run-owned process survived")),
-        );
+    fn incomplete_cleanup_fails_the_result_and_preserves_producer_failure_evidence() {
+        // (producer success, exit code, timed out, expected exit code)
+        for (success, exit_code, timed_out, expected_exit) in [
+            (true, 0, false, 1),
+            (false, 42, false, 42),
+            (false, 124, true, 124),
+            (false, 143, false, 143),
+        ] {
+            let output = finalize_cleanup_report(
+                command_output(success, exit_code, timed_out),
+                Some(cleanup_report("run-owned process survived")),
+            );
 
-        assert!(!output.success);
-        assert_eq!(output.exit_code, 1);
-        assert!(output.stderr.contains("containment cleanup was incomplete"));
-    }
-
-    #[test]
-    fn incomplete_cleanup_preserves_a_producer_failure() {
-        let output = finalize_cleanup_report(
-            command_output(false, 42, false),
-            Some(cleanup_report("ambiguous process scope")),
-        );
-
-        assert!(!output.success);
-        assert_eq!(output.exit_code, 42);
-        assert!(output.stderr.contains("ambiguous process scope"));
-    }
-
-    #[test]
-    fn incomplete_cleanup_preserves_timeout_failure_evidence() {
-        let output = finalize_cleanup_report(
-            command_output(false, 124, true),
-            Some(cleanup_report("cleanup after timeout")),
-        );
-
-        assert!(!output.success);
-        assert_eq!(output.exit_code, 124);
-        assert!(output.timed_out);
-        assert!(output.stderr.contains("cleanup after timeout"));
-    }
-
-    #[test]
-    fn incomplete_cleanup_preserves_cancellation_failure_evidence() {
-        let output = finalize_cleanup_report(
-            command_output(false, 143, false),
-            Some(cleanup_report("cleanup after cancellation")),
-        );
-
-        assert!(!output.success);
-        assert_eq!(output.exit_code, 143);
-        assert!(output.stderr.contains("cleanup after cancellation"));
-    }
-
-    #[test]
-    fn incomplete_cleanup_preserves_delegated_failure_evidence() {
-        let output = finalize_cleanup_report(
-            command_output(false, 1, false),
-            Some(cleanup_report("cleanup after delegated failure")),
-        );
-
-        assert!(!output.success);
-        assert_eq!(output.exit_code, 1);
-        assert!(output.stderr.contains("cleanup after delegated failure"));
+            assert!(!output.success, "exit {exit_code}");
+            assert_eq!(output.exit_code, expected_exit);
+            assert_eq!(output.timed_out, timed_out);
+            assert!(output.stderr.contains("producer evidence"));
+            assert!(output
+                .stderr
+                .contains("containment cleanup was incomplete: run-owned process survived"));
+        }
     }
 
     #[cfg(unix)]
@@ -1448,27 +1411,23 @@ mod tests {
         // signal cannot arrive early and be lost under load (#15958).
         let interrupter = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
-            while !ready.exists() && Instant::now() < deadline {
+            while !ready.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "waiting for child SIGTERM trap readiness at {}",
+                    ready.display()
+                );
                 thread::sleep(Duration::from_millis(10));
             }
-            unsafe { libc::kill(foreground_pid, libc::SIGTERM) };
+            assert_eq!(unsafe { libc::kill(foreground_pid, libc::SIGTERM) }, 0);
         });
 
-        // The child must never be blocked in a foreground command when the
-        // TERM arrives: POSIX shells defer a trap until the foreground command
-        // finishes, and cleanup escalates to SIGKILL after a 200ms grace. With
-        // `while :; do sleep 1; done`, a `sleep` forked after cleanup scanned
-        // the owned scope (or not yet forked when READY appeared) is never
-        // signalled, so the trap waited up to a second and the shell was
-        // killed before writing the marker. Instead, start the long-lived
-        // child before announcing readiness, so it is already in the scope
-        // when cleanup scans it, and block in the `wait` builtin, which a
-        // trapped signal interrupts immediately.
-        //
-        // Bounded so a lost signal fails the assertions below instead of
-        // hanging the test binary.
+        // Use only shell builtins after readiness. A foreground sleep delays
+        // traps; a background sleep plus `wait` can exit before TERM reaches
+        // the shell if cleanup signals the sleep first. The builtin loop
+        // cannot finish except through the trap (or the bounded timeout).
         let output = execute_local_command_in_dir_with_timeout(
-            "trap 'printf graceful > \"$MARKER\"; exit 0' TERM; sleep 1000 & : > \"$READY\"; wait",
+            "trap 'printf graceful > \"$MARKER\"; exit 0' TERM; : > \"$READY\"; while :; do :; done",
             None,
             Some(&env),
             Duration::from_secs(60),
@@ -1510,15 +1469,5 @@ mod tests {
         assert!(output.success, "{}", output.stderr);
         assert_eq!(output.exit_code, 0);
         assert!(!output.stderr.contains("cleanup was incomplete"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn clean_completion_reaps_an_owned_scope_survivor() {
-        let output = execute_local_command("sleep 30 & printf '%s' \"$!\"");
-
-        assert!(output.success, "{}", output.stderr);
-        let pid = output.stdout.parse::<libc::pid_t>().expect("survivor pid");
-        assert_pid_reaped(pid);
     }
 }

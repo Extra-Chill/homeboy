@@ -1259,7 +1259,7 @@ fn attach_version_sources(result: &mut DeployOrchestrationResult, components: &[
 /// deploy can reuse the same run-scoped bytes across every target.
 ///
 /// Check mode consumes the same canonical release package selected for deploy
-/// when it is available. A failed optional lookup retains legacy source-tree
+/// when it is available. A failed optional lookup falls back to source-tree
 /// checking rather than failing the complete read-only project probe.
 fn resolve_release_artifacts_for_deploy(
     components: &[Component],

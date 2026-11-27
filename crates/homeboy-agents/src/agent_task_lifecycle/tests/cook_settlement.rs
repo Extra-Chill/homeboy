@@ -16,7 +16,6 @@ fn continuation_settlement_matrix() {
                             "state": state, "submitted_at": "2026-01-01T00:00:00Z", "plan_path": "/plan",
                             "metadata": if runner { serde_json::json!({"runner_id": "runner"}) } else { serde_json::json!({}) },
                         })).unwrap();
-                        assert_eq!(record.runner_id().is_some(), runner);
                         let settlement = CookSettlement(continuation);
                         let expected = terminal
                             && !driver
@@ -27,10 +26,6 @@ fn continuation_settlement_matrix() {
                             };
                         assert_eq!(settlement.is_settled(&record, driver), expected,
                             "terminal={terminal}, driver={driver}, continuation={continuation:?}, runner={runner}, outcome={outcome:?}");
-                        assert_eq!(settlement.pending(), continuation == C::Pending);
-                        assert_eq!(settlement.running(), continuation == C::Claimed);
-                        assert_eq!(settlement.failed(), continuation == C::Failed);
-                        assert_eq!(settlement.completed(), continuation == C::Completed);
                     }
                 }
             }

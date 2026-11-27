@@ -130,31 +130,22 @@ mod shell_arg_tests {
     use super::shell_arg;
 
     #[test]
-    fn safe_set_is_left_bare() {
-        assert_eq!(shell_arg("abc-DEF_1.2/x:y"), "abc-DEF_1.2/x:y");
-        assert_eq!(shell_arg("user@host"), "user@host");
-        assert_eq!(shell_arg("key=value"), "key=value");
-        assert_eq!(shell_arg("a@b=c/d:e"), "a@b=c/d:e");
-    }
-
-    #[test]
-    fn unsafe_values_are_single_quoted() {
-        assert_eq!(shell_arg("a b"), "'a b'");
-        assert_eq!(shell_arg("$HOME"), "'$HOME'");
-        assert_eq!(shell_arg("a;b"), "'a;b'");
-        assert_eq!(shell_arg("{\"k\":1}"), "'{\"k\":1}'");
-        assert_eq!(shell_arg("~/x"), "'~/x'");
-    }
-
-    #[test]
-    fn embedded_single_quote_is_escaped() {
-        assert_eq!(shell_arg("a'b"), "'a'\\''b'");
-        assert_eq!(shell_arg("'"), "''\\'''");
-    }
-
-    #[test]
-    fn empty_value_is_quoted_not_dropped() {
-        assert_eq!(shell_arg(""), "''");
+    fn shell_arg_leaves_safe_values_bare_and_single_quotes_the_rest() {
+        for (input, expected) in [
+            ("abc-DEF_1.2/x:y", "abc-DEF_1.2/x:y"),
+            ("a@b=c/d:e", "a@b=c/d:e"),
+            ("a b", "'a b'"),
+            ("$HOME", "'$HOME'"),
+            ("a;b", "'a;b'"),
+            ("{\"k\":1}", "'{\"k\":1}'"),
+            ("~/x", "'~/x'"),
+            ("a'b", "'a'\\''b'"),
+            ("'", "''\\'''"),
+            // Empty is quoted, not dropped.
+            ("", "''"),
+        ] {
+            assert_eq!(shell_arg(input), expected, "{input}");
+        }
     }
 }
 
@@ -172,15 +163,11 @@ mod remote_env_tests {
     }
 
     #[test]
-    fn path_env_value_allows_existing_path_expansion() {
+    fn only_path_env_values_allow_expansion() {
         assert_eq!(
             quote_runner_env_value("PATH", "$PATH:/custom/bin"),
             "\"$PATH:/custom/bin\""
         );
-    }
-
-    #[test]
-    fn non_path_env_value_uses_shell_quoting() {
         assert_eq!(
             quote_runner_env_value("TOKEN", "hello world"),
             "'hello world'"

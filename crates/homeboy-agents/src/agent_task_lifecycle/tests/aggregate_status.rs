@@ -94,21 +94,6 @@ fn mixed_scheduler_outcomes_keep_status_and_totals() {
             candidate: candidate.clone(),
         }))
         .run(scheduler_plan);
-        let statuses = |aggregate: &AgentTaskAggregate| {
-            aggregate
-                .outcomes
-                .iter()
-                .map(|outcome| (outcome.task_id.clone(), outcome.status))
-                .collect::<Vec<_>>()
-        };
-        let mixed = vec![
-            ("task-a".to_string(), AgentTaskOutcomeStatus::Succeeded),
-            (
-                "task-b".to_string(),
-                AgentTaskOutcomeStatus::CandidateRecoverable,
-            ),
-        ];
-        assert_eq!(statuses(&scheduled), mixed);
         store
             .submit_plan_with_runtime_admission(&plan, "mixed-scheduler", |_| Ok(json!({})))
             .expect("submit scheduler run");

@@ -134,46 +134,27 @@ mod tests {
         }
     }
 
+    /// Runner-exec mirrors persist the nested `lab.remote_job.id` and bench/trace
+    /// siblings the flat `lab.remote_job_id`; both must resolve to the same job
+    /// so artifact linking finds the sibling (#9783).
     #[test]
-    fn reads_nested_remote_job_id() {
-        // runner-exec mirrors persist the nested shape.
-        let run = run_with_metadata(serde_json::json!({
-            "lab": { "runner": { "id": "lab" }, "remote_job": { "id": "job-123" } }
-        }));
-        assert_eq!(lab_remote_job_id(&run), Some("job-123"));
-    }
-
-    #[test]
-    fn reads_flat_remote_job_id() {
-        // bench/trace sibling runs persist the flat shape.
-        let run = run_with_metadata(serde_json::json!({
-            "lab": { "remote_job_id": "job-123" }
-        }));
-        assert_eq!(lab_remote_job_id(&run), Some("job-123"));
-    }
-
-    #[test]
-    fn nested_and_flat_shapes_correlate_to_the_same_job() {
-        // #9783: a runner-exec run (nested) and its sibling (flat) must resolve
-        // to the same job id so artifact linking finds the sibling.
-        let runner = run_with_metadata(serde_json::json!({
-            "lab": { "runner": { "id": "lab" }, "remote_job": { "id": "job-9783" } }
-        }));
-        let sibling = run_with_metadata(serde_json::json!({
-            "lab": { "remote_job_id": "job-9783" }
-        }));
-        assert_eq!(lab_remote_job_id(&runner), lab_remote_job_id(&sibling));
-    }
-
-    #[test]
-    fn missing_lineage_returns_none() {
-        assert_eq!(
-            lab_remote_job_id(&run_with_metadata(serde_json::json!({}))),
-            None
-        );
-        assert_eq!(
-            lab_remote_job_id(&run_with_metadata(serde_json::json!({ "lab": {} }))),
-            None
-        );
+    fn lab_remote_job_id_reads_both_metadata_shapes() {
+        for (metadata, expected) in [
+            (
+                serde_json::json!({
+                    "lab": { "runner": { "id": "lab" }, "remote_job": { "id": "job-9783" } }
+                }),
+                Some("job-9783"),
+            ),
+            (
+                serde_json::json!({ "lab": { "remote_job_id": "job-9783" } }),
+                Some("job-9783"),
+            ),
+            (serde_json::json!({}), None),
+            (serde_json::json!({ "lab": {} }), None),
+        ] {
+            let run = run_with_metadata(metadata.clone());
+            assert_eq!(lab_remote_job_id(&run), expected, "{metadata}");
+        }
     }
 }

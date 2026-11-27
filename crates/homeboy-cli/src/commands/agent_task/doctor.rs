@@ -277,25 +277,23 @@ mod tests {
     }
 
     #[test]
-    fn serde_runner_status_matches_report_wire_labels() {
-        // The report serializes RunnerDoctorStatus as snake_case; verdict
-        // comparisons must use the exact same strings.
-        assert_eq!(serde_runner_status(RunnerDoctorStatus::Ok), "ok");
-        assert_eq!(serde_runner_status(RunnerDoctorStatus::Warning), "warn");
-        assert_eq!(serde_runner_status(RunnerDoctorStatus::Error), "error");
-    }
-
-    #[test]
-    fn provider_failure_blocks_cook_with_its_own_blocker() {
-        let provider = blocked_provider();
-        let runner = json!({ "status": "ok", "checks": [] });
-        let verdict = combine_verdict(&provider, &runner);
-        assert!(!verdict.ready);
-        assert_eq!(
-            verdict.blocker.as_ref().unwrap()["code"],
-            json!("backend_unresolved")
-        );
-        assert!(verdict.summary.contains("provider contract"));
+    fn provider_blocker_wins_over_any_runner_state() {
+        // The provider blocker is reported first so the operator fixes contract
+        // readiness before chasing runner state.
+        for runner in [
+            json!({ "status": "ok", "checks": [] }),
+            json!({
+                "status": "error",
+                "checks": [{ "id": "daemon.exec", "status": "error", "message": "x" }]
+            }),
+        ] {
+            let verdict = combine_verdict(&blocked_provider(), &runner);
+            assert!(!verdict.ready);
+            let blocker = verdict.blocker.unwrap();
+            assert_eq!(blocker["stage"], json!("provider_contracts"));
+            assert_eq!(blocker["code"], json!("backend_unresolved"));
+            assert!(verdict.summary.contains("provider contract"));
+        }
     }
 
     #[test]
@@ -329,47 +327,20 @@ mod tests {
     }
 
     #[test]
-    fn ready_when_both_stages_pass() {
-        let provider = ready_provider();
-        let runner = json!({ "status": "ok", "checks": [] });
-        let verdict = combine_verdict(&provider, &runner);
-        assert!(verdict.ready);
-        assert!(verdict.blocker.is_none());
-        assert!(verdict.summary.contains("ready"));
-        assert!(!verdict.summary.contains("warning"));
-    }
-
-    #[test]
-    fn runner_warnings_do_not_block_cook_but_are_surfaced_in_verdict() {
-        let provider = ready_provider();
-        let runner = json!({
-            "status": "warn",
-            "checks": [
-                { "id": "homeboy.daemon_command", "status": "warn", "message": "skew" }
-            ]
-        });
-        let verdict = combine_verdict(&provider, &runner);
-        assert!(verdict.ready);
-        assert!(verdict.blocker.is_none());
-        assert!(verdict.summary.contains("non-blocking warnings"));
-    }
-
-    #[test]
-    fn provider_stage_takes_precedence_over_runner_error() {
-        // When both stages fail, the provider blocker is reported first so the
-        // operator fixes contract readiness before chasing runner state.
-        let provider = blocked_provider();
-        let runner = json!({
-            "status": "error",
-            "checks": [
-                { "id": "daemon.exec", "status": "error", "message": "x" }
-            ]
-        });
-        let verdict = combine_verdict(&provider, &runner);
-        assert!(!verdict.ready);
-        assert_eq!(
-            verdict.blocker.unwrap()["stage"],
-            json!("provider_contracts")
-        );
+    fn runner_ok_or_warning_is_ready_and_discloses_warnings() {
+        for (status, warned) in [("ok", false), ("warn", true)] {
+            let runner = json!({
+                "status": status,
+                "checks": [{ "id": "homeboy.daemon_command", "status": status, "message": "m" }]
+            });
+            let verdict = combine_verdict(&ready_provider(), &runner);
+            assert!(verdict.ready, "{status}");
+            assert!(verdict.blocker.is_none(), "{status}");
+            assert_eq!(
+                verdict.summary.contains("non-blocking warnings"),
+                warned,
+                "{status}"
+            );
+        }
     }
 }

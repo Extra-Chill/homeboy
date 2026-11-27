@@ -127,7 +127,8 @@ fn terminal_transition_settles_cook_observations_and_span() {
             agent_task_lifecycle::record_cook_terminal_result_in_store(
                 &store,
                 &attempt,
-                status,
+                homeboy_core::cook_status::CookStatus::from_status(status)
+                    .unwrap_or(homeboy_core::cook_status::CookStatus::ReviewReady),
                 i32::from(!success),
             )
             .unwrap();
@@ -241,16 +242,26 @@ fn admission_blocks_nonterminal_record_older_than_display_window() {
                 json!({"runner_id": "lab", "runner_job_id": "old-job"}),
             ))
             .unwrap();
-        for index in 0..1001 {
-            store
-                .write_record(&record(
-                    &format!("terminal-{index}"),
-                    "succeeded",
-                    "2026-01-01T00:00:00Z",
-                    json!({}),
-                ))
-                .unwrap();
+        // Only the observation history matters here, not terminal lifecycle
+        // side effects (notably a host process-table scan per terminal write).
+        // Project one real terminal record, then reuse its durable row shape
+        // through a single connection for the rest of the display-window filler.
+        store
+            .write_record(&record(
+                "terminal-0",
+                "succeeded",
+                "2026-01-01T00:00:00Z",
+                json!({}),
+            ))
+            .unwrap();
+        let observations = store.open_observation_initialized().unwrap();
+        let mut terminal = observations.get_run("terminal-0").unwrap().unwrap();
+        for index in 1..1001 {
+            terminal.id = format!("terminal-{index}");
+            terminal.metadata_json["agent_task_run"]["run_id"] = json!(terminal.id);
+            observations.upsert_imported_run(&terminal).unwrap();
         }
+        drop(observations);
         let (bounded, _) = store.read_records_with_health_bounded(1000).unwrap();
         assert!(!bounded.iter().any(|record| record.run_id == "old-active"));
 

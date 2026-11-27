@@ -24,7 +24,7 @@ use diagnostics::*;
 use projections::*;
 pub(crate) use projections::{
     bounded_cancel_report, bounded_full_operation_report, compact_aggregate_summary,
-    compact_cook_report, compact_cook_report_with_summary, project_operator_output,
+    compact_cook_report, project_operator_output,
 };
 
 use crate::commands::operator_projection::serialized_len;

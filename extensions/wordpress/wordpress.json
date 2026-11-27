@@ -1,12 +1,13 @@
 {
   "name": "WordPress",
-  "version": "3.56.5",
+  "version": "3.56.8",
   "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
   "author": "Extra Chill",
   "wp_codebox": {
-    "minimum_version": "0.21.0"
+    "minimum_version": "0.21.0",
+    "ref": "v0.34.3"
   },
   "env_provider": {
     "script": "scripts/env-provider.js"
@@ -21,7 +22,7 @@
   "composition": {
     "includes": ["nodejs"]
   },
-  "isolated_home_paths": [".cache/homeboy/wp-codebox", ".wordpress-playground"],
+  "isolated_home_paths": [".cache/homeboy/wp-codebox", ".wordpress-playground", ".cache/composer"],
   "source_snapshot": {
     "sync_excludes": ["vendor/", "vendor/**", "wp-config.php"]
   },
@@ -657,7 +658,7 @@
       "label": "wp-config additions",
       "type": "object",
       "default": {},
-      "description": "Map of CONSTANT_NAME => value appended to the WP Codebox wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden."
+      "description": "Map of CONSTANT_NAME => value appended to the WP Codebox wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden; declaring a database target constant (DB_NAME, DB_HOST, DB_USER, DB_PASSWORD, ...) makes the runner fail closed."
     },
     {
       "id": "build_nested_packages",

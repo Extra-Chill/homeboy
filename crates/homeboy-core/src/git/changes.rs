@@ -700,23 +700,6 @@ mod tests {
     }
 
     #[test]
-    fn get_files_changed_since_uses_core_owned_changed_since_path() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let path = dir.path().to_str().unwrap();
-        init_repo_with_initial_commit(path);
-        git(path, &["checkout", "-qb", "candidate"]);
-        fs::write(dir.path().join("changed.txt"), "changed\n").unwrap();
-        git(path, &["add", "changed.txt"]);
-        git(path, &["commit", "-qm", "changed"]);
-        fs::write(dir.path().join("untracked.txt"), "untracked\n").unwrap();
-
-        let files = get_files_changed_since(path, "main").expect("changed files");
-
-        assert!(files.contains(&"changed.txt".to_string()));
-        assert!(files.contains(&"untracked.txt".to_string()));
-    }
-
-    #[test]
     fn get_files_changed_since_excludes_files_deleted_in_the_working_tree() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().to_str().unwrap();
@@ -960,12 +943,16 @@ mod tests {
     }
 
     #[test]
-    fn base_advance_warning_reports_how_far_a_moved_base_has_advanced() {
+    fn base_advance_warning_reports_only_a_moved_base() {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().to_str().unwrap().to_string();
         init_repo_with_initial_commit(&path);
 
         git(&path, &["checkout", "-q", "-b", "candidate"]);
+        fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-q", "-m", "candidate feature"]);
+        assert_eq!(base_advance_warning(&path, "main"), None);
 
         git(&path, &["checkout", "-q", "main"]);
         fs::write(dir.path().join("a.txt"), "a\n").unwrap();
@@ -974,7 +961,6 @@ mod tests {
         fs::write(dir.path().join("b.txt"), "b\n").unwrap();
         git(&path, &["add", "."]);
         git(&path, &["commit", "-q", "-m", "advance 2"]);
-
         git(&path, &["checkout", "-q", "candidate"]);
 
         let warning = base_advance_warning(&path, "main").expect("warning when base has advanced");
@@ -986,21 +972,6 @@ mod tests {
             warning.contains("rebase"),
             "expected the warning to hint that a rebase may be needed: {warning}"
         );
-    }
-
-    #[test]
-    fn base_advance_warning_is_none_when_base_has_not_moved() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let path = dir.path().to_str().unwrap().to_string();
-        init_repo_with_initial_commit(&path);
-
-        git(&path, &["checkout", "-q", "-b", "candidate"]);
-        fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
-        git(&path, &["add", "."]);
-        git(&path, &["commit", "-q", "-m", "candidate feature"]);
-
-        // main never moved past the point candidate branched from.
-        assert_eq!(base_advance_warning(&path, "main"), None);
     }
 
     #[test]

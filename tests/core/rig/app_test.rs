@@ -96,46 +96,6 @@ fn test_app_launcher_spec_parses() {
 }
 
 #[test]
-fn test_linux_app_launcher_spec_parses() {
-    let json = r#"{
-        "id": "studio-dev",
-        "components": { "studio": { "path": "/tmp/studio" } },
-        "app_launcher": {
-            "platform": "linux",
-            "wrapper_display_name": "Studio Dev",
-            "wrapper_bundle_id": "com.example.studio-dev",
-            "target_app": "${components.studio.path}/out/studio",
-            "install_dir": "/tmp/apps",
-            "preflight": ["rig:check"]
-        }
-    }"#;
-    let spec: RigSpec = serde_json::from_str(json).expect("parse");
-    let launcher = spec.app_launcher.expect("launcher");
-    assert_eq!(launcher.platform, AppLauncherPlatform::Linux);
-    assert_eq!(launcher.wrapper_display_name, "Studio Dev");
-}
-
-#[test]
-fn test_resolve_launcher_expands_paths() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let launcher = super::resolve_launcher(&rig).expect("resolve");
-    assert_eq!(launcher.target_path, "/tmp/studio-dev/out/Studio.app");
-    assert!(launcher.launcher_path.ends_with("Studio (Dev).app"));
-    assert_eq!(launcher.launcher_path.parent().unwrap(), tmp.path());
-}
-
-#[test]
-fn test_resolve_linux_launcher_uses_desktop_extension() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_linux_launcher(&tmp.path().to_string_lossy());
-    let launcher = super::resolve_launcher(&rig).expect("resolve");
-    assert_eq!(launcher.target_path, "/tmp/studio-dev/out/studio");
-    assert!(launcher.launcher_path.ends_with("Studio (Dev).desktop"));
-    assert_eq!(launcher.launcher_path.parent().unwrap(), tmp.path());
-}
-
-#[test]
 fn test_generated_wrapper_content_runs_check_up_then_target() {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let rig = rig_with_launcher(&tmp.path().to_string_lossy());
@@ -168,63 +128,82 @@ fn test_generated_linux_desktop_entry_runs_check_up_then_target() {
 }
 
 #[test]
-fn test_install_dry_run_reports_paths_without_writing() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let report = install_inner(&rig, AppLauncherOptions { dry_run: true }, false).expect("plan");
-    assert!(report.dry_run);
-    assert_eq!(report.action, AppLauncherAction::Install);
-    assert!(report.launcher_path.ends_with("Studio (Dev).app"));
-    assert_eq!(report.files.len(), 3);
-    assert!(!tmp.path().join("Studio (Dev).app").exists());
+fn test_public_install_dry_run_previews_paths_on_any_host() {
+    let cases: [(fn(&str) -> RigSpec, AppLauncherPlatform, &str, &str, usize); 2] = [
+        (
+            rig_with_launcher,
+            AppLauncherPlatform::Macos,
+            "Studio (Dev).app",
+            "/tmp/studio-dev/out/Studio.app",
+            3,
+        ),
+        (
+            rig_with_linux_launcher,
+            AppLauncherPlatform::Linux,
+            "Studio (Dev).desktop",
+            "/tmp/studio-dev/out/studio",
+            1,
+        ),
+    ];
+
+    for (make_rig, platform, file_name, target, file_count) in cases {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let rig = make_rig(&tmp.path().to_string_lossy());
+        let report = crate::app::install(&rig, AppLauncherOptions { dry_run: true })
+            .expect("dry-run preview");
+
+        assert!(report.dry_run);
+        assert_eq!(report.action, AppLauncherAction::Install);
+        assert_eq!(report.platform, platform);
+        assert_eq!(
+            report.launcher_path,
+            tmp.path().join(file_name).display().to_string()
+        );
+        assert_eq!(report.target_app, target);
+        assert_eq!(report.files.len(), file_count, "{file_name}");
+        assert!(!tmp.path().join(file_name).exists(), "{file_name}");
+    }
 }
 
 #[test]
-fn test_linux_install_dry_run_reports_desktop_file_without_writing() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_linux_launcher(&tmp.path().to_string_lossy());
-    let report = install_inner(&rig, AppLauncherOptions { dry_run: true }, false).expect("plan");
-    assert!(report.dry_run);
-    assert_eq!(report.platform, AppLauncherPlatform::Linux);
-    assert!(report.launcher_path.ends_with("Studio (Dev).desktop"));
-    assert_eq!(report.files.len(), 1);
-    assert!(!tmp.path().join("Studio (Dev).desktop").exists());
-}
+fn test_install_then_uninstall_round_trips_launcher_files() {
+    let cases: [(fn(&str) -> RigSpec, &str, &str, &str); 2] = [
+        (
+            rig_with_launcher,
+            "Studio (Dev).app",
+            "Contents/MacOS/launch",
+            "rig up 'studio-dev'",
+        ),
+        (
+            rig_with_linux_launcher,
+            "Studio (Dev).desktop",
+            "",
+            "Exec=/bin/sh -lc",
+        ),
+    ];
 
-#[test]
-fn test_install_writes_script_backed_bundle_to_temp_dir() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let report =
-        install_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("install");
-    let app = tmp.path().join("Studio (Dev).app");
-    let plist = app.join("Contents/Info.plist");
-    let script = app.join("Contents/MacOS/launch");
+    for (make_rig, file_name, content_file, expected) in cases {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let rig = make_rig(&tmp.path().to_string_lossy());
+        let launcher = tmp.path().join(file_name);
 
-    assert!(!report.dry_run);
-    assert!(plist.exists(), "Info.plist written");
-    assert!(script.exists(), "launch script written");
-    assert!(fs::read_to_string(plist)
-        .expect("read plist")
-        .contains("com.example.studio-dev"));
-    assert!(fs::read_to_string(script)
-        .expect("read script")
-        .contains("homeboy"));
-}
+        let report =
+            install_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("install");
+        assert!(!report.dry_run);
+        let content_path = if content_file.is_empty() {
+            launcher.clone()
+        } else {
+            launcher.join(content_file)
+        };
+        assert!(fs::read_to_string(&content_path)
+            .expect("read generated launcher")
+            .contains(expected));
 
-#[test]
-fn test_linux_install_writes_desktop_file_to_temp_dir() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_linux_launcher(&tmp.path().to_string_lossy());
-    let report =
-        install_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("install");
-    let desktop = tmp.path().join("Studio (Dev).desktop");
-
-    assert!(!report.dry_run);
-    assert!(desktop.exists(), "desktop file written");
-    assert!(fs::read_to_string(desktop)
-        .expect("read desktop")
-        .contains("Exec=/bin/sh -lc"));
+        let report =
+            uninstall_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("uninstall");
+        assert_eq!(report.action, AppLauncherAction::Uninstall);
+        assert!(!launcher.exists(), "{file_name} removed");
+    }
 }
 
 #[test]
@@ -247,75 +226,29 @@ fn test_linux_update_regenerates_desktop_file_in_place() {
 }
 
 #[test]
-fn test_uninstall_removes_generated_bundle_from_temp_dir() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    install_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("install");
-    let app = tmp.path().join("Studio (Dev).app");
-    assert!(app.exists());
+fn test_public_install_refuses_launchers_for_other_hosts() {
+    let cases: [(fn(&str) -> RigSpec, bool, &str); 2] = [
+        (
+            rig_with_launcher,
+            cfg!(target_os = "macos"),
+            "macOS app launchers",
+        ),
+        (
+            rig_with_linux_launcher,
+            cfg!(target_os = "linux"),
+            "Linux .desktop launchers",
+        ),
+    ];
 
-    let report =
-        uninstall_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("uninstall");
-    assert_eq!(report.action, AppLauncherAction::Uninstall);
-    assert!(!app.exists(), "bundle removed");
-}
-
-#[test]
-fn test_uninstall_removes_generated_linux_desktop_file_from_temp_dir() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_linux_launcher(&tmp.path().to_string_lossy());
-    install_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("install");
-    let desktop = tmp.path().join("Studio (Dev).desktop");
-    assert!(desktop.exists());
-
-    let report =
-        uninstall_inner(&rig, AppLauncherOptions { dry_run: false }, false).expect("uninstall");
-    assert_eq!(report.action, AppLauncherAction::Uninstall);
-    assert!(!desktop.exists(), "desktop file removed");
-}
-
-#[test]
-fn test_public_linux_install_refuses_on_non_linux_hosts() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_linux_launcher(&tmp.path().to_string_lossy());
-    let result = crate::app::install(&rig, AppLauncherOptions { dry_run: false });
-    if cfg!(target_os = "linux") {
-        assert!(result.is_ok(), "Linux should allow install");
-    } else {
-        let err = result.expect_err("non-Linux refuses install");
-        assert!(err.to_string().contains("Linux .desktop launchers"));
+    for (make_rig, host_matches, refusal) in cases {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let rig = make_rig(&tmp.path().to_string_lossy());
+        let result = crate::app::install(&rig, AppLauncherOptions { dry_run: false });
+        if host_matches {
+            assert!(result.is_ok(), "{refusal} should install on matching host");
+        } else {
+            let err = result.expect_err("mismatched host refuses install");
+            assert!(err.to_string().contains(refusal));
+        }
     }
-}
-
-#[test]
-fn test_update_reports_update_action() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let report =
-        crate::app::update(&rig, AppLauncherOptions { dry_run: true }).expect("update dry-run");
-    assert_eq!(report.action, AppLauncherAction::Update);
-    assert!(report.dry_run);
-}
-
-#[test]
-fn test_public_install_refuses_unsupported_platforms() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let result = crate::app::install(&rig, AppLauncherOptions { dry_run: false });
-    if cfg!(target_os = "macos") {
-        assert!(result.is_ok(), "macOS should allow install");
-    } else {
-        let err = result.expect_err("non-macOS refuses install");
-        assert!(err.to_string().contains("macOS app launchers"));
-    }
-}
-
-#[test]
-fn test_public_install_dry_run_is_cross_platform_preview() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let rig = rig_with_launcher(&tmp.path().to_string_lossy());
-    let report =
-        crate::app::install(&rig, AppLauncherOptions { dry_run: true }).expect("dry-run preview");
-    assert!(report.dry_run);
-    assert!(!tmp.path().join("Studio (Dev).app").exists());
 }

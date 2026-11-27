@@ -98,11 +98,8 @@ pub fn local() -> LocalFs {
 /// Ensure all app directories exist
 ///
 /// The config root is resolved exactly once and threaded into every derived
-/// location. This used to be seven independent resolutions of the same root —
-/// `paths::homeboy()` plus six derived resolvers that each re-resolved it
-/// internally — on the startup path. A repoint of the home root between the
-/// first and the last built half a config tree in one home and half in another
-/// (#7505).
+/// location, so a repoint of the home root mid-startup cannot build half a
+/// config tree in one home and half in another (#7505).
 pub fn ensure_app_dirs() -> Result<()> {
     ensure_app_dirs_in_root(&homeboy_paths::homeboy()?)
 }
@@ -378,7 +375,6 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Barrier};
     use tempfile::tempdir;
-    use tempfile::NamedTempFile;
 
     fn partially_write_owner_only_then_fail(
         path: &Path,
@@ -399,14 +395,21 @@ mod tests {
     }
 
     #[test]
-    fn test_local_fs_write_read() {
+    fn local_fs_writes_lists_reads_and_deletes_entries() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("test.txt");
         let fs = local();
+        let json = dir.path().join("a.json");
 
-        fs.write(&path, "hello world").unwrap();
-        let content = fs.read(&path).unwrap();
-        assert_eq!(content, "hello world");
+        fs.write(&json, "{}").unwrap();
+        fs.write(&dir.path().join("b.txt"), "text").unwrap();
+        assert_eq!(fs.read(&json).unwrap(), "{}");
+
+        let entries = fs.list(dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.iter().filter(|e| e.is_json()).count(), 1);
+
+        fs.delete(&json).unwrap();
+        assert!(!json.exists());
     }
 
     #[test]
@@ -502,70 +505,19 @@ mod tests {
     }
 
     #[test]
-    fn test_local_fs_list() {
+    fn read_and_write_file_round_trip_and_report_io_errors() {
         let dir = tempdir().unwrap();
-        let fs = local();
+        let path = dir.path().join("file.txt");
+        write_file(&path, "new content", "test write").unwrap();
+        assert_eq!(read_file(&path, "test read").unwrap(), "new content");
 
-        fs.write(&dir.path().join("a.json"), "{}").unwrap();
-        fs.write(&dir.path().join("b.txt"), "text").unwrap();
-
-        let entries = fs.list(dir.path()).unwrap();
-        assert_eq!(entries.len(), 2);
-
-        let json_entries: Vec<_> = entries.iter().filter(|e| e.is_json()).collect();
-        assert_eq!(json_entries.len(), 1);
-    }
-
-    #[test]
-    fn test_local_fs_delete() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("delete_me.txt");
-        let fs = local();
-
-        fs.write(&path, "content").unwrap();
-        assert!(path.exists());
-
-        fs.delete(&path).unwrap();
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn read_file_succeeds_for_existing_file() {
-        let mut temp = NamedTempFile::new().unwrap();
-        writeln!(temp, "test content").unwrap();
-
-        let content = read_file(temp.path(), "test read").unwrap();
-        assert!(content.contains("test content"));
-    }
-
-    #[test]
-    fn read_file_returns_error_for_missing_file() {
-        let result = read_file(Path::new("/nonexistent/path.txt"), "test read");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code.as_str(), "internal.io_error");
-    }
-
-    #[test]
-    fn write_file_succeeds_for_valid_path() {
-        let temp = NamedTempFile::new().unwrap();
-        let result = write_file(temp.path(), "new content", "test write");
-        assert!(result.is_ok());
-
-        let content = fs::read_to_string(temp.path()).unwrap();
-        assert_eq!(content, "new content");
-    }
-
-    #[test]
-    fn write_file_returns_error_for_invalid_path() {
-        let result = write_file(
-            Path::new("/nonexistent/dir/file.txt"),
-            "content",
-            "test write",
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code.as_str(), "internal.io_error");
+        let missing = dir.path().join("missing/file.txt");
+        for err in [
+            read_file(&missing, "test read").unwrap_err(),
+            write_file(&missing, "content", "test write").unwrap_err(),
+        ] {
+            assert_eq!(err.code.as_str(), "internal.io_error");
+        }
     }
 
     #[test]

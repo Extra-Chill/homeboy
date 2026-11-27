@@ -13,41 +13,27 @@ use std::process::{Command, Output};
 fn unknown_top_level_command_fails_without_resolving_components() {
     let fixture = Fixture::new();
 
-    let output = fixture.run(&["nonexistentxyz"]);
+    for (command, expected) in [
+        // Plain clap diagnostic with its help hint.
+        ("nonexistentxyz", "unrecognized subcommand 'nonexistentxyz'"),
+        // Registry-backed suggestions still work without resolving components.
+        ("slow-plugn", "Did you mean component 'slow-plugin'?"),
+    ] {
+        let output = fixture.run(&[command]);
 
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "{}",
-        fixture.describe(&output)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unrecognized subcommand 'nonexistentxyz'") && stderr.contains("--help"),
-        "missing clap diagnostic and help hint: {stderr}"
-    );
-    fixture.assert_no_subprocess_lookups();
-}
-
-#[cfg(unix)]
-#[test]
-fn unknown_top_level_command_still_suggests_registered_components() {
-    let fixture = Fixture::new();
-
-    let output = fixture.run(&["slow-plugn"]);
-
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "{}",
-        fixture.describe(&output)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Did you mean component 'slow-plugin'?"),
-        "registry-backed component suggestion missing: {stderr}"
-    );
-    fixture.assert_no_subprocess_lookups();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{}",
+            fixture.describe(&output)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(expected) && stderr.contains("--help"),
+            "{command}: missing diagnostic: {stderr}"
+        );
+        fixture.assert_no_subprocess_lookups();
+    }
 }
 
 struct Fixture {

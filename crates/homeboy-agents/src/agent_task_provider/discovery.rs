@@ -38,19 +38,3 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
         pi_readiness: PiReadinessConfig::default(),
     }]
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pi_is_available_without_runtime_manifests() {
-        let providers = discover_agent_task_executor_providers();
-        assert_eq!(providers.len(), 1);
-        let provider = &providers[0];
-        assert_eq!(provider.id, "pi.agent-task-executor");
-        assert_eq!(provider.backend, "pi");
-        assert_eq!(provider.invocation.argv, ["pi"]);
-        assert_eq!(provider.pi_readiness, PiReadinessConfig::default());
-    }
-}

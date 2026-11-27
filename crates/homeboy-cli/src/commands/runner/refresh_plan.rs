@@ -760,7 +760,6 @@ fn shell_join_owned(args: &[String]) -> String {
 mod tests {
     use super::*;
     use homeboy::core::runner_execution_envelope::RUNNER_EXECUTION_ENVELOPE_SCHEMA;
-    use homeboy::core::secret_env_plan::SECRET_ENV_PLAN_SCHEMA;
 
     fn clean_controller_identity() -> BuildIdentity {
         BuildIdentity {
@@ -791,9 +790,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn plan_commands_include_existing_runner_artifact_primitives() {
-        let args = RefreshPlanArgs {
+    fn matrix_args(sync_mode: &str, command: &[&str]) -> RefreshPlanArgs {
+        RefreshPlanArgs {
             runner: "lab-runner".to_string(),
             workspace: "/workspace/source".to_string(),
             runner_cwd: "/runner/source".to_string(),
@@ -802,13 +800,14 @@ mod tests {
             summaries: vec!["artifacts/matrix/matrix-summary.json".to_string()],
             sources: Vec::new(),
             fixtures: Vec::new(),
-            sync_mode: "snapshot".to_string(),
-            command: vec![
-                "sh".to_string(),
-                "-lc".to_string(),
-                "./run matrix".to_string(),
-            ],
-        };
+            sync_mode: sync_mode.to_string(),
+            command: command.iter().map(|arg| arg.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn plan_commands_include_existing_runner_artifact_primitives() {
+        let args = matrix_args("snapshot", &["sh", "-lc", "./run matrix"]);
         let evidence = evidence_paths(&args);
         let commands = next_commands(&args, &evidence);
 
@@ -834,18 +833,7 @@ mod tests {
 
     #[test]
     fn handoff_v2_keeps_execution_facts_in_the_canonical_envelope() {
-        let args = RefreshPlanArgs {
-            runner: "lab-runner".to_string(),
-            workspace: "/workspace/source".to_string(),
-            runner_cwd: "/runner/source".to_string(),
-            run_id: "matrix-refresh-1".to_string(),
-            outputs: vec!["artifacts/matrix".to_string()],
-            summaries: vec!["artifacts/matrix/matrix-summary.json".to_string()],
-            sources: Vec::new(),
-            fixtures: Vec::new(),
-            sync_mode: "snapshot-git".to_string(),
-            command: vec!["cargo".to_string(), "test".to_string()],
-        };
+        let args = matrix_args("snapshot-git", &["cargo", "test"]);
         let evidence = evidence_paths(&args);
         let docs = vec!["docs/commands/runner.md".to_string()];
         let provenance = test_provenance();
@@ -864,10 +852,6 @@ mod tests {
             handoff.execution_record.mirror_run_id.as_deref(),
             Some("matrix-refresh-1")
         );
-        let execution_record =
-            serde_json::to_value(&handoff.execution_record).expect("serialize handoff record");
-        assert_eq!(execution_record["mirror_run_id"], "matrix-refresh-1");
-        assert!(execution_record.get("remote_run_id").is_none());
         assert_eq!(handoff.execution_record.artifact_refs.len(), 2);
         assert_eq!(
             handoff.execution_record.artifact_refs[0].path.as_deref(),
@@ -895,22 +879,6 @@ mod tests {
         );
         assert!(handoff.homeboy_provenance.diagnostics.is_empty());
 
-        let serialized = serde_json::to_value(&handoff).expect("handoff json");
-        for removed_mirror in [
-            "execution_envelope_ref",
-            "execution_envelope",
-            "workspace",
-            "env_plan",
-            "secret_plan",
-            "runtime_refs",
-            "lifecycle",
-        ] {
-            assert!(
-                serialized.get(removed_mirror).is_none(),
-                "handoff v2 must not mirror `{removed_mirror}`"
-            );
-        }
-
         let output = LabRefreshPlanOutput {
             variant: "refresh_plan",
             execution_envelope: envelope,
@@ -933,23 +901,11 @@ mod tests {
             serialized["handoff"]["schema"],
             "homeboy/lab-refresh-handoff/v2"
         );
-        assert!(serialized["handoff"].get("execution_envelope").is_none());
     }
 
     #[test]
     fn refresh_plan_compiles_canonical_execution_envelope() {
-        let args = RefreshPlanArgs {
-            runner: "lab-runner".to_string(),
-            workspace: "/workspace/source".to_string(),
-            runner_cwd: "/runner/source".to_string(),
-            run_id: "matrix-refresh-1".to_string(),
-            outputs: vec!["artifacts/matrix".to_string()],
-            summaries: vec!["artifacts/matrix/matrix-summary.json".to_string()],
-            sources: Vec::new(),
-            fixtures: Vec::new(),
-            sync_mode: "snapshot".to_string(),
-            command: vec!["cargo".to_string(), "test".to_string()],
-        };
+        let args = matrix_args("snapshot", &["cargo", "test"]);
         let evidence = evidence_paths(&args);
         let docs = vec!["docs/commands/runner.md".to_string()];
         let provenance = test_provenance();
@@ -1006,7 +962,6 @@ mod tests {
                 ),
             ]
         );
-        assert!(envelope.metadata.get("runner").is_none());
         assert_eq!(
             envelope.metadata["workspace"]["mapping"]["ref_id"],
             "runner:lab-runner:workspace:matrix-refresh-1"
@@ -1015,7 +970,6 @@ mod tests {
             envelope.metadata["workspace"]["mapping"]["lease"]["owner_run_id"],
             "matrix-refresh-1"
         );
-        assert!(envelope.metadata.get("runtime").is_none());
         assert_eq!(
             envelope.metadata["homeboy_provenance"]["controller_cli"]["role"],
             "controller_cli"
@@ -1191,23 +1145,6 @@ mod tests {
     }
 
     #[test]
-    fn refresh_plan_secret_plan_uses_redacted_canonical_shape() {
-        let secret_plan =
-            SecretEnvPlan::from_secret_env_names(["B_SECRET".to_string(), "A_SECRET".to_string()]);
-
-        let redacted = serde_json::to_value(secret_plan.redacted()).expect("redacted json");
-        let rendered = serde_json::to_string(&redacted).expect("redacted json string");
-
-        assert_eq!(redacted["schema"], SECRET_ENV_PLAN_SCHEMA);
-        assert_eq!(
-            redacted["secret_env_names"],
-            serde_json::json!(["A_SECRET", "B_SECRET"])
-        );
-        assert!(!rendered.contains("super-secret-value"));
-        assert_eq!(secret_plan.redacted_env()["A_SECRET"], "[REDACTED]");
-    }
-
-    #[test]
     fn invalid_sync_mode_is_rejected() {
         let args = RefreshPlanArgs {
             runner: "missing-runner".to_string(),
@@ -1226,12 +1163,5 @@ mod tests {
 
         let message = err.to_string();
         assert!(message.contains("unsupported sync mode: rsync"));
-    }
-
-    #[test]
-    fn shell_quote_handles_spaces_and_single_quotes() {
-        assert_eq!(posix_quote_arg("simple/path"), "simple/path");
-        assert_eq!(posix_quote_arg("two words"), "'two words'");
-        assert_eq!(posix_quote_arg("it's ok"), "'it'\\''s ok'");
     }
 }

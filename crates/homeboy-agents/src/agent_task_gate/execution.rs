@@ -585,9 +585,10 @@ pub(super) fn run_gate_argv_local(
     let verdict_started = Instant::now();
     selected_environment.configure_rust_cache(cwd)?;
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
-    selected_environment.configure_component_inputs(cwd)?;
+    selected_environment.configure_component_inputs(cwd, std::slice::from_ref(&command_vec))?;
     // Do not clear again: the declared suite deadline is already applied.
     process.envs(&selected_environment.values);
+    process.env("HOMEBOY_GATE_ARTIFACT_HANDOFF", "1");
     // Every deterministic gate is contained the same way regardless of
     // whether the caller supervises it: the gate spawns build/test tooling
     // (`cargo test -p ... --lib` and friends) that outlives a plain
@@ -830,6 +831,28 @@ pub(super) fn run_gate_argv_local(
     report.bench_compare = bench_compare;
     report.termination = termination;
     if let Ok(mut collector) = phase_collector.lock() {
+        let zero_tests = report.stderr.contains("[test-results] Total: 0,")
+            || report.stdout.contains("[test-results] Total: 0,");
+        if (exit_code != 0 || zero_tests) && visibility != AgentTaskGateVisibility::Private {
+            report.test_artifacts = std::mem::take(&mut collector.artifacts);
+            let diagnostics = report
+                .test_artifacts
+                .iter()
+                .flat_map(|artifact| artifact.diagnosis_summary())
+                .take(20)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !diagnostics.is_empty() {
+                report.stderr = format!("{diagnostics}\n{}", report.stderr);
+                report.failure_evidence = Some(gate_failure_evidence(
+                    command,
+                    exit_code,
+                    &diagnostics,
+                    &report.stderr,
+                    report.cargo_selection.as_ref(),
+                ));
+            }
+        }
         report.phases = std::mem::take(&mut *collector).finish();
     }
     report.cleanup_warning = cleanup_warning;

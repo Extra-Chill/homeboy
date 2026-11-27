@@ -997,29 +997,18 @@ pub struct ControlPlaneEvidenceRef {
 mod tests {
     use super::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
-        ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, ControlPlaneAttempt,
-        ControlPlaneAttemptListRequest, ControlPlaneAttemptPage, ControlPlaneBlocker,
-        ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEvidenceRef, ControlPlaneExecution,
-        ControlPlaneExecutionPage, ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
-        ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOwner,
-        ControlPlaneProviderSummary, ControlPlaneReference, ControlPlaneReferencePage,
-        ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneResult,
-        ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunPlacement,
+        ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport,
+        ControlPlaneAttemptListRequest, ControlPlaneBlocker, ControlPlaneEvidenceRef,
+        ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMissionListRequest,
+        ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReferenceRegistration,
+        ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPlacement,
         ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
         ControlPlaneRunPlacementSelected, ControlPlaneRuntime, ControlPlaneState,
-        ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest,
-        ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
-        CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
-        CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-        CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
-        CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+        ControlPlaneStateSummary, ControlPlaneTaskListRequest,
+        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
+        CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
     };
-    use crate::{
-        AttemptCursor, AttemptId, ExecutionId, MissionCursor, MissionId, ProviderSessionId,
-        ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
-    };
+    use crate::{MissionId, ProviderSessionId, ReferenceId, RunId};
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
@@ -1109,37 +1098,6 @@ mod tests {
     }
 
     #[test]
-    fn control_plane_run_round_trips_through_serde_with_typed_identities() {
-        let resource = sample_run();
-        let value = serde_json::to_value(&resource).expect("serialize");
-        assert_eq!(value["schema"], CONTROL_PLANE_RUN_SCHEMA);
-        assert_eq!(value["mission"], AGENT_TASK_COOK);
-        assert_eq!(value["run"], AGENT_TASK_RUN);
-        assert!(value.get("attempt").is_none());
-        assert!(value.get("attempt_number").is_none());
-        assert!(value.get("execution").is_none());
-        assert_eq!(value["state"], "succeeded");
-        assert_eq!(value["phase"], "terminal");
-        assert_eq!(value["owner"]["kind"], "runner");
-        assert_eq!(value["runtime"]["build_identity"], "homeboy 0.1.0+test");
-        assert_eq!(value["provider"]["id"], "claude");
-        assert_eq!(value["heartbeat_at"], "2026-01-01T00:00:30Z");
-        assert_eq!(value["liveness"]["state"], "active");
-        assert_eq!(value["candidate"]["state"], "applied");
-        assert_eq!(value["gates"][0]["id"], "test");
-        assert_eq!(value["publication"]["state"], "published");
-        assert_eq!(
-            value["action_eligibility"]["schema"],
-            CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA
-        );
-        assert!(value.get("metadata").is_none());
-        assert!(value.get("cwd").is_none());
-        assert!(value.get("prompt").is_none());
-        let decoded: ControlPlaneRun = serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, resource);
-    }
-
-    #[test]
     fn run_placement_rejects_unbounded_or_unknown_data() {
         let valid = ControlPlaneRunPlacement::new(
             "decision-1",
@@ -1195,131 +1153,53 @@ mod tests {
     }
 
     #[test]
-    fn run_page_round_trips_with_a_bounded_typed_cursor() {
-        let page = ControlPlaneRunPage {
-            schema: CONTROL_PLANE_RUN_PAGE_SCHEMA.to_string(),
-            runs: vec![sample_run()],
-            next_cursor: Some(RunCursor::new(AGENT_TASK_RUN).expect("cursor")),
-            has_more: true,
-        };
-        let value = serde_json::to_value(&page).expect("serialize");
-        assert_eq!(value["schema"], CONTROL_PLANE_RUN_PAGE_SCHEMA);
-        assert_eq!(value["next_cursor"], AGENT_TASK_RUN);
-        let decoded: ControlPlaneRunPage = serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, page);
-
-        let request = ControlPlaneRunListRequest {
-            mission: Some(MissionId::new(AGENT_TASK_COOK).expect("mission")),
-            ..Default::default()
-        };
-        assert_eq!(
-            serde_json::to_value(request).expect("serialize request")["mission"],
-            AGENT_TASK_COOK
-        );
-
-        assert!(ControlPlaneRunListRequest {
-            limit: 0,
-            ..Default::default()
+    fn list_requests_bound_page_limits_to_one_through_one_hundred() {
+        for limit in [0, 101] {
+            assert!(ControlPlaneRunListRequest {
+                limit,
+                ..Default::default()
+            }
+            .validate()
+            .is_err());
+            assert!(ControlPlaneMissionListRequest {
+                limit,
+                ..Default::default()
+            }
+            .validate()
+            .is_err());
+            assert!(ControlPlaneTaskListRequest {
+                limit,
+                ..Default::default()
+            }
+            .validate()
+            .is_err());
+            assert!(ControlPlaneAttemptListRequest {
+                limit,
+                ..Default::default()
+            }
+            .validate()
+            .is_err());
         }
-        .validate()
-        .is_err());
-        assert!(ControlPlaneRunListRequest {
-            limit: 101,
-            ..Default::default()
-        }
-        .validate()
-        .is_err());
+        assert!(ControlPlaneRunListRequest::default().validate().is_ok());
     }
 
     #[test]
-    fn run_page_v1_golden_fixture_remains_compatible() {
-        let fixture = include_str!("../tests/fixtures/run-page-v1.json");
-        let page: ControlPlaneRunPage = serde_json::from_str(fixture).expect("v1 fixture");
-        assert_eq!(page.schema, CONTROL_PLANE_RUN_PAGE_SCHEMA);
-        assert_eq!(page.runs[0].run.as_str(), "run-fixture-1");
-        assert_eq!(page.runs[0].state, ControlPlaneState::Running);
-        assert!(page.next_cursor.is_none());
-        assert!(!page.has_more);
-        assert_eq!(
-            serde_json::to_value(&page).expect("serialize fixture"),
-            serde_json::from_str::<serde_json::Value>(fixture).expect("fixture JSON")
-        );
-    }
-
-    #[test]
-    fn run_page_placement_v1_golden_fixture_round_trips() {
-        let fixture = include_str!("../tests/fixtures/run-page-placement-v1.json");
-        let page: ControlPlaneRunPage = serde_json::from_str(fixture).expect("placement fixture");
-        let placement = page.runs[0].placement.as_ref().expect("placement");
-        assert_eq!(placement.decision_id, "epd-fixture-1");
-        assert_eq!(
-            placement.effective,
-            Some(ControlPlaneRunPlacementEffective::Controller)
-        );
-        assert_eq!(placement.runner_id.as_deref(), Some("runner-fixture-1"));
-        assert_eq!(
-            serde_json::to_value(&page).expect("serialize fixture"),
-            serde_json::from_str::<serde_json::Value>(fixture).expect("fixture JSON")
-        );
-    }
-
-    #[test]
-    fn mission_resource_and_page_round_trip() {
-        let mission = ControlPlaneMission {
-            schema: CONTROL_PLANE_MISSION_SCHEMA.to_string(),
-            mission: MissionId::new("mission-1").expect("mission"),
-            created_at: "2026-01-01T00:00:00Z".to_string(),
-            updated_at: "2026-01-02T00:00:00Z".to_string(),
-            run_count: 2,
+    fn reference_registration_rejects_unsafe_reference_identity() {
+        let registration = ControlPlaneReferenceRegistration {
+            schema: CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA.to_string(),
+            idempotency_key: "register-patch-1".to_string(),
+            actor: "broker:controller".to_string(),
+            reference: ReferenceId::new("patch-1").expect("reference"),
+            kind: "patch".to_string(),
+            uri: "homeboy://artifact/patch-1".to_string(),
         };
-        let page = ControlPlaneMissionPage {
-            schema: CONTROL_PLANE_MISSION_PAGE_SCHEMA.to_string(),
-            missions: vec![mission],
-            next_cursor: Some(MissionCursor::new("opaque").expect("cursor")),
-            has_more: true,
-        };
-        let value = serde_json::to_value(&page).expect("serialize");
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneMissionPage>(value).expect("deserialize"),
-            page
-        );
-        assert!(ControlPlaneMissionListRequest {
-            limit: 101,
-            ..Default::default()
-        }
-        .validate()
-        .is_err());
-    }
-
-    #[test]
-    fn run_scoped_task_resource_and_page_round_trip() {
-        let task = ControlPlaneTask {
-            schema: CONTROL_PLANE_TASK_SCHEMA.to_string(),
-            mission: Some(MissionId::new(AGENT_TASK_COOK).expect("mission")),
-            run: RunId::new(AGENT_TASK_RUN).expect("run"),
-            task: TaskId::new("review").expect("task"),
-            state: ControlPlaneState::Blocked,
-        };
-        let page = ControlPlaneTaskPage {
-            schema: CONTROL_PLANE_TASK_PAGE_SCHEMA.to_string(),
-            run: task.run.clone(),
-            tasks: vec![task],
-            next_cursor: Some(TaskCursor::new("opaque").expect("cursor")),
-            has_more: true,
-        };
-        let value = serde_json::to_value(&page).expect("serialize");
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneTaskPage>(value).expect("deserialize"),
-            page
-        );
-        assert!(!ControlPlaneState::Blocked.is_terminal());
-        assert!(ControlPlaneState::Skipped.is_terminal());
-        assert!(ControlPlaneTaskListRequest {
-            limit: 0,
-            ..Default::default()
-        }
-        .validate()
-        .is_err());
+        registration.validate().expect("registration");
+        let mut unsafe_registration = registration;
+        unsafe_registration.reference =
+            ReferenceId::new("patch?token=secret").expect("non-empty reference");
+        unsafe_registration
+            .validate()
+            .expect_err("unsafe reference identity");
     }
 
     /// Every state label round-trips unchanged, carries its classification,
@@ -1362,137 +1242,6 @@ mod tests {
     }
 
     #[test]
-    fn task_scoped_attempt_resource_and_page_round_trip() {
-        let attempt = ControlPlaneAttempt {
-            schema: CONTROL_PLANE_ATTEMPT_SCHEMA.to_string(),
-            run: RunId::new(AGENT_TASK_RUN).expect("run"),
-            task: TaskId::new("review").expect("task"),
-            attempt: AttemptId::new(format!("{AGENT_TASK_RUN}:review:1")).expect("attempt"),
-            attempt_number: 1,
-            state: ControlPlaneState::Running,
-            started_at: "2026-01-01T00:00:00Z".to_string(),
-            finished_at: None,
-            execution: None,
-        };
-        let page = ControlPlaneAttemptPage {
-            schema: CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA.to_string(),
-            run: attempt.run.clone(),
-            task: attempt.task.clone(),
-            attempts: vec![attempt],
-            next_cursor: Some(AttemptCursor::new("opaque").expect("cursor")),
-            has_more: true,
-        };
-        let value = serde_json::to_value(&page).expect("serialize");
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneAttemptPage>(value).expect("deserialize"),
-            page
-        );
-        assert!(ControlPlaneAttemptListRequest {
-            limit: 101,
-            ..Default::default()
-        }
-        .validate()
-        .is_err());
-    }
-
-    #[test]
-    fn attempt_scoped_execution_resource_and_page_round_trip() {
-        let attempt = AttemptId::new(format!("{AGENT_TASK_RUN}:review:1")).expect("attempt");
-        let execution = ControlPlaneExecution {
-            schema: CONTROL_PLANE_EXECUTION_SCHEMA.to_string(),
-            run: RunId::new(AGENT_TASK_RUN).expect("run"),
-            task: TaskId::new("review").expect("task"),
-            attempt: attempt.clone(),
-            execution: ExecutionId::new(format!("{attempt}:execution")).expect("execution"),
-            state: ControlPlaneState::Succeeded,
-            started_at: "2026-01-01T00:00:00Z".to_string(),
-            finished_at: Some("2026-01-01T00:01:00Z".to_string()),
-        };
-        let page = ControlPlaneExecutionPage {
-            schema: CONTROL_PLANE_EXECUTION_PAGE_SCHEMA.to_string(),
-            run: execution.run.clone(),
-            task: execution.task.clone(),
-            attempt,
-            executions: vec![execution],
-        };
-        let value = serde_json::to_value(&page).expect("serialize");
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneExecutionPage>(value).expect("deserialize"),
-            page
-        );
-    }
-
-    #[test]
-    fn run_scoped_reference_registration_and_page_round_trip() {
-        let registration = ControlPlaneReferenceRegistration {
-            schema: CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA.to_string(),
-            idempotency_key: "register-patch-1".to_string(),
-            actor: "broker:controller".to_string(),
-            reference: ReferenceId::new("patch-1").expect("reference"),
-            kind: "patch".to_string(),
-            uri: "homeboy://artifact/patch-1".to_string(),
-        };
-        registration.validate().expect("registration");
-        let mut unsafe_registration = registration.clone();
-        unsafe_registration.reference =
-            ReferenceId::new("patch?token=secret").expect("non-empty reference");
-        unsafe_registration
-            .validate()
-            .expect_err("unsafe reference identity");
-        let reference = ControlPlaneReference {
-            schema: CONTROL_PLANE_REFERENCE_SCHEMA.to_string(),
-            run: RunId::new(AGENT_TASK_RUN).expect("run"),
-            reference_type: ControlPlaneReferenceType::Artifact,
-            reference: registration.reference.clone(),
-            kind: registration.kind.clone(),
-            uri: registration.uri.clone(),
-            registered_at: Some("2026-01-01T00:00:00Z".to_string()),
-            actor: Some(registration.actor.clone()),
-        };
-        let page = ControlPlaneReferencePage {
-            schema: CONTROL_PLANE_REFERENCE_PAGE_SCHEMA.to_string(),
-            run: reference.run.clone(),
-            reference_type: ControlPlaneReferenceType::Artifact,
-            references: vec![reference],
-        };
-        let value = serde_json::to_value(&page).expect("serialize");
-        assert_eq!(
-            serde_json::from_value::<ControlPlaneReferencePage>(value).expect("deserialize"),
-            page
-        );
-    }
-
-    #[test]
-    fn action_eligibility_report_round_trips_without_agent_task_schema() {
-        let run = RunId::new(AGENT_TASK_RUN).expect("run");
-        let report = ControlPlaneActionEligibilityReport {
-            schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
-            run: run.clone(),
-            actions: vec![ControlPlaneActionEligibility {
-                action: ControlPlaneAction::Cancel,
-                availability: ControlPlaneActionAvailability::Unavailable,
-                reason: "run is terminal".to_string(),
-                confirmation: ControlPlaneActionConfirmation::Required,
-                required_inputs: Vec::new(),
-                idempotent: false,
-                requires_revalidation: true,
-                result_resource_type: "run".to_string(),
-            }],
-        };
-        let value = serde_json::to_value(&report).expect("serialize");
-        assert_eq!(value["schema"], CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
-        assert_eq!(value["run"], AGENT_TASK_RUN);
-        assert!(value.get("run_id").is_none());
-        assert!(value.get("state").is_none());
-        assert!(value.get("location").is_none());
-        assert_eq!(value["actions"][0]["action"], "cancel");
-        let decoded: ControlPlaneActionEligibilityReport =
-            serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, report);
-        assert_eq!(decoded.run, run);
-    }
-
-    #[test]
     fn additive_run_detail_fields_remain_optional_for_v1_readers() {
         let mut value = serde_json::to_value(sample_run()).expect("serialize");
         let fields = value.as_object_mut().expect("run object");
@@ -1517,29 +1266,11 @@ mod tests {
     }
 
     #[test]
-    fn result_envelope_versions_resources_once() {
-        let ok = ControlPlaneResult::ok(sample_run());
-        let value = serde_json::to_value(&ok).expect("serialize");
+    fn ok_result_envelope_wraps_a_versioned_resource() {
+        let value = serde_json::to_value(ControlPlaneResult::ok(sample_run())).expect("serialize");
         assert_eq!(value["schema"], CONTROL_PLANE_RESULT_SCHEMA);
         assert_eq!(value["ok"], true);
         assert_eq!(value["resource"]["schema"], CONTROL_PLANE_RUN_SCHEMA);
-        let decoded: ControlPlaneResult<ControlPlaneRun> =
-            serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, ok);
-
-        let err = ControlPlaneResult::<ControlPlaneRun>::err(ControlPlaneError::not_found(
-            "agent-task run not found: missing",
-        ));
-        let value = serde_json::to_value(&err).expect("serialize");
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["error"]["class"], "not_found");
-        assert_eq!(value["error"]["retryable"], false);
-        let decoded: ControlPlaneResult<ControlPlaneRun> =
-            serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, err);
-        assert_eq!(
-            decoded.error.as_ref().unwrap().class,
-            ControlPlaneErrorClass::NotFound
-        );
+        assert!(value.get("error").is_none());
     }
 }

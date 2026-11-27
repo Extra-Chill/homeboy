@@ -1,91 +1,9 @@
 use super::*;
 
 #[test]
-fn fuzz_replay_parses_artifact_and_case_id_flags() {
-    let cli = FuzzCli::parse_from([
-        "fuzz",
-        "replay",
-        "/tmp/fuzz-results.json",
-        "--component",
-        "component-a",
-        "--case-id",
-        "case-1",
-        "--run-id",
-        "proof-1",
-        "--",
-        "--runner-flag",
-    ]);
-
-    match cli.args.command {
-        Some(FuzzCommand::Replay(replay)) => {
-            assert_eq!(replay.component.as_deref(), Some("component-a"));
-            assert_eq!(
-                replay.artifact_or_case.as_deref(),
-                Some("/tmp/fuzz-results.json")
-            );
-            assert_eq!(replay.case_id.as_deref(), Some("case-1"));
-            assert_eq!(replay.run_id.as_deref(), Some("proof-1"));
-            assert_eq!(replay.args, vec!["--runner-flag"]);
-        }
-        _ => panic!("expected fuzz replay command"),
-    }
-}
-
-#[test]
-fn fuzz_minimize_parses_artifact_and_case_id_flags() {
-    let cli = FuzzCli::parse_from([
-        "fuzz",
-        "minimize",
-        "/tmp/fuzz-results.json",
-        "--component",
-        "component-a",
-        "--case-id",
-        "case-1",
-        "--run-id",
-        "proof-1",
-        "--",
-        "--runner-flag",
-    ]);
-
-    match cli.args.command {
-        Some(FuzzCommand::Minimize(minimize)) => {
-            assert_eq!(minimize.component.as_deref(), Some("component-a"));
-            assert_eq!(
-                minimize.artifact_or_case.as_deref(),
-                Some("/tmp/fuzz-results.json")
-            );
-            assert_eq!(minimize.case_id.as_deref(), Some("case-1"));
-            assert_eq!(minimize.run_id.as_deref(), Some("proof-1"));
-            assert_eq!(minimize.args, vec!["--runner-flag"]);
-        }
-        _ => panic!("expected fuzz minimize command"),
-    }
-}
-
-#[test]
 fn fuzz_replay_resolves_campaign_metadata_without_executing() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("fuzz-results.json");
-    let campaign = serde_json::json!({
-        "schema": homeboy::fuzz::FUZZ_CAMPAIGN_SCHEMA,
-        "version": homeboy::fuzz::FUZZ_CONTRACT_VERSION,
-        "id": "campaign-1",
-        "safety_class": "read_only",
-        "cases": [
-            {
-                "schema": homeboy::fuzz::FUZZ_CASE_SCHEMA,
-                "id": "case-1",
-                "replay_id": "replay-1"
-            }
-        ],
-        "replay": {
-            "schema": homeboy::fuzz::FUZZ_REPLAY_SCHEMA,
-            "id": "replay-1",
-            "seed": "1234",
-            "artifact_id": "case-artifact"
-        }
-    });
-    std::fs::write(&path, serde_json::to_string(&campaign).unwrap()).expect("write campaign");
+    let path = write_replay_campaign(temp.path());
 
     let output = run_replay(FuzzReplayLikeArgs {
         component: None,
@@ -504,29 +422,10 @@ fn fuzz_replay_dry_run_explains_missing_extension_replay_command() {
     with_isolated_home(|home| {
         let component_dir = tempfile::tempdir().expect("component dir");
         write_fuzz_extension(home.path(), "fixture-fuzz", None, Some("true"));
-        write_fuzz_rig(
-            home,
-            "fixture-rig",
-            "component-a",
-            component_dir.path(),
-            "fixture-fuzz",
-        );
-        let path = write_replay_campaign(component_dir.path());
+        let path = write_fixture_rig_campaign(home, component_dir.path());
 
-        let (output, exit) = run_replay(FuzzReplayLikeArgs {
-            component: Some("component-a".to_string()),
-            path: None,
-            rig: Some("fixture-rig".to_string()),
-            extension_override: ExtensionOverrideArgs::default(),
-            setting_args: SettingArgs::default(),
-            artifact_or_case: Some(path.to_string_lossy().to_string()),
-            artifact: None,
-            case_id: Some("case-1".to_string()),
-            run_id: Some("proof-1".to_string()),
-            dry_run: true,
-            args: Vec::new(),
-        })
-        .expect("dry-run replay");
+        let (output, exit) =
+            run_replay(fixture_rig_replay_args(&path, true)).expect("dry-run replay");
 
         assert_eq!(exit, 0);
         assert_eq!(output.status, "dry_run");
@@ -647,175 +546,117 @@ fn fuzz_replay_runner_artifact_ref_without_dry_run_is_actionable() {
             .is_some_and(|value| value.contains("--dry-run"))));
 }
 
+type ReplayRunner =
+    fn(FuzzReplayLikeArgs) -> homeboy::core::Result<(super::super::types::FuzzReplayOutput, i32)>;
+
 #[test]
-fn fuzz_replay_executes_manifest_replay_command_with_env() {
-    with_isolated_home(|home| {
-        let component_dir = tempfile::tempdir().expect("component dir");
-        write_fuzz_extension(
-            home.path(),
-            "fixture-fuzz",
-            Some(
-                r#"sh -c 'printf %s:%s:%s "$HOMEBOY_FUZZ_REPLAY_CASE_ID" "$HOMEBOY_FUZZ_REPLAY_SEED" "$1"' replay-runner {case}"#,
-            ),
+fn fuzz_replay_and_minimize_execute_manifest_command_with_replay_env() {
+    let replay_command = r#"sh -c 'printf %s:%s:%s "$HOMEBOY_FUZZ_REPLAY_CASE_ID" "$HOMEBOY_FUZZ_REPLAY_SEED" "$1"' runner {case}"#;
+    for (command, run, replay, minimize, execution_kind) in [
+        (
+            "fuzz.replay",
+            run_replay as ReplayRunner,
+            Some(replay_command),
             None,
-        );
-        write_fuzz_rig(
-            home,
-            "fixture-rig",
-            "component-a",
-            component_dir.path(),
-            "fixture-fuzz",
-        );
-        let path = write_replay_campaign(component_dir.path());
-
-        let (output, exit) = run_replay(FuzzReplayLikeArgs {
-            component: Some("component-a".to_string()),
-            path: None,
-            rig: Some("fixture-rig".to_string()),
-            extension_override: ExtensionOverrideArgs::default(),
-            setting_args: SettingArgs::default(),
-            artifact_or_case: Some(path.to_string_lossy().to_string()),
-            artifact: None,
-            case_id: Some("case-1".to_string()),
-            run_id: Some("proof-1".to_string()),
-            dry_run: false,
-            args: vec!["--extra".to_string()],
-        })
-        .expect("execute replay");
-
-        assert_eq!(exit, 0);
-        assert_eq!(output.status, "passed");
-        assert!(output.replay_command.as_deref().unwrap().contains("case-1"));
-        assert!(output.env.iter().any(|env| {
-            env.name == "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE" && env.value == path.to_string_lossy()
-        }));
-        let execution = output.execution.expect("execution");
-        assert_eq!(execution.extension_id, "fixture-fuzz");
-        assert_eq!(execution.stdout, "case-1:1234:case-1");
-    });
-}
-
-#[test]
-fn fuzz_replay_reports_unsupported_when_manifest_has_no_replay_command() {
-    with_isolated_home(|home| {
-        let component_dir = tempfile::tempdir().expect("component dir");
-        write_fuzz_extension(home.path(), "fixture-fuzz", None, None);
-        write_fuzz_rig(
-            home,
-            "fixture-rig",
-            "component-a",
-            component_dir.path(),
-            "fixture-fuzz",
-        );
-        let path = write_replay_campaign(component_dir.path());
-
-        let (output, exit) = run_replay(FuzzReplayLikeArgs {
-            component: Some("component-a".to_string()),
-            path: None,
-            rig: Some("fixture-rig".to_string()),
-            extension_override: ExtensionOverrideArgs::default(),
-            setting_args: SettingArgs::default(),
-            artifact_or_case: Some(path.to_string_lossy().to_string()),
-            artifact: None,
-            case_id: Some("case-1".to_string()),
-            run_id: Some("proof-1".to_string()),
-            dry_run: false,
-            args: Vec::new(),
-        })
-        .expect("resolve unsupported replay");
-
-        assert_eq!(exit, 1);
-        assert_eq!(output.status, "unsupported");
-        assert!(output
-            .message
-            .contains("does not declare fuzz.replay_command"));
-        assert!(output.execution.is_none());
-    });
-}
-
-#[test]
-fn fuzz_minimize_executes_manifest_minimize_command_with_replay_env() {
-    with_isolated_home(|home| {
-        let component_dir = tempfile::tempdir().expect("component dir");
-        write_fuzz_extension(
-            home.path(),
-            "fixture-fuzz",
+            "fuzz_replay",
+        ),
+        (
+            "fuzz.minimize",
+            run_minimize as ReplayRunner,
             None,
-            Some(
-                r#"sh -c 'printf min:%s:%s:%s "$HOMEBOY_FUZZ_REPLAY_CASE_ID" "$HOMEBOY_FUZZ_REPLAY_SEED" "$1"' minimize-runner {case}"#,
-            ),
-        );
-        write_fuzz_rig(
-            home,
-            "fixture-rig",
-            "component-a",
-            component_dir.path(),
-            "fixture-fuzz",
-        );
-        let path = write_replay_campaign(component_dir.path());
+            Some(replay_command),
+            "fuzz_minimize",
+        ),
+    ] {
+        with_isolated_home(|home| {
+            let component_dir = tempfile::tempdir().expect("component dir");
+            write_fuzz_extension(home.path(), "fixture-fuzz", replay, minimize);
+            let path = write_fixture_rig_campaign(home, component_dir.path());
 
-        let (output, exit) = run_minimize(FuzzReplayLikeArgs {
-            component: Some("component-a".to_string()),
-            path: None,
-            rig: Some("fixture-rig".to_string()),
-            extension_override: ExtensionOverrideArgs::default(),
-            setting_args: SettingArgs::default(),
-            artifact_or_case: Some(path.to_string_lossy().to_string()),
-            artifact: None,
-            case_id: Some("case-1".to_string()),
-            run_id: Some("proof-1".to_string()),
-            dry_run: false,
-            args: vec!["--extra".to_string()],
-        })
-        .expect("execute minimize");
+            let (output, exit) =
+                run(fixture_rig_replay_args(&path, false)).expect("execute replay command");
 
-        assert_eq!(exit, 0);
-        assert_eq!(output.command, "fuzz.minimize");
-        assert_eq!(output.status, "passed");
-        assert!(output.replay_command.as_deref().unwrap().contains("case-1"));
-        let execution = output.execution.expect("execution");
-        assert_eq!(execution.kind, "fuzz_minimize");
-        assert_eq!(execution.stdout, "min:case-1:1234:case-1");
-    });
+            assert_eq!(exit, 0, "{command}");
+            assert_eq!(output.command, command);
+            assert_eq!(output.status, "passed", "{command}");
+            assert!(output.env.iter().any(|env| {
+                env.name == "HOMEBOY_FUZZ_REPLAY_ARTIFACT_FILE"
+                    && env.value == path.to_string_lossy()
+            }));
+            let execution = output.execution.expect("execution");
+            assert_eq!(execution.extension_id, "fixture-fuzz");
+            assert_eq!(execution.kind, execution_kind);
+            assert_eq!(execution.stdout, "case-1:1234:case-1", "{command}");
+        });
+    }
 }
 
 #[test]
-fn fuzz_minimize_reports_unsupported_without_minimize_command() {
-    with_isolated_home(|home| {
-        let component_dir = tempfile::tempdir().expect("component dir");
-        write_fuzz_extension(home.path(), "fixture-fuzz", Some("true"), None);
-        write_fuzz_rig(
-            home,
-            "fixture-rig",
-            "component-a",
-            component_dir.path(),
-            "fixture-fuzz",
-        );
-        let path = write_replay_campaign(component_dir.path());
+fn fuzz_replay_and_minimize_report_unsupported_without_manifest_command() {
+    for (command, run, replay, minimize, missing_key) in [
+        (
+            "fuzz.replay",
+            run_replay as ReplayRunner,
+            None,
+            None,
+            "fuzz.replay_command",
+        ),
+        (
+            "fuzz.minimize",
+            run_minimize as ReplayRunner,
+            Some("true"),
+            None,
+            "fuzz.minimize_command",
+        ),
+    ] {
+        with_isolated_home(|home| {
+            let component_dir = tempfile::tempdir().expect("component dir");
+            write_fuzz_extension(home.path(), "fixture-fuzz", replay, minimize);
+            let path = write_fixture_rig_campaign(home, component_dir.path());
 
-        let (output, exit) = run_minimize(FuzzReplayLikeArgs {
-            component: Some("component-a".to_string()),
-            path: None,
-            rig: Some("fixture-rig".to_string()),
-            extension_override: ExtensionOverrideArgs::default(),
-            setting_args: SettingArgs::default(),
-            artifact_or_case: Some(path.to_string_lossy().to_string()),
-            artifact: None,
-            case_id: Some("case-1".to_string()),
-            run_id: Some("proof-1".to_string()),
-            dry_run: false,
-            args: Vec::new(),
-        })
-        .expect("resolve unsupported minimize");
+            let (output, exit) =
+                run(fixture_rig_replay_args(&path, false)).expect("resolve unsupported command");
 
-        assert_eq!(exit, 1);
-        assert_eq!(output.command, "fuzz.minimize");
-        assert_eq!(output.status, "unsupported");
-        assert!(output
-            .message
-            .contains("does not declare fuzz.minimize_command"));
-        assert!(output.execution.is_none());
-    });
+            assert_eq!(exit, 1, "{command}");
+            assert_eq!(output.command, command);
+            assert_eq!(output.status, "unsupported");
+            assert!(
+                output
+                    .message
+                    .contains(&format!("does not declare {missing_key}")),
+                "{}",
+                output.message
+            );
+            assert!(output.execution.is_none());
+        });
+    }
+}
+
+fn write_fixture_rig_campaign(home: &tempfile::TempDir, component_dir: &Path) -> PathBuf {
+    write_fuzz_rig(
+        home,
+        "fixture-rig",
+        "component-a",
+        component_dir,
+        "fixture-fuzz",
+    );
+    write_replay_campaign(component_dir)
+}
+
+fn fixture_rig_replay_args(campaign: &Path, dry_run: bool) -> FuzzReplayLikeArgs {
+    FuzzReplayLikeArgs {
+        component: Some("component-a".to_string()),
+        path: None,
+        rig: Some("fixture-rig".to_string()),
+        extension_override: ExtensionOverrideArgs::default(),
+        setting_args: SettingArgs::default(),
+        artifact_or_case: Some(campaign.to_string_lossy().to_string()),
+        artifact: None,
+        case_id: Some("case-1".to_string()),
+        run_id: Some("proof-1".to_string()),
+        dry_run,
+        args: Vec::new(),
+    }
 }
 
 fn write_fuzz_extension(

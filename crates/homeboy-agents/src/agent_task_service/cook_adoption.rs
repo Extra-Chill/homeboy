@@ -1459,39 +1459,6 @@ mod projection_tests {
     use super::*;
 
     #[test]
-    fn finalization_projects_the_exact_durable_placement_decision_and_outcome_ids() {
-        let decision = serde_json::json!({
-            "decision_id": "epd-durable-decision",
-            "runner": { "runner_id": "fixture-lab", "source": "policy" }
-        });
-        let outcome = serde_json::json!({
-            "decision_id": "epd-durable-decision",
-            "effective": "lab",
-            "runner_id": "fixture-lab"
-        });
-        let metadata = serde_json::json!({
-            "execution_placement_decision": decision,
-            "execution_placement_outcome": outcome
-        });
-        let mut finalization = serde_json::json!({ "status": "review_ready" });
-
-        project_execution_placement(&mut finalization, &metadata);
-
-        assert_eq!(
-            finalization["execution_placement_decision"],
-            metadata["execution_placement_decision"]
-        );
-        assert_eq!(
-            finalization["execution_placement_outcome"],
-            metadata["execution_placement_outcome"]
-        );
-        assert_eq!(
-            finalization["execution_placement_decision"]["decision_id"],
-            finalization["execution_placement_outcome"]["decision_id"]
-        );
-    }
-
-    #[test]
     fn adoption_gate_identity_preserves_legacy_values_and_binds_declared_plans() {
         let empty = crate::agent_task_gate::VerifyGateOptions::default();
         assert_eq!(

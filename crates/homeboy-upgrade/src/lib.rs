@@ -7,8 +7,3 @@
 pub mod controller_staleness;
 pub mod self_status;
 pub mod upgrade;
-
-// Re-export the upgrade module surface at the crate root so external consumers
-// that previously used `homeboy_core::upgrade::X` can migrate to
-// `homeboy_upgrade::upgrade::X` (or the flattened `homeboy_upgrade::X`).
-pub use upgrade::*;

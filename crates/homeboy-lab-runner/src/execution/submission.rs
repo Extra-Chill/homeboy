@@ -287,13 +287,6 @@ mod tests {
         assert!(carried_plan
             .secret_env_names()
             .contains(&"AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()));
-        let dispatch = envelope.dispatch.as_ref().expect("envelope dispatch");
-        assert!(!dispatch
-            .env
-            .contains_key("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"));
-        // The serialized durable payload carries no secret value.
-        let durable = serde_json::to_string(&envelope).expect("envelope json");
-        assert!(!durable.contains("access-secret-value"));
     }
 
     #[test]

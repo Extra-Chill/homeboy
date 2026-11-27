@@ -102,8 +102,7 @@ pub fn read_json_spec_to_string(spec: &str) -> Result<String> {
     }
 
     // The remaining form is inline JSON. If the operator passed a bare path to
-    // an existing file (a common mistake, since these flags used to render as
-    // `<PATH>`), the string would otherwise be parsed as JSON and fail with an
+    // an existing file (a common mistake), the string would otherwise be parsed as JSON and fail with an
     // opaque "expected value" error. Detect that case and point at the `@FILE`
     // form explicitly (#9891).
     if !looks_like_inline_json(spec) && Path::new(spec.trim()).is_file() {
@@ -138,7 +137,7 @@ fn looks_like_inline_json(spec: &str) -> bool {
             .is_some_and(|c| c == '-' || c.is_ascii_digit())
 }
 
-/// Read a JSON value spec, preserving the report commands' legacy bare-path support.
+/// Read a JSON value spec, also accepting a bare path to an existing file (report commands).
 pub fn read_json_value_spec_with_bare_path(spec: &str, context: &str) -> Result<serde_json::Value> {
     let raw = if Path::new(spec).exists() {
         std::fs::read_to_string(spec)
@@ -225,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn json_value_spec_accepts_legacy_bare_path() {
+    fn json_value_spec_accepts_bare_path() {
         let path = temp_json_path("bare-spec.json");
         fs::write(&path, r#"{"source":"file"}"#).unwrap();
         let value = read_json_value_spec_with_bare_path(path.to_str().unwrap(), "results").unwrap();
@@ -264,15 +263,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_bulk_ids_accepts_json_array() {
-        let parsed = parse_bulk_ids(r#"["api","web"]"#).unwrap();
-        assert_eq!(parsed.component_ids, vec!["api", "web"]);
-    }
-
-    #[test]
-    fn parse_bulk_ids_accepts_json_object() {
-        let parsed = parse_bulk_ids(r#"{"component_ids":["api","web"]}"#).unwrap();
-        assert_eq!(parsed.component_ids, vec!["api", "web"]);
+    fn parse_bulk_ids_accepts_json_array_and_object() {
+        for spec in [r#"["api","web"]"#, r#"{"component_ids":["api","web"]}"#] {
+            let parsed = parse_bulk_ids(spec).unwrap();
+            assert_eq!(parsed.component_ids, vec!["api", "web"], "{spec}");
+        }
     }
 
     #[test]

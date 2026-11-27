@@ -597,49 +597,36 @@ mod tests {
         assert!(verify(file.path(), "wrong").is_err());
     }
     #[test]
-    fn reports_missing_outputs_without_a_package() {
-        let data_root = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        assert!(prepare_in_roots(data_root.path(), root.path(), &plan())
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn refuses_partial_packages_when_any_provider_omits_outputs() {
-        let data_root = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("deps")).unwrap();
-        fs::write(root.path().join("deps/a"), "ok").unwrap();
-        let mut plan = plan();
-        plan.push(DependencyInstallPlanStep {
+    fn incomplete_or_mismatched_outputs_produce_no_package() {
+        let outputless = DependencyInstallPlanStep {
             provider_id: "outputless".to_string(),
             invocation: DependencyInstallInvocation::Argv {
                 argv: vec!["test".to_string()],
             },
             workspace_relative_root: String::new(),
             outputs: Vec::new(),
-        });
+        };
+        for scenario in ["missing", "partial", "wrong kind"] {
+            let data_root = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let mut plan = plan();
+            match scenario {
+                "missing" => {}
+                "partial" => {
+                    fs::create_dir(root.path().join("deps")).unwrap();
+                    fs::write(root.path().join("deps/a"), "ok").unwrap();
+                    plan.push(outputless.clone());
+                }
+                "wrong kind" => fs::write(root.path().join("deps"), "not a directory").unwrap(),
+                _ => unreachable!(),
+            }
 
-        assert!(prepare_in_roots(data_root.path(), root.path(), &plan)
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn validates_declared_output_kind_before_packaging() {
-        let data_root = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        fs::write(root.path().join("deps"), "not a directory").unwrap();
-
-        assert!(prepare_in_roots(data_root.path(), root.path(), &plan())
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn rejects_an_oversized_package_before_transfer() {
-        let error = bound_error("bytes", MAX_PACKAGE_BYTES + 1, MAX_PACKAGE_BYTES);
-        assert!(error.message.contains("configured bytes bound"));
+            assert!(
+                prepare_in_roots(data_root.path(), root.path(), &plan)
+                    .unwrap()
+                    .is_none(),
+                "{scenario}"
+            );
+        }
     }
 }

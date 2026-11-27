@@ -918,24 +918,28 @@ fn ready_lab() -> LabRunnerReadiness {
     }
 }
 
-#[test]
-fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
+/// Persist one bench run with the given captured resource-policy context
+/// (`None` = no preflight context captured) and return its run metadata.
+fn persisted_resource_policy(local_override: Option<bool>) -> serde_json::Value {
+    let mut policy = serde_json::Value::Null;
     with_isolated_home(|home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         resource_policy::reset_captured_context_for_test();
 
-        let synthetic = synthetic_resources(ResourceRecommendation::Hot);
-        let warning = resource_policy::evaluate(HotCommand::lab_supported("bench"), &synthetic)
-            .expect("synthetic warning");
-        resource_policy::capture_context(resource_policy_context_from_evaluation(
-            HotCommand::lab_supported("bench"),
-            &synthetic,
-            Some(&warning),
-            false,
-            false,
-            Some(&ready_lab()),
-            false,
-        ));
+        if let Some(local_override) = local_override {
+            let synthetic = synthetic_resources(ResourceRecommendation::Hot);
+            let warning = resource_policy::evaluate(HotCommand::lab_supported("bench"), &synthetic)
+                .expect("synthetic warning");
+            resource_policy::capture_context(resource_policy_context_from_evaluation(
+                HotCommand::lab_supported("bench"),
+                &synthetic,
+                Some(&warning),
+                local_override,
+                false,
+                Some(&ready_lab()),
+                false,
+            ));
+        }
 
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
@@ -971,134 +975,38 @@ fn bench_observation_persists_resource_policy_warning_for_hot_machine() {
 
         let store = ObservationStore::open_initialized().expect("store");
         let run = store.get_run(&run_id).expect("read run").expect("run");
-        let policy = &run.metadata_json["resource_policy"];
-        assert_eq!(policy["command"], "bench");
-        assert_eq!(policy["severity"], "hot");
-        assert_eq!(policy["local_override"], false);
-        assert_eq!(policy["warned"], true);
-        assert_eq!(policy["runner_selection"]["runner_id"], "homeboy-lab");
-        assert_eq!(policy["runner_selection"]["reason"], "default_lab_runner");
-        assert!(policy["message"]
-            .as_str()
-            .expect("message string")
-            .contains("Resource policy warning"));
-        assert_eq!(policy["host"]["load_severity"], "hot");
-        assert_eq!(policy["host"]["load_one"], 18.2);
-        assert_eq!(policy["host"]["cpu_count"], 18);
+        policy = run.metadata_json["resource_policy"].clone();
 
         resource_policy::reset_captured_context_for_test();
     });
+    policy
 }
 
 #[test]
-fn bench_observation_records_local_placement_override_with_legacy_evidence() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        resource_policy::reset_captured_context_for_test();
+fn bench_observation_persists_captured_resource_policy_evidence() {
+    let policy = persisted_resource_policy(Some(false));
+    assert_eq!(policy["command"], "bench");
+    assert_eq!(policy["severity"], "hot");
+    assert_eq!(policy["local_override"], false);
+    assert_eq!(policy["warned"], true);
+    assert_eq!(policy["runner_selection"]["runner_id"], "homeboy-lab");
+    assert_eq!(policy["runner_selection"]["reason"], "default_lab_runner");
+    assert!(policy["message"]
+        .as_str()
+        .expect("message string")
+        .contains("Resource policy warning"));
+    assert_eq!(policy["host"]["load_severity"], "hot");
+    assert_eq!(policy["host"]["load_one"], 18.2);
+    assert_eq!(policy["host"]["cpu_count"], 18);
 
-        let synthetic = synthetic_resources(ResourceRecommendation::Hot);
-        let warning = resource_policy::evaluate(HotCommand::lab_supported("bench"), &synthetic)
-            .expect("synthetic warning");
-        resource_policy::capture_context(resource_policy_context_from_evaluation(
-            HotCommand::lab_supported("bench"),
-            &synthetic,
-            Some(&warning),
-            true,
-            false,
-            Some(&ready_lab()),
-            false,
-        ));
+    let policy = persisted_resource_policy(Some(true));
+    assert_eq!(policy["local_override"], true);
+    assert_eq!(
+        policy["runner_selection"]["reason"],
+        "placement_local_override"
+    );
 
-        let run_dir = RunDir::create().expect("run dir");
-        fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
-
-        let args = bench_args();
-        let observation = start(BenchObservationStart {
-            component_id: "homeboy",
-            component_label: "homeboy",
-            source_path: home.path(),
-            args: &args,
-            selected_scenarios: &[],
-            rig_id: None,
-            rig_snapshot: None,
-            run_dir: &run_dir,
-        })
-        .expect("start observation");
-        let run_id = observation.run_id().to_string();
-
-        let mut workflow = BenchRunWorkflowResult {
-            status: "passed".to_string(),
-            component: "homeboy".to_string(),
-            exit_code: 0,
-            iterations: 10,
-            results: None,
-            gate_results: Vec::new(),
-            gate_failures: Vec::new(),
-            baseline_comparison: None,
-            hints: None,
-            failure: None,
-            diagnostics: Vec::new(),
-        };
-        finish_success(Some(observation), &mut workflow, &run_dir).expect("observation summary");
-
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store.get_run(&run_id).expect("read run").expect("run");
-        let policy = &run.metadata_json["resource_policy"];
-        assert_eq!(policy["severity"], "hot");
-        assert_eq!(policy["local_override"], true);
-        assert_eq!(policy["warned"], true);
-        assert_eq!(
-            policy["runner_selection"]["reason"],
-            "placement_local_override"
-        );
-
-        resource_policy::reset_captured_context_for_test();
-    });
-}
-
-#[test]
-fn bench_observation_omits_resource_policy_when_not_captured() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        resource_policy::reset_captured_context_for_test();
-
-        let run_dir = RunDir::create().expect("run dir");
-        fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
-
-        let args = bench_args();
-        let observation = start(BenchObservationStart {
-            component_id: "homeboy",
-            component_label: "homeboy",
-            source_path: home.path(),
-            args: &args,
-            selected_scenarios: &[],
-            rig_id: None,
-            rig_snapshot: None,
-            run_dir: &run_dir,
-        })
-        .expect("start observation");
-        let run_id = observation.run_id().to_string();
-
-        let mut workflow = BenchRunWorkflowResult {
-            status: "passed".to_string(),
-            component: "homeboy".to_string(),
-            exit_code: 0,
-            iterations: 10,
-            results: None,
-            gate_results: Vec::new(),
-            gate_failures: Vec::new(),
-            baseline_comparison: None,
-            hints: None,
-            failure: None,
-            diagnostics: Vec::new(),
-        };
-        finish_success(Some(observation), &mut workflow, &run_dir).expect("observation summary");
-
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store.get_run(&run_id).expect("read run").expect("run");
-        // When no preflight context was captured (e.g. the bench was
-        // invoked from a context where main never ran), the metadata
-        // explicitly records `null` rather than fabricating a snapshot.
-        assert!(run.metadata_json["resource_policy"].is_null());
-    });
+    // Without a captured preflight context the metadata records `null`
+    // rather than fabricating a snapshot.
+    assert!(persisted_resource_policy(None).is_null());
 }

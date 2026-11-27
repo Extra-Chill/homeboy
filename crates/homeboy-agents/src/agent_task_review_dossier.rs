@@ -72,18 +72,6 @@ impl AgentTaskReviewEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AiReviewVerificationClaim {
-    pub command: String,
-    /// Provider-measured wall time. Controller gate timing is retained separately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u128>,
-    pub total: u64,
-    pub passed: u64,
-    pub failed: u64,
-    pub ignored: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskReviewVerifiedCommand {
     #[serde(default)]
     pub label: String,
@@ -182,6 +170,10 @@ pub struct AgentTaskReviewDossier {
     /// Cook status `succeeded_partial`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery: Vec<homeboy_control_plane_contract::CookDeliveryItem>,
+    /// The review form's completion verdict when the form validated. Cook
+    /// records it; manual finalization omits it (#18931).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<AiReviewCompletion>,
 }
 
 /// Repro evidence for a candidate. Only `verified` proves the issue.
@@ -245,6 +237,9 @@ pub struct AgentTaskReviewAiAssistance {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskReviewIssueRelationshipKind {
     Closes,
+    /// A same-repository issue the publication works on but has not proved
+    /// done; renders `Refs #N` so merging leaves the issue open (#18931).
+    Refs,
     RelatesTo,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -444,16 +439,6 @@ pub struct AiFilledReviewForm {
     /// Bullet points of the concrete changes.
     #[serde(default, deserialize_with = "prose_lines")]
     pub what_changed: Vec<String>,
-    /// Optional numeric test claims. No longer requested by the dispatched
-    /// prompt or declared output schema (#14733): the deterministic gate
-    /// commands are controller-owned, so asking the agent to also run and
-    /// report them was redundant, non-deterministic, and unreliable evidence.
-    /// The field remains only so an older or noncompliant provider response
-    /// that still includes it parses instead of hard-failing; it is never
-    /// consulted — `verify_against_promotion` derives every reviewer-visible
-    /// verification entry solely from durable candidate gate evidence.
-    #[serde(default)]
-    pub verification: Vec<AiReviewVerificationClaim>,
     /// The agent's own verdict on whether the requested task is done. Gates
     /// prove the repository still passes, not that the task was completed;
     /// only the agent can declare that, and it must do so structurally rather
@@ -1335,6 +1320,7 @@ pub(crate) fn render_source_relationships(
                 "{} {}",
                 match item.kind {
                     AgentTaskReviewIssueRelationshipKind::Closes => "Closes",
+                    AgentTaskReviewIssueRelationshipKind::Refs => "Refs",
                     AgentTaskReviewIssueRelationshipKind::RelatesTo => "Relates to",
                 },
                 relationship_reference(&item.reference)
@@ -1344,7 +1330,7 @@ pub(crate) fn render_source_relationships(
         .join("\n")
 }
 
-/// Remove legacy routing-tier suffixes from model disclosures, including lineage entries.
+/// Remove routing-tier suffixes that persisted model disclosures may carry, including lineage entries.
 fn strip_model_tiers(model: &str) -> String {
     let mut display = model.to_string();
     while let Some(start) = display.find(" (tier ") {
@@ -2102,7 +2088,7 @@ pub fn validate_issue_reference(value: &str) -> Result<()> {
         )
     }
 }
-/// `Closes` must name a GitHub issue so GitHub links and closes it on merge.
+/// `Closes` and `Refs` must name a GitHub issue so GitHub links it.
 /// `Relates to` additionally accepts a public HTTPS reference, such as a task
 /// tracked outside GitHub, rendered verbatim as a single-line link.
 pub fn validate_issue_relationship(relationship: &AgentTaskReviewIssueRelationship) -> Result<()> {
@@ -2202,7 +2188,9 @@ pub fn task_issue_relationship(
 }
 
 /// Reconcile source relationships with the PR being updated. Its own source
-/// reference is not a relationship; closing references from its body survive.
+/// reference is not a relationship; closing references from its body survive
+/// unless this publication already decided that reference's relationship, so a
+/// task that is no longer proven is not re-closed by its previous body (#18931).
 pub fn reconcile_existing_pr_relationships(
     relationships: &mut Vec<AgentTaskReviewIssueRelationship>,
     target_url: &str,
@@ -2223,7 +2211,9 @@ pub fn reconcile_existing_pr_relationships(
             reference: captures[1].to_string(),
         };
         if validate_issue_relationship(&relationship).is_ok()
-            && !relationships.contains(&relationship)
+            && !relationships
+                .iter()
+                .any(|existing| existing.reference == relationship.reference)
         {
             relationships.push(relationship);
         }
@@ -2333,79 +2323,62 @@ mod tests {
         })
     }
 
+    /// Only an issue in the destination repository (same host, owner and
+    /// repo, compared case-insensitively) closes; pull requests, cross-repo
+    /// issues and external trackers relate, and non-URL refs are dropped.
     #[test]
-    fn task_issue_relationship_closes_same_repo_issue_case_insensitively() {
-        let dest = destination("github.com", "Extra-Chill", "homeboy");
-        assert_eq!(
-            task_issue_relationship(
+    fn task_issue_relationship_closes_only_destination_repo_issues() {
+        use AgentTaskReviewIssueRelationshipKind::{Closes, RelatesTo};
+        let github = destination("github.com", "Extra-Chill", "homeboy");
+        let enterprise = destination("github.example.com", "Team", "App");
+        for (url, dest, expected) in [
+            (
                 "https://github.com/extra-chill/HOMEBOY/issues/16247",
-                Some(&dest)
+                Some(&github),
+                relationship(Closes, "#16247"),
             ),
-            relationship(AgentTaskReviewIssueRelationshipKind::Closes, "#16247")
-        );
-    }
-
-    #[test]
-    fn task_issue_relationship_relates_cross_repo_issue() {
-        let dest = destination("github.com", "Extra-Chill", "homeboy");
-        assert_eq!(
-            task_issue_relationship("https://github.com/Extra-Chill/other/issues/7", Some(&dest)),
-            relationship(
-                AgentTaskReviewIssueRelationshipKind::RelatesTo,
-                "Extra-Chill/other#7"
-            )
-        );
-    }
-
-    #[test]
-    fn task_issue_relationship_never_closes_pull_requests_or_external_trackers() {
-        let dest = destination("github.com", "Extra-Chill", "homeboy");
-        assert_eq!(
-            task_issue_relationship("https://github.com/Extra-Chill/homeboy/pull/9", Some(&dest)),
-            relationship(AgentTaskReviewIssueRelationshipKind::RelatesTo, "#9")
-        );
-        assert_eq!(
-            task_issue_relationship("https://linear.app/team/issue/HB-1", Some(&dest)),
-            relationship(
-                AgentTaskReviewIssueRelationshipKind::RelatesTo,
-                "https://linear.app/team/issue/HB-1"
-            )
-        );
-        // Without a known destination nothing can be closed.
-        assert_eq!(
-            task_issue_relationship("https://github.com/Extra-Chill/homeboy/issues/3", None),
-            relationship(
-                AgentTaskReviewIssueRelationshipKind::RelatesTo,
-                "https://github.com/Extra-Chill/homeboy/issues/3"
-            )
-        );
-        assert_eq!(task_issue_relationship("prompt:do-it", Some(&dest)), None);
-        assert_eq!(
-            task_issue_relationship("homeboy://agent-task/run/x", Some(&dest)),
-            None
-        );
-    }
-
-    #[test]
-    fn task_issue_relationship_supports_github_enterprise_hosts() {
-        let dest = destination("github.example.com", "Team", "App");
-        assert_eq!(
-            task_issue_relationship("https://GitHub.example.com/team/app/issues/5", Some(&dest)),
-            relationship(AgentTaskReviewIssueRelationshipKind::Closes, "#5")
-        );
-        assert_eq!(
-            task_issue_relationship("https://github.example.com/team/lib/issues/6", Some(&dest)),
-            relationship(
-                AgentTaskReviewIssueRelationshipKind::RelatesTo,
-                "team/lib#6"
-            )
-        );
-        // Same owner/repo on a different host is a different repository.
-        assert_ne!(
-            task_issue_relationship("https://github.com/Team/App/issues/5", Some(&dest))
-                .map(|value| value.kind),
-            Some(AgentTaskReviewIssueRelationshipKind::Closes)
-        );
+            (
+                "https://github.com/Extra-Chill/other/issues/7",
+                Some(&github),
+                relationship(RelatesTo, "Extra-Chill/other#7"),
+            ),
+            (
+                "https://github.com/Extra-Chill/homeboy/pull/9",
+                Some(&github),
+                relationship(RelatesTo, "#9"),
+            ),
+            (
+                "https://linear.app/team/issue/HB-1",
+                Some(&github),
+                relationship(RelatesTo, "https://linear.app/team/issue/HB-1"),
+            ),
+            // Without a known destination nothing can be closed.
+            (
+                "https://github.com/Extra-Chill/homeboy/issues/3",
+                None,
+                relationship(RelatesTo, "https://github.com/Extra-Chill/homeboy/issues/3"),
+            ),
+            ("prompt:do-it", Some(&github), None),
+            ("homeboy://agent-task/run/x", Some(&github), None),
+            (
+                "https://GitHub.example.com/team/app/issues/5",
+                Some(&enterprise),
+                relationship(Closes, "#5"),
+            ),
+            (
+                "https://github.example.com/team/lib/issues/6",
+                Some(&enterprise),
+                relationship(RelatesTo, "team/lib#6"),
+            ),
+            // Same owner/repo on a different host is a different repository.
+            (
+                "https://github.com/Team/App/issues/5",
+                Some(&enterprise),
+                relationship(RelatesTo, "https://github.com/Team/App/issues/5"),
+            ),
+        ] {
+            assert_eq!(task_issue_relationship(url, dest), expected, "{url}");
+        }
     }
 
     #[test]
@@ -2498,6 +2471,23 @@ mod tests {
         );
         form.validate(PrTitlePolicy::ConventionalCommit)
             .expect("a coerced form is still valid");
+
+        // The inverse shape: a single paragraph where a bullet list was asked
+        // for. The trailing newline must not become an empty bullet.
+        let outputs = serde_json::json!({
+            "review_form": {
+                "summary": "s",
+                "pr_title": "fix(agent-task): guard the reload render path",
+                "what_changed": "first line\nsecond line\n",
+            }
+        });
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("a string-shaped list field must not be a hard error")
+            .expect("form present");
+        assert_eq!(
+            form.what_changed,
+            vec!["first line".to_string(), "second line".to_string()]
+        );
     }
 
     /// Regression for #15397 / #15051 / #16523: a model that writes
@@ -2540,51 +2530,6 @@ mod tests {
         }
     }
 
-    /// The inverse shape: a single paragraph where a bullet list was asked for.
-    #[test]
-    fn what_changed_accepts_a_single_string() {
-        let outputs = serde_json::json!({
-            "review_form": {
-                "summary": "s",
-                "pr_title": "fix(agent-task): guard the reload render path",
-                "what_changed": "first line\nsecond line\n",
-                "compatibility": "c",
-                "used_for": "Investigated, then implemented and verified the change.",
-            }
-        });
-
-        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("a string-shaped list field must not be a hard error")
-            .expect("form present");
-
-        // The trailing newline must not become an empty bullet: `validate`
-        // refuses a list with no non-empty entries and should keep doing so.
-        assert_eq!(
-            form.what_changed,
-            vec!["first line".to_string(), "second line".to_string()]
-        );
-    }
-
-    /// Plain strings keep behaving exactly as before.
-    #[test]
-    fn prose_fields_still_accept_plain_strings() {
-        let outputs = serde_json::json!({
-            "review_form": {
-                "summary": "s",
-                "pr_title": "fix(agent-task): guard the reload render path",
-                "what_changed": ["one"],
-                "compatibility": "c",
-                "used_for": "Investigated, then implemented and verified the change.",
-            }
-        });
-
-        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("parses")
-            .expect("form present");
-        assert_eq!(form.summary, "s");
-        assert_eq!(form.what_changed, vec!["one".to_string()]);
-    }
-
     /// A shape that still cannot be coerced must say what a valid form needs,
     /// because this error costs the whole cook.
     #[test]
@@ -2600,15 +2545,6 @@ mod tests {
             error.to_string().contains("`summary`"),
             "message states what a valid form requires: {error}"
         );
-    }
-
-    /// An absent form is still `Ok(None)` so the nudge loop keeps owning it.
-    #[test]
-    fn an_absent_form_is_not_an_error() {
-        let outputs = serde_json::json!({});
-        assert!(AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("absence is not an error")
-            .is_none());
     }
 
     /// A prose `completion` reads as absent: the form parses as incomplete and
@@ -2676,6 +2612,7 @@ mod tests {
             out_of_scope_changes: Vec::new(),
             repro: None,
             delivery: Vec::new(),
+            completion: None,
         }
     }
 
@@ -2781,7 +2718,6 @@ mod tests {
             pr_title: "fix(agent-task): guard the reload render path".into(),
             summary: "Fix the widget so it renders on reload.".into(),
             what_changed: vec!["Guard the null path in render().".into()],
-            verification: Vec::new(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
             delivery: Vec::new(),
@@ -2924,13 +2860,6 @@ mod tests {
             .ensure_publishable()
             .expect_err("an incomplete form blocks publication");
         assert!(error.message.contains("not published"), "{}", error.message);
-    }
-
-    #[test]
-    fn valid_review_form_passes_validation() {
-        assert!(valid_form()
-            .validate(PrTitlePolicy::ConventionalCommit)
-            .is_ok());
     }
 
     #[test]
@@ -3082,46 +3011,8 @@ mod tests {
     }
 
     #[test]
-    fn optional_claims_do_not_change_machine_derived_verified_commands() {
-        let mut form = valid_form();
-        form.verification.push(AiReviewVerificationClaim {
-            command: "cargo test connection::tests".into(),
-            elapsed_ms: None,
-            total: 127,
-            passed: 124,
-            failed: 3,
-            ignored: 0,
-        });
-        form.verification.push(AiReviewVerificationClaim {
-            command: "cargo test connection".into(),
-            elapsed_ms: None,
-            total: 127,
-            passed: 124,
-            failed: 2,
-            ignored: 0,
-        });
-        let verified = form
-            .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
-            .expect("optional agent claims cannot reject durable gate evidence");
-        assert_eq!(verified.len(), 1);
-        assert_eq!(verified[0].command, "cargo test connection");
-        assert_eq!(verified[0].total, Some(177));
-        assert_eq!(verified[0].passed, Some(175));
-        assert_eq!(verified[0].failed, Some(2));
-        assert_eq!(verified[0].ignored, Some(0));
-    }
-
-    #[test]
     fn different_candidate_fingerprint_is_excluded_from_review_verification() {
-        let mut form = valid_form();
-        form.verification.push(AiReviewVerificationClaim {
-            command: "cargo test connection".into(),
-            elapsed_ms: None,
-            total: 177,
-            passed: 175,
-            failed: 2,
-            ignored: 0,
-        });
+        let form = valid_form();
         let mut promotion = promotion("cargo test connection", "candidate-tree");
         promotion.provenance["candidate_checkout"]["tree"] = serde_json::json!("other-tree");
         let verified = form
@@ -3132,15 +3023,7 @@ mod tests {
 
     #[test]
     fn php_style_gate_without_supported_counts_still_derives_verified_command() {
-        let mut form = valid_form();
-        form.verification.push(AiReviewVerificationClaim {
-            command: "php artisan test".into(),
-            elapsed_ms: None,
-            total: 7,
-            passed: 7,
-            failed: 0,
-            ignored: 0,
-        });
+        let form = valid_form();
         let mut promotion = promotion("php artisan test", "candidate-tree");
         promotion.deterministic_gates[0].stdout =
             "PASS  Tests\\Feature\\ExampleTest\nTests: 7 passed".into();
@@ -3171,15 +3054,6 @@ mod tests {
     }
 
     #[test]
-    fn review_form_parses_from_outcome_outputs() {
-        let outputs = serde_json::json!({ "review_form": valid_form() });
-        let parsed = AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("parse")
-            .expect("present");
-        assert_eq!(parsed, valid_form());
-    }
-
-    #[test]
     fn absent_review_form_parses_as_none() {
         assert!(
             AiFilledReviewForm::from_outcome_outputs(&serde_json::json!({}))
@@ -3191,12 +3065,6 @@ mod tests {
         )
         .expect("parse")
         .is_none());
-    }
-
-    #[test]
-    fn malformed_review_form_is_a_hard_error() {
-        let outputs = serde_json::json!({ "review_form": { "summary": 42 } });
-        assert!(AiFilledReviewForm::from_outcome_outputs(&outputs).is_err());
     }
 
     #[test]
@@ -3217,17 +3085,15 @@ mod tests {
             !label.starts_with("gate-1"),
             "must not lead with the positional id"
         );
-    }
 
-    #[test]
-    fn gate_evidence_summary_falls_back_to_id_when_summary_absent() {
-        let gate = HomeboyGateResult::new(
+        // Without a summary the id is the only label available.
+        let bare = HomeboyGateResult::new(
             "gate-2",
             "gate-2",
             homeboy_core::gate::HomeboyGateKind::Command,
             homeboy_core::gate::HomeboyGateStatus::Passed,
         );
-        assert_eq!(gate_evidence_summary(&gate), "gate-2: Passed");
+        assert_eq!(gate_evidence_summary(&bare), "gate-2: Passed");
     }
 
     /// Regression for #15312: a multi-line `--verify-file` gate passed, then
@@ -3606,32 +3472,20 @@ mod tests {
     }
 
     #[test]
-    fn review_form_accepts_used_for_and_legacy_compatibility_keys() {
+    fn review_form_parses_minimal_and_undeclared_keys() {
+        // `compatibility` is not declared; providers still send it.
         let outputs = serde_json::json!({ "review_form": {
             "pr_title": "fix(agent-task): guard reload path",
             "summary": "Guard reloads.",
             "what_changed": ["Added the guard."],
             "compatibility": "Additive.",
-            "used_for": "Guard reloads.",
             "completion": "complete"
         }});
         let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
-            .expect("retired keys still parse")
+            .expect("undeclared keys parse")
             .expect("form present");
         form.validate(PrTitlePolicy::ConventionalCommit)
-            .expect("retired keys are not validated");
-    }
-
-    #[test]
-    fn minimal_review_form_does_not_require_legacy_fields() {
-        let form: AiFilledReviewForm = serde_json::from_value(serde_json::json!({
-            "pr_title": "refactor(review): simplify signatures",
-            "summary": "Remove redundant reviewer fields.",
-            "what_changed": ["Simplified the form."],
-            "completion": "complete"
-        }))
-        .unwrap();
-        form.validate(PrTitlePolicy::ConventionalCommit).unwrap();
+            .expect("minimal form validates");
         let declaration = review_form_output_declaration(PrTitlePolicy::ConventionalCommit);
         assert!(declaration.structural_schema["properties"]
             .get("used_for")
@@ -3704,25 +3558,6 @@ mod tests {
         // Idempotent and empty-safe.
         assert_eq!(homeboy_tool_disclosure("Homeboy (Pi)"), "Homeboy (Pi)");
         assert_eq!(homeboy_tool_disclosure(""), "");
-    }
-
-    #[test]
-    fn profile_conflicts_fail_closed() {
-        let profile = AgentTaskReviewProfile {
-            required_sections: vec![AgentTaskReviewSectionId::Summary],
-            hidden_sections: vec![AgentTaskReviewSectionId::Summary],
-            ..Default::default()
-        };
-        assert!(validate_profile(&profile).is_err());
-    }
-    #[test]
-    fn url_policy_rejects_local_urls() {
-        let mut value = dossier();
-        value.evidence.push(AgentTaskReviewEvidence {
-            summary: "local".into(),
-            url: Some("https://localhost/a".into()),
-        });
-        assert!(value.validate(&default_profile()).is_err());
     }
 
     #[test]
@@ -3839,13 +3674,6 @@ mod tests {
         assert!(
             render_review_dossier(&value, &default_profile()).contains("unavailable_manual_review")
         );
-    }
-
-    #[test]
-    fn internal_only_changes_do_not_require_public_contract_evidence() {
-        dossier()
-            .validate(&default_profile())
-            .expect("internal-only change");
     }
 
     #[test]

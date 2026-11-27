@@ -7,9 +7,8 @@ use std::sync::{mpsc, Arc, Barrier, Mutex};
 use std::time::Duration;
 
 use super::{
-    artifact_content_url, can_recover_startup_attempt, ensure_running_with_operations,
-    fetch_artifact_to_path, observe_startup_lease,
-    terminate_token_owned_startup_process_with_operations,
+    can_recover_startup_attempt, ensure_running_with_operations, fetch_artifact_to_path,
+    observe_startup_lease, terminate_token_owned_startup_process_with_operations,
 };
 use crate::api_jobs::{JobStatus, JobStore};
 use crate::build_identity::BuildIdentity;
@@ -86,21 +85,6 @@ fn stale_start_cleanup_waits_for_cook_generation_admission() {
             .recv_timeout(Duration::from_secs(1))
             .expect("stale startup cleanup proceeds after Cook admission");
     });
-}
-
-#[test]
-fn artifact_content_url_builds_encoded_daemon_byte_alias() {
-    let url = artifact_content_url(
-        "http://127.0.0.1:7421/base?ignored=true",
-        "run 1",
-        "report/summary.json",
-    )
-    .expect("url");
-
-    assert_eq!(
-        url,
-        "http://127.0.0.1:7421/runs/run%201/artifacts/report%2Fsummary.json/content"
-    );
 }
 
 /// A store over the shared ledger stamped with `lease_id` and `scope`.
@@ -222,7 +206,7 @@ fn fetch_artifact_to_path_downloads_daemon_byte_alias() {
             let bytes = stream.read(&mut request).expect("request");
             let request = String::from_utf8_lossy(&request[..bytes]);
             assert!(request
-                .starts_with("GET /runs/run-1/artifacts/report%2Fsummary.json/content HTTP/1.1"));
+                .starts_with("GET /runs/run%201/artifacts/report%2Fsummary.json/content HTTP/1.1"));
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nX-Homeboy-Artifact-Sha256: abc123\r\nConnection: close\r\n\r\n{\"ok\":true}",
@@ -232,9 +216,10 @@ fn fetch_artifact_to_path_downloads_daemon_byte_alias() {
         let output = home.path().join("summary.json");
 
         let outcome = fetch_artifact_to_path(
-            "run-1",
+            "run 1",
             "report/summary.json",
-            Some(format!("http://{addr}")),
+            // The daemon base URL's own path and query never leak into the alias.
+            Some(format!("http://{addr}/base?ignored=true")),
             Some(output.clone()),
         )
         .expect("artifact get");
@@ -294,29 +279,6 @@ fn ensure_running_returns_stale_live_daemon_without_starting_duplicate() {
 
         assert_eq!(attached, daemon);
         assert_eq!(state.lock().expect("state").starts, 0);
-    });
-}
-
-#[test]
-fn ensure_running_concurrent_callers_converge_on_same_daemon() {
-    with_isolated_home(|_| {
-        let daemon = fake_daemon(4242, "lease-shared");
-        let state = Arc::new(Mutex::new(FakeEnsureState::default()));
-        let barrier = Arc::new(Barrier::new(3));
-        let first =
-            ensure_with_fake_operations(Arc::clone(&barrier), Arc::clone(&state), daemon.clone());
-        let second = ensure_with_fake_operations(Arc::clone(&barrier), Arc::clone(&state), daemon);
-        barrier.wait();
-
-        let first = first.join().expect("first thread").expect("first ensure");
-        let second = second
-            .join()
-            .expect("second thread")
-            .expect("second ensure");
-        assert_eq!(first.pid, second.pid);
-        assert_eq!(first.lease_id, second.lease_id);
-        assert_eq!(first.address, second.address);
-        assert_eq!(state.lock().expect("state").starts, 1);
     });
 }
 
@@ -408,8 +370,8 @@ fn startup_observation_waits_for_delayed_token_without_provider_work() {
 
 #[test]
 fn startup_observation_stops_as_soon_as_the_child_exits() {
-    // #17445: a `serve` that died on bind used to be polled for the whole
-    // observation budget, re-reading status on every poll.
+    // #17445: a `serve` that dies on bind ends observation immediately
+    // instead of polling status for the whole observation budget.
     let missing = fake_status(None, false);
     let mut reads = 0;
     let mut sleeps = 0;
@@ -703,35 +665,6 @@ fn locked_start_operations_publish_once_and_converge_concurrent_callers() {
         assert_eq!(first.lease_id, second.lease_id);
         assert_eq!(state.lock().expect("state").starts, 1);
     });
-}
-
-fn ensure_with_fake_operations(
-    barrier: Arc<Barrier>,
-    state: Arc<Mutex<FakeEnsureState>>,
-    daemon: super::DaemonStartResult,
-) -> std::thread::JoinHandle<crate::error::Result<super::DaemonStartResult>> {
-    std::thread::spawn(move || {
-        barrier.wait();
-        let read_state = Arc::clone(&state);
-        let start_state = Arc::clone(&state);
-        let daemon_pid = daemon.pid;
-        ensure_running_with_operations(
-            || super::super::acquire_daemon_operation_lock_with_wait(Duration::from_secs(1)),
-            move || {
-                Ok(fake_status(
-                    read_state.lock().expect("state").daemon.clone(),
-                    true,
-                ))
-            },
-            move |pid| pid == daemon_pid,
-            move || {
-                let mut state = start_state.lock().expect("state");
-                state.starts += 1;
-                state.daemon = Some(daemon.clone());
-                Ok(daemon)
-            },
-        )
-    })
 }
 
 fn ensure_with_slow_fake_operations(

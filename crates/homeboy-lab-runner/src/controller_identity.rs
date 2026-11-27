@@ -52,15 +52,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_to_this_process_build() {
+    fn scopes_the_converging_controller_and_restores_after() {
         assert_eq!(
             compatibility_controller_identity(),
             homeboy_product_identity::build_identity()
         );
-    }
-
-    #[test]
-    fn scopes_the_converging_controller_and_restores_after() {
         let installed = "homeboy 99.0.0+dd97ab6dd5395907573bd4525f60f67e1e38af56";
         let seen = with_converging_controller(Some(installed), compatibility_controller_identity);
         assert_eq!(seen.display, installed);

@@ -115,8 +115,7 @@ pub enum FuzzEvidenceViolationCode {
     /// is there.
     ArtifactRefMissing,
     /// A declared artifact path is local-looking but escapes the artifact
-    /// root (`..` traversal or an absolute path outside the base). Previously
-    /// these were silently discarded.
+    /// root (`..` traversal or an absolute path outside the base).
     ArtifactRefUnresolvable,
     /// A declared artifact path exists but is the wrong kind — a directory
     /// where the contract declared a file, or the reverse.
@@ -436,98 +435,103 @@ mod tests {
     }
 
     #[test]
-    fn passing_cases_with_a_missing_artifact_classify_as_evidence_contract_failure() {
-        let evidence = FuzzEvidenceContract::from_violations(vec![missing_ref("results.json")]);
-        let classification = classify_fuzz_failure(&FuzzFailureSignals {
-            evidence: &evidence,
-            failed_case_ids: &[],
-            open_findings: 0,
-            failed_gate_ids: &[],
-            campaign_present: true,
-        });
+    fn classification_keeps_workload_and_evidence_verdicts_independent() {
+        let incomplete = FuzzEvidenceContract::from_violations(vec![missing_ref("results.json")]);
+        let complete = FuzzEvidenceContract::satisfied();
+        let failed_case = vec!["case-17".to_string()];
+        let failed_gate = vec!["no-open-findings".to_string()];
+        let none: Vec<String> = Vec::new();
 
-        assert_eq!(
-            classification.domain,
-            FuzzFailureDomain::EvidenceContractFailure
-        );
-        // The reported #10513 regression: the workload verdict must survive.
-        assert_eq!(classification.workload_verdict, FuzzWorkloadVerdict::Passed);
-        assert_eq!(
-            classification.evidence_verdict,
-            FuzzEvidenceVerdict::Incomplete
-        );
-    }
+        // (label, evidence, failed cases, open findings, failed gates, campaign present,
+        //  expected domain, expected workload verdict, expected evidence verdict)
+        let cases = [
+            (
+                // The reported #10513 regression: the workload verdict must survive.
+                "missing artifact with passing cases",
+                &incomplete,
+                &none,
+                0,
+                &none,
+                true,
+                FuzzFailureDomain::EvidenceContractFailure,
+                FuzzWorkloadVerdict::Passed,
+                FuzzEvidenceVerdict::Incomplete,
+            ),
+            (
+                "open finding outranks incomplete evidence",
+                &incomplete,
+                &none,
+                1,
+                &none,
+                true,
+                FuzzFailureDomain::ProductFinding,
+                FuzzWorkloadVerdict::Failed,
+                FuzzEvidenceVerdict::Incomplete,
+            ),
+            (
+                "failed gate with complete evidence",
+                &complete,
+                &none,
+                0,
+                &failed_gate,
+                true,
+                FuzzFailureDomain::GateFailure,
+                FuzzWorkloadVerdict::Passed,
+                FuzzEvidenceVerdict::Complete,
+            ),
+            (
+                "failed case",
+                &complete,
+                &failed_case,
+                0,
+                &none,
+                true,
+                FuzzFailureDomain::WorkloadFailure,
+                FuzzWorkloadVerdict::Failed,
+                FuzzEvidenceVerdict::Complete,
+            ),
+            (
+                "absent campaign",
+                &complete,
+                &none,
+                0,
+                &none,
+                false,
+                FuzzFailureDomain::WorkloadFailure,
+                FuzzWorkloadVerdict::Unknown,
+                FuzzEvidenceVerdict::Complete,
+            ),
+        ];
 
-    #[test]
-    fn an_open_finding_outranks_an_incomplete_evidence_contract() {
-        let evidence = FuzzEvidenceContract::from_violations(vec![missing_ref("results.json")]);
-        let classification = classify_fuzz_failure(&FuzzFailureSignals {
-            evidence: &evidence,
-            failed_case_ids: &[],
-            open_findings: 1,
-            failed_gate_ids: &[],
-            campaign_present: true,
-        });
-
-        assert_eq!(classification.domain, FuzzFailureDomain::ProductFinding);
-        assert_eq!(classification.workload_verdict, FuzzWorkloadVerdict::Failed);
-        // Both verdicts stay visible; the domain only says which one leads.
-        assert_eq!(
-            classification.evidence_verdict,
-            FuzzEvidenceVerdict::Incomplete
-        );
-    }
-
-    #[test]
-    fn a_failed_gate_with_complete_evidence_is_a_gate_failure() {
-        let evidence = FuzzEvidenceContract::satisfied();
-        let classification = classify_fuzz_failure(&FuzzFailureSignals {
-            evidence: &evidence,
-            failed_case_ids: &[],
-            open_findings: 0,
-            failed_gate_ids: &["no-open-findings".to_string()],
-            campaign_present: true,
-        });
-
-        assert_eq!(classification.domain, FuzzFailureDomain::GateFailure);
-        assert_eq!(classification.workload_verdict, FuzzWorkloadVerdict::Passed);
-        assert_eq!(
-            classification.evidence_verdict,
-            FuzzEvidenceVerdict::Complete
-        );
-    }
-
-    #[test]
-    fn a_failed_case_is_a_workload_failure() {
-        let evidence = FuzzEvidenceContract::satisfied();
-        let classification = classify_fuzz_failure(&FuzzFailureSignals {
-            evidence: &evidence,
-            failed_case_ids: &["case-17".to_string()],
-            open_findings: 0,
-            failed_gate_ids: &[],
-            campaign_present: true,
-        });
-
-        assert_eq!(classification.domain, FuzzFailureDomain::WorkloadFailure);
-        assert_eq!(classification.workload_verdict, FuzzWorkloadVerdict::Failed);
-    }
-
-    #[test]
-    fn an_absent_campaign_leaves_the_workload_verdict_unknown() {
-        let evidence = FuzzEvidenceContract::satisfied();
-        let classification = classify_fuzz_failure(&FuzzFailureSignals {
-            evidence: &evidence,
-            failed_case_ids: &[],
-            open_findings: 0,
-            failed_gate_ids: &[],
-            campaign_present: false,
-        });
-
-        assert_eq!(classification.domain, FuzzFailureDomain::WorkloadFailure);
-        assert_eq!(
-            classification.workload_verdict,
-            FuzzWorkloadVerdict::Unknown
-        );
+        for (
+            label,
+            evidence,
+            failed_case_ids,
+            open_findings,
+            failed_gate_ids,
+            campaign_present,
+            domain,
+            workload,
+            evidence_verdict,
+        ) in cases
+        {
+            let classification = classify_fuzz_failure(&FuzzFailureSignals {
+                evidence,
+                failed_case_ids,
+                open_findings,
+                failed_gate_ids,
+                campaign_present,
+            });
+            assert_eq!(
+                classification,
+                FuzzFailureClassification {
+                    domain,
+                    workload_verdict: workload,
+                    evidence_verdict,
+                },
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -552,7 +556,9 @@ mod tests {
     }
 
     #[test]
-    fn summary_counts_the_remaining_violations() {
+    fn summary_leads_with_the_first_violation_and_counts_the_rest() {
+        assert!(FuzzEvidenceContract::satisfied().summary().is_none());
+
         let evidence = FuzzEvidenceContract::from_violations(vec![
             missing_ref("results.json"),
             missing_ref("case-log.json"),
@@ -565,42 +571,25 @@ mod tests {
     }
 
     #[test]
-    fn a_satisfied_contract_has_no_summary() {
-        assert!(FuzzEvidenceContract::satisfied().summary().is_none());
-    }
-
-    #[test]
-    fn unknown_labels_deserialize_to_unknown_rather_than_failing() {
+    fn newer_producer_labels_and_members_decode_instead_of_failing() {
         let domain: FuzzFailureDomain =
             serde_json::from_value(serde_json::json!("brand_new_domain")).expect("domain");
         assert_eq!(domain, FuzzFailureDomain::Unknown);
 
-        let code: FuzzEvidenceViolationCode =
-            serde_json::from_value(serde_json::json!("brand_new_code")).expect("code");
-        assert_eq!(code, FuzzEvidenceViolationCode::Unknown);
-
         let verdict: FuzzWorkloadVerdict =
             serde_json::from_value(serde_json::json!("indeterminate")).expect("verdict");
         assert_eq!(verdict, FuzzWorkloadVerdict::Unknown);
-    }
 
-    #[test]
-    fn violations_tolerate_unknown_members_from_a_newer_producer() {
         let violation: FuzzEvidenceViolation = serde_json::from_value(serde_json::json!({
             "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-            "code": "artifact_ref_missing",
+            "code": "brand_new_code",
             "message": "absent",
             "declared_ref": "results.json",
             "future_member": { "nested": true }
         }))
         .expect("violation");
-
-        assert_eq!(
-            violation.code,
-            FuzzEvidenceViolationCode::ArtifactRefMissing
-        );
+        assert_eq!(violation.code, FuzzEvidenceViolationCode::Unknown);
         assert_eq!(violation.declared_ref.as_deref(), Some("results.json"));
-        assert_eq!(violation.schema, FUZZ_EVIDENCE_CONTRACT_SCHEMA);
     }
 
     #[test]
@@ -629,45 +618,50 @@ mod tests {
     }
 
     #[test]
-    fn missing_evidence_cannot_be_claimed_satisfied() {
-        let error = FuzzEvidenceContract::from_run_metadata(&serde_json::json!({
+    fn run_metadata_rejects_missing_or_untrustworthy_contracts() {
+        let missing = FuzzEvidenceContract::from_run_metadata(&serde_json::json!({
             "success": true
         }))
         .expect_err("missing canonical evidence must fail");
-        assert_eq!(error.details["field"], "evidence_contract");
-    }
+        assert_eq!(missing.details["field"], "evidence_contract");
 
-    #[test]
-    fn unsupported_evidence_schema_is_rejected() {
-        let metadata = serde_json::json!({
-            "evidence_contract": {
-                "schema": "attacker/not-the-contract/v9",
-                "complete": true,
-                "violations": []
-            }
+        let violation = serde_json::json!({
+            "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+            "code": "artifact_ref_missing",
+            "message": "absent"
         });
-
-        let error =
-            FuzzEvidenceContract::from_run_metadata(&metadata).expect_err("unsupported schema");
-        assert_eq!(error.details["valid"], false);
-    }
-
-    #[test]
-    fn a_payload_claiming_completeness_with_violations_is_rejected() {
-        let metadata = serde_json::json!({
-            "evidence_contract": {
-                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-                "complete": true,
-                "violations": [{
+        let invalid = [
+            (
+                "unsupported schema",
+                serde_json::json!({
+                    "schema": "attacker/not-the-contract/v9",
+                    "complete": true,
+                    "violations": []
+                }),
+            ),
+            (
+                "complete with violations",
+                serde_json::json!({
                     "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-                    "code": "artifact_ref_missing",
-                    "message": "absent"
-                }]
-            }
-        });
-
-        let error =
-            FuzzEvidenceContract::from_run_metadata(&metadata).expect_err("contradictory proof");
-        assert_eq!(error.details["valid"], false);
+                    "complete": true,
+                    "violations": [violation]
+                }),
+            ),
+            (
+                "incomplete without violations",
+                serde_json::json!({
+                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                    "complete": false,
+                    "violations": []
+                }),
+            ),
+        ];
+        for (label, contract) in invalid {
+            let error = FuzzEvidenceContract::from_run_metadata(
+                &serde_json::json!({ "evidence_contract": contract }),
+            )
+            .expect_err(label);
+            assert_eq!(error.details["valid"], false, "{label}");
+        }
     }
 }

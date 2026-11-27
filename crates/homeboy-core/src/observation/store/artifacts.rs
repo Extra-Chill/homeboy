@@ -561,9 +561,8 @@ impl ObservationStore {
         if !owned {
             return Ok(());
         }
-        // Every run-owned table, not just artifacts. This path used to clear
-        // artifacts alone, which silently orphaned any other child row; with
-        // foreign keys enforced (#11129) it would instead fail the parent
+        // Every run-owned table, not just artifacts: with foreign keys
+        // enforced (#11129) any remaining child row would fail the parent
         // delete outright.
         for table in RUN_OWNED_CHILD_TABLES {
             tx.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [run_id])
@@ -2181,18 +2180,7 @@ mod tests {
     use std::sync::mpsc;
 
     /// The preflight gates every publication path, so a healthy filesystem must
-    /// stay silently healthy. A capacity gate that fails closed on a machine
-    /// with space would block more work than the exhaustion it prevents.
-    #[test]
-    fn the_capacity_preflight_admits_a_healthy_filesystem() {
-        with_isolated_home(|home| {
-            let target = home.path().join("run").join("artifact.bin");
-
-            preflight_artifact_capacity(&target).expect("a healthy filesystem must admit a write");
-        });
-    }
-
-    /// It must also resolve a target whose directory does not exist yet — the
+    /// admit a write even when the target directory does not exist yet — the
     /// run directory is frequently created moments after the path is computed,
     /// and probing a non-existent path measures nothing at all.
     #[test]
@@ -2815,7 +2803,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_artifact_insert_failure_removes_newly_copied_tree() {
+    fn directory_artifact_insert_failure_removes_only_the_tree_it_copied() {
         with_isolated_home(|home| {
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
@@ -2824,84 +2812,58 @@ mod tests {
             let source = home.path().join("directory-source");
             fs::create_dir_all(&source).expect("create source");
             fs::write(source.join("copied.txt"), b"copied bytes").expect("write source");
-            let artifact_id = "injected-directory-insert-failure";
-            let stored_path =
-                persisted_artifact_path(&run.id, artifact_id, &source).expect("persisted path");
-            store
-                .connection
-                .execute_batch(&format!(
-                    "CREATE TRIGGER fail_directory_artifact_insert BEFORE INSERT ON artifacts WHEN NEW.id = '{artifact_id}' BEGIN SELECT RAISE(ABORT, 'injected directory artifact insert failure'); END;"
-                ))
-                .expect("install insertion fault");
 
-            let error = store
-                .record_directory_artifact_with_id(
+            for (artifact_id, preexisting) in [
+                ("injected-directory-insert-failure", false),
+                ("preexisting-directory-insert-failure", true),
+            ] {
+                let stored_path =
+                    persisted_artifact_path(&run.id, artifact_id, &source).expect("persisted path");
+                if preexisting {
+                    fs::create_dir_all(&stored_path).expect("create stable tree");
+                    fs::write(stored_path.join("stable.txt"), b"stable bytes")
+                        .expect("write stable bytes");
+                }
+                store
+                    .connection
+                    .execute_batch(&format!(
+                        "DROP TRIGGER IF EXISTS fail_directory_artifact_insert; CREATE TRIGGER fail_directory_artifact_insert BEFORE INSERT ON artifacts WHEN NEW.id = '{artifact_id}' BEGIN SELECT RAISE(ABORT, 'injected directory artifact insert failure'); END;"
+                    ))
+                    .expect("install insertion fault");
+
+                let result = store.record_directory_artifact_with_id(
                     &run.id,
                     "evidence",
                     &source,
                     artifact_id,
                     serde_json::json!({}),
-                )
-                .expect_err("injected insert failure");
-            assert!(error
-                .to_string()
-                .contains("injected directory artifact insert failure"));
+                );
 
-            assert!(
-                !stored_path.exists(),
-                "failed insert must not orphan copied bytes"
-            );
-            assert!(store
-                .get_artifact(artifact_id)
-                .expect("lookup artifact")
-                .is_none());
-        });
-    }
-
-    #[test]
-    fn directory_artifact_insert_failure_preserves_preexisting_tree() {
-        with_isolated_home(|home| {
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
-                .expect("run");
-            let source = home.path().join("directory-source");
-            fs::create_dir_all(&source).expect("create source");
-            fs::write(source.join("copied.txt"), b"copied bytes").expect("write source");
-            let artifact_id = "preexisting-directory-insert-failure";
-            let stored_path =
-                persisted_artifact_path(&run.id, artifact_id, &source).expect("persisted path");
-            fs::create_dir_all(&stored_path).expect("create stable tree");
-            fs::write(stored_path.join("stable.txt"), b"stable bytes").expect("write stable bytes");
-            store
-                .connection
-                .execute_batch(&format!(
-                    "CREATE TRIGGER fail_directory_artifact_insert BEFORE INSERT ON artifacts WHEN NEW.id = '{artifact_id}' BEGIN SELECT RAISE(ABORT, 'injected directory artifact insert failure'); END;"
-                ))
-                .expect("install insertion fault");
-
-            assert!(store
-                .record_directory_artifact_with_id(
-                    &run.id,
-                    "evidence",
-                    &source,
-                    artifact_id,
-                    serde_json::json!({}),
-                )
-                .is_err());
-
-            assert_eq!(
-                fs::read(stored_path.join("stable.txt")).expect("read stable bytes"),
-                b"stable bytes"
-            );
-            assert!(
-                !stored_path.join("copied.txt").exists(),
-                "an existing target must not be merged before a failed insert"
-            );
-            assert!(store
-                .get_artifact(artifact_id)
-                .expect("lookup artifact")
-                .is_none());
+                if preexisting {
+                    assert!(result.is_err());
+                    assert_eq!(
+                        fs::read(stored_path.join("stable.txt")).expect("read stable bytes"),
+                        b"stable bytes"
+                    );
+                    assert!(
+                        !stored_path.join("copied.txt").exists(),
+                        "an existing target must not be merged before a failed insert"
+                    );
+                } else {
+                    let error = result.expect_err("injected insert failure");
+                    assert!(error
+                        .to_string()
+                        .contains("injected directory artifact insert failure"));
+                    assert!(
+                        !stored_path.exists(),
+                        "failed insert must not orphan copied bytes"
+                    );
+                }
+                assert!(store
+                    .get_artifact(artifact_id)
+                    .expect("lookup artifact")
+                    .is_none());
+            }
         });
     }
 

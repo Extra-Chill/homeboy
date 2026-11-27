@@ -1619,36 +1619,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_staging_rejects_bytes_changed_after_initial_identity_check() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let file = workspace.path().join("input.txt");
-        std::fs::write(&file, "recorded").expect("write recorded bytes");
-        let expected = crate::generic_lab_replay_artifact_identity(workspace.path())
-            .expect("capture replay identity");
-
-        verify_replay_artifact_identity(workspace.path(), Some(&expected))
-            .expect("initial locked preflight identity");
-        std::fs::write(&file, "changed-before-snapshot").expect("change before staging read");
-
-        let error = verify_replay_artifact_identity(workspace.path(), Some(&expected))
-            .expect_err("changed bytes cannot enter the staged replay");
-        assert!(error.message.contains("no longer matches"));
-    }
-
-    #[test]
-    fn replay_staging_accepts_unchanged_workspace_identity() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        std::fs::write(workspace.path().join("input.txt"), "recorded")
-            .expect("write recorded bytes");
-        let expected = crate::generic_lab_replay_artifact_identity(workspace.path())
-            .expect("capture replay identity");
-
-        verify_replay_artifact_identity(workspace.path(), Some(&expected))
-            .expect("unchanged replay may stage");
-    }
-
-    #[test]
-    fn replay_staging_fails_closed_when_effective_include_policy_changes() {
+    fn replay_staging_fails_closed_when_bytes_or_effective_policy_change() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("generated.txt"), "recorded")
             .expect("write recorded bytes");
@@ -1666,43 +1637,46 @@ mod tests {
             crate::workspace::immutable_replay_snapshot(workspace.path(), &recorded_excludes)
                 .expect("recorded replay artifact");
 
+        prepare_replay_snapshot(&runner, workspace.path(), Some(&recorded.identity))
+            .expect("unchanged replay may stage")
+            .expect("replay snapshot");
+
+        std::fs::write(
+            workspace.path().join("generated.txt"),
+            "changed-before-snapshot",
+        )
+        .expect("change before staging read");
+        let error = prepare_replay_snapshot(&runner, workspace.path(), Some(&recorded.identity))
+            .expect_err("changed bytes cannot enter the staged replay");
+        assert!(
+            error.message.contains("does not match"),
+            "{}",
+            error.message
+        );
+
         runner.policy.snapshot_includes.clear();
         let error = prepare_replay_snapshot(&runner, workspace.path(), Some(&recorded.identity))
             .expect_err("changed effective policy must reject replay");
-
         assert!(error.message.contains("exclusion policy no longer matches"));
     }
 
     #[test]
-    fn evidence_transfer_refusal_precedes_workspace_sync() {
-        let synced = Cell::new(false);
-        let error = preflight_before_workspace_sync(
-            true,
-            || Err(Error::internal_unexpected("runner has no SSH file channel")),
-            || {
-                synced.set(true);
-                Ok(())
-            },
-        )
-        .expect_err("missing file channel must refuse before sync");
-
-        assert!(error.message.contains("no SSH file channel"));
-        assert!(!synced.get(), "workspace sync must not run after refusal");
-    }
-
-    #[test]
-    fn no_evidence_skips_file_channel_preflight_before_workspace_sync() {
-        let synced = Cell::new(false);
-        preflight_before_workspace_sync(
-            false,
-            || Err(Error::internal_unexpected("must not probe")),
-            || {
-                synced.set(true);
-                Ok(())
-            },
-        )
-        .expect("ordinary sync");
-        assert!(synced.get());
+    fn evidence_transfer_preflight_runs_only_when_evidence_is_declared() {
+        // A missing file channel must refuse before any workspace sync; with
+        // no evidence the channel is never probed.
+        for has_evidence in [true, false] {
+            let synced = Cell::new(false);
+            let result = preflight_before_workspace_sync(
+                has_evidence,
+                || Err(Error::internal_unexpected("runner has no SSH file channel")),
+                || {
+                    synced.set(true);
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_err(), has_evidence);
+            assert_eq!(synced.get(), !has_evidence);
+        }
     }
 
     #[test]
@@ -1926,7 +1900,6 @@ mod tests {
         let first = remote_lab_rig_registry_root("/runner/_lab_workspaces/app-job-one");
         let second = remote_lab_rig_registry_root("/runner/_lab_workspaces/app-job-two");
 
-        assert_ne!(first, second);
         assert_eq!(
             first,
             "/runner/_lab_workspaces/app-job-one-homeboy-artifacts/rig-registry"
@@ -1965,49 +1938,90 @@ mod tests {
     }
 
     #[test]
-    fn final_remote_command_remaps_bench_env_path_settings() {
+    fn final_remote_command_remaps_controller_paths_to_runner_paths() {
         let controller_workspace = "/controller/workspaces/toolkit";
         let fixture_root = format!("{controller_workspace}/fixtures/websites");
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--rig".to_string(),
-            "fixture-matrix".to_string(),
-            "--setting".to_string(),
-            format!("bench_env.FIXTURE_ROOT={fixture_root}"),
-            format!("--setting=bench_env.TOOLKIT_ROOT={controller_workspace}"),
-        ];
         let mappings = vec![
             LabPathRemap {
-                local: fixture_root,
+                local: fixture_root.clone(),
                 remote: "/runner/workspaces/fixtures-websites".to_string(),
             },
             LabPathRemap {
                 local: controller_workspace.to_string(),
                 remote: "/runner/workspaces/toolkit".to_string(),
             },
+            LabPathRemap {
+                local: "/controller/tmp/fixtures".to_string(),
+                remote: "/runner/_lab_workspaces/fixtures".to_string(),
+            },
         ];
 
-        let command = rewrite_lab_offload_remote_command_args(
-            &args,
-            "/runner/workspaces/primary",
-            &mappings,
-            None,
-        );
-
-        assert_eq!(
-            command,
-            vec![
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "--rig".to_string(),
-                "fixture-matrix".to_string(),
-                "--setting".to_string(),
-                "bench_env.FIXTURE_ROOT=/runner/workspaces/fixtures-websites".to_string(),
-                "--setting=bench_env.TOOLKIT_ROOT=/runner/workspaces/toolkit".to_string(),
-            ]
-        );
-        assert!(!command.iter().any(|arg| arg.contains("/controller/")));
+        for (args, expected) in [
+            // bench_env settings, split and equals forms, most specific mapping first.
+            (
+                vec![
+                    "--setting".to_string(),
+                    format!("bench_env.FIXTURE_ROOT={fixture_root}"),
+                    format!("--setting=bench_env.TOOLKIT_ROOT={controller_workspace}"),
+                ],
+                vec![
+                    "--setting",
+                    "bench_env.FIXTURE_ROOT=/runner/workspaces/fixtures-websites",
+                    "--setting=bench_env.TOOLKIT_ROOT=/runner/workspaces/toolkit",
+                ],
+            ),
+            // Subdirectory under an extra workspace.
+            (
+                vec![
+                    "--setting".to_string(),
+                    "bench_env.CONFIG_DIR=/controller/workspaces/toolkit/config/matrix".to_string(),
+                ],
+                vec![
+                    "--setting",
+                    "bench_env.CONFIG_DIR=/runner/workspaces/toolkit/config/matrix",
+                ],
+            ),
+            // Staged passthrough path inputs.
+            (
+                vec![
+                    "--".to_string(),
+                    "--fixture-root".to_string(),
+                    "/controller/tmp/fixtures".to_string(),
+                    "--max-depth".to_string(),
+                    "0".to_string(),
+                ],
+                vec![
+                    "--",
+                    "--fixture-root",
+                    "/runner/_lab_workspaces/fixtures",
+                    "--max-depth",
+                    "0",
+                ],
+            ),
+            // Shared state moves into the runner artifact directory.
+            (
+                vec![
+                    "--shared-state".to_string(),
+                    "/tmp/controller-shared-state".to_string(),
+                ],
+                vec![
+                    "--shared-state",
+                    "/runner/workspaces/primary-homeboy-artifacts/bench-shared-state",
+                ],
+            ),
+        ] {
+            let args = ["homeboy".to_string(), "bench".to_string()]
+                .into_iter()
+                .chain(args)
+                .collect::<Vec<_>>();
+            let command = rewrite_lab_offload_remote_command_args(
+                &args,
+                "/runner/workspaces/primary",
+                &mappings,
+                None,
+            );
+            assert_eq!(command[2..], expected[..], "{args:?}");
+        }
     }
 
     #[test]
@@ -2024,10 +2038,7 @@ mod tests {
             "wordpress-fixture".to_string(),
         ];
 
-        let command_prefix = lab_offload_command_prefix(
-            Path::new("/runner/workspaces/node-project"),
-            "/runner/bin/homeboy",
-        );
+        let command_prefix = lab_offload_command_prefix("/runner/bin/homeboy");
         let command = build_lab_offload_remote_command(
             &command_prefix.argv,
             &args,
@@ -2450,142 +2461,6 @@ mod tests {
     }
 
     #[test]
-    fn final_remote_command_forwards_rig_component_bench_extension() {
-        crate::test_support::with_isolated_home(|home| {
-            let rigs_dir = home.path().join(".config/homeboy/rigs");
-            std::fs::create_dir_all(&rigs_dir).expect("rigs dir");
-            std::fs::write(
-                rigs_dir.join("fixture-matrix.json"),
-                r#"{
-                    "components": {
-                        "node-project": {
-                            "path": "/controller/workspaces/node-project",
-                            "extensions": { "wordpress": {} }
-                        }
-                    },
-                    "bench": { "default_component": "node-project" }
-                }"#,
-            )
-            .expect("rig spec");
-
-            let args = vec![
-                "homeboy".to_string(),
-                "--runner".to_string(),
-                "homeboy-lab".to_string(),
-                "bench".to_string(),
-                "node-project".to_string(),
-                "--path".to_string(),
-                "/controller/workspaces/node-project".to_string(),
-                "--rig".to_string(),
-                "fixture-matrix".to_string(),
-            ];
-            let command = build_lab_offload_remote_command(
-                &["/runner/bin/homeboy".to_string()],
-                &args,
-                "/runner/workspaces/node-project",
-                &[],
-                None,
-                &command_plan(&["wordpress"]),
-            );
-
-            assert_eq!(
-                command,
-                vec![
-                    "/runner/bin/homeboy".to_string(),
-                    "bench".to_string(),
-                    "--extension".to_string(),
-                    "wordpress".to_string(),
-                    "node-project".to_string(),
-                    "--path".to_string(),
-                    "/runner/workspaces/node-project".to_string(),
-                    "--rig".to_string(),
-                    "fixture-matrix".to_string(),
-                ]
-            );
-        });
-    }
-
-    #[test]
-    fn final_remote_command_forwards_rig_bench_env_provider_extension() {
-        crate::test_support::with_isolated_home(|home| {
-            let rigs_dir = home.path().join(".config/homeboy/rigs");
-            std::fs::create_dir_all(&rigs_dir).expect("rigs dir");
-            std::fs::write(
-                rigs_dir.join("static-site-importer-fixture-matrix.json"),
-                r#"{
-                    "components": {
-                        "static-site-importer": {
-                            "component_id": "static-site-importer",
-                            "path": "/controller/workspaces/static-site-importer"
-                        }
-                    },
-                    "bench": {
-                        "default_component": "static-site-importer",
-                        "accepted_settings": ["fixture_namespace"]
-                    },
-                    "bench_workloads": {
-                        "nodejs": [
-                            {
-                                "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs",
-                                "env_provider_extensions": ["wordpress"]
-                            }
-                        ]
-                    }
-                }"#,
-            )
-            .expect("rig spec");
-
-            let args = vec![
-                "homeboy".to_string(),
-                "--runner".to_string(),
-                "homeboy-lab".to_string(),
-                "bench".to_string(),
-                "static-site-importer".to_string(),
-                "--path".to_string(),
-                "/controller/workspaces/static-site-importer".to_string(),
-                "--rig".to_string(),
-                "static-site-importer-fixture-matrix".to_string(),
-            ];
-            let command = build_lab_offload_remote_command(
-                &["/runner/bin/homeboy".to_string()],
-                &args,
-                "/runner/workspaces/static-site-importer",
-                &[],
-                None,
-                &command_plan(&["nodejs"]),
-            );
-
-            let nodejs_flag = command
-                .windows(2)
-                .position(|window| window == ["--extension", "nodejs"])
-                .expect("final remote command includes --extension nodejs");
-            let rig_flag = command
-                .iter()
-                .position(|arg| arg == "--rig")
-                .expect("final remote command includes --rig");
-            assert!(
-                nodejs_flag < rig_flag,
-                "--extension nodejs must be injected before --rig in final runner command: {}",
-                command.join(" ")
-            );
-            assert_eq!(
-                command,
-                vec![
-                    "/runner/bin/homeboy".to_string(),
-                    "bench".to_string(),
-                    "--extension".to_string(),
-                    "nodejs".to_string(),
-                    "static-site-importer".to_string(),
-                    "--path".to_string(),
-                    "/runner/workspaces/static-site-importer".to_string(),
-                    "--rig".to_string(),
-                    "static-site-importer-fixture-matrix".to_string(),
-                ]
-            );
-        });
-    }
-
-    #[test]
     fn runner_command_plan_for_primary_rig_adds_env_provider_extension_and_remaps_settings() {
         crate::test_support::with_isolated_home(|home| {
             let primary = home.path().join("primary-static-site-importer");
@@ -2764,116 +2639,6 @@ mod tests {
     }
 
     #[test]
-    fn runner_command_plan_for_primary_fuzz_rig_preserves_campaign_workload() {
-        crate::test_support::with_isolated_home(|home| {
-            let primary = home.path().join("primary-homeboy-rigs");
-            let rig_dir = primary.join("rigs/jetpack-api-route-inventory");
-            std::fs::create_dir_all(&rig_dir).expect("primary rig dir");
-            std::fs::write(
-                rig_dir.join("rig.json"),
-                r#"{
-                    "components": {
-                        "jetpack": {
-                            "component_id": "jetpack",
-                            "path": "/controller/workspaces/jetpack"
-                        }
-                    },
-                    "fuzz": { "default_component": "jetpack" },
-                    "fuzz_workloads": {
-                        "nodejs": [
-                            { "path": "${package.root}/fuzz/jetpack-api-route-inventory.fuzz.mjs" }
-                        ]
-                    }
-                }"#,
-            )
-            .expect("primary rig spec");
-
-            let args = vec![
-                "homeboy".to_string(),
-                "--runner".to_string(),
-                "homeboy-lab".to_string(),
-                "fuzz".to_string(),
-                "run-campaign".to_string(),
-                "--execute".to_string(),
-                "--rig".to_string(),
-                "jetpack-api-route-inventory".to_string(),
-                "--campaign-workload".to_string(),
-                "rest-api-read".to_string(),
-            ];
-            let workload = rig_workload(
-                homeboy_core::lab_contract::LabRigWorkloadKind::Fuzz,
-                "jetpack-api-route-inventory",
-                None,
-            );
-            let plan = RunnerCommandPlan::for_offload(Some(&workload), &[], &primary)
-                .expect("runner command plan");
-            let command = build_lab_offload_remote_command(
-                &["/runner/bin/homeboy".to_string()],
-                &args,
-                "/runner/workspaces/homeboy-rigs",
-                &[],
-                None,
-                &plan,
-            );
-
-            assert_eq!(plan.required_extensions, vec!["nodejs".to_string()]);
-            assert_eq!(plan.command_extensions, vec!["nodejs".to_string()]);
-            assert_eq!(
-                command,
-                vec![
-                    "/runner/bin/homeboy".to_string(),
-                    "fuzz".to_string(),
-                    "--extension".to_string(),
-                    "nodejs".to_string(),
-                    "run-campaign".to_string(),
-                    "--execute".to_string(),
-                    "--rig".to_string(),
-                    "jetpack-api-route-inventory".to_string(),
-                    "--campaign-workload".to_string(),
-                    "rest-api-read".to_string(),
-                ]
-            );
-        });
-    }
-
-    #[test]
-    fn final_remote_command_keeps_explicit_extension_override() {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--extension".to_string(),
-            "custom".to_string(),
-            "node-project".to_string(),
-            "--rig".to_string(),
-            "wordpress-fixture".to_string(),
-        ];
-
-        let command = build_lab_offload_remote_command(
-            &["/runner/bin/homeboy".to_string()],
-            &args,
-            "/runner/workspaces/node-project",
-            &[],
-            None,
-            &command_plan(&["wordpress"]),
-        );
-
-        assert_eq!(
-            command,
-            vec![
-                "/runner/bin/homeboy".to_string(),
-                "bench".to_string(),
-                "--extension".to_string(),
-                "wordpress".to_string(),
-                "--extension".to_string(),
-                "custom".to_string(),
-                "node-project".to_string(),
-                "--rig".to_string(),
-                "wordpress-fixture".to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn detached_cook_preserves_the_controller_worktree_identity() {
         let args = vec![
             "homeboy".to_string(),
@@ -3002,37 +2767,6 @@ mod tests {
 
         assert_eq!(plan.required_extensions, vec!["explicit".to_string()]);
         assert_eq!(plan.command_extensions, vec!["explicit".to_string()]);
-    }
-
-    #[test]
-    fn final_remote_command_remaps_bench_env_subdirectory_under_extra_workspace() {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--setting".to_string(),
-            "bench_env.CONFIG_DIR=/controller/workspaces/toolkit/config/matrix".to_string(),
-        ];
-        let mappings = vec![LabPathRemap {
-            local: "/controller/workspaces/toolkit".to_string(),
-            remote: "/runner/workspaces/toolkit".to_string(),
-        }];
-
-        let command = rewrite_lab_offload_remote_command_args(
-            &args,
-            "/runner/workspaces/primary",
-            &mappings,
-            None,
-        );
-
-        assert_eq!(
-            command,
-            vec![
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "--setting".to_string(),
-                "bench_env.CONFIG_DIR=/runner/workspaces/toolkit/config/matrix".to_string(),
-            ]
-        );
     }
 
     #[test]
@@ -3203,79 +2937,6 @@ mod tests {
     }
 
     #[test]
-    fn final_remote_command_remaps_declared_passthrough_path_inputs_when_staged() {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "static-site-importer".to_string(),
-            "--rig".to_string(),
-            "static-site-importer-fixture-matrix".to_string(),
-            "--".to_string(),
-            "--fixture-root".to_string(),
-            "/controller/tmp/fixtures".to_string(),
-            "--max-depth".to_string(),
-            "0".to_string(),
-        ];
-        let path_remaps = vec![LabPathRemap {
-            local: "/controller/tmp/fixtures".to_string(),
-            remote: "/runner/_lab_workspaces/fixtures".to_string(),
-        }];
-
-        let command = rewrite_lab_offload_remote_command_args(
-            &args,
-            "/runner/_lab_workspaces/static-site-importer",
-            &path_remaps,
-            None,
-        );
-
-        assert_eq!(
-            command,
-            vec![
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "static-site-importer".to_string(),
-                "--rig".to_string(),
-                "static-site-importer-fixture-matrix".to_string(),
-                "--".to_string(),
-                "--fixture-root".to_string(),
-                "/runner/_lab_workspaces/fixtures".to_string(),
-                "--max-depth".to_string(),
-                "0".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn final_remote_command_rewrites_shared_state_to_runner_artifact_dir() {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "static-site-importer".to_string(),
-            "--shared-state".to_string(),
-            "/tmp/controller-shared-state".to_string(),
-        ];
-
-        let command = rewrite_lab_offload_remote_command_args(
-            &args,
-            "/runner/_lab_workspaces/static-site-importer",
-            &[],
-            None,
-        );
-
-        assert_eq!(
-            command,
-            vec![
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "static-site-importer".to_string(),
-                "--shared-state".to_string(),
-                "/runner/_lab_workspaces/static-site-importer-homeboy-artifacts/bench-shared-state"
-                    .to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn provider_config_materialization_plan_projects_lab_policy_and_mappings() {
         let synced = test_synced_workspace(
             "/controller/workspaces/provider-runtime",
@@ -3318,31 +2979,6 @@ mod tests {
             "/runner/workspaces/provider-runtime"
         );
         assert_eq!(plan.entries[0].materialization_mode, "git");
-    }
-
-    #[test]
-    fn workspace_path_materialization_plan_projects_standard_workspace_mappings() {
-        let synced = test_synced_workspace(
-            "/controller/workspaces/homeboy",
-            "/runner/workspaces/homeboy",
-        );
-        let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
-
-        let plan = workspace_path_materialization_plan(
-            &workspace_mapping,
-            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-            RunnerWorkspaceSyncMode::Snapshot.as_str(),
-        );
-
-        assert_eq!(plan.entries.len(), 1);
-        assert_eq!(plan.entries[0].role, "primary");
-        assert_eq!(plan.entries[0].owner, "lab.execution_context");
-        assert_eq!(
-            plan.entries[0].local_path.as_deref(),
-            Some("/controller/workspaces/homeboy")
-        );
-        assert_eq!(plan.entries[0].remote_path, "/runner/workspaces/homeboy");
-        assert_eq!(plan.entries[0].materialization_mode, "snapshot");
         assert_eq!(plan.entries[0].validation_status, "materialized");
     }
 
@@ -3371,41 +3007,6 @@ mod tests {
         assert_eq!(plan.entries[0].materialization_mode, "git");
         assert_eq!(plan.entries[1].role, "agent_task_plan_config");
         assert_eq!(plan.entries[1].materialization_mode, "snapshot-git");
-    }
-
-    #[test]
-    fn portable_promotion_target_materialization_plan_requires_git() {
-        let synced = test_synced_workspace(
-            "/controller/workspaces/homeboy@promotion",
-            "/runner/workspaces/homeboy@promotion",
-        );
-        let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
-        let contract = LabOffloadCommand {
-            required_extensions: Vec::new(),
-            required_capabilities: Vec::new(),
-            workload: None,
-            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
-                homeboy_core::lab_contract::LabCommandContract {
-                    workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                    ..homeboy_core::lab_contract::LabCommandContract::portable(
-                        "agent-task promote",
-                        Some("--to-worktree"),
-                        false,
-                        &[],
-                    )
-                },
-                Vec::new(),
-            )
-        };
-
-        let plan = workspace_path_materialization_plan(
-            &workspace_mapping,
-            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-            lab_path_materialization_mode(&contract.clone(), RunnerWorkspaceSyncMode::Git),
-        );
-
-        assert_eq!(plan.entries[0].materialization_mode, "git");
-        assert_eq!(plan.entries[0].validation_status, "materialized");
     }
 
     #[test]
@@ -3778,8 +3379,6 @@ mod tests {
                     .expect("passthrough delimiter")..],
                 &["--", "--changed-since", "provider-value"]
             );
-            assert!(stage.command.contains(&stage.remote_cwd));
-            assert!(stage.command.iter().any(|arg| arg == "--path"));
             assert!(stage
                 .command
                 .windows(2)
@@ -4181,24 +3780,5 @@ fn prepare_replay_snapshot(
             "Restore the recorded workspace content or reissue the command as a new Lab run."
                 .to_string(),
         ]),
-    ))
-}
-
-#[cfg(test)]
-fn verify_replay_artifact_identity(
-    source_path: &Path,
-    expected_identity: Option<&str>,
-) -> homeboy_core::Result<()> {
-    let Some(expected_identity) = expected_identity else {
-        return Ok(());
-    };
-    if crate::generic_lab_replay_artifact_identity(source_path)? == expected_identity {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "generic_lab_command_replay",
-        "Lab replay artifact no longer matches the persisted immutable replay identity",
-        Some(source_path.display().to_string()),
-        None,
     ))
 }

@@ -976,8 +976,7 @@ fn lab_dispatch_metadata(
 }
 
 /// Render offloaded stdout, attaching persisted-run retrieval guidance when a
-/// run was recorded. Mirrors the legacy CLI helper but is owned by core so the
-/// transformation is testable without constructing a clap `Cli`.
+/// run was recorded. Owned by core so the transformation is testable without constructing a clap `Cli`.
 pub(crate) fn stdout_with_persisted_run_retrieval(
     stdout: &str,
     retrieval: Option<&PersistedRunRetrieval>,
@@ -1319,7 +1318,7 @@ mod tests {
     }
 
     #[test]
-    fn lab_route_plan_from_contract_exposes_generic_policy_shape() {
+    fn lab_route_plan_from_contract_maps_portable_and_local_only_policies() {
         let plan = lab_route_plan_from_route_contract(
             lab_contract()
                 .into_route_contract(vec!["wordpress".to_string(), "playwright".to_string()]),
@@ -1348,17 +1347,12 @@ mod tests {
             plan.required_capabilities[0].name,
             LAB_CAPABILITY_PLAYWRIGHT
         );
-    }
 
-    #[test]
-    fn lab_route_plan_from_contract_exposes_local_only_reason() {
         let mut contract = lab_contract();
         contract.portability = LabCommandPortability::LocalOnly("needs controller services");
         contract.source_path_mode = LabSourcePathMode::RunnerResident;
         contract.workspace_mode_policy = LabWorkspaceModePolicy::RunnerResident;
-
         let plan = lab_route_plan_from_route_contract(contract.into_route_contract(Vec::new()));
-
         assert_eq!(plan.local_only_reason(), Some("needs controller services"));
         assert_eq!(plan.source_policy, CommandSourcePolicy::RunnerResident);
         assert_eq!(
@@ -1371,49 +1365,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn route_lab_offload_runs_contracted_local_decision_without_provider() {
-        let outcome = route_lab_offload(LabRoutingRequest {
-            placement_decision: compatibility_placement_decision(
-                homeboy_lab_contract::Placement::Auto,
-                None,
-                false,
-            ),
-            command: Some(lab_offload_command_from_contract(
-                lab_contract(),
-                Vec::new(),
-            )),
-            normalized_args: &["homeboy".to_string(), "status".to_string()],
-            explicit_runner: None,
-            placement: homeboy_lab_contract::Placement::Auto,
-            allow_local_fallback: false,
-            allow_dirty_lab_workspace: false,
-            skip_deps_hydration: false,
-            delete_workspace_on_failure: false,
-            capture_patch: false,
-            mutation_flag: None,
-            timeout: None,
-            placement_outcome_target: None,
-            detach_after_handoff: false,
-            output_file_requested: false,
-            read_only_polling: false,
-            local_output_file: None,
-            durable_agent_task_plan: None,
-            durable_run_id: None,
-            source_path: None,
-            expected_source_snapshot_identity: None,
-            verified_cook_baseline: None,
-            require_controller_git_bundle: false,
-            job_overrides: crate::lab_offload::LabJobOverrides::default(),
-        })
-        .unwrap();
-
-        assert!(matches!(
-            outcome,
-            crate::lab_offload::LabOffloadOutcome::RunLocal { .. }
-        ));
-    }
-
     /// A read-only lifecycle/discovery contract: `runner_resident`, no
     /// automatic offload. This is the shape shared by `agent-task providers`
     /// and by `agent-task status/logs/diagnose/evidence`.
@@ -1422,119 +1373,93 @@ mod tests {
     }
 
     #[test]
-    fn a_runner_resident_read_never_authorizes_a_policy_selected_runner() {
-        // Controller and runner differ in extensions, runtime defaults,
-        // secrets, provider readiness — and, decisively, in which durable run
-        // records they own. Relocating a read changes what its answer means, so
-        // no severity and no default runner may promote it (#9763, #11597,
-        // #11599).
-        let contract = runner_resident_read_contract();
-        for severity in [None, Some("ok"), Some("warm"), Some("hot")] {
-            assert!(
-                !authorizes_policy_lab_runner(
-                    &lab_offload_command_from_contract(contract.clone(), Vec::new()),
-                    homeboy_lab_contract::Placement::Auto,
+    fn policy_selected_runner_authorization_table() {
+        use homeboy_lab_contract::Placement::{Auto, Lab, LabOrLocal, Local};
+        let portable = LabCommandContract::portable(
+            "agent-task run",
+            None,
+            false,
+            crate::lab_contract::LAB_NO_EXTRA_CAPABILITIES,
+        );
+        let local_only =
+            LabCommandContract::local_only("agent-task cook", "controller-owned coordinator");
+        let explicit_runner = LabCommandContract::explicit_runner_simple("runtime refresh");
+        let read = runner_resident_read_contract();
+
+        for (name, contract, placement, severity, expected) in [
+            // Relocating a runner-resident read changes which durable run
+            // records answer it, so no severity may promote it.
+            ("read, no severity", read.clone(), Auto, None, false),
+            ("read, ok", read.clone(), Auto, Some("ok"), false),
+            ("read, warm", read.clone(), Auto, Some("warm"), false),
+            ("read, hot", read.clone(), Auto, Some("hot"), false),
+            // `--placement local` owns the whole lifecycle.
+            (
+                "local placement, read",
+                read.clone(),
+                Local,
+                Some("hot"),
+                false,
+            ),
+            (
+                "local placement, portable",
+                portable.clone(),
+                Local,
+                Some("hot"),
+                false,
+            ),
+            // An explicit Lab request keeps the runner so the contract answers.
+            ("lab, read", read.clone(), Lab, None, true),
+            ("lab-or-local, read", read.clone(), LabOrLocal, None, true),
+            ("lab, local-only", local_only.clone(), Lab, None, true),
+            (
+                "lab-or-local, local-only",
+                local_only.clone(),
+                LabOrLocal,
+                None,
+                true,
+            ),
+            (
+                "default offload contract",
+                portable.clone(),
+                Auto,
+                None,
+                true,
+            ),
+            // Explicit-runner contracts decline automatic offload but pressure
+            // may still promote them.
+            (
+                "explicit runner, ok",
+                explicit_runner.clone(),
+                Auto,
+                Some("ok"),
+                false,
+            ),
+            (
+                "explicit runner, warm",
+                explicit_runner.clone(),
+                Auto,
+                Some("warm"),
+                true,
+            ),
+            (
+                "local-only, hot",
+                local_only.clone(),
+                Auto,
+                Some("hot"),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                authorizes_policy_lab_runner(
+                    &lab_offload_command_from_contract(contract, Vec::new()),
+                    placement,
                     severity,
                 ),
-                "severity {severity:?} must not relocate a runner-resident read",
+                expected,
+                "{name}"
             );
         }
-    }
-
-    #[test]
-    fn explicit_local_placement_never_authorizes_a_policy_selected_runner() {
-        // `--placement local` is an ownership statement about the whole
-        // lifecycle of whatever it creates, not a hint (#11600).
-        for contract in [
-            runner_resident_read_contract(),
-            LabCommandContract::portable(
-                "agent-task run",
-                None,
-                false,
-                crate::lab_contract::LAB_NO_EXTRA_CAPABILITIES,
-            ),
-        ] {
-            assert!(!authorizes_policy_lab_runner(
-                &lab_offload_command_from_contract(contract.clone(), Vec::new()),
-                homeboy_lab_contract::Placement::Local,
-                Some("hot"),
-            ));
-        }
-    }
-
-    #[test]
-    fn an_explicit_lab_request_always_authorizes_the_selected_runner() {
-        // The operator asked. Keep the runner so the command's own contract
-        // answers — dispatching, or explaining its local-only reason — rather
-        // than a generic "no ready runner".
-        for placement in [
-            homeboy_lab_contract::Placement::Lab,
-            homeboy_lab_contract::Placement::LabOrLocal,
-        ] {
-            assert!(authorizes_policy_lab_runner(
-                &lab_offload_command_from_contract(runner_resident_read_contract(), Vec::new()),
-                placement,
-                None,
-            ));
-            assert!(authorizes_policy_lab_runner(
-                &lab_offload_command_from_contract(
-                    LabCommandContract::local_only(
-                        "agent-task cook",
-                        "controller-owned coordinator"
-                    ),
-                    Vec::new()
-                ),
-                placement,
-                None,
-            ));
-        }
-    }
-
-    #[test]
-    fn a_default_offload_contract_still_authorizes_its_policy_runner() {
-        assert!(authorizes_policy_lab_runner(
-            &lab_offload_command_from_contract(
-                LabCommandContract::portable(
-                    "agent-task run",
-                    None,
-                    false,
-                    crate::lab_contract::LAB_NO_EXTRA_CAPABILITIES,
-                ),
-                Vec::new()
-            ),
-            homeboy_lab_contract::Placement::Auto,
-            None,
-        ));
-    }
-
-    #[test]
-    fn pressure_promotion_still_reaches_a_non_runner_resident_contract() {
-        // `explicit_runner_simple` declines automatic offload but is not a
-        // runner-resident read, so a loaded controller may still promote it.
-        // Losing this would have traded one regression for another.
-        let contract = LabCommandContract::explicit_runner_simple("runtime refresh");
-        assert!(!authorizes_policy_lab_runner(
-            &lab_offload_command_from_contract(contract.clone(), Vec::new()),
-            homeboy_lab_contract::Placement::Auto,
-            Some("ok"),
-        ));
-        assert!(authorizes_policy_lab_runner(
-            &lab_offload_command_from_contract(contract.clone(), Vec::new()),
-            homeboy_lab_contract::Placement::Auto,
-            Some("warm"),
-        ));
-    }
-
-    #[test]
-    fn a_local_only_contract_is_never_relocated_by_policy() {
-        assert!(!authorizes_policy_lab_runner(
-            &lab_offload_command_from_contract(
-                LabCommandContract::local_only("agent-task cook", "controller-owned coordinator"),
-                Vec::new()
-            ),
-            homeboy_lab_contract::Placement::Auto,
-            Some("hot"),
-        ));
     }
 
     #[test]
@@ -1545,26 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn test_for_run() {
-        let retrieval = PersistedRunRetrieval::for_run("run-xyz");
-
-        assert_eq!(retrieval.run_id, "run-xyz");
-        assert_eq!(
-            retrieval.commands.evidence_command,
-            "homeboy runs evidence run-xyz"
-        );
-        assert_eq!(
-            retrieval.commands.artifacts_command,
-            "homeboy runs artifacts run-xyz"
-        );
-        assert_eq!(
-            retrieval.export_command,
-            "homeboy runs export --run run-xyz --output homeboy-run-run-xyz"
-        );
-    }
-
-    #[test]
-    fn offloaded_json_stdout_labels_persisted_homeboy_run_id() {
+    fn offloaded_json_success_and_error_stdout_label_persisted_homeboy_run_id() {
         let retrieval = PersistedRunRetrieval::for_run("trace-run-123");
 
         let stdout = stdout_with_persisted_run_retrieval(
@@ -1591,18 +1497,12 @@ mod tests {
             json["homeboy_persisted_run"]["retrieval_commands"]["export"],
             "homeboy runs export --run trace-run-123 --output homeboy-run-trace-run-123"
         );
-    }
-
-    #[test]
-    fn offloaded_error_json_stdout_labels_persisted_homeboy_run_id() {
-        let retrieval = PersistedRunRetrieval::for_run("trace-run-err");
 
         let stdout = stdout_with_persisted_run_retrieval(
             r#"{"success":false,"error":{"code":"remote.command_failed","message":"failed","details":{"temp_id":"tmp-1"}}}"#,
-            Some(&retrieval),
+            Some(&PersistedRunRetrieval::for_run("trace-run-err")),
         );
         let json: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
-
         assert_eq!(json["error"]["details"]["temp_id"], "tmp-1");
         assert_eq!(
             json["homeboy_persisted_run"]["persisted_run_id"],
@@ -1747,47 +1647,32 @@ mod tests {
     }
 
     #[test]
-    fn runner_provider_readiness_rejects_controller_ready_result() {
-        let result = validate_runner_provider_scope(
-            r#"{"schema":"homeboy/command-result/v3","data":{"observed_scope":{"location":"controller","runner_id":null},"dispatchability":{"ready":true}}}"#,
-            Some("homeboy-lab"),
-        );
-
-        let error = result.expect_err("controller readiness cannot prove runner readiness");
-        assert_eq!(error.details["expected"]["runner_id"], "homeboy-lab");
-        assert_eq!(error.details["observed"]["location"], "controller");
-    }
-
-    #[test]
-    fn runner_provider_readiness_accepts_selected_runner_and_preserves_metadata() {
+    fn runner_provider_readiness_requires_the_selected_runner_scope() {
         validate_runner_provider_scope(
-            r#"{"schema":"homeboy/command-result/v3","data":{"observed_scope":{"location":"runner","runner_id":"homeboy-lab","homeboy_identity":{"git_commit":"runner-sha"}},"readiness_validation":{"effective_model":"openai/gpt-5.6-luna"},"secret_env":[{"name":"PI_TOKEN","configured":false}]}}"#,
+            r#"{"schema":"homeboy/command-result/v3","data":{"observed_scope":{"location":"runner","runner_id":"homeboy-lab"}}}"#,
             Some("homeboy-lab"),
         )
         .expect("runner readiness scope");
-    }
 
-    #[test]
-    fn runner_provider_readiness_rejects_missing_scope_for_disconnected_runner() {
-        let result = validate_runner_provider_scope(
+        let error = validate_runner_provider_scope(
+            r#"{"schema":"homeboy/command-result/v3","data":{"observed_scope":{"location":"controller","runner_id":null},"dispatchability":{"ready":true}}}"#,
+            Some("homeboy-lab"),
+        )
+        .expect_err("controller readiness cannot prove runner readiness");
+        assert_eq!(error.details["expected"]["runner_id"], "homeboy-lab");
+        assert_eq!(error.details["observed"]["location"], "controller");
+
+        let error = validate_runner_provider_scope(
             r#"{"schema":"homeboy/command-result/v3","data":{"dispatchability":{"ready":false}}}"#,
             Some("homeboy-lab"),
-        );
-
-        let error = result.expect_err("unscoped readiness must fail closed");
+        )
+        .expect_err("unscoped readiness must fail closed");
         assert!(error.message.contains("did not observe selected runner"));
         assert_eq!(error.details["observed"], Value::Null);
     }
 
-    /// Renamed from `detached_handoff_maps_to_in_flight_output_and_leaves_run_running`,
-    /// which asserted `finished.is_none()` and so pinned the phantom-run leak in
-    /// place as if it were the contract (#11107).
-    ///
-    /// It is not the contract. The local dispatch record is finished by this
-    /// arm now, because the process that owns it is about to exit; every other
-    /// assertion in this test — the in-flight envelope, the watch commands, the
-    /// remote handles — is unchanged and still passes, which is the evidence
-    /// that the envelope contract was never what was broken.
+    /// The local dispatch record is finished as handed off, because the
+    /// process that owns it is about to exit (#11107).
     #[test]
     fn detached_handoff_maps_to_in_flight_output_and_finishes_run_as_handed_off() {
         let finished = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -1858,7 +1743,7 @@ mod tests {
             "dispatch-run-7448"
         );
 
-        // The leak itself: this used to be `is_none()`.
+        // The handoff must finish the local observation row.
         let recorded = finished.lock().unwrap().clone();
         let (status, metadata) = recorded.expect("handoff finishes the local observation");
         assert_eq!(status, RunStatus::HandedOff);
@@ -2026,13 +1911,11 @@ mod tests {
         assert!(stdout.contains(
             "`homeboy runs export --run trace-run-text --output homeboy-run-trace-run-text`"
         ));
-    }
 
-    #[test]
-    fn stdout_without_retrieval_is_unchanged() {
-        let stdout = stdout_with_persisted_run_retrieval("{\"ok\":true}\n", None);
-
-        assert_eq!(stdout, "{\"ok\":true}\n");
+        assert_eq!(
+            stdout_with_persisted_run_retrieval("{\"ok\":true}\n", None),
+            "{\"ok\":true}\n"
+        );
     }
 
     #[test]
@@ -2066,16 +1949,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn noop_observer_finishes_without_retrieval() {
-        let observer: Box<dyn LabDispatchObserver> = Box::new(NoopLabDispatchObserver);
-
-        assert_eq!(observer.run_id(), None);
-        assert!(observer
-            .finish(RunStatus::Skipped, serde_json::Value::Null)
-            .is_none());
-    }
-
     /// Observer that records the finishing status/metadata so the orchestration
     /// control flow can be asserted without persisting a real trace run.
     #[derive(Default)]
@@ -2100,7 +1973,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_lab_offload() {
+    fn dispatch_without_lab_command_runs_locally_and_finishes_skipped() {
         // A non-Lab command (`command: None`) routes to a local run and drives
         // the observer to a `Skipped` finish without offloading.
         let finished = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -2151,19 +2024,5 @@ mod tests {
         assert_eq!(status, RunStatus::Skipped);
         assert_eq!(metadata["lab_dispatch"]["phase"], LAB_DISPATCH_PHASE);
         assert_eq!(metadata["lab_dispatch"]["status"], "run_local");
-    }
-
-    #[test]
-    fn lab_dispatch_metadata_merges_extra_into_envelope() {
-        let metadata = lab_dispatch_metadata(
-            Some("homeboy-lab"),
-            "offloaded_complete",
-            json!({ "exit_code": 0 }),
-        );
-
-        assert_eq!(metadata["lab_dispatch"]["phase"], LAB_DISPATCH_PHASE);
-        assert_eq!(metadata["lab_dispatch"]["runner_id"], "homeboy-lab");
-        assert_eq!(metadata["lab_dispatch"]["status"], "offloaded_complete");
-        assert_eq!(metadata["lab_dispatch"]["exit_code"], 0);
     }
 }

@@ -710,6 +710,8 @@ pub struct AgentTaskGateReport {
     /// in printed order (#17893). Absent for a gate that printed none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases: Vec<phases::AgentTaskGatePhase>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_artifacts: Vec<phases::GateTestArtifact>,
     #[serde(default)]
     pub capture: AgentTaskGateCapture,
     /// The workspace requested by Cook and the component workspace that
@@ -805,11 +807,9 @@ pub struct AgentTaskGateBaselineComparison {
     pub result: AgentTaskGateDifferentialResult,
     /// Why the comparison could not conclude.
     ///
-    /// An `Inconclusive` result used to be indistinguishable from every other
-    /// `Inconclusive` result: the baseline replay error was discarded at the
-    /// point it was produced, so an operator was told to "repair the gate
-    /// baseline setup" with nothing naming what was actually wrong. This
-    /// carries that reason forward. Conclusive results leave it `None`.
+    /// Carries the baseline replay error forward so an `Inconclusive` result
+    /// names what was actually wrong instead of only telling the operator to
+    /// "repair the gate baseline setup". Conclusive results leave it `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
     /// Machine-readable attribution of the candidate's failures against the
@@ -1511,6 +1511,7 @@ impl AgentTaskGateReport {
             termination: AgentTaskGateTermination::Completed,
             signal: None,
             test_execution_outcome: None,
+            test_artifacts: Vec::new(),
             phases: phases::gate_phases(&stdout),
             stdout,
             stderr: stderr.into(),
@@ -1581,6 +1582,7 @@ impl AgentTaskGateReport {
             test_execution_outcome: None,
             stdout: String::new(),
             stderr: String::new(),
+            test_artifacts: Vec::new(),
             phases: Vec::new(),
             capture: AgentTaskGateCapture::default(),
             cwd: None,
@@ -1820,6 +1822,9 @@ use extension_sources::*;
 
 mod environment;
 use environment::*;
+
+mod gate_secret_env;
+pub use gate_secret_env::gate_test_secret_env_names;
 
 mod rust_cache;
 use rust_cache::*;

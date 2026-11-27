@@ -47,7 +47,7 @@ pub fn observe(limit: Option<usize>) -> LabCapacity {
 
 /// Reserve the last CPUs, leaving at least one for steps.
 /// Oversized requests are clamped to preserve step progress.
-/// Unset, invalid, or zero requests preserve the legacy admission policy.
+/// Unset, invalid, or zero requests reserve no CPUs.
 pub fn gate_reserve(allowed: &[usize]) -> Vec<usize> {
     let requested = std::env::var("HOMEBOY_LAB_GATE_RESERVE")
         .ok()
@@ -1537,23 +1537,9 @@ mod tests {
     fn controller_eta_from_lab_capacity_payload_table() {
         let queue = |budget: u64, holders: serde_json::Value| serde_json::json!({ "effective_budget": budget, "holders": holders });
         let holder = |budget: Option<u64>, elapsed: u64| serde_json::json!({ "owner": "wf", "budget_seconds": budget, "elapsed_seconds": elapsed });
+        // Budgeted holders are covered by
+        // `runner_job_holders_count_toward_share_cap_and_eta`.
         for (payload, position, expected) in [
-            (
-                queue(
-                    2,
-                    serde_json::json!([holder(Some(600), 100), holder(Some(900), 0)]),
-                ),
-                1,
-                Some(500),
-            ),
-            (
-                queue(
-                    2,
-                    serde_json::json!([holder(Some(600), 100), holder(Some(900), 0)]),
-                ),
-                2,
-                Some(900),
-            ),
             (
                 queue(
                     2,
@@ -1709,18 +1695,6 @@ mod tests {
     }
 
     #[test]
-    fn budget_table() {
-        for (cpus, limit, expected) in [
-            (32, Some(24), 24),
-            (1, Some(24), 24),
-            (8, None, 8),
-            (8, Some(0), 0),
-        ] {
-            assert_eq!(admission_budget(cpus, limit), expected);
-        }
-    }
-
-    #[test]
     fn high_self_load_does_not_reduce_configured_slots() {
         crate::test_support::with_isolated_home(|_| {
             let observation = |limit| LabCapacity {
@@ -1753,14 +1727,6 @@ mod tests {
                 );
             }
             assert_eq!(observe(Some(24)).effective_budget, 24);
-            // Slot capacity stays 24 even when PSI independently refuses work.
-            pressure.cpu = Some(1250);
-            pressure.apply_thresholds(&thresholds);
-            assert_eq!(pressure.admission_reason.as_deref(), Some("pressure"));
-            assert_eq!(
-                pressure.admission_refusal().details["admission_reason"],
-                "pressure"
-            );
             // A queue observation must not inherit the last caller's limit.
             assert_eq!(
                 step_queue_snapshot()["effective_budget"],

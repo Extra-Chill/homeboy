@@ -32,7 +32,11 @@ pub(super) fn status(id: Option<&str>, full: bool) -> CmdResult<RunnerOutput> {
         }
         let lab_readiness = runner::lab_runner_readiness()?;
         let preferred_lab_runner = lab_readiness.selected_runner_id.clone();
-        let admission_snapshot = runner::runner_status_admission_snapshot(id)?;
+        let admission_snapshot = runner::runner_admission_snapshot(
+            id,
+            None,
+            runner::RunnerAdmissionReadiness::Configured,
+        )?;
         let report = admission_snapshot.status;
         let capabilities =
             global_execution_capabilities(&runners, Some(&report), Some(&lab_readiness))?;
@@ -174,7 +178,7 @@ pub(super) fn status(id: Option<&str>, full: bool) -> CmdResult<RunnerOutput> {
 /// execution capabilities (Lab admission readiness) are a remote probe and
 /// belong to `runner status` without an id or to a specific remote runner
 /// query; this query never touches a remote host (#15935).
-pub(super) fn controller_local_status_output(id: &str) -> RunnerOutput {
+fn controller_local_status_output(id: &str) -> RunnerOutput {
     RunnerOutput {
         command: "runner.status".to_string(),
         id: Some(id.to_string()),
@@ -338,7 +342,10 @@ pub(super) fn reconcile_output(
     id: &str,
     report: homeboy::runner::runners::RunnerStatusReport,
 ) -> CmdResult<RunnerOutput> {
-    let admission_snapshot = runner::runner_admission_snapshot_for_status(report);
+    let admission_snapshot = runner::runner_admission_snapshot_for_status(
+        report,
+        runner::RunnerAdmissionReadiness::Observation,
+    );
     let report = admission_snapshot.status;
     let admission_summary = admission_snapshot.summary;
     let reconciliation = reconciliation_outcome(id, &report, &admission_summary);
@@ -724,7 +731,14 @@ fn selected_lab_runner_status(
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
         connected: status.connected,
-        availability: status.admission_availability(runner_config.settings.concurrency_limit),
+        availability: runner::runner_admission_availability(
+            &status,
+            &runner::RunnerAdmissionPolicy {
+                capacity: runner_config.settings.concurrency_limit,
+                capabilities_ready: true,
+                exact_version: false,
+            },
+        ),
     }))
 }
 
@@ -1477,30 +1491,6 @@ mod tests {
     use homeboy::runner::{RunnerActiveJobState, RunnerSessionRole, RunnerStaleDaemonWarning};
 
     #[test]
-    fn stale_daemon_status_hint_recommends_job_binary_refresh() {
-        let report = stale_daemon_report();
-
-        let hints = runner_status_operator_hints(&report);
-        let commands = runner_status_operator_commands(&report);
-
-        let hint = hints
-            .iter()
-            .find(|hint| hint.contains("stale daemon"))
-            .expect("stale daemon hint");
-        let job_binary_refresh = format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{}",
-            homeboy_product_identity::product_version()
-        );
-        assert!(hint.contains(&job_binary_refresh));
-
-        let refresh = commands
-            .iter()
-            .find(|command| command.scope == "daemon_refresh")
-            .expect("daemon refresh command");
-        assert!(refresh.command.starts_with(&job_binary_refresh));
-    }
-
-    #[test]
     fn build_drift_alone_is_not_a_stale_daemon_with_refresh_guidance() {
         let mut report = stale_daemon_report();
         let warning = report.stale_daemon.as_mut().expect("warning");
@@ -1545,6 +1535,10 @@ mod tests {
         let output = lab_runner_homeboy_output("homeboy-lab", "/opt/homeboy", &report);
         assert_eq!(output.refresh_commands, commands);
         assert_eq!(output.upgrade_command, None);
+
+        assert!(runner_status_operator_hints(&report)
+            .iter()
+            .any(|hint| hint.contains("stale daemon") && hint.contains(&commands[0])));
 
         let operator_commands = runner_status_operator_commands(&report);
         assert_eq!(operator_commands.len(), 1);
@@ -1599,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_drift_never_leaks_the_legacy_daemon_refresh_command() {
+    fn identity_drift_never_emits_a_daemon_refresh_command() {
         let mut report = stale_daemon_report();
         report
             .session

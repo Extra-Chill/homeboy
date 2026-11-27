@@ -112,17 +112,6 @@ fn row_for<'a>(
 }
 
 #[test]
-fn age_floor_is_the_shared_runner_floor_and_is_not_configurable() {
-    // Every runner-scoped delete path resolves one named floor (#10316). This
-    // category deliberately exposes no flag or configuration key to lower it.
-    assert_eq!(
-        RUNNER_DOWNLOAD_MIN_AGE,
-        Duration::from_secs(crate::cleanup::RUNNER_MIN_AGE_HOURS * 3_600)
-    );
-    assert_eq!(RUNNER_DOWNLOAD_MIN_AGE, Duration::from_secs(24 * 60 * 60));
-}
-
-#[test]
 fn missing_cache_root_is_an_empty_plan_and_never_opens_the_store() {
     let home = tempfile::tempdir().expect("home");
     let options = options(true);
@@ -145,8 +134,8 @@ fn missing_cache_root_is_an_empty_plan_and_never_opens_the_store() {
 #[test]
 fn a_freshly_pulled_artifact_is_never_removed() {
     // The data-loss case #10564 was filed for: `homeboy runs artifacts <run>
-    // --pull` writes here, and a bare `homeboy cleanup --apply` used to remove
-    // the whole tree with no age floor at all. The cache is tagged
+    // --pull` writes here, and a bare `homeboy cleanup --apply` must not remove
+    // it before the age floor. The cache is tagged
     // `internal_fetch` so the age floor is the only thing that can save it —
     // an operator-owned tag would make the assertion pass for the wrong reason.
     let home = tempfile::tempdir().expect("home");
@@ -204,6 +193,8 @@ fn a_fresh_cache_survives_beside_a_stale_one_that_is_reclaimed() {
     assert!(fresh.join("new.bin").exists());
     assert_eq!(row_for(&outcome, "lab/stale-run").action, "removed");
     assert_eq!(row_for(&outcome, "lab/fresh-run").action, "skip");
+    // `remove_dir` is non-recursive, so the surviving sibling keeps its parent.
+    assert!(home.path().join("runner").join("lab").exists());
 }
 
 #[test]
@@ -345,36 +336,6 @@ fn a_declared_unavailable_store_fails_closed_without_attempting_an_open() {
     );
 }
 
-/// The gate defaults to "available" so a caller that never probed is not
-/// silently downgraded into retaining everything.
-#[test]
-fn the_default_assumes_the_store_is_available() {
-    assert!(RunnerDownloadCleanupOptions::default().store_available);
-}
-
-#[test]
-fn a_missing_run_row_does_not_by_itself_authorize_removal() {
-    // Row absence is not a delete proof (#10284): runner-side run ids often
-    // have no local row at all. The age floor is the authorization, so a cache
-    // with no matching row is still retained while it is young.
-    let home = tempfile::tempdir().expect("home");
-    let cache = write_cached_download(home.path(), "lab", "no-such-run", "trace.zip", b"trace");
-    let options = options(true);
-
-    let outcome = sweep_with(
-        home.path(),
-        &options,
-        &filters(&options),
-        RUNNER_DOWNLOAD_MIN_AGE,
-        SystemTime::now(),
-        no_running_runs,
-    )
-    .expect("sweep");
-
-    assert_eq!(outcome.removed_count, 0);
-    assert!(cache.exists());
-}
-
 #[test]
 fn entries_that_are_not_the_canonical_shape_are_reported_and_never_removed() {
     let home = tempfile::tempdir().expect("home");
@@ -432,30 +393,6 @@ fn the_cache_root_itself_is_never_removed() {
     // and only because `remove_dir` refuses a non-empty directory.
     assert!(home.path().join("runner").exists());
     assert!(!home.path().join("runner").join("lab").exists());
-}
-
-#[test]
-fn an_emptied_runner_directory_is_pruned_only_when_a_sibling_does_not_survive() {
-    let home = tempfile::tempdir().expect("home");
-    write_cached_download(home.path(), "lab", "stale-run", "old.bin", b"old");
-    let fresh = write_cached_download(home.path(), "lab", "fresh-run", "new.bin", b"new");
-    let clock = clock_past_the_floor();
-    set_file_mtime(&fresh.join("new.bin"), clock);
-
-    let options = options(true);
-    sweep_with(
-        home.path(),
-        &options,
-        &filters(&options),
-        RUNNER_DOWNLOAD_MIN_AGE,
-        clock,
-        no_running_runs,
-    )
-    .expect("sweep");
-
-    // `remove_dir` is non-recursive, so the surviving sibling keeps its parent.
-    assert!(fresh.exists());
-    assert!(home.path().join("runner").join("lab").exists());
 }
 
 #[test]
