@@ -12,7 +12,13 @@ pub const GATE_PHASE_MARKER: &str = "homeboy-gate-phase";
 pub const MAX_GATE_PHASES: usize = 64;
 const MAX_PHASE_NAME_LEN: usize = 64;
 /// Longer lines cannot be markers; the collector discards them unbuffered.
-const MAX_MARKER_LINE_BYTES: usize = 256;
+const MAX_MARKER_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateTestArtifact {
+    pub reference: String,
+    pub contents: String,
+}
 
 /// One phase a gate reported about itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +78,7 @@ pub(crate) struct GatePhaseCollector {
     pending: Vec<u8>,
     discarding: bool,
     phases: Vec<AgentTaskGatePhase>,
+    pub(crate) artifacts: Vec<GateTestArtifact>,
 }
 
 impl GatePhaseCollector {
@@ -95,6 +102,23 @@ impl GatePhaseCollector {
     }
 
     fn take_line(&mut self) {
+        if let Ok(line) = std::str::from_utf8(&self.pending) {
+            if let Some(json) = line.strip_prefix("homeboy-gate-test-artifact ") {
+                if self.artifacts.len() < 32
+                    && self
+                        .artifacts
+                        .iter()
+                        .map(|a| a.contents.len())
+                        .sum::<usize>()
+                        + json.len()
+                        <= 8 * 1024 * 1024
+                {
+                    if let Ok(artifact) = serde_json::from_str::<GateTestArtifact>(json) {
+                        self.artifacts.push(artifact);
+                    }
+                }
+            }
+        }
         if self.phases.len() >= MAX_GATE_PHASES {
             return;
         }

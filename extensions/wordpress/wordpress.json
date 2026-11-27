@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.56.6",
+  "version": "3.56.7",
   "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
@@ -21,7 +21,7 @@
   "composition": {
     "includes": ["nodejs"]
   },
-  "isolated_home_paths": [".cache/homeboy/wp-codebox", ".wordpress-playground"],
+  "isolated_home_paths": [".cache/homeboy/wp-codebox", ".wordpress-playground", ".cache/composer"],
   "source_snapshot": {
     "sync_excludes": ["vendor/", "vendor/**", "wp-config.php"]
   },

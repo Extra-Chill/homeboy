@@ -202,13 +202,15 @@ pub fn record_detached_cook_handoff_parent_in_store(
     }
 
     let mut record = submit_detached_handoff_placeholder_in_store(lifecycle_store, &cook_id)?;
-    record.metadata["detached_cook_handoff"] = json!({
+    let mut handoff = json!({
         "admission_state": "pre_supervisor",
-        "admission_deadline_at": (chrono::Utc::now()
-            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
-            .to_rfc3339(),
         "cook_id": cook_id,
     });
+    // The process writing the placeholder is the one about to claim it. Its
+    // observed liveness, not the bare lease, guards the window until the
+    // claim lands, which can exceed the lease under concurrent launches.
+    record_launcher_custody(&mut handoff);
+    record.metadata["detached_cook_handoff"] = handoff;
     lifecycle_store.commit_record_without_events(&mut record)?;
     record_cook_progress_in_store(
         lifecycle_store,
@@ -258,6 +260,17 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         Some("a live launcher owns the handoff and is materializing the first attempt"),
     )?;
     Ok(claimed)
+}
+
+/// Bind a handoff's launcher liveness to this process, with the lease as the
+/// fallback when its identity cannot be observed.
+fn record_launcher_custody(handoff: &mut Value) {
+    let pid = std::process::id();
+    let identity = process_start_identity(pid).ok().flatten();
+    handoff["launcher_pid"] = json!(pid);
+    handoff["launcher_start_identity"] = json!(identity);
+    let lease = chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS);
+    handoff["admission_deadline_at"] = json!((chrono::Utc::now() + lease).to_rfc3339());
 }
 
 fn detached_cook_launcher_is_live(
@@ -895,6 +908,19 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
 /// makes cancellation in that interval able to signal the exact process, while
 /// the launcher id prevents a stale launcher from publishing another owner's
 /// child or supervisor.
+pub fn record_claimed_detached_cook_step_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    job_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    apply_cook_handoff_event(
+        lifecycle_store,
+        &sanitize_run_id(cook_id),
+        CookHandoffEvent::Admit(launcher_id, job_id),
+    )
+}
+
 pub fn record_claimed_detached_cook_handoff_supervision_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -996,6 +1022,8 @@ fn complete_detached_cook_handoff_parent_in_store(
 pub(crate) enum CookHandoffEvent<'a> {
     /// `(launcher_id)` takes ownership of a pre-supervisor parent.
     Claim(&'a str),
+    /// `(launcher_id, supervisor_job_id)` transfers custody before step start.
+    Admit(&'a str, &'a str),
     /// `(launcher_id, child_pid, child_start_identity, supervisor_job_id)`.
     Supervise(&'a str, u32, &'a ProcessStartIdentity, &'a str),
     /// `(attempt_run_id)` takes custody before its Cook index is published.
@@ -1034,11 +1062,17 @@ pub(crate) fn cook_handoff_event_admits(
             }
             (_, Claim(_)) => {
                 pre_supervisor
+                    && !handoff["supervisor_job_id"].is_string()
                     && !(handoff.get("launcher_id").is_some()
                         && detached_cook_launcher_is_live(record, chrono::Utc::now()))
             }
-            (_, Supervise(launcher_id, ..) | FailClaimed(launcher_id, _)) => {
+            (_, Admit(launcher_id, _) | Supervise(launcher_id, ..)) => {
                 pre_supervisor && handoff["launcher_id"] == launcher_id
+            }
+            (_, FailClaimed(launcher_id, _)) => {
+                pre_supervisor
+                    && handoff["launcher_id"] == launcher_id
+                    && !handoff["supervisor_job_id"].is_string()
             }
             // Replaying the reserved attempt rewrites nothing; neither does a
             // reservation after the one-time handoff (later retries need none).
@@ -1068,13 +1102,11 @@ pub(crate) fn apply_cook_handoff_event(
     };
     let write = |handoff: &mut Value| match event {
         Claim(launcher_id) => {
-            let pid = std::process::id();
-            let identity = process_start_identity(pid).ok().flatten();
             handoff["launcher_id"] = json!(launcher_id);
-            handoff["launcher_pid"] = json!(pid);
-            handoff["launcher_start_identity"] = json!(identity);
-            let lease = chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS);
-            handoff["admission_deadline_at"] = json!((chrono::Utc::now() + lease).to_rfc3339());
+            record_launcher_custody(handoff);
+        }
+        Admit(_, job_id) => {
+            handoff["supervisor_job_id"] = json!(job_id);
         }
         Supervise(_, child_pid, child_start_identity, job_id) => {
             handoff["child_pid"] = json!(child_pid);
@@ -1114,7 +1146,7 @@ pub(crate) fn apply_cook_handoff_event(
         Fail(_) | FailClaimed(..) | Expire(_) => {
             lifecycle_store.transition_when(cook_id, terminate)?
         }
-        Claim(_) | Supervise(..) | Reserve(_) => {
+        Claim(_) | Admit(..) | Supervise(..) | Reserve(_) => {
             lifecycle_store.mutate_record(cook_id, |record| {
                 use CookAdmissionPhase::Pending;
                 let pending = matches!(CookAdmissionPhase::of(record), Some(Pending { .. }));
@@ -1164,7 +1196,7 @@ pub(crate) fn apply_cook_handoff_event(
             "detached Cook handoff is already owned or has advanced",
             lifecycle_store.read_record_bounded(cook_id).ok(),
         ),
-        (None, Supervise(..)) => (
+        (None, Admit(..) | Supervise(..)) => (
             "detached Cook handoff is not owned by this launcher or has advanced",
             lifecycle_store.read_record(cook_id).ok(),
         ),
@@ -1241,7 +1273,10 @@ pub fn detached_cook_admission_is_live(
         // Runtime sealing can outlast the initial lease. Use the same observed
         // launcher custody as reclaim, falling back to the deadline only when
         // process identity cannot be established.
-        Some("pre_supervisor") | None => detached_cook_launcher_is_live(record, now),
+        Some("pre_supervisor") | None => {
+            record.metadata["detached_cook_handoff"]["supervisor_job_id"].is_string()
+                || detached_cook_launcher_is_live(record, now)
+        }
         _ => false,
     }
 }
@@ -1463,10 +1498,25 @@ pub fn normalize_missing_execution_placement_decision_in_store(
             None,
         )
     })?;
-    if persisted.decision_id == decision.decision_id || !persisted.is_submission_stamp() {
+    if persisted.decision_id == decision.decision_id {
         return Ok(false);
     }
-    let reason = "durable run carried a submission-derived placement decision";
+    // A Cook attempt inherits its mission's routed decision at
+    // materialization. The route that actually dispatches the attempt owns the
+    // authoritative decision for this execution, so it supersedes the inherited
+    // one — but never by loosening a Lab requirement onto the controller.
+    let inherited = record.metadata["execution_placement_inherited"]["decision_id"]
+        .as_str()
+        .is_some_and(|id| id == persisted.decision_id);
+    let reason = if persisted.is_submission_stamp() {
+        "durable run carried a submission-derived placement decision"
+    } else if inherited
+        && (persisted.permits_local_execution() || !decision.permits_local_execution())
+    {
+        "durable run carried a placement decision inherited from its Cook mission"
+    } else {
+        return Ok(false);
+    };
     record.metadata["execution_placement_decision"] =
         serde_json::to_value(decision).map_err(|error| {
             Error::internal_json(
@@ -1478,6 +1528,70 @@ pub fn normalize_missing_execution_placement_decision_in_store(
         "at": now_timestamp(),
         "reason": reason,
         "adopted_decision_id": decision.decision_id,
+    });
+    lifecycle_store.commit_record(&mut record)?;
+    Ok(true)
+}
+
+/// Bind a Cook attempt to its mission's persisted routing decision.
+///
+/// Attempt plans are submitted without a routing decision, so submission stamps
+/// them as controller-local (`requested: automatic, selected: controller`).
+/// For a Lab-dispatched Cook that stamp is wrong: status, diagnose, retry and
+/// local-continuation guards would all read the attempt as controller-owned and
+/// offer (or perform) a controller fallback the mission forbade. Replace only a
+/// submission stamp, and only before any placement outcome was verified.
+pub fn inherit_cook_execution_placement_decision_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    decision: &homeboy_lab_contract::ExecutionPlacementDecision,
+) -> Result<bool> {
+    if !decision.is_valid() {
+        return Ok(false);
+    }
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
+    let persisted = record
+        .metadata
+        .get("execution_placement_decision")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+                value.clone(),
+            )
+        });
+    match persisted {
+        None => {}
+        Some(Ok(persisted)) if persisted.is_submission_stamp() => {
+            // An operator's explicit local override is only honored when the
+            // mission itself does not require the Lab.
+            if persisted.decision_id == decision.decision_id
+                || (persisted.override_authorization.authorized
+                    && decision.required
+                        != homeboy_lab_contract::ExecutionPlacementRequirement::Lab)
+            {
+                return Ok(false);
+            }
+        }
+        Some(_) => return Ok(false),
+    }
+    if record
+        .metadata
+        .get("execution_placement_outcome")
+        .is_some_and(|outcome| !outcome.is_null())
+    {
+        return Ok(false);
+    }
+    record.metadata["execution_placement_decision"] =
+        serde_json::to_value(decision).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize inherited placement decision".to_string()),
+            )
+        })?;
+    record.metadata["execution_placement_inherited"] = json!({
+        "at": now_timestamp(),
+        "source": "cook_recipe_attempt_dispatch",
+        "decision_id": decision.decision_id,
     });
     lifecycle_store.commit_record(&mut record)?;
     Ok(true)
@@ -2828,6 +2942,27 @@ pub fn defer_cook_runtime_admission_in_store(
     run_id: &str,
     owner: Value,
 ) -> Result<bool> {
+    defer_cook_admission_in_store(lifecycle_store, run_id, owner, None)
+}
+
+/// Recover a lost execution child only while its zero-provider attempt still
+/// lacks a successor owner. The failure count travels with the attempt, not
+/// the handoff parent, so subsequent queued executions share the same budget.
+pub(crate) fn defer_interrupted_cook_execution_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    owner: Value,
+    recovery_limit: u64,
+) -> Result<bool> {
+    defer_cook_admission_in_store(lifecycle_store, run_id, owner, Some(recovery_limit))
+}
+
+fn defer_cook_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    owner: Value,
+    recovery_limit: Option<u64>,
+) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
     let now = now_timestamp();
     let mut intent_error = None;
@@ -2841,11 +2976,29 @@ pub fn defer_cook_runtime_admission_in_store(
         {
             return None;
         }
+        if let Some(limit) = recovery_limit {
+            let key = record.metadata["execution_scheduling"]["current_intent_id"].as_str();
+            let failures = record.metadata["execution_scheduling"]["recovery_failures"]
+                .as_u64()
+                .unwrap_or(0)
+                .max(owner["recovery_failures"].as_u64().unwrap_or(0));
+            if key.is_some_and(|key| Some(key) != owner["step_key"].as_str())
+                || failures + 1 >= limit
+            {
+                return None;
+            }
+            record.metadata["execution_scheduling"]["recovery_failures"] = json!(failures + 1);
+        }
         record.metadata["cook_runtime_admission"] = json!({
             "schema": "homeboy/cook-runtime-admission/v1",
             "state": "queued",
             "owner": owner,
         });
+        if recovery_limit.is_some() {
+            record.metadata["cook_runtime_admission"]["reason"] =
+                json!("execution_step_interrupted");
+            record.metadata["cook_runtime_admission"]["job_id"] = owner["job_id"].clone();
+        }
         record.updated_at = Some(now.clone());
         reset_for_requeue(record);
         let not_before = Some((chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339());

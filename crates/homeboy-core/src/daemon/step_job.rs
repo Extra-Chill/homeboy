@@ -969,7 +969,9 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         StepPhase::Running => {
             let child = checkpoint.child.clone().expect("validated running child");
             job.progress(checkpoint.progress())?;
-            let cgroup = adopted_cgroup(&child);
+            // Recovery owns this job's named cgroup, not whichever cgroup a
+            // reused or migrated PID might currently inhabit.
+            let cgroup = JobCgroup::for_job(&job_id).ok().flatten();
             supervise_adopted(&child, cgroup.as_ref(), job)?;
             stop_finished_cgroup(&job_id, cgroup.as_ref());
             checkpoint.exit_code = recorded_step_exit_code(&job_id);

@@ -1173,8 +1173,18 @@ fn age_minutes(timestamp: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> O
 }
 
 fn discovery_outcome(record: &AgentTaskRunRecord) -> AgentTaskRunRecord {
+    // Discovery already holds the physical row. Only an indexed Cook alias
+    // pointing elsewhere requires another record read; ordinary histories must
+    // not reopen and decode every snapshot a second time.
     agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
-        .and_then(|store| agent_task_lifecycle::status_in_store(&store, &record.run_id))
+        .and_then(|store| {
+            let index = store.read_cook_index(&record.run_id)?;
+            if index.latest_run_id == record.run_id {
+                Ok(record.clone())
+            } else {
+                store.read_record_bounded(&index.latest_run_id)
+            }
+        })
         .unwrap_or_else(|_| record.clone())
 }
 
@@ -1183,7 +1193,10 @@ fn discovery_run(
     live: Option<&BTreeSet<Uuid>>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskDiscoveryRun {
-    let plan = agent_task_lifecycle::load_controller_plan(&record.run_id).ok();
+    // Physical discovery rows already have canonical IDs, not operator aliases.
+    let plan = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+        .and_then(|store| store.read_controller_plan(&record.run_id))
+        .ok();
     let identity = discovery_identity(&record);
     let component = plan.as_ref().and_then(|plan| {
         plan.metadata

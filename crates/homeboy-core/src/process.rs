@@ -473,7 +473,17 @@ pub fn process_identity_state_with_start_identity(
         let actual = match process_start_identity(pid) {
             Ok(Some(identity)) => identity,
             Ok(None) => return ProcessIdentityState::Dead,
-            Err(_) => return ProcessIdentityState::Unverifiable,
+            Err(_) => {
+                // proc_pidinfo may fail even for an absent process (for
+                // example ENOENT on macOS). ESRCH from kill is independent,
+                // conclusive death evidence; EPERM remains fail-closed.
+                if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    return ProcessIdentityState::Dead;
+                }
+                return ProcessIdentityState::Unverifiable;
+            }
         };
         match expected_start_identity {
             Some(expected) if expected != &actual => ProcessIdentityState::IdentityMismatch,

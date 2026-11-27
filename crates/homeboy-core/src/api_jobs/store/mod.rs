@@ -349,6 +349,8 @@ pub(super) struct ControllerJobSubmission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredJob {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) attached_exec_heartbeat_ms: Option<u64>,
     /// Durable admission state for direct exec and gate jobs, owned by the executing daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_admission_reason: Option<String>,
@@ -1871,6 +1873,7 @@ impl JobStore {
         inner.jobs.insert(
             job.id,
             StoredJob {
+                attached_exec_heartbeat_ms: None,
                 // The worker's first admission probe records any wait.
                 pending_admission_reason: None,
                 pending_execution_envelope,
@@ -2952,6 +2955,7 @@ impl JobStore {
                 data: Some(event_data),
             };
             let mut stored = StoredJob {
+                attached_exec_heartbeat_ms: None,
                 pending_admission_reason: None,
                 pending_execution_envelope: None,
                 job,
@@ -3589,7 +3593,7 @@ impl JobStore {
                 .as_ref()
                 .and_then(|state| state.pending_admission_reason.as_ref())
         });
-        if stored.job.status != JobStatus::Queued || reason.is_none() {
+        if stored.job.status != JobStatus::Queued {
             return Ok(Value::Null);
         }
         let latest = stored
@@ -3598,9 +3602,30 @@ impl JobStore {
             .rev()
             .filter_map(|event| event.data.as_ref())
             .find(|data| data["status"] == "pending_resource_admission");
+        let mut queued = inner
+            .jobs
+            .values()
+            .filter(|candidate| self.owns(candidate) && candidate.job.status == JobStatus::Queued)
+            .map(|candidate| (candidate.job.created_at_ms, candidate.job.id))
+            .collect::<Vec<_>>();
+        queued.sort();
+        let position = queued
+            .iter()
+            .position(|(_, id)| *id == job_id)
+            .map(|index| index + 1);
+        let reservation = stored
+            .events
+            .iter()
+            .rev()
+            .filter_map(|event| event.data.as_ref())
+            .find_map(|data| data.get("reservation_id"));
         Ok(serde_json::json!({
+            "blocker": reservation,
+
+            "queue_position": position,
+            "queue_length": queued.len(),
             "status": "pending_resource_admission",
-            "pending_admission_reason": reason,
+            "pending_admission_reason": reason.map(String::as_str).or_else(|| reservation.map(|_| "reservation")),
             "message": "waiting on Lab capacity",
             "load": latest.and_then(|data| data.get("load")),
             "budget": latest.and_then(|data| data.get("budget")),

@@ -2575,21 +2575,7 @@ fn refresh_installed_extensions(
     let skipped: Vec<_> = result
         .skipped_details
         .into_iter()
-        .map(|entry| {
-            let force = if entry.reason.starts_with(DIRTY_LINKED_PREFIX) {
-                " --force"
-            } else {
-                ""
-            };
-            ExtensionUpgradeSkip {
-                recovery_commands: vec![format!(
-                    "homeboy extension update {}{force}",
-                    entry.extension_id
-                )],
-                extension_id: entry.extension_id,
-                reason: entry.reason,
-            }
-        })
+        .map(extension_upgrade_skip)
         .collect();
     let dirty = skipped
         .iter()
@@ -2599,6 +2585,38 @@ fn refresh_installed_extensions(
         upgrade_phase(&dirty_linked_summary(&dirty));
     }
     Ok((updated, skipped))
+}
+
+fn extension_upgrade_skip(
+    entry: homeboy_extension_contract::update_output::UpdateSkippedEntry,
+) -> ExtensionUpgradeSkip {
+    let force = if entry.reason.starts_with(DIRTY_LINKED_PREFIX) {
+        " --force"
+    } else {
+        ""
+    };
+    ExtensionUpgradeSkip {
+        recovery_commands: if entry
+            .reason
+            .starts_with(lifecycle::LINKED_SOURCE_DIVERGENCE_PREFIX)
+        {
+            entry.hints
+        } else {
+            vec![format!(
+                "homeboy extension update {}{force}",
+                entry.extension_id
+            )]
+        },
+        extension_id: entry.extension_id,
+        reason: if entry
+            .reason
+            .starts_with(lifecycle::LINKED_SOURCE_DIVERGENCE_PREFIX)
+        {
+            format!("WARNING: {}", entry.reason)
+        } else {
+            entry.reason
+        },
+    }
 }
 
 fn report_extension_progress(
@@ -4937,6 +4955,25 @@ mod convergence_tests {
             extension_component_status(true, false, &[], &[]).status,
             "completed"
         );
+    }
+
+    #[test]
+    fn source_divergence_skip_preserves_recovery_commands() {
+        let commands = vec![
+            "homeboy extension install https://example.com/current --id fixture --replace"
+                .to_string(),
+            "homeboy extension relink fixture <path to a checkout of the declared source>"
+                .to_string(),
+        ];
+        let skip = extension_upgrade_skip(
+            homeboy_extension_contract::update_output::UpdateSkippedEntry {
+                extension_id: "fixture".to_string(),
+                reason: format!("{} for fixture", lifecycle::LINKED_SOURCE_DIVERGENCE_PREFIX),
+                hints: commands.clone(),
+            },
+        );
+        assert!(skip.reason.starts_with("WARNING:"));
+        assert_eq!(skip.recovery_commands, commands);
     }
 
     #[test]

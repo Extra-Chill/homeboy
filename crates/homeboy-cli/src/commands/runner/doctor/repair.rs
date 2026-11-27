@@ -435,10 +435,7 @@ mod tests {
     #[test]
     fn promotion_wait_failures_retry_once_and_converge() {
         let target = local_target();
-        for code in [
-            ErrorCode::RuntimePromotionWaitTimeout,
-            ErrorCode::RuntimePromotionContended,
-        ] {
+        for code in [ErrorCode::RuntimePromotionContended] {
             let mut calls = 0;
             let result = retry_runtime_promotion_wait(&target, || {
                 calls += 1;
@@ -516,7 +513,7 @@ mod tests {
         .expect_err("the second bounded wait remains terminal");
 
         assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
-        assert_eq!(calls, PROMOTION_WAIT_CONNECT_ATTEMPTS);
+        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -746,14 +743,11 @@ fn retry_runtime_promotion_wait<T>(
     for attempt in 0..PROMOTION_WAIT_CONNECT_ATTEMPTS {
         match action() {
             Err(error)
-                if matches!(
-                    error.code,
-                    ErrorCode::RuntimePromotionContended | ErrorCode::RuntimePromotionWaitTimeout
-                ) && attempt + 1 < PROMOTION_WAIT_CONNECT_ATTEMPTS =>
+                if error.code == ErrorCode::RuntimePromotionContended
+                    && attempt + 1 < PROMOTION_WAIT_CONNECT_ATTEMPTS =>
             {
-                // `connect` emitted owner/watch events during the first wait.
-                // A second bounded admission wait converges a promotion that
-                // completed at the timeout boundary without changing identity.
+                // Immediate contention may converge, but a consumed admission
+                // timeout is terminal and must not start a fresh wait budget.
                 target.ensure_current()?;
             }
             result => return result,

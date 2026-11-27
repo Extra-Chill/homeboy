@@ -3758,6 +3758,8 @@ fn enqueue_exec_request(
     job_store: &JobStore,
     staged_adoption: Option<StagedDirectExecution>,
 ) -> Result<serde_json::Value> {
+    static EXEC_ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _admission = EXEC_ADMISSION.lock().unwrap();
     let dispatch = request.envelope.dispatch.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "envelope.dispatch",
@@ -3904,6 +3906,29 @@ fn enqueue_exec_request(
         .and_then(|runner| runner.pointer("/settings/pressure_thresholds"))
         .cloned()
         .unwrap_or_else(|| json!(crate::runner_pressure::PressureThresholds::default()));
+    if execution_metadata
+        .and_then(|metadata| metadata.get("admission_no_wait"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        let thresholds = serde_json::from_value(run_ref_metadata["pressure_thresholds"].clone())
+            .unwrap_or_default();
+        let pressure = crate::runner_pressure::sample(&thresholds);
+        if pressure.admission_reason.is_some() {
+            return Err(pressure.admission_refusal());
+        }
+        if let Some(blocker) = reservation::holding(
+            dispatch
+                .env
+                .get("HOMEBOY_RUNNER_RESERVATION")
+                .map(String::as_str),
+        )? {
+            let mut error = pressure.admission_refusal();
+            error.details["admission_reason"] = json!("reservation");
+            error.details["blocker"] = json!(blocker);
+            return Err(error);
+        }
+    }
     run_ref_metadata["pending_execution_envelope"] = json!(request.envelope);
     run_ref_metadata["reservation"] = json!(dispatch.env.get("HOMEBOY_RUNNER_RESERVATION"));
     run_ref_metadata["admission_class"] = json!(dispatch
@@ -3917,6 +3942,20 @@ fn enqueue_exec_request(
         "kind": lifecycle.as_ref().and_then(|lifecycle| lifecycle.kind.clone()).unwrap_or_else(|| "runner.exec".to_string()),
         "lifecycle": lifecycle.clone(),
     });
+    if execution_metadata
+        .and_then(|m| m.get("guard_duplicate_exec"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        if let Some(id) = job_store.duplicate_exec(
+            &plan.runner_id,
+            &plan.cwd,
+            &plan.command,
+            submission_key.as_deref(),
+        ) {
+            return Err(Error::validation_invalid_argument("command", format!("identical exec is live as {id}; cancel with `homeboy runner job cancel {} {id}` or use --allow-concurrent", plan.runner_id), None, None));
+        }
+    }
     // Capture any potentially slow baseline before reserving child capacity.
     // Once the reservation is durable, the worker performs only the bounded
     // process-spawn handoff before persisting child ownership.
@@ -4036,6 +4075,13 @@ fn enqueue_exec_request(
         }
     };
     let _workspace_owner_lease = pending_owner_lease.disarm();
+    if execution_metadata
+        .and_then(|m| m.get("attached_exec"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        job_store.attach_exec(runner.job_id)?;
+    }
     if queued_owner_heartbeat {
         // Liveness is best effort: the job is already durably accepted.
         let _ = job_store.observe_queued_job(runner.job_id);
@@ -4045,6 +4091,7 @@ fn enqueue_exec_request(
     Ok(json!({
         "command": "api.runner.exec.enqueue",
         "job": job,
+        "admission": job_store.pending_admission_report(runner.job_id)?,
         "poll": {
             "job": format!("/jobs/{}", runner.job_id),
             "events": format!("/jobs/{}/events", runner.job_id),
@@ -5236,6 +5283,28 @@ mod tests {
     /// 400 (`runner subsystem is unavailable`).
     pub(super) fn register_enqueue_test_driver() {
         runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
+    }
+
+    #[test]
+    fn direct_exec_no_wait_refuses_pressure_without_creating_a_job() {
+        with_isolated_home(|_| {
+            register_enqueue_test_driver();
+            let store = JobStore::default();
+            let _pressure = crate::test_support::EnvVarGuard::set(
+                crate::runner_pressure::SAMPLE_ENV,
+                r#"{"memory":10000}"#,
+            );
+            let mut body = crate::test_support::direct_exec_body(
+                json!({"runner_id": "homeboy-lab", "cwd": "/tmp", "command": ["true"]}),
+                "no-wait-pressure",
+            );
+            body["submission"]["envelope"]["metadata"]["admission_no_wait"] = json!(true);
+            body["submission"]["envelope"]["mutation_policy"]["capture_patch"] = json!(false);
+            let error = enqueue_exec_job(Some(body), &store).unwrap_err();
+            assert_eq!(error.code, crate::ErrorCode::RunnerCapacityBusy);
+            assert_eq!(error.details["admission_reason"], "pressure");
+            assert!(store.list().is_empty());
+        });
     }
 
     #[test]

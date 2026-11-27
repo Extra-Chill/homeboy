@@ -18,6 +18,38 @@ use super::{source_metadata, UpdateResult};
 use crate::extension::catalog::{is_extension_linked, load_extension};
 use homeboy_extension_contract::update_output::ExtensionSourceUpdate;
 
+pub const LINKED_SOURCE_DIVERGENCE_PREFIX: &str =
+    "Linked extension source repository differs from declared source";
+
+/// Report a linked checkout whose origin no longer matches its manifest.
+/// Missing identity on either side is not evidence of divergence.
+pub fn linked_extension_source_divergence(extension_id: &str) -> Option<Error> {
+    if !is_extension_linked(extension_id) {
+        return None;
+    }
+    let extension_dir = paths::extension(extension_id).ok()?;
+    let source_dir = linked_source_dir(&extension_dir).ok()?;
+    let git_root = linked_extension_git_root(extension_id, &source_dir).ok()?;
+    let manifest = load_extension(extension_id).ok()?;
+    let declared = manifest.source_url.as_deref()?.trim();
+    let origin = git::remote_origin_url(&git_root)?;
+    let origin = origin.trim();
+    if declared.is_empty()
+        || origin.is_empty()
+        || super::install_sources::same_extension_source(origin, declared)
+    {
+        return None;
+    }
+    Some(Error::validation_invalid_argument(
+        "extension_id",
+        format!("{LINKED_SOURCE_DIVERGENCE_PREFIX} for {extension_id}: link {} -> {}; checkout origin: {origin}; declared source_url: {declared}", extension_dir.display(), source_dir.display()),
+        Some(extension_id.to_string()),
+        None,
+    )
+    .with_hint(format!("homeboy extension install {declared} --id {extension_id} --replace"))
+    .with_hint(format!("homeboy extension relink {extension_id} <path to a checkout of the declared source>")))
+}
+
 /// Resolve each extracted source URL/ref once for a sweep. Failed lookups are
 /// retained too, so every member falls through to refresh without retrying.
 pub fn resolve_update_revisions(
@@ -207,6 +239,11 @@ pub fn update_linked_group(extension_ids: &[String], force: bool) -> Result<Vec<
         let extension_dir = paths::extension_in_root(&config_root, id);
         let source_dir = linked_source_dir(&extension_dir)?;
         let git_root = linked_extension_git_root(id, &source_dir)?;
+        if !force {
+            if let Some(error) = linked_extension_source_divergence(id) {
+                return Err(error);
+            }
+        }
         entries.push((id.as_str(), extension_dir, source_dir, git_root));
     }
     let Some((_, _, _, git_root)) = entries.first() else {
@@ -502,6 +539,11 @@ fn update_linked_extension(
     };
     let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
     let git_root = linked_extension_git_root(extension_id, &source_dir)?;
+    if !force {
+        if let Some(error) = linked_extension_source_divergence(extension_id) {
+            return Err(error);
+        }
+    }
     let old_branch = git::current_branch(&git_root);
     let old_source_revision = git::short_head_revision(&git_root);
 

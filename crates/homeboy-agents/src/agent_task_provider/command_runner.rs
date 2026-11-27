@@ -22,6 +22,13 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+#[cfg(test)]
+thread_local! {
+    // Scoped to the calling test thread; provider reader threads still use real IO.
+    pub(super) static TEST_PROVIDER_ELAPSED: std::cell::RefCell<Option<Box<dyn FnMut(u64, u64) -> Duration>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 const EXECUTOR_OUTPUT_CAPTURE_LIMIT_BYTES: usize = 16 * 1024;
 const REDACTED_VALUE: &str = "[redacted]";
 /// Floor and ceiling for how often the liveness watchdog re-samples the
@@ -677,8 +684,9 @@ fn outcome_text_is_transient(outcome: &AgentTaskOutcome) -> bool {
 /// failure. Matching is case-insensitive.
 pub(super) fn is_transient_provider_error(text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
-    const TRANSIENT_PATTERNS: [&str; 15] = [
+    const TRANSIENT_PATTERNS: [&str; 16] = [
         "curl error 28",
+        "overloaded_error",
         "operation timed out",
         "timed out",
         "timeout",
@@ -728,7 +736,7 @@ pub(super) fn is_rate_limited_provider_error(text: &str) -> bool {
 /// Detect a transient HTTP 5xx status code mentioned in error text, while
 /// leaving permanent 4xx codes and rate-limit 429 non-retryable here.
 fn transient_status_code(lowered: &str) -> bool {
-    const TRANSIENT_CODES: [&str; 6] = ["500", "502", "503", "504", "522", "524"];
+    const TRANSIENT_CODES: [&str; 7] = ["500", "502", "503", "504", "522", "524", "529"];
     TRANSIENT_CODES
         .iter()
         .any(|code| contains_status_code_token(lowered, code))
@@ -1317,9 +1325,15 @@ pub(super) fn run_materialized_provider_command_once(
                 if execution.cancellation.is_cancelled() {
                     break (None, false, false, true);
                 }
-                let elapsed = started.elapsed();
-                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let output_progress_ms = last_progress_ms.load(Ordering::SeqCst);
+                let elapsed = started.elapsed();
+                #[cfg(test)]
+                let elapsed = TEST_PROVIDER_ELAPSED.with(|hook| {
+                    hook.borrow_mut().as_mut().map_or(elapsed, |clock| {
+                        clock(output_progress_ms, current_deadline_ms)
+                    })
+                });
+                let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let mut progressed = output_progress_ms > observed_output_progress_ms;
                 observed_output_progress_ms = output_progress_ms;
                 let mut progress_source = "runtime_output";

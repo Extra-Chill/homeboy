@@ -405,6 +405,7 @@ fn lab_runner_exec_options(
         run_id: context.agent_task_run_id.clone(),
         run_id_owns_generic_exec: false,
         detach_after_handoff: context.detach_after_handoff,
+        allow_concurrent: false,
         mirror_evidence: context.mirror_evidence,
         print_handoff: context.print_handoff,
         read_only_artifact_access: false,

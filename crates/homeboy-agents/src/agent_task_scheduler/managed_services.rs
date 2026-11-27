@@ -1586,15 +1586,32 @@ mod tests {
             service.command = vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                "trap '' TERM; while :; do sleep 1; done".to_string(),
+                "trap '' TERM; printf 'ready\\n'; while :; do sleep 1; done".to_string(),
             ];
             let services =
                 ManagedServices::start(&[service], "forced-cleanup").expect("start service");
-            thread::sleep(Duration::from_millis(50));
-            let started = Instant::now();
+            let log_path = services.records()[0].log_path.clone().expect("service log");
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+                if log.lines().any(|line| line == "ready") {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "waiting for service to ignore SIGTERM; observed log: {log:?}"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            let pid = services.records()[0].pid.expect("service pid");
             let records = services.cleanup("test");
 
-            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(records[0].cleanup_reaped, Some(true), "{:?}", records[0]);
+            assert!(
+                !homeboy_core::process::pid_is_running(pid),
+                "service {pid} still running after forced cleanup: {:?}",
+                records[0]
+            );
             assert_eq!(records[0].requested_cleanup_deadline_ms, Some(100));
             assert_cleanup_outcome(&records[0], "deadline_escalation_forced");
         });

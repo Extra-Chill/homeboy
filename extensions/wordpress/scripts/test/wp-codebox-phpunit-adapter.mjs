@@ -19,6 +19,9 @@ import { configuredWpCodeboxRuntimeCrashGraceSeconds, createWpCodeboxRuntimeCras
 import { applyLocalWorkspaceDependenciesBeforePrepare } from '../lib/local-workspace-prepare.mjs';
 import { assertIsolatedDatabaseTarget } from '../lib/wordpress-database-isolation-guard.mjs';
 
+import { createPhpunitSuiteResults, readPhpunitSuiteResults } from '../lib/phpunit-suite-results.mjs';
+
+const recordSuiteResults = createPhpunitSuiteResults(process.env.HOMEBOY_TEST_RESULTS_FILE);
 const require = createRequire(import.meta.url);
 const { preflightWpCodeboxCommand } = require('../../lib/wp-codebox-runtime-selection.js');
 
@@ -393,6 +396,7 @@ async function runHostSuite(suite) {
   await writeFile(logPath, output);
 
   const summary = parseHostPhpunitSummary(output);
+  await recordSuiteResults(summary);
   await writeFile(
     path.join(suiteArtifacts, 'wp-codebox-phpunit-results.json'),
     `${JSON.stringify({ schema: 'wp-codebox/phpunit-results/v1', suite: suite.name, runtime: 'host', summary }, null, 2)}\n`,
@@ -1275,7 +1279,16 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
 }
 async function parsePublishedArtifacts(published) {
   if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
-    runScript('parse-test-results.sh', [published.directory]);
+    const destination = process.env.HOMEBOY_TEST_RESULTS_FILE;
+    const scratch = `${destination}.${process.pid}.suite`;
+    process.env.HOMEBOY_TEST_RESULTS_FILE = scratch;
+    try {
+      runScript('parse-test-results.sh', [published.directory]);
+      await recordSuiteResults(await readPhpunitSuiteResults(scratch));
+    } finally {
+      process.env.HOMEBOY_TEST_RESULTS_FILE = destination;
+      await unlink(scratch).catch(() => {});
+    }
   }
   if (process.env.HOMEBOY_TEST_FAILURES_FILE || published.failuresPath) {
     const requestedFailuresPath = process.env.HOMEBOY_TEST_FAILURES_FILE;

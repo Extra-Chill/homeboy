@@ -1411,27 +1411,23 @@ mod tests {
         // signal cannot arrive early and be lost under load (#15958).
         let interrupter = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
-            while !ready.exists() && Instant::now() < deadline {
+            while !ready.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "waiting for child SIGTERM trap readiness at {}",
+                    ready.display()
+                );
                 thread::sleep(Duration::from_millis(10));
             }
-            unsafe { libc::kill(foreground_pid, libc::SIGTERM) };
+            assert_eq!(unsafe { libc::kill(foreground_pid, libc::SIGTERM) }, 0);
         });
 
-        // The child must never be blocked in a foreground command when the
-        // TERM arrives: POSIX shells defer a trap until the foreground command
-        // finishes, and cleanup escalates to SIGKILL after a 200ms grace. With
-        // `while :; do sleep 1; done`, a `sleep` forked after cleanup scanned
-        // the owned scope (or not yet forked when READY appeared) is never
-        // signalled, so the trap waited up to a second and the shell was
-        // killed before writing the marker. Instead, start the long-lived
-        // child before announcing readiness, so it is already in the scope
-        // when cleanup scans it, and block in the `wait` builtin, which a
-        // trapped signal interrupts immediately.
-        //
-        // Bounded so a lost signal fails the assertions below instead of
-        // hanging the test binary.
+        // Use only shell builtins after readiness. A foreground sleep delays
+        // traps; a background sleep plus `wait` can exit before TERM reaches
+        // the shell if cleanup signals the sleep first. The builtin loop
+        // cannot finish except through the trap (or the bounded timeout).
         let output = execute_local_command_in_dir_with_timeout(
-            "trap 'printf graceful > \"$MARKER\"; exit 0' TERM; sleep 1000 & : > \"$READY\"; wait",
+            "trap 'printf graceful > \"$MARKER\"; exit 0' TERM; : > \"$READY\"; while :; do :; done",
             None,
             Some(&env),
             Duration::from_secs(60),
