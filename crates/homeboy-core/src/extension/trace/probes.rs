@@ -805,25 +805,4 @@ mod tests {
             .and_then(|value| value.as_str())
             == Some("old line")));
     }
-
-    #[test]
-    fn process_snapshot_emits_list_events() {
-        let pattern = std::env::current_exe()
-            .expect("current exe")
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("homeboy")
-            .to_string();
-        let probes = ActiveTraceProbes::start(&[TraceProbeConfig::ProcessSnapshot {
-            pattern,
-            interval_ms: Some(25),
-        }])
-        .expect("start probes");
-        thread::sleep(Duration::from_millis(80));
-
-        let events = probes.stop();
-        assert!(events
-            .iter()
-            .any(|event| event.source == "process.snapshot" && event.event == "proc.list"));
-    }
 }

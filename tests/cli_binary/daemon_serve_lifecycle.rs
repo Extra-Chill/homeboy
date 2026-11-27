@@ -89,20 +89,20 @@ fn wait_exit(child: &mut Child, bound: Duration) -> Option<std::process::ExitSta
     None
 }
 
+/// Both the supervisor shape and the exact shape the CLI launches stop
+/// cleanly on SIGTERM, release their lease, and record a clean stop.
 #[cfg(unix)]
 #[test]
-fn sigterm_stops_a_foreground_daemon_cleanly_and_releases_its_lease() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let (child, _lease) = serve(home.path());
-    assert_sigterm_drains(home.path(), child);
-}
-
-#[cfg(unix)]
-#[test]
-fn sigterm_drains_a_cli_launched_shape_daemon_too() {
-    let home = tempfile::tempdir().expect("temporary home");
-    let (child, _lease) = cli_launched_shape_serve(home.path());
-    assert_sigterm_drains(home.path(), child);
+fn sigterm_stops_every_serve_shape_cleanly_and_releases_its_lease() {
+    for cli_launched in [false, true] {
+        let home = tempfile::tempdir().expect("temporary home");
+        let (child, _lease) = if cli_launched {
+            cli_launched_shape_serve(home.path())
+        } else {
+            serve(home.path())
+        };
+        assert_sigterm_drains(home.path(), child);
+    }
 }
 
 #[cfg(unix)]

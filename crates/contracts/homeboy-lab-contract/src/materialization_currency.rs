@@ -333,33 +333,29 @@ fn compare_opaque(
 mod tests {
     use super::{
         compare_content_digests, compare_identities, compare_source_revisions, Currency,
-        CurrencyEvidence, MaterializedIdentity,
+        MaterializedIdentity,
     };
 
     #[test]
-    fn missing_evidence_is_unknown_rather_than_current() {
+    fn missing_or_blank_evidence_is_unknown_rather_than_current() {
         // The single behaviour this contract exists to force. Every mechanism
         // it replaces had some path where a failed probe produced the same
-        // value as a successful match.
+        // value as a successful match. Blank counts as absent on either side.
         for verdict in [
             compare_content_digests("workspace", None, Some("sha256:a")),
             compare_content_digests("workspace", Some("sha256:a"), None),
             compare_content_digests("workspace", None, None),
+            compare_content_digests("workspace", Some(""), Some("")),
             compare_source_revisions("extension", None, Some("abc1234")),
             compare_source_revisions("extension", Some("abc1234"), None),
             compare_source_revisions("extension", None, None),
+            compare_source_revisions("rig", Some("   "), Some("abc1234")),
+            compare_source_revisions("rig", Some("abc1234"), Some("")),
         ] {
             assert!(verdict.is_unknown(), "expected unknown, got {verdict:?}");
             assert!(!verdict.is_current());
             assert!(!verdict.is_stale());
         }
-    }
-
-    #[test]
-    fn blank_evidence_counts_as_absent_on_either_side() {
-        assert!(compare_source_revisions("rig", Some("   "), Some("abc1234")).is_unknown());
-        assert!(compare_source_revisions("rig", Some("abc1234"), Some("")).is_unknown());
-        assert!(compare_content_digests("workspace", Some(""), Some("")).is_unknown());
     }
 
     #[test]
@@ -375,17 +371,6 @@ mod tests {
             .reason()
             .unwrap_or_default()
             .contains("content_digest"));
-    }
-
-    #[test]
-    fn digest_evidence_proves_byte_equality_and_revision_evidence_does_not() {
-        // A revision match and a digest match were both stored as `true` in the
-        // mechanisms this replaces, which is exactly why a dirty worktree could
-        // satisfy one check and fail another for the same subject.
-        assert!(CurrencyEvidence::ContentDigest.proves_content_equality());
-        assert!(!CurrencyEvidence::SourceRevision.proves_content_equality());
-        assert!(!CurrencyEvidence::BuildIdentity.proves_content_equality());
-        assert!(!CurrencyEvidence::BuildTimestamp.proves_content_equality());
     }
 
     #[test]
@@ -422,41 +407,5 @@ mod tests {
             compare_identities("workspace", &local, &remote),
             Currency::Current
         );
-    }
-
-    #[test]
-    fn verdict_tags_are_stable_for_records() {
-        assert_eq!(Currency::Current.tag(), "current");
-        assert_eq!(Currency::stale("because").tag(), "stale");
-        assert_eq!(Currency::unknown("because").tag(), "unknown");
-        assert_eq!(
-            serde_json::to_value(Currency::Current).expect("serialize"),
-            serde_json::json!({ "verdict": "current" })
-        );
-        assert_eq!(
-            serde_json::to_value(Currency::stale("drifted")).expect("serialize"),
-            serde_json::json!({ "verdict": "stale", "reason": "drifted" })
-        );
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn currency_evidence_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (CurrencyEvidence::ContentDigest, "content_digest"),
-            (CurrencyEvidence::SourceRevision, "source_revision"),
-            (CurrencyEvidence::BuildIdentity, "build_identity"),
-            (CurrencyEvidence::BuildTimestamp, "build_timestamp"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
     }
 }

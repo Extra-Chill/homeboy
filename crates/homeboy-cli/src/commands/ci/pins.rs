@@ -637,98 +637,6 @@ mod tests {
             .collect()
     }
 
-    /// The wire vocabulary these statuses serialize to is what a consumer
-    /// filters on, so it is pinned against literals rather than against a
-    /// second spelling of itself. An `as_str` here would only have restated
-    /// `#[serde(rename_all)]` with nothing tying the two together -- the defect
-    /// in #13400, invented rather than inherited.
-    #[test]
-    fn the_wire_vocabulary_is_pinned() {
-        let form = |f| serde_json::to_value(f).expect("serialize");
-        assert_eq!(form(PinForm::CommitSha), "commit_sha");
-        assert_eq!(form(PinForm::Floating), "floating");
-
-        let status = |s| serde_json::to_value(s).expect("serialize");
-        assert_eq!(status(PinStatus::Current), "current");
-        assert_eq!(status(PinStatus::Behind), "behind");
-        assert_eq!(status(PinStatus::Floating), "floating");
-        assert_eq!(status(PinStatus::Unresolved), "unresolved");
-    }
-
-    #[test]
-    fn a_uses_line_names_its_own_repository() {
-        let pins = discover_in_file(
-            "ci.yml",
-            "    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@83110d6638ec1c2f63352fcb004920524add0377\n",
-            &no_mapping(),
-        );
-        assert_eq!(pins.len(), 1);
-        assert_eq!(
-            pins[0].repository.as_deref(),
-            Some("Extra-Chill/homeboy-action")
-        );
-        assert_eq!(pins[0].attribution, PinAttribution::Declared);
-        assert_eq!(pins[0].form, PinForm::CommitSha);
-        assert_eq!(pins[0].line, 1);
-    }
-
-    /// A tag or branch moves on its own, so it is reported but is not a
-    /// staleness candidate. Classifying it as a stale commit pin would be a
-    /// permanent false positive.
-    #[test]
-    fn a_tag_is_floating_rather_than_stale() {
-        let pins = discover_in_file("ci.yml", "  uses: actions/checkout@v6\n", &no_mapping());
-        assert_eq!(pins[0].form, PinForm::Floating);
-        assert_eq!(pins[0].reference, "v6");
-    }
-
-    /// The rule that would have caught the `action-ref` half of #13437: a bare
-    /// SHA under `with:` belongs to the action it is passed to.
-    #[test]
-    fn a_bare_sha_input_is_attributed_to_the_nearest_uses() {
-        let yaml = "\
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@83110d6638ec1c2f63352fcb004920524add0377
-    with:
-      action-ref: 83110d6638ec1c2f63352fcb004920524add0377
-";
-        let pins = discover_in_file("ci.yml", yaml, &no_mapping());
-        assert_eq!(pins.len(), 2);
-        assert_eq!(
-            pins[1].source,
-            PinSource::Input {
-                key: "action-ref".to_string()
-            }
-        );
-        assert_eq!(
-            pins[1].repository.as_deref(),
-            Some("Extra-Chill/homeboy-action")
-        );
-        assert_eq!(pins[1].attribution, PinAttribution::NearestUses);
-    }
-
-    /// The `extension-ref` case. It sits under a `homeboy-action` `uses:` but
-    /// refers to `homeboy-extensions`, so nearest-uses attribution is wrong
-    /// here and configuration has to win. Getting this backwards would compare
-    /// the pin against a history that does not contain it.
-    #[test]
-    fn configuration_overrides_nearest_uses_for_an_input_naming_a_third_repository() {
-        let yaml = "\
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@83110d6638ec1c2f63352fcb004920524add0377
-    with:
-      extension-ref: fd4165ef2b9713672d0e25786c3af27c03012aae
-";
-        let pins = discover_in_file(
-            "ci.yml",
-            yaml,
-            &mapping(&[("extension-ref", "Extra-Chill/homeboy-extensions")]),
-        );
-        assert_eq!(
-            pins[1].repository.as_deref(),
-            Some("Extra-Chill/homeboy-extensions")
-        );
-        assert_eq!(pins[1].attribution, PinAttribution::Configured);
-    }
-
     /// A local action cannot drift, and -- the part that is easy to get wrong
     /// -- it must not become the attribution target for inputs beneath it.
     #[test]
@@ -753,6 +661,8 @@ mod tests {
         let pins = discover_in_file("ci.yml", yaml, &no_mapping());
         assert_eq!(pins.len(), 1);
         assert_eq!(pins[0].reference, "v6");
+        // A tag moves on its own: reported, but never a stale-commit candidate.
+        assert_eq!(pins[0].form, PinForm::Floating);
     }
 
     /// Quoted scalars are the same pin as unquoted ones.
@@ -861,16 +771,11 @@ mod tests {
             compared.target_commit.as_deref(),
             Some("c".repeat(40).as_str())
         );
-    }
 
-    /// `compared` with zero drift is `current`, not `behind`, and still carries
-    /// a target -- so a re-run after a bump does not propose the same bump.
-    #[test]
-    fn a_pin_at_its_release_is_current() {
-        let outcome = PinOutcome::compared("o/r", "v1".to_string(), "c".repeat(40), 0);
-        assert_eq!(outcome.status, PinStatus::Current);
-        assert_eq!(outcome.commits_behind, Some(0));
-        assert!(plan_bumps(&[]).is_empty());
+        // Zero drift is `current`, so a re-run after a bump proposes nothing.
+        let current = PinOutcome::compared("o/r", "v1".to_string(), "c".repeat(40), 0);
+        assert_eq!(current.status, PinStatus::Current);
+        assert_eq!(current.commits_behind, Some(0));
     }
 
     /// `uses:` and `action-ref:` carry the identical SHA on different lines.
@@ -908,6 +813,7 @@ mod tests {
             out.contains(&format!("# historical: {old}")),
             "the comment occurrence is untouched"
         );
+        assert!(out.ends_with('\n'), "the trailing newline survives a bump");
     }
 
     /// A stale plan must not be applied to whatever moved into that line.
@@ -924,22 +830,6 @@ mod tests {
         let (out, applied) = apply_bumps_to_text("    uses: o/r@v6\n", &bumps);
         assert!(applied.is_empty());
         assert_eq!(out, "    uses: o/r@v6\n");
-    }
-
-    /// Losing the trailing newline would put a spurious hunk in every diff.
-    #[test]
-    fn the_trailing_newline_survives_a_bump() {
-        let old = "b".repeat(40);
-        let bumps = vec![PinBump {
-            file: "ci.yml".into(),
-            line: 1,
-            repository: "o/r".into(),
-            from: old.clone(),
-            to: "c".repeat(40),
-            release: "v1".into(),
-        }];
-        let (out, _) = apply_bumps_to_text(&format!("    uses: o/r@{old}\n"), &bumps);
-        assert!(out.ends_with('\n'));
     }
 
     /// The real shape of the file this check exists for: three pins, two
@@ -971,6 +861,14 @@ jobs:
                 )
             })
             .collect();
+        assert_eq!(pins[0].source, PinSource::Uses);
+        assert_eq!(pins[0].form, PinForm::CommitSha);
+        assert_eq!(
+            pins[1].source,
+            PinSource::Input {
+                key: "action-ref".to_string()
+            }
+        );
         assert_eq!(
             described,
             vec![

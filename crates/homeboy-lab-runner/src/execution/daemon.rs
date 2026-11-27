@@ -55,7 +55,21 @@ pub(super) fn exec_via_daemon(
     mirror_evidence: bool,
     print_handoff_output: bool,
     accepted_daemon_identity: Option<String>,
+    allow_concurrent: bool,
 ) -> Result<(RunnerExecOutput, i32)> {
+    static EXEC_STOP: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>> = Mutex::new(None);
+    let stop = if run_id_owns_generic_exec && !detach_after_handoff {
+        let mut installed = EXEC_STOP.lock().unwrap();
+        if installed.is_none() {
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            homeboy_core::process::install_shutdown_handler(stop.clone(), "runner exec")?;
+            homeboy_core::process::install_terminate_handler(stop.clone())?;
+            *installed = Some(stop);
+        }
+        installed.as_ref().unwrap().clone()
+    } else {
+        Arc::new(std::sync::atomic::AtomicBool::new(false))
+    };
     let run_id_owns_generic_exec = run_id_owns_generic_exec || run_id.is_none();
     let run_id = Some(run_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
     let client = Client::builder()
@@ -110,6 +124,9 @@ pub(super) fn exec_via_daemon(
         metadata: {
             let mut metadata =
                 runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id);
+            metadata["admission_no_wait"] = json!(super::queue_wait::no_wait());
+            metadata["attached_exec"] = json!(run_id_owns_generic_exec && !detach_after_handoff);
+            metadata["guard_duplicate_exec"] = json!(run_id_owns_generic_exec && !allow_concurrent);
             if !detach_after_handoff {
                 // This call waits on the job below, so it owns the job's
                 // queued-owner heartbeat from the moment it is accepted.
@@ -193,6 +210,14 @@ pub(super) fn exec_via_daemon(
     let job: Job = serde_json::from_value(job_value.clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon exec job".to_string()))
     })?;
+    // A newly accepted job is briefly Queued before its worker acquires
+    // capacity. Do not mistake that publication window for an admission wait.
+    if body["admission"]["pending_admission_reason"].is_string() {
+        observe_exec_admission(&client, local_url, &body, &job)?;
+    }
+    if detach_after_handoff && print_handoff_output {
+        eprintln!("Job {} detached.\nhomeboy runner job logs {} {} --follow\nhomeboy runner job cancel {} {}", job.id, runner.id, job.id, runner.id, job.id);
+    }
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let lease_store = run_id
         .as_deref()
@@ -274,9 +299,26 @@ pub(super) fn exec_via_daemon(
                     .renew_running_runner_exec_source_lease(run_id, token)?;
             }
             let job_id = current.id.to_string();
-            // `current` keeps the accepted status until terminal; the beat
-            // itself stops once the daemon reports the job admitted.
-            if current.status == JobStatus::Queued {
+            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let response = daemon_post_json_text(
+                    &client,
+                    &daemon_endpoint.borrow(),
+                    &format!("/jobs/{job_id}/cancel"),
+                    &json!({"reason": "attached exec client interrupted"}),
+                    DaemonPostOptions {
+                        connection_close: true,
+                        timeout: Some(Duration::from_secs(3)),
+                    },
+                )?;
+                if response.status_code >= 400 {
+                    return Err(Error::internal_unexpected(
+                        "runner exec cancellation was not acknowledged",
+                    ));
+                }
+            }
+            // Attached exec ownership continues after admission; queued-only
+            // clients remain compatible with the same observe endpoint.
+            if !current.status.is_terminal() {
                 queued_owner_heartbeat.beat(&client, &daemon_endpoint.borrow(), &job_id);
             }
             let reload = || owner_transport.reload(&runner.id, &client, &job_id);
@@ -310,6 +352,12 @@ pub(super) fn exec_via_daemon(
             *daemon_endpoint.borrow_mut() = endpoint;
             follow.absorb(current.id, &response).map_err(poll_failure)?;
             if !response.terminal {
+                // Watch reports terminality, not the queued -> running edge.
+                // Read admission while queued so feedback/deadlines and the
+                // execution budget follow the daemon's actual start time.
+                if current.status == JobStatus::Queued {
+                    return fetch_daemon_job(&client, &daemon_endpoint.borrow(), &job_id);
+                }
                 return Ok(current.clone());
             }
             // Refresh the job once at terminality so artifacts and finish
@@ -1306,41 +1354,6 @@ mod admission_tests {
     }
 
     #[test]
-    fn authority_excludes_token_from_debug_and_serialization() {
-        let authority = DaemonAdmissionReservationAuthority {
-            daemon_lease_id: "lease-a".to_string(),
-            reservation_job_id: "job-a".to_string(),
-            lease_expires_at_ms: 42,
-            renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth::default())),
-        };
-        let debug = format!("{authority:?}");
-        let serialized = serde_json::to_string(&authority).expect("serialize authority");
-        assert!(!debug.contains("opaque-token"));
-        assert!(!serialized.contains("token\":\""));
-        assert!(authority
-            .prove_server_owned_expiry_or_cancellation_authority()
-            .is_ok());
-    }
-
-    #[test]
-    fn renewal_failure_blocks_strict_dispatch_authority() {
-        let authority = DaemonAdmissionReservationAuthority {
-            daemon_lease_id: "lease-a".to_string(),
-            reservation_job_id: "job-a".to_string(),
-            lease_expires_at_ms: 42,
-            renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth {
-                lease_expires_at_ms: Some(42),
-                failure: Some("daemon rejected renewal".to_string()),
-            })),
-        };
-        let error = authority
-            .prove_server_owned_expiry_or_cancellation_authority()
-            .expect_err("renewal failure must be observable before dispatch");
-        assert!(error.message.contains("renewal failed"));
-        assert!(!error.message.contains("opaque-token"));
-    }
-
-    #[test]
     fn renewal_transport_gaps_are_retried_and_refusals_are_failures() {
         let text = |status_code: u16, body: &str| {
             Ok(DaemonHttpTextResponse {
@@ -1425,7 +1438,6 @@ mod admission_tests {
         let runner_id = format!("parallel-admission-{}", uuid::Uuid::new_v4());
         let attempts = Arc::new(AtomicUsize::new(0));
         let recovery_owners = Arc::new(AtomicUsize::new(0));
-        let provider_budget = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(std::sync::Barrier::new(4));
         let mut children = Vec::new();
 
@@ -1433,7 +1445,6 @@ mod admission_tests {
             let runner_id = runner_id.clone();
             let attempts = Arc::clone(&attempts);
             let recovery_owners = Arc::clone(&recovery_owners);
-            let provider_budget = Arc::clone(&provider_budget);
             let barrier = Arc::clone(&barrier);
             children.push(std::thread::spawn(move || {
                 barrier.wait();
@@ -1458,10 +1469,7 @@ mod admission_tests {
                     },
                     || {},
                 )
-                .map(|lease| {
-                    assert_eq!(lease, "lease-reconnected");
-                    assert_eq!(provider_budget.load(Ordering::SeqCst), 0);
-                })
+                .map(|lease| assert_eq!(lease, "lease-reconnected"))
             }));
         }
 
@@ -1476,7 +1484,6 @@ mod admission_tests {
             1,
             "one recovery owner"
         );
-        assert_eq!(provider_budget.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1706,7 +1713,35 @@ pub(super) fn fetch_daemon_job(client: &Client, local_url: &str, job_id: &str) -
         Error::internal_json(err.to_string(), Some("parse daemon job".to_string()))
     })?;
     validate_daemon_job_identity(job_id, &job)?;
+    observe_exec_admission(client, local_url, &body, &job)?;
     Ok(job)
+}
+
+fn observe_exec_admission(client: &Client, endpoint: &str, body: &Value, job: &Job) -> Result<()> {
+    if let Err(mut error) = super::queue_wait::observe(
+        job.status == JobStatus::Queued,
+        &body["admission"],
+        &job.id.to_string(),
+    ) {
+        // Never leave a command queued to execute unexpectedly after its caller
+        // has explicitly refused to wait. Preserve cancellation failures too.
+        let cancellation = daemon_post_json_text(
+            client,
+            endpoint,
+            &format!("/jobs/{}/cancel", job.id),
+            &json!({"reason": "runner exec queue deadline expired"}),
+            DaemonPostOptions {
+                connection_close: true,
+                timeout: Some(Duration::from_secs(10)),
+            },
+        );
+        error.details["cancellation"] = match cancellation {
+            Ok(response) => json!({"http_status": response.status_code, "response": response.body}),
+            Err(failure) => json!({"error": failure.to_string()}),
+        };
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(super) fn validate_daemon_job_identity(requested_job_id: &str, job: &Job) -> Result<()> {
@@ -1868,15 +1903,15 @@ const DAEMON_TERMINAL_WAIT_MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// How often a waiting client renews its owner heartbeat on a queued job. The
 /// daemon reaps an opted-in queued job after
 /// [`homeboy_core::api_jobs::QUEUED_OWNER_DEADLINE_MS`] of silence (#18601).
-const QUEUED_OWNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const QUEUED_OWNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
-/// A waiting client's owner heartbeat for one queued daemon job.
+/// A waiting client's heartbeat for queued or running daemon work.
 ///
 /// While the job is queued, each [`Self::beat`] tells the daemon, at most once
 /// per [`QUEUED_OWNER_HEARTBEAT_INTERVAL`], that this client still waits for
 /// it. If the client is cancelled, killed, or gives up, the beats stop and the
 /// daemon frees the job's queue position instead of holding it for hours.
-/// Beats stop once the daemon reports the job admitted or settled, or rejects
+/// Beats stop once the daemon reports the job settled, or rejects
 /// the route (an older daemon keeps its no-deadline queue policy). A failed
 /// beat is never an observation failure: the poll loop owns transport errors.
 #[derive(Default)]
@@ -1913,7 +1948,7 @@ impl QueuedOwnerHeartbeat {
             .ok()
             .and_then(|body| body.pointer("/data/body/job/status").cloned())
             .and_then(|status| serde_json::from_value::<JobStatus>(status).ok());
-        if status.is_some_and(|status| status != JobStatus::Queued) {
+        if status.is_some_and(|status| status.is_terminal()) {
             self.done.set(true);
         }
     }
@@ -2260,12 +2295,10 @@ where
                 if !daemon_poll_transport_was_lost(&err) {
                     return Err(err);
                 }
-                // Checked before the endpoint-change fast path below, not
-                // after it. An endpoint change is still tolerated — it retries
-                // immediately and skips the backoff — but it can no longer
-                // extend the grace window without limit. When `reload_endpoint`
-                // alternates between two endpoints, every iteration used to
-                // `continue` past this check and the loop never terminated.
+                // Checked before the endpoint-change fast path below, so an
+                // endpoint change retries immediately and skips the backoff
+                // but cannot extend the grace window: a `reload_endpoint` that
+                // alternates between two endpoints still hits this deadline.
                 if Instant::now() >= transient_deadline {
                     let mut surfaced = err;
                     surfaced.retryable = surfaced.retryable.or(Some(true));

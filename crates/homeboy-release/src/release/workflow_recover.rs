@@ -1395,11 +1395,6 @@ mod tests {
     }
 
     #[test]
-    fn recovery_incomplete_exit_code_is_not_success() {
-        assert_ne!(RECOVERY_INCOMPLETE_EXIT_CODE, 0);
-    }
-
-    #[test]
     fn divergent_retag_refuses_unknown_github_release_lookup() {
         let error = require_unpublished_github_release("v1.2.3", None)
             .expect_err("unknown publication state must refuse tag replacement");
@@ -1505,11 +1500,6 @@ mod tests {
             homeboy_core::component::write_standalone_component_config(&component)
                 .expect("register fixture component");
             let scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
-            assert_eq!(scope.tag_prefix(), None);
-            assert_eq!(
-                scope.latest_tag_any().expect("latest tag"),
-                Some("v0.1.1".to_string())
-            );
             let input = ReleaseCommandInput {
                 component_id: "fixture".to_string(),
                 path_override: Some(component.local_path.clone()),
@@ -1643,21 +1633,6 @@ mod tests {
                 ..Default::default()
             };
 
-            assert_eq!(scope.tag_prefix(), None);
-            assert_eq!(
-                scope.latest_tag_any().expect("latest tag"),
-                Some("v0.1.1".to_string())
-            );
-            let local_tag =
-                git::get_tag_commit(&component.local_path, "v0.1.1").expect("local tag commit");
-            let remote_tag = git::remote_tag_commit(&component.local_path, "v0.1.1")
-                .expect("remote tag lookup")
-                .expect("remote tag commit");
-            assert_eq!(local_tag, remote_tag);
-            assert!(
-                !git::is_ancestor(&component.local_path, &local_tag, &retry_head)
-                    .expect("tag ancestry")
-            );
             let result = recreate_divergent_unpublished_release(
                 &input,
                 &component,

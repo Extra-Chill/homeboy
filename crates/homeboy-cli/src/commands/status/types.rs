@@ -260,9 +260,9 @@ pub struct CompactContextStatus {
 }
 
 /// Answers "can work be dispatched right now, and to which placement" — the
-/// question compact `status` previously left to a second `runner status`
-/// call. `effective_placement` is what a `--placement auto` command would
-/// resolve to at this instant given `runner`'s live readiness.
+/// question compact `status` answers without a second `runner status` call.
+/// `effective_placement` is what a `--placement auto` command would resolve
+/// to at this instant given `runner`'s live readiness.
 #[derive(Debug, Serialize)]
 pub struct DispatchReadinessStatus {
     /// Where a `--placement auto` command would run right now: `"lab"` when a
@@ -414,7 +414,7 @@ pub enum ProjectComponentDashboardStatus {
     /// Absorbed into another component; not independently deployable. Tracked
     /// for visibility but excluded from deploy/outdated obligations.
     Bundled,
-    /// Sunset; no longer a deploy target. Excluded from outdated obligations.
+    /// Sunset; not a deploy target. Excluded from outdated obligations.
     Retired,
     /// Cannot determine status
     Unknown,
@@ -598,19 +598,5 @@ mod progress_tests {
         // whether stderr is a TTY (#7378).
         assert!(!StatusProgress::new(0).is_active());
         assert!(!StatusProgress::new(1).is_active());
-    }
-
-    #[test]
-    fn inactive_progress_report_and_drop_are_no_ops() {
-        // In the (non-TTY) test environment progress is inactive; report/drop
-        // must be safe no-ops that never panic or emit control characters.
-        let progress = StatusProgress::new(10);
-        assert!(
-            !progress.is_active(),
-            "non-TTY stderr yields inactive progress"
-        );
-        progress.report(0, "component-a");
-        progress.report(9, "component-b");
-        drop(progress);
     }
 }

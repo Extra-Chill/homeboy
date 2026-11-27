@@ -4,6 +4,313 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.500.0] - 2026-11-27
+
+### Added
+- publish green incomplete candidates as partial deliveries
+
+## [0.499.0] - 2026-11-27
+
+### Added
+- expose exec admission waits and queue deadlines
+
+### Fixed
+- report leftover processes killed during cgroup teardown
+- bound workspace sync and report active stages
+
+## [0.498.0] - 2026-11-27
+
+### Added
+- aggregate cook-batch child phases and stream batch progress
+
+### Fixed
+- bound promotion admission retries and expose stale lease owners
+- cancel orphaned attached exec jobs and guard duplicates
+
+## [0.497.33] - 2026-11-27
+
+### Fixed
+- reject divergent linked checkout sources
+
+## [0.497.32] - 2026-11-27
+
+### Fixed
+- retain extension test artifacts across gate finalization
+
+## [0.497.31] - 2026-11-26
+
+### Fixed
+- Cook attempts inherit the mission's Lab placement decision
+- don't cancel queued pre-spawn Cook attempts while their driver is live
+
+## [0.497.30] - 2026-11-26
+
+### Fixed
+- carry tested subcomponents' declared test secrets into Lab gates
+
+## [0.497.29] - 2026-11-26
+
+### Fixed
+- hydrate cached extensions beside their declared shared assets
+
+## [0.497.28] - 2026-11-25
+
+### Fixed
+- requeue interrupted zero-execution Cook attempts
+- Deflake process-lifecycle and chaos tests (launcher crash, daemon/step chaos, sigterm, service cleanup)
+- deflake heartbeat and deadline tests and protect SQLite from package scans
+- hydrate job extension overlays in a runner-side content-addressed cache
+
+## [0.497.27] - 2026-11-25
+
+### Changed
+- bump GitHub Actions off the Node 20 runtime
+
+### Fixed
+- a workflow row belongs to its active controller job, not its creator pid
+
+## [0.497.26] - 2026-11-25
+
+### Fixed
+- bind an unclaimed Cook handoff placeholder to its live writer
+- retry provider overloaded_error (529) as transient
+
+## [0.497.25] - 2026-11-25
+
+### Changed
+- prune and fold execution, bundle, materialization and gate-transport tests file by file
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 5/12)
+- prune implementation-restating and duplicate workspace/workload tests
+
+## [0.497.24] - 2026-11-25
+
+### Changed
+- prune workspace snapshot, snapshots, types and util tests file by file
+- prune and fold low-value tests in lab-runner slice 1/12
+- prune and fold redundant agent-task gate and lifecycle tests
+
+## [0.497.23] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in http_api, observation store and rig suites
+
+## [0.497.22] - 2026-11-25
+
+### Changed
+- prune and fold staging-controller and lab-workspace tests
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 9/12)
+- prune lab offload and preparation tests (6/12)
+- prune and fold redundant tests in lab-runner slice 10/12
+- prune and fold low-value tests file-by-file (homeboy-lab-runner 7/12)
+
+## [0.497.21] - 2026-11-25
+
+### Changed
+- prune agent_task_service and control-plane tests file by file
+
+## [0.497.20] - 2026-11-25
+
+### Changed
+- prune and fold homeboy-lab-runner connection tests file by file
+- prune homeboy-agents agent_task tests file-by-file (9/15)
+- prune agent_task_provider tests file-by-file (8/15)
+- prune homeboy-agents scratch and orchestration tests file by file
+- prune redundant tests in homeboy-lab-runner slice 3/12
+
+## [0.497.19] - 2026-11-25
+
+### Changed
+- prune agent_task_service tests file-by-file (13/15)
+- prune and fold low-value homeboy-agents scheduler and cook tests (wave 1 follow-up)
+- prune and fold low-value tests in agent-task lifecycle, notify and promotion suites (6/15)
+- prune and fold redundant contract tests (contracts 2/2)
+- prune and fold homeboy-rig tests file-by-file (homeboy-rig 1/1)
+- prune and fold homeboy-agents finalization and gate tests (2/15)
+- prune homeboy-agents agent_task_service cook tests file-by-file (11/15)
+- prune cook_tests file-by-file (homeboy-agents 12/15)
+
+### Fixed
+- Cook status/diagnose report a run with gates still running as candidate_recoverable, inviting a duplicate regate
+
+## [0.497.18] - 2026-11-25
+
+### Changed
+- prune and fold low-value agent-task promotion, prompt and provider tests (7/15)
+- prune and fold homeboy-fuzz tests file by file
+- prune redundant lifecycle tests and stale history comments
+- prune agent_task_lifecycle status/submit tests file-by-file
+
+## [0.497.17] - 2026-11-25
+
+### Changed
+- prune redundant tests in remaining contract files
+- prune and fold low-value tests in small crates (homeboy-error, paths, redaction, review, product-identity)
+
+## [0.497.16] - 2026-11-25
+
+### Changed
+- prune homeboy-agents agent_task tests file-by-file (1/15)
+
+## [0.497.15] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in rig, daemon, deps, installer, release and report suites (tests 5/6)
+
+## [0.497.14] - 2026-11-25
+
+### Changed
+- prune and fold low-value homeboy-core git tests file-by-file
+
+## [0.497.13] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in tests/core/rig (tests 4/6)
+
+## [0.497.12] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in homeboy-core src/extension (9/22)
+- prune and fold daemon, invocation, bench and component-script tests (tests 2/6)
+- prune redundant tests in the tests/ wave 6 slice
+- prune and fold src/extension invoke/lifecycle/lint tests
+- prune and fold low-value tests in tests 1/6 slice
+- prune and fold low-value contract-crate tests
+- prune and fold homeboy-upgrade tests file by file (1/2)
+- prune and fold homeboy-engine-primitives tests file-by-file
+- prune and fold homeboy-version unit tests
+- prune and fold homeboy-upgrade upgrade tests file-by-file (2/2)
+- prune and fold low-value release planning tests (homeboy-release 3/4)
+- prune workflow, workflow_recover and workspace tests
+
+### Fixed
+- Prune tests file-by-file: homeboy-deploy 1/2 (crates/homeboy-deploy/src, 199 tests)
+- Prune tests file-by-file: homeboy-deploy 2/2 (crates/homeboy-deploy/src, 191 tests)
+
+## [0.497.11] - 2026-11-25
+
+### Changed
+- prune and fold status, test, trace and upgrade command tests (wave 2, homeboy-cli 14/16)
+
+## [0.497.10] - 2026-11-25
+
+### Changed
+- prune and fold homeboy-cli tests (wave 2, homeboy-cli 16/16)
+- prune and fold homeboy-release executor and lifecycle tests (wave 2, homeboy-release 2/4)
+
+## [0.497.9] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in homeboy-cli commands slice 10/16
+- prune and fold low-value tests in homeboy-release (wave 2, 1/4)
+- prune and fold command utils tests (wave 2, homeboy-cli 15/16)
+- prune and fold low-value tests in homeboy-cli rig/runner slice 11/16
+- prune and fold homeboy-cli command tests (wave 2, slice 13/16)
+
+## [0.497.8] - 2026-11-25
+
+### Changed
+- prune and fold low-value homeboy-cli tests (wave 2, slice 1/16)
+
+## [0.497.7] - 2026-11-25
+
+### Changed
+- prune route, json_output, lint and command tests to behavioral regressions
+- prune fuzz, git and infra command tests file by file
+- prune and fold low-value runner/runs command tests (homeboy-cli 12/16)
+
+## [0.497.6] - 2026-11-25
+
+### Changed
+- prune low-value agent-task command tests (wave 2, homeboy-cli 4/16)
+- prune and fold agent_task command tests (wave 2, homeboy-cli 2/16)
+- prune and fold low-value tests in contract, control-plane, cook verdict, daemon, extension and fuzz command modules
+- prune and fold agent-task status/run/dispatch tests (wave 2, homeboy-cli 3/16)
+- prune and fold server, transfer, snapshot and sidecar tests (wave 2, slice 20/22)
+- prune and fold homeboy-core project/runner/runtime tests (wave 2, slice 19/22)
+- prune and fold low-value tests in ci, cleanup, component, config and contract commands
+- prune and fold low-value bench, agent-task summary and build tests (wave 2, slice 5/16)
+- prune and fold homeboy-core tests (wave 2, slice 21/22)
+- prune worktree and provider tests file by file
+
+## [0.497.5] - 2026-11-25
+
+### Changed
+- one collision check and one root builder for unmaterialized Cook admission
+- prune restating and duplicate tests in api_jobs and artifact modules
+
+## [0.497.4] - 2026-11-25
+
+### Changed
+- prune and fold low-value tests in homeboy-core slice 15/22
+
+## [0.497.3] - 2026-11-25
+
+### Changed
+- prune redundant lab/workspace tests, dead command-prefix input, and history comments
+- prune retired gate sentinel, test-only provider env wrapper and non-earning scheduler/gate tests
+- prune notify, observation and reconcile tests file-by-file
+- prune low-value trace, workload, gate and git tests file-by-file
+- prune duplicate and low-value tests in homeboy-core observation
+
+## [0.497.2] - 2026-11-25
+
+### Changed
+- prune redundant execution/connection tests and dead tunnel wrapper
+- prune and fold low-value tests in output, paths, preflight, plan, process and project component modules
+- prune and fold homeboy-core extension tests (wave 2, slice 11/22)
+- prune low-value tests in engine, evidence manifest, execution and bench modules
+- prune and fold low-value tests in extension test/trace modules
+- prune restating and duplicate tests in daemon, defaults, deps and cli_tool
+
+## [0.497.1] - 2026-11-25
+
+### Changed
+- prune dead code, low-value tests and history comments
+- prune agent_task_service retired compat, dead code and low-value tests
+- prune restating and duplicate cleanup and component tests
+- prune restating and duplicate tests in homeboy-core src/daemon
+- fold redundant staging, runner and resource tests; drop test-only cache wrapper
+- prune restating and duplicate tests in component, config, context, control-plane and daemon
+- prune restating and duplicate tests in homeboy-core cleanup modules
+- prune restating and duplicate tests in artifact, broker auth, build, capacity and CI profile modules
+- prune low-value top-level integration tests and orphan fixtures
+- prune history comments, dead code and restating tests from agent_task_lifecycle
+
+## [0.497.0] - 2026-11-24
+
+### Added
+- add /agent_task/local_execution policy to deny controller-local execution
+
+### Changed
+- prune runs/runner/status tests that restate implementation or guard retired surfaces
+- prune restating and duplicate tests in deploy, rig, fuzz, error, paths, review and small crates
+- prune retired cook flag migration shim, init guidance, and absence tests
+- prune clap-restating tests and history comments in bench/fuzz/trace/infra
+- prune tests that don't earn their place and the retired --ai-used-for flag
+- prune serde-restating tests, dead review-form claims and test-only notify entry
+- prune restating tests and retired compatibility from shared core modules
+- prune observation/daemon tests that restate implementation and drop v1 daemon lease acceptance
+- prune low-value git/worktree tests, dead destination guard, and history comments
+- prune dead admission code, redundant tests and history comments in api_jobs/component/project
+- prune redundant extension tests and history comments
+
+## [0.496.7] - 2026-11-24
+
+### Changed
+- one guarded transition for the detached Cook handoff
+
+## [0.496.6] - 2026-11-24
+
+### Fixed
+- link extension isolated_home_paths into Lab job HOME
+
+## [0.496.5] - 2026-11-24
+
+### Changed
+- move local dispatch admission from the CLI into CookService
+- one runner admission/readiness projection
+- delete cook_progress.terminal_status as a Cook verdict source
+
 ## [0.496.4] - 2026-11-24
 
 ### Fixed

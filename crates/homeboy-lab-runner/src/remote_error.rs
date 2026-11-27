@@ -68,62 +68,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projection_cancel_absence_keeps_code_and_details() {
-        let details = serde_json::json!({
-            "field": "job_id",
-            "runner_job_absence": "ledger_absent",
+    fn daemon_error_keeps_typed_code_message_details_and_hints() {
+        let details = json!({
+            "runner_job_absence": "ledger_terminal",
+            "runner_job_status": "cancelled",
         });
         let error = from_wire(
-            serde_json::json!({
+            json!({
                 "error": "validation.invalid_argument",
                 "message": "job not found",
                 "details": details,
+                "hints": [{"message": "repair the record"}, "retry later"]
             }),
-            "daemon projection cancel failed",
-            Some(400),
-            "/jobs/missing/cancel-projection",
+            "daemon job read failed",
+            Some(404),
+            "/jobs/missing",
         );
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(error.message, "job not found");
         assert_eq!(error.details, details);
-    }
+        let hints: Vec<_> = error
+            .hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect();
+        assert_eq!(hints, ["repair the record", "retry later"]);
 
-    #[test]
-    fn job_read_absence_keeps_ledger_classification_and_terminal_status() {
-        for absence in ["ledger_absent", "ledger_terminal"] {
-            let details = json!({
-                "runner_job_absence": absence,
-                "runner_job_status": "cancelled",
-            });
-            let error = from_wire(
-                json!({"error": "validation.invalid_argument", "message": "job not found", "details": details}),
-                "daemon job read failed",
-                Some(404),
-                "/jobs/missing",
-            );
-            assert_eq!(error.details, details);
-        }
         let bare = from_wire(json!({}), "not found", Some(404), "/jobs/missing");
+        assert_eq!(bare.code, ErrorCode::InternalUnexpected);
+        assert_eq!(bare.message, "not found");
         assert!(bare.details.get("runner_job_absence").is_none());
-    }
-
-    #[test]
-    fn daemon_error_keeps_nested_json_error_typed() {
-        let error = from_wire(
-            serde_json::json!({
-                "error": "internal.json_error",
-                "message": "staging record schema is invalid",
-                "details": {"phase": "lab_staging_submission"},
-                "hints": [{"message": "repair the staging record"}]
-            }),
-            "daemon request failed",
-            Some(500),
-            "/runner/staging/submit",
-        );
-
-        assert_eq!(error.code, ErrorCode::InternalJsonError);
-        assert_eq!(error.message, "staging record schema is invalid");
-        assert_eq!(error.details["phase"], "lab_staging_submission");
-        assert_eq!(error.hints[0].message, "repair the staging record");
+        assert_eq!(bare.details["path"], "/jobs/missing");
     }
 
     #[test]

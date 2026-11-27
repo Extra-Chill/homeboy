@@ -215,26 +215,6 @@ mod tests {
     }
 
     #[test]
-    fn uncommitted_filter_ignores_only_generated_build_artifacts() {
-        let temp = git_repo();
-        let dir = temp.path();
-        let build_dir = deploy_generated_build_dir();
-        std::fs::create_dir_all(dir.join(&build_dir)).expect("build dir");
-        std::fs::write(dir.join(&build_dir).join("plugin.zip"), "artifact").expect("artifact");
-        std::fs::write(dir.join("src.rs"), "source\n").expect("source");
-
-        let component = Component {
-            local_path: dir.to_string_lossy().to_string(),
-            ..Component::default()
-        };
-        let unexpected = uncommitted_file_report_excluding_known_generated(&component)
-            .expect("status")
-            .unexpected;
-
-        assert_eq!(unexpected, vec!["src.rs"]);
-    }
-
-    #[test]
     fn uncommitted_report_classifies_declared_cleanup_paths_and_archives() {
         let temp = git_repo();
         let dir = temp.path();

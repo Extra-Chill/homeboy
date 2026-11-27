@@ -499,16 +499,6 @@ fn empty_selection_error(field: &str, message: &str) -> Error {
     Error::validation_invalid_argument(field, message, None, None)
 }
 
-#[cfg(test)]
-fn select_behind_upstream_components(all_components: &[Component]) -> Vec<Component> {
-    let mut git_probe_cache = GitProbeCache::default();
-    all_components
-        .iter()
-        .filter(|component| git_probe_cache.component_is_behind_upstream(component))
-        .cloned()
-        .collect()
-}
-
 #[derive(Default)]
 pub(super) struct GitProbeCache {
     behind_upstream: HashMap<String, bool>,
@@ -814,7 +804,7 @@ pub(super) fn load_project_components_with_projection(
             Err(error) => return Err(error),
         };
 
-        // Bundled/retired components are no longer standalone deploy targets.
+        // Bundled/retired components are not standalone deploy targets.
         // Skip them before extension validation and artifact resolution so they
         // never appear as deploy obligations or `--outdated` drift. Their
         // version tracks the host component (when bundled) or is moot (retired).
@@ -1198,18 +1188,22 @@ mod tests {
     }
 
     #[test]
-    fn plan_component_deploys_marks_explicit_selection_ready() {
+    fn plan_component_deploys_classifies_requested_components() {
         let temp = TempDir::new().expect("temp dir");
         let selected = component("selected", temp.path());
         let config = DeployConfig {
-            component_ids: vec!["selected".to_string()],
+            component_ids: vec![
+                "selected".to_string(),
+                "missing".to_string(),
+                "docs".to_string(),
+            ],
             ..deploy_config()
         };
 
         let plan = plan_component_deploys(
             &config,
             std::slice::from_ref(&selected),
-            &[],
+            &["docs".to_string()],
             &project(),
             "/var/www/example",
             &ssh_client(),
@@ -1217,102 +1211,65 @@ mod tests {
 
         assert_eq!(plan.plan.kind, PlanKind::Deploy);
         assert_eq!(step(&plan, "selected").status, PlanStepStatus::Ready);
-        assert_eq!(plan.ready_components()[0].id, "selected");
-    }
+        let missing = step(&plan, "missing");
+        assert_eq!(missing.status, PlanStepStatus::Missing);
+        assert_eq!(missing.missing, vec!["missing"]);
+        let docs = step(&plan, "docs");
+        assert_eq!(docs.status, PlanStepStatus::Disabled);
+        assert_eq!(
+            docs.skip_reason.as_deref(),
+            Some("Non-deployable component (no artifact/deploy strategy)")
+        );
+        let ready: Vec<String> = plan
+            .ready_components()
+            .into_iter()
+            .map(|component| component.id.clone())
+            .collect();
+        assert_eq!(ready, vec!["selected"]);
 
-    #[test]
-    fn validate_deploy_plan_rejects_partial_deploy_together_selection() {
-        let temp = TempDir::new().expect("temp dir");
-        let plugin = coupled_component("studio-plugin", temp.path(), &["studio-theme"]);
-        let theme = component("studio-theme", temp.path());
-        let config = DeployConfig {
-            component_ids: vec!["studio-plugin".to_string()],
-            ..deploy_config()
-        };
-
-        let plan = plan_component_deploys(
-            &config,
-            &[plugin, theme],
+        let empty = plan_component_deploys(
+            &deploy_config(),
+            &[],
             &[],
             &project(),
             "/var/www/example",
             &ssh_client(),
         );
+        assert_eq!(empty.plan.steps[0].kind, "deploy_selection");
+        assert_eq!(empty.plan.steps[0].status, PlanStepStatus::Missing);
+        assert!(empty.ready_components().is_empty());
+    }
 
+    #[test]
+    fn validate_deploy_plan_requires_complete_deploy_together_selection() {
+        let temp = TempDir::new().expect("temp dir");
+        let plugin = coupled_component("studio-plugin", temp.path(), &["studio-theme"]);
+        let theme = component("studio-theme", temp.path());
+        let plan_for = |ids: &[&str]| {
+            let config = DeployConfig {
+                component_ids: ids.iter().map(|id| id.to_string()).collect(),
+                ..deploy_config()
+            };
+            let plan = plan_component_deploys(
+                &config,
+                &[plugin.clone(), theme.clone()],
+                &[],
+                &project(),
+                "/var/www/example",
+                &ssh_client(),
+            );
+            (config, plan)
+        };
+
+        let (config, plan) = plan_for(&["studio-plugin"]);
         let err = validate_deploy_plan(&config, &plan).expect_err("partial group should fail");
         assert!(err
             .message
             .contains("Deploy selection omits coupled components"));
         assert!(err.details.to_string().contains("studio-theme"));
-    }
 
-    #[test]
-    fn validate_deploy_plan_accepts_complete_deploy_together_selection() {
-        let temp = TempDir::new().expect("temp dir");
-        let plugin = coupled_component("studio-plugin", temp.path(), &["studio-theme"]);
-        let theme = component("studio-theme", temp.path());
-        let config = DeployConfig {
-            component_ids: vec!["studio-plugin".to_string(), "studio-theme".to_string()],
-            ..deploy_config()
-        };
-
-        let plan = plan_component_deploys(
-            &config,
-            &[plugin, theme],
-            &[],
-            &project(),
-            "/var/www/example",
-            &ssh_client(),
-        );
-
+        let (config, plan) = plan_for(&["studio-plugin", "studio-theme"]);
         validate_deploy_plan(&config, &plan).expect("complete group should pass");
-    }
-
-    #[test]
-    fn plan_component_deploys_marks_missing_requested_component() {
-        let config = DeployConfig {
-            component_ids: vec!["missing".to_string()],
-            ..deploy_config()
-        };
-
-        let plan = plan_component_deploys(
-            &config,
-            &[],
-            &[],
-            &project(),
-            "/var/www/example",
-            &ssh_client(),
-        );
-
-        let step = step(&plan, "missing");
-        assert_eq!(step.status, PlanStepStatus::Missing);
-        assert_eq!(step.missing, vec!["missing"]);
-        assert!(plan.ready_components().is_empty());
-    }
-
-    #[test]
-    fn plan_component_deploys_marks_non_deployable_requested_component_disabled() {
-        let config = DeployConfig {
-            component_ids: vec!["docs".to_string()],
-            ..deploy_config()
-        };
-
-        let plan = plan_component_deploys(
-            &config,
-            &[],
-            &["docs".to_string()],
-            &project(),
-            "/var/www/example",
-            &ssh_client(),
-        );
-
-        let step = step(&plan, "docs");
-        assert_eq!(step.status, PlanStepStatus::Disabled);
-        assert_eq!(
-            step.skip_reason.as_deref(),
-            Some("Non-deployable component (no artifact/deploy strategy)")
-        );
-        assert!(plan.ready_components().is_empty());
     }
 
     #[test]
@@ -1452,177 +1409,88 @@ mod tests {
         assert_eq!(plan.ready_components()[0].id, "stale");
     }
 
+    /// Deployed-version drift wins over checkout state; when versions match,
+    /// a checkout tracking a moved upstream is `BehindUpstream` and a detached
+    /// or untracked checkout is `SourceStale`.
     #[test]
-    fn plan_component_deploys_marks_empty_selection_missing() {
-        let plan = plan_component_deploys(
-            &deploy_config(),
-            &[],
-            &[],
-            &project(),
-            "/var/www/example",
-            &ssh_client(),
-        );
+    fn component_status_combines_version_drift_with_checkout_freshness() {
+        // (case, checkout args, upstream moves, local version, remote version, expected)
+        let cases: [(&str, &[&str], bool, &str, &str, ComponentStatus); 6] = [
+            (
+                "tracking behind",
+                &[],
+                true,
+                "1.0.0",
+                "1.0.0",
+                ComponentStatus::BehindUpstream,
+            ),
+            (
+                "detached behind",
+                &["checkout", "--detach", "HEAD"],
+                true,
+                "1.0.0",
+                "1.0.0",
+                ComponentStatus::SourceStale,
+            ),
+            (
+                "detached at default",
+                &["checkout", "--detach", "HEAD"],
+                false,
+                "1.0.0",
+                "1.0.0",
+                ComponentStatus::SourceStale,
+            ),
+            (
+                "untracked branch behind",
+                &["checkout", "-b", "configured-source"],
+                true,
+                "1.0.0",
+                "1.0.0",
+                ComponentStatus::SourceStale,
+            ),
+            (
+                "tracking behind, remote drift",
+                &[],
+                true,
+                "1.0.0",
+                "2.0.0",
+                ComponentStatus::BehindRemote,
+            ),
+            (
+                "detached behind, remote newer",
+                &["checkout", "--detach", "HEAD"],
+                true,
+                "0.12.2",
+                "0.12.15",
+                ComponentStatus::BehindRemote,
+            ),
+        ];
 
-        assert_eq!(plan.plan.steps[0].kind, "deploy_selection");
-        assert_eq!(plan.plan.steps[0].status, PlanStepStatus::Missing);
-        assert!(plan.ready_components().is_empty());
-    }
+        for (name, checkout_args, upstream_moves, local_version, remote_version, expected) in cases
+        {
+            let temp = TempDir::new().expect("temp dir");
+            let source = temp.path().join("source");
+            let local = temp.path().join("local");
+            std::fs::create_dir(&source).expect("source dir");
+            init_source_repo(&source);
+            clone_repo(&source, &local);
+            if !checkout_args.is_empty() {
+                run_git(&local, checkout_args);
+            }
+            if upstream_moves {
+                commit_upstream_change(&source);
+            }
 
-    #[test]
-    fn select_behind_upstream_components_finds_stale_checkout() {
-        let temp = TempDir::new().expect("temp dir");
-        let source = temp.path().join("source");
-        let local = temp.path().join("local");
-        std::fs::create_dir(&source).expect("source dir");
+            let stale = versioned_component("stale", &local, local_version);
+            let remote_versions =
+                HashMap::from([("stale".to_string(), remote_version.to_string())]);
 
-        init_source_repo(&source);
-        clone_repo(&source, &local);
-        commit_upstream_change(&source);
-
-        let stale = component("stale", &local);
-        let selected = select_behind_upstream_components(std::slice::from_ref(&stale));
-
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].id, "stale");
-    }
-
-    #[test]
-    fn component_status_reports_behind_upstream_when_deployed_version_matches() {
-        let temp = TempDir::new().expect("temp dir");
-        let source = temp.path().join("source");
-        let local = temp.path().join("local");
-        std::fs::create_dir(&source).expect("source dir");
-
-        init_source_repo(&source);
-        clone_repo(&source, &local);
-        commit_upstream_change(&source);
-
-        let stale = versioned_component("stale", &local, "1.0.0");
-        let remote_versions = HashMap::from([("stale".to_string(), "1.0.0".to_string())]);
-
-        assert!(matches!(
-            calculate_component_status(&stale, &remote_versions),
-            ComponentStatus::BehindUpstream
-        ));
-    }
-
-    #[test]
-    fn component_status_reports_source_stale_for_detached_checkout_behind_default() {
-        let temp = TempDir::new().expect("temp dir");
-        let source = temp.path().join("source");
-        let local = temp.path().join("local");
-        std::fs::create_dir(&source).expect("source dir");
-
-        init_source_repo(&source);
-        clone_repo(&source, &local);
-        run_git(&local, &["checkout", "--detach", "HEAD"]);
-        commit_upstream_change(&source);
-
-        let stale = versioned_component("stale", &local, "1.0.0");
-        let remote_versions = HashMap::from([("stale".to_string(), "1.0.0".to_string())]);
-
-        assert!(matches!(
-            calculate_component_status(&stale, &remote_versions),
-            ComponentStatus::SourceStale
-        ));
-    }
-
-    #[test]
-    fn component_status_reports_source_stale_for_detached_checkout_at_default() {
-        let temp = TempDir::new().expect("temp dir");
-        let source = temp.path().join("source");
-        let local = temp.path().join("local");
-        std::fs::create_dir(&source).expect("source dir");
-
-        init_source_repo(&source);
-        clone_repo(&source, &local);
-        run_git(&local, &["checkout", "--detach", "HEAD"]);
-
-        let stale = versioned_component("stale", &local, "1.0.0");
-        let remote_versions = HashMap::from([("stale".to_string(), "1.0.0".to_string())]);
-
-        assert!(matches!(
-            calculate_component_status(&stale, &remote_versions),
-            ComponentStatus::SourceStale
-        ));
-    }
-
-    #[test]
-    fn component_status_reports_source_stale_for_untracked_branch_behind_default() {
-        let temp = TempDir::new().expect("temp dir");
-        let source = temp.path().join("source");
-        let local = temp.path().join("local");
-        std::fs::create_dir(&source).expect("source dir");
-
-        init_source_repo(&source);
-        clone_repo(&source, &local);
-        run_git(&local, &["checkout", "-b", "configured-source"]);
-        commit_upstream_change(&source);
-
-        let stale = versioned_component("stale", &local, "1.0.0");
-        let remote_versions = HashMap::from([("stale".to_string(), "1.0.0".to_string())]);
-
-        assert!(matches!(
-            calculate_component_status(&stale, &remote_versions),
-            ComponentStatus::SourceStale
-        ));
-    }
-
-    #[test]
-    fn component_status_preserves_deployed_version_drift_when_checkout_is_behind_upstream() {
-        let temp = TempDir::new().expect("temp dir");
-        let source = temp.path().join("source");
-        let local = temp.path().join("local");
-        std::fs::create_dir(&source).expect("source dir");
-
-        init_source_repo(&source);
-        clone_repo(&source, &local);
-        commit_upstream_change(&source);
-
-        let stale = versioned_component("stale", &local, "1.0.0");
-        let remote_versions = HashMap::from([("stale".to_string(), "2.0.0".to_string())]);
-
-        assert!(matches!(
-            calculate_component_status(&stale, &remote_versions),
-            ComponentStatus::BehindRemote
-        ));
-    }
-
-    #[test]
-    fn component_status_reports_remote_newer_when_detached_checkout_is_stale() {
-        let temp = TempDir::new().expect("temp dir");
-        let source = temp.path().join("source");
-        let local = temp.path().join("local");
-        std::fs::create_dir(&source).expect("source dir");
-
-        init_source_repo(&source);
-        clone_repo(&source, &local);
-        run_git(&local, &["checkout", "--detach", "HEAD"]);
-        commit_upstream_change(&source);
-
-        let stale = versioned_component("stale", &local, "0.12.2");
-        let remote_versions = HashMap::from([("stale".to_string(), "0.12.15".to_string())]);
-
-        assert!(matches!(
-            calculate_component_status(&stale, &remote_versions),
-            ComponentStatus::BehindRemote
-        ));
-    }
-
-    #[test]
-    fn select_behind_upstream_components_skips_current_checkout() {
-        let temp = TempDir::new().expect("temp dir");
-        let source = temp.path().join("source");
-        let local = temp.path().join("local");
-        std::fs::create_dir(&source).expect("source dir");
-
-        init_source_repo(&source);
-        clone_repo(&source, &local);
-
-        let current = component("current", &local);
-        let selected = select_behind_upstream_components(&[current]);
-
-        assert!(selected.is_empty());
+            assert_eq!(
+                calculate_component_status(&stale, &remote_versions),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     /// Write a deployable component repo (homeboy.json + a deploy artifact) at

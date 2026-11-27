@@ -918,10 +918,23 @@ mod tests {
             "should not render bullets on a clean run:\n{}",
             md
         );
+        assert!(md.contains("> Deep dive: homeboy review lint my-comp"));
+        assert!(md.contains("> Deep dive: homeboy review test my-comp"));
+        assert!(
+            !md.contains("Slowest tests"),
+            "no durations, no slow-test section"
+        );
+        // The consumer (`homeboy git pr comment --header`) owns the wrapping
+        // `### Title` heading. Renderer must only emit the body.
+        assert!(
+            !md.starts_with("### "),
+            "renderer must not emit a section header:\n{}",
+            md
+        );
     }
 
     #[test]
-    fn renders_slowest_extension_phases_generically() {
+    fn renders_slowest_and_waiting_extension_phases_generically() {
         let mut env = passing_envelope();
         let lint = env.lint.output.as_mut().expect("lint output");
         lint.extension_phase_timings = vec![
@@ -942,21 +955,6 @@ mod tests {
                 metadata: std::collections::BTreeMap::new(),
             },
         ];
-
-        let md = render_pr_comment(&env);
-
-        assert!(md.contains("- _Slowest extension phases:_"), "{}", md);
-        assert!(
-            md.contains("  - `opaque-slow-phase` — 1200 ms; 1 artifact ref(s)"),
-            "{}",
-            md
-        );
-        assert!(md.contains("  - `provider-cache` — 25 ms"), "{}", md);
-    }
-
-    #[test]
-    fn renders_waiting_extension_phases_from_generic_status() {
-        let mut env = passing_envelope();
         let test = env.test.output.as_mut().expect("test output");
         test.extension_phase_timings = vec![
             ExtensionPhaseTiming {
@@ -982,20 +980,25 @@ mod tests {
 
         let md = render_pr_comment(&env);
 
+        assert!(md.contains("- _Slowest extension phases:_"), "{}", md);
+        assert!(
+            md.contains("  - `opaque-slow-phase` — 1200 ms; 1 artifact ref(s)"),
+            "{}",
+            md
+        );
+        assert!(md.contains("  - `provider-cache` — 25 ms"), "{}", md);
         assert!(md.contains("- _Waiting extension phases:_"), "{}", md);
         assert!(
             md.contains("  - `provider-shared-resource` — 90000 ms; status: `waiting`; waiting for exclusive provider resource"),
             "{}",
             md
         );
-        assert!(md.contains("- _Slowest extension phases:_"), "{}", md);
         assert!(
             md.contains("  - `provider-active-work` — 120000 ms; status: `running`"),
             "{}",
             md
         );
     }
-
     #[test]
     fn renders_failing_review_with_findings() {
         let mut env = passing_envelope();
@@ -1101,17 +1104,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_full_scope_banner() {
-        let env = passing_envelope();
-        let md = render_pr_comment(&env);
-        assert!(
-            md.contains(":information_source: Scope: **full**"),
-            "missing full-scope banner:\n{}",
-            md
-        );
-    }
-
-    #[test]
     fn renders_action_banners_before_scope_banner() {
         let env = passing_envelope();
         let banners = vec![
@@ -1132,21 +1124,14 @@ mod tests {
     }
 
     #[test]
-    fn renders_test_pass_count_when_no_failures() {
+    fn renders_test_counts_for_passing_and_failing_runs() {
         let mut env = passing_envelope();
         env.test.output = Some(test_with_counts(42, 0, 1));
         let md = render_pr_comment(&env);
-        assert!(
-            md.contains("- 42 passed"),
-            "missing passed count line:\n{}",
-            md
-        );
+        assert!(md.contains("- 42 passed"), "missing passed line:\n{}", md);
         assert!(md.contains("- 1 skipped"), "missing skipped line:\n{}", md);
-    }
+        assert!(!md.contains("failed** out of"), "{}", md);
 
-    #[test]
-    fn renders_test_failure_summary() {
-        let mut env = passing_envelope();
         env.test.passed = false;
         env.test.exit_code = 1;
         env.test.finding_count = 3;
@@ -1159,33 +1144,6 @@ mod tests {
         );
         assert!(md.contains("- 10 passed"), "missing passed line:\n{}", md);
     }
-
-    #[test]
-    fn renders_top_test_findings_when_present() {
-        let mut env = passing_envelope();
-        env.test.passed = false;
-        env.test.exit_code = 1;
-        env.test.finding_count = 3;
-        env.test.output = Some(test_with_findings(3));
-
-        let md = render_pr_comment(&env);
-        assert!(
-            md.contains("- **3 failed** out of 24 total"),
-            "missing aggregate line:\n{}",
-            md
-        );
-        assert!(
-            md.contains("- `tests::suite::case_00` — assertion 0 failed (`tests/suite.rs:10`)"),
-            "missing failed-test detail line:\n{}",
-            md
-        );
-        assert!(
-            md.contains("- `tests::suite::case_02` — assertion 2 failed (`tests/suite.rs:12`)"),
-            "missing final failed-test detail line:\n{}",
-            md
-        );
-    }
-
     #[test]
     fn caps_test_findings_at_top_10() {
         let mut env = passing_envelope();
@@ -1195,6 +1153,11 @@ mod tests {
         env.test.output = Some(test_with_findings(12));
 
         let md = render_pr_comment(&env);
+        assert!(
+            md.contains("- `tests::suite::case_00` — assertion 0 failed (`tests/suite.rs:10`)"),
+            "missing failed-test detail line:\n{}",
+            md
+        );
         let bullet_count = md.matches("- `tests::suite::case_").count();
         assert_eq!(
             bullet_count, TOP_N,
@@ -1244,28 +1207,10 @@ mod tests {
         );
     }
 
+    /// A slow suite is reported, but stays green with an unchanged finding
+    /// count: slowness is a separate field, not a failure.
     #[test]
-    fn renders_deep_dive_hints_for_ran_stages() {
-        let env = passing_envelope();
-        let md = render_pr_comment(&env);
-        assert!(md.contains("> Deep dive: homeboy review lint my-comp"));
-        assert!(md.contains("> Deep dive: homeboy review test my-comp"));
-    }
-
-    #[test]
-    fn never_emits_top_level_section_heading() {
-        let env = passing_envelope();
-        let md = render_pr_comment(&env);
-        // The consumer (`homeboy git pr comment --header`) owns the wrapping
-        // `### Title` heading. Renderer must only emit the body.
-        assert!(
-            !md.starts_with("### "),
-            "renderer must not emit a section header:\n{}",
-            md
-        );
-    }
-    #[test]
-    fn a_slow_test_is_reported_on_a_passing_stage() {
+    fn a_slow_test_is_reported_without_making_the_stage_look_failed() {
         let mut env = passing_envelope();
         env.test = stage_test_passing_but_slow();
         let md = render_pr_comment(&env);
@@ -1283,22 +1228,10 @@ mod tests {
             md.contains("Measured suite time: 561.8s of a 1500s budget"),
             "{md}"
         );
-    }
-
-    #[test]
-    fn a_slow_test_does_not_make_the_stage_look_failed() {
-        let mut env = passing_envelope();
-        env.test = stage_test_passing_but_slow();
-        let md = render_pr_comment(&env);
-
-        // The whole point of a separate field: an expensive suite still reads
-        // as green, and the finding count a reviewer sees is unchanged.
         assert!(md.contains(":white_check_mark: **test**"), "{md}");
-        assert!(!md.contains(":x: **test**"), "{md}");
         assert!(md.contains("**0** finding(s)"), "{md}");
         assert!(!md.contains("more failed test(s)"), "{md}");
     }
-
     #[test]
     fn incomplete_timings_are_labelled_and_unknown_durations_are_not_printed_as_zero() {
         let mut durations = durations_with_a_slow_test();
@@ -1334,14 +1267,5 @@ mod tests {
             !md.contains("`tests/killed.rs` — 0.0s"),
             "an unmeasured unit must never be rendered as instantaneous: {md}"
         );
-    }
-
-    #[test]
-    fn a_stage_without_durations_renders_exactly_as_before() {
-        let mut env = passing_envelope();
-        env.test = stage_test_passing(450);
-        let baseline = render_pr_comment(&env);
-        assert!(!baseline.contains("Slowest tests"), "{baseline}");
-        assert!(!baseline.contains("SLOW"), "{baseline}");
     }
 }

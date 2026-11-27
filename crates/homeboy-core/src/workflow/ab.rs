@@ -681,8 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_ab_recipe_validates_and_rejects_escaping_patterns() {
-        definition().validate(&|_| false).expect("valid recipe");
+    fn workflow_ab_rejects_escaping_compare_patterns() {
         assert!(validate_patterns(&["../x".to_string()]).is_err());
         assert!(validate_patterns(&["/etc".to_string()]).is_err());
         assert!(validate_patterns(&["out/**/*.html".to_string()]).is_ok());

@@ -191,26 +191,10 @@ fn compares_repeats_matrix_variants_and_browser_deltas() {
     assert!(report.markdown.contains("DOM Lifecycle Metrics"));
     assert!(report.markdown.contains("browser-evidence.json"));
     assert!(!report.markdown.contains(root.to_string_lossy().as_ref()));
-}
-
-#[test]
-fn can_include_local_paths_when_requested() {
-    let guard = tmp_dir("local-paths");
-    let root = guard.path();
-    write_fixture_file(
-        &root.join("baseline"),
-        "evidence.json",
-        r#"{"scenario_id":"home","assertions":[],"request_count":1}"#,
-    );
-    write_fixture_file(
-        &root.join("candidate"),
-        "evidence.json",
-        r#"{"scenario_id":"home","assertions":[],"request_count":2}"#,
-    );
-
-    let report = compare(root, true);
-
-    assert!(report.markdown.contains(root.to_string_lossy().as_ref()));
+    // Local paths appear only when explicitly requested.
+    assert!(compare(root, true)
+        .markdown
+        .contains(root.to_string_lossy().as_ref()));
 }
 
 #[test]

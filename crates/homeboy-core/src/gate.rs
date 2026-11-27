@@ -337,11 +337,6 @@ mod tests {
         assert_eq!(pending.outcome(), ExternalCheckOutcome::Failed);
         pending.hydrated = false;
         assert!(pending.validate().is_err());
-    }
-
-    #[test]
-    fn external_publication_rejects_unknown_status() {
-        let invalid = publication("bogus", None);
-        assert!(invalid.validate().is_err());
+        assert!(publication("bogus", None).validate().is_err());
     }
 }

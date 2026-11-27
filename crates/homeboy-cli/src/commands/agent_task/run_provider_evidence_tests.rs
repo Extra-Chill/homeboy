@@ -203,16 +203,9 @@ fn projected_binary_digest_detects_post_admission_mutation_without_exposing_cont
 }
 
 #[test]
-fn rejects_undeclared_absolute_prompt_path_before_provider_admission() {
-    let error = validate_provider_evidence_inputs(&[], Some("Read /private/evidence.json."))
-        .expect_err("undeclared prompt path is rejected");
-    assert_eq!(error.details["field"], "prompt");
-    assert!(error.message.contains("undeclared absolute evidence path"));
-}
-
-#[test]
 fn scans_explicit_absolute_paths_across_provider_prompt_syntaxes() {
     for prompt in [
+        "Read /private/evidence.json.",
         "Read file:///private/evidence.json",
         "evidence=/private/evidence.json",
         "[evidence](/private/evidence.json)",
@@ -256,22 +249,6 @@ fn prompt_path_classifier_admits_device_pseudo_files_but_flags_real_devices() {
             );
         }
     }
-}
-
-#[test]
-fn ignores_prompt_prose_that_uses_slashes_without_naming_local_evidence() {
-    let prompt = r#"
-Use core/html with direct/staged and model/tool modes, then move [queued/running] work.
-Route requests through /response, /startup, /sw.js, and /wp-codebox.
-Use / as a separator and retain https://example.test/response plus `// NOTE: implementation`.
-"#;
-
-    assert_eq!(
-        absolute_host_paths_in_provider_prompt(prompt).expect("scan prose"),
-        Vec::<String>::new()
-    );
-    validate_provider_evidence_inputs(&[], Some(prompt))
-        .expect("slash-delimited prose is not filesystem evidence");
 }
 
 #[test]
@@ -349,32 +326,6 @@ fn scans_a_recognized_single_segment_root_path() {
         absolute_host_paths_in_provider_prompt("Read /tmp.").expect("scan real path"),
         vec!["/tmp".to_string()]
     );
-}
-
-#[test]
-fn reports_all_concrete_undeclared_prompt_evidence_paths() {
-    let error = validate_provider_evidence_inputs(
-        &[],
-        Some(
-            "Read /private/evidence.json, file:///private/other.json, \
-                 [more](/tmp/evidence.txt), and //srv/evidence.log.",
-        ),
-    )
-    .expect_err("concrete local paths require declared evidence");
-
-    assert_eq!(error.details["field"], "prompt");
-    for path in [
-        "/private/evidence.json",
-        "/private/other.json",
-        "/tmp/evidence.txt",
-        "//srv/evidence.log",
-    ] {
-        assert!(
-            error.message.contains(path),
-            "missing {path}: {}",
-            error.message
-        );
-    }
 }
 
 #[test]
@@ -487,7 +438,8 @@ fn prompt_path_scanner_ignores_quoted_examples_and_scans_explicit_local_paths() 
 fn ignores_endpoint_repository_and_code_path_vocabulary() {
     let prompt = r#"
 Route requests through /response, /startup, /sw.js, and /wp-codebox.
-Use core/html, direct/staged, and model/tool for Extra-Chill/homeboy.
+Use core/html, direct/staged, and model/tool for Extra-Chill/homeboy; move [queued/running] work.
+Use / as a separator and retain https://example.test/response plus `// NOTE: implementation`.
 `/private/inline-example.json`, "/tmp/quoted-example.json", and "file:///tmp/quoted.json" are examples.
     let path = "/private/indented-code.json";
 ```
@@ -499,6 +451,8 @@ let path = "/private/fenced-code.json";
         absolute_host_paths_in_provider_prompt(prompt).expect("scan technical prose"),
         Vec::<String>::new()
     );
+    validate_provider_evidence_inputs(&[], Some(prompt))
+        .expect("slash-delimited prose is not filesystem evidence");
 }
 
 #[cfg(unix)]

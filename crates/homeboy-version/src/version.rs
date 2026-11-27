@@ -17,8 +17,6 @@ pub use default_pattern_for_file::{build_init_warnings, resolve_version_file_pat
 pub use default_pattern_for_file::{
     default_pattern_for_file, parse_versions, resolve_target_pattern,
 };
-#[cfg(test)]
-use types::DEFAULT_SINCE_PLACEHOLDER;
 pub use types::{
     BumpResult, ChangelogValidationResult, ComponentVersionInfo, ComponentVersionSnapshot,
     UnconfiguredPattern, VersionTargetInfo,
@@ -146,9 +144,8 @@ pub fn validate_component_versions(components: &[Component]) -> Result<()> {
 
 /// The single version target a component's version is read from.
 ///
-/// `local_version_source` / `artifact_version_source` used to live here and
-/// returned `homeboy-deploy` types, which is one of the edges that made release
-/// and deploy circular. They now live in `homeboy-deploy` and call this.
+/// `homeboy-deploy`'s `local_version_source` / `artifact_version_source`
+/// resolve through this.
 pub fn canonical_version_target(component: &Component) -> Option<&VersionTarget> {
     component
         .version_targets
@@ -422,7 +419,7 @@ pub fn validate_and_finalize_changelog(
             new_version,
         )?
     } else {
-        // Legacy path: finalize an existing ## Unreleased section.
+        // Manual path: finalize an existing ## Unreleased section.
         changelog::finalize_next_section(
             &changelog_content,
             &settings.next_section_aliases,
@@ -640,7 +637,6 @@ pub fn reconcile_component_version_targets(
 mod tests {
     use super::*;
     use homeboy_core::component::Component;
-    use regex::Regex;
     use std::fs;
 
     fn make_test_component(temp_dir: &tempfile::TempDir) -> Component {
@@ -654,42 +650,53 @@ mod tests {
     }
 
     #[test]
-    fn deploy_version_policy_accepts_root_and_nested_artifact_targets_in_any_order() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp_dir.path().join("plugins/example")).unwrap();
-        fs::write(
-            temp_dir.path().join("package.json"),
-            r#"{"version":"1.2.3"}"#,
-        )
-        .unwrap();
-        fs::write(
-            temp_dir.path().join("plugins/example/example.php"),
-            "<?php\n/* Version: 1.2.3 */\n",
-        )
-        .unwrap();
-        let mut component = make_test_component(&temp_dir);
-        component.version_targets = Some(vec![
-            VersionTarget {
-                file: "plugins/example/example.php".to_string(),
-                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
-                artifact_path: Some("example/example.php".to_string()),
-            },
-            VersionTarget {
-                file: "package.json".to_string(),
-                pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
-                artifact_path: Some("package.json".to_string()),
-            },
-        ]);
+    fn deploy_version_policy_requires_root_and_nested_targets_to_agree() {
+        for nested_version in ["1.2.3", "1.2.4"] {
+            let temp_dir = tempfile::tempdir().unwrap();
+            fs::create_dir_all(temp_dir.path().join("plugins/example")).unwrap();
+            fs::write(
+                temp_dir.path().join("package.json"),
+                r#"{"version":"1.2.3"}"#,
+            )
+            .unwrap();
+            fs::write(
+                temp_dir.path().join("plugins/example/example.php"),
+                format!("<?php\n/* Version: {nested_version} */\n"),
+            )
+            .unwrap();
+            let mut component = make_test_component(&temp_dir);
+            // The nested target is declared first: canonical selection must not
+            // depend on declaration order.
+            component.version_targets = Some(vec![
+                VersionTarget {
+                    file: "plugins/example/example.php".to_string(),
+                    pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                    artifact_path: Some("example/example.php".to_string()),
+                },
+                VersionTarget {
+                    file: "package.json".to_string(),
+                    pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                    artifact_path: Some("package.json".to_string()),
+                },
+            ]);
 
-        validate_component_versions(&[component.clone()]).expect("matching targets");
-        assert_eq!(get_component_version(&component).as_deref(), Some("1.2.3"));
-        // The VersionSource-shaped assertions this test used to make now live
-        // in homeboy-deploy, next to `local_version_source` /
-        // `artifact_version_source`. What this crate owns is the canonical
-        // target those two resolve through.
-        let canonical = canonical_version_target(&component).expect("canonical target");
-        assert_eq!(canonical.file, "package.json");
-        assert_eq!(canonical.artifact_path.as_deref(), Some("package.json"));
+            if nested_version != "1.2.3" {
+                let error =
+                    validate_component_versions(&[component]).expect_err("conflicting targets");
+                assert!(error
+                    .message
+                    .contains("conflicting declared version targets"));
+                continue;
+            }
+
+            validate_component_versions(&[component.clone()]).expect("matching targets");
+            assert_eq!(get_component_version(&component).as_deref(), Some("1.2.3"));
+            // VersionSource assertions live in homeboy-deploy; this crate owns
+            // the canonical target they resolve through.
+            let canonical = canonical_version_target(&component).expect("canonical target");
+            assert_eq!(canonical.file, "package.json");
+            assert_eq!(canonical.artifact_path.as_deref(), Some("package.json"));
+        }
     }
 
     #[test]
@@ -736,210 +743,41 @@ mod tests {
         );
     }
 
+    /// Named bumps drop prerelease and build metadata (semver §10) so the
+    /// result always advances (#10321); explicit targets are validated through
+    /// semver; malformed current versions are never coerced (the old
+    /// `version_parts` sibling degraded `1.x.3` to `1.0.3`).
     #[test]
-    fn deploy_version_policy_rejects_conflicting_root_and_nested_targets() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(temp_dir.path().join("plugins/example")).unwrap();
-        fs::write(
-            temp_dir.path().join("package.json"),
-            r#"{"version":"1.2.3"}"#,
-        )
-        .unwrap();
-        fs::write(
-            temp_dir.path().join("plugins/example/example.php"),
-            "<?php\n/* Version: 1.2.4 */\n",
-        )
-        .unwrap();
-        let mut component = make_test_component(&temp_dir);
-        component.version_targets = Some(vec![
-            VersionTarget {
-                file: "package.json".to_string(),
-                pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
-                artifact_path: None,
-            },
-            VersionTarget {
-                file: "plugins/example/example.php".to_string(),
-                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
-                artifact_path: None,
-            },
-        ]);
+    fn increment_version_applies_named_bumps_and_validates_explicit_targets() {
+        let cases = [
+            ("1.2.3", "patch", Some("1.2.4")),
+            ("1.2.3", "minor", Some("1.3.0")),
+            ("1.2.3", "major", Some("2.0.0")),
+            ("1.2.3-beta.1", "patch", Some("1.2.4")),
+            ("1.2.3-beta.1", "minor", Some("1.3.0")),
+            ("1.2.3-beta.1", "major", Some("2.0.0")),
+            ("1.2.3+build.5", "patch", Some("1.2.4")),
+            ("1.2.3-rc.1+build.5", "minor", Some("1.3.0")),
+            ("1.25.5", "2.0.0", Some("2.0.0")),
+            ("1.2.3-beta.1", "1.2.3", Some("1.2.3")),
+            ("1.2.3", "2.0.0-rc.1", Some("2.0.0-rc.1")),
+            ("1.2.3", "2.0.0+build.5", Some("2.0.0+build.5")),
+            ("1.0.0", "2.0", None),
+            ("1.0.0", "abc.def.ghi", None),
+            ("1.0.0", "huge", None),
+            ("1.x.3", "patch", None),
+            ("1.2", "patch", None),
+            ("1.2.3.4", "patch", None),
+            ("v1.2.3", "patch", None),
+            ("", "patch", None),
+            ("not-a-version", "patch", None),
+        ];
 
-        let error = validate_component_versions(&[component]).expect_err("conflicting targets");
-        assert!(error
-            .message
-            .contains("conflicting declared version targets"));
-    }
-
-    #[test]
-    fn since_tag_regex_matches_placeholders() {
-        let pattern_str = format!(r"@since\s+({})", DEFAULT_SINCE_PLACEHOLDER);
-        let regex = Regex::new(&pattern_str).unwrap();
-
-        // Should match placeholders
-        assert!(regex.is_match("@since 0.0.0"));
-        assert!(regex.is_match("@since NEXT"));
-        assert!(regex.is_match("@since TBD"));
-        assert!(regex.is_match("@since TODO"));
-        assert!(regex.is_match("@since UNRELEASED"));
-        assert!(regex.is_match("@since x.x.x"));
-        assert!(regex.is_match(" * @since TBD"));
-        assert!(regex.is_match(" * @since  NEXT")); // extra space
-
-        // Should NOT match real versions
-        assert!(!regex.is_match("@since 1.2.3"));
-        assert!(!regex.is_match("@since 0.1.0"));
-    }
-
-    #[test]
-    fn since_tag_replacement_preserves_context() {
-        let pattern_str = format!(r"@since\s+({})", DEFAULT_SINCE_PLACEHOLDER);
-        let regex = Regex::new(&pattern_str).unwrap();
-
-        let input = " * @since TBD\n * @since 1.0.0\n * @since NEXT\n";
-        let result = regex.replace_all(input, |caps: &regex::Captures| {
-            let full = caps.get(0).unwrap().as_str();
-            let placeholder = caps.get(1).unwrap().as_str();
-            full.replacen(placeholder, "2.0.0", 1)
-        });
-
-        assert_eq!(
-            result,
-            " * @since 2.0.0\n * @since 1.0.0\n * @since 2.0.0\n"
-        );
-    }
-
-    #[test]
-    fn increment_version_patch() {
-        assert_eq!(
-            increment_version("1.2.3", "patch"),
-            Some("1.2.4".to_string())
-        );
-    }
-
-    #[test]
-    fn increment_version_minor() {
-        assert_eq!(
-            increment_version("1.2.3", "minor"),
-            Some("1.3.0".to_string())
-        );
-    }
-
-    #[test]
-    fn increment_version_major() {
-        assert_eq!(
-            increment_version("1.2.3", "major"),
-            Some("2.0.0".to_string())
-        );
-    }
-
-    #[test]
-    fn increment_version_explicit_version() {
-        assert_eq!(
-            increment_version("1.25.5", "2.0.0"),
-            Some("2.0.0".to_string())
-        );
-        assert_eq!(
-            increment_version("0.5.0", "1.0.0"),
-            Some("1.0.0".to_string())
-        );
-    }
-
-    #[test]
-    fn increment_version_explicit_invalid() {
-        assert_eq!(increment_version("1.0.0", "2.0"), None);
-        assert_eq!(increment_version("1.0.0", "abc.def.ghi"), None);
-    }
-
-    #[test]
-    fn increment_version_unknown_bump_type() {
-        assert_eq!(increment_version("1.0.0", "huge"), None);
-    }
-
-    // ========================================================================
-    // Prerelease / build metadata handling (see #10321)
-    // ========================================================================
-
-    /// `--bump patch` on a prerelease used to return `None` because the
-    /// hand-rolled parser split on `.` and demanded exactly three numeric
-    /// parts, so `1.2.3-beta.1` yielded `["1", "2", "3-beta", "1"]`.
-    #[test]
-    fn increment_version_bumps_prerelease_by_dropping_it() {
-        assert_eq!(
-            increment_version("1.2.3-beta.1", "patch"),
-            Some("1.2.4".to_string())
-        );
-        assert_eq!(
-            increment_version("1.2.3-beta.1", "minor"),
-            Some("1.3.0".to_string())
-        );
-        assert_eq!(
-            increment_version("1.2.3-beta.1", "major"),
-            Some("2.0.0".to_string())
-        );
-    }
-
-    /// Every named bump must land strictly above the prerelease it came from,
-    /// so the release floor checks can never plan a non-advancing release.
-    #[test]
-    fn increment_version_prerelease_result_is_strictly_greater() {
-        let current = semver::Version::parse("1.2.3-beta.1").unwrap();
-        for bump in ["patch", "minor", "major"] {
-            let next = increment_version("1.2.3-beta.1", bump).expect(bump);
-            let next = semver::Version::parse(&next).expect("bumped version is valid semver");
-            assert!(
-                next > current,
-                "{} bump produced {} which does not advance past {}",
-                bump,
-                next,
-                current
-            );
-        }
-    }
-
-    /// Build metadata is excluded from precedence by semver §10, so it is not
-    /// carried onto the next release.
-    #[test]
-    fn increment_version_drops_build_metadata() {
-        assert_eq!(
-            increment_version("1.2.3+build.5", "patch"),
-            Some("1.2.4".to_string())
-        );
-        assert_eq!(
-            increment_version("1.2.3-rc.1+build.5", "minor"),
-            Some("1.3.0".to_string())
-        );
-    }
-
-    /// An explicit target version is validated through semver, which means a
-    /// prerelease or build-metadata target is now accepted. This is the
-    /// supported way to "release" a prerelease as its final version.
-    #[test]
-    fn increment_version_explicit_prerelease_target() {
-        assert_eq!(
-            increment_version("1.2.3-beta.1", "1.2.3"),
-            Some("1.2.3".to_string())
-        );
-        assert_eq!(
-            increment_version("1.2.3", "2.0.0-rc.1"),
-            Some("2.0.0-rc.1".to_string())
-        );
-        assert_eq!(
-            increment_version("1.2.3", "2.0.0+build.5"),
-            Some("2.0.0+build.5".to_string())
-        );
-    }
-
-    /// A malformed current version must be an explicit `None`, never silently
-    /// coerced (the old `version_parts` sibling used `.unwrap_or(0)`, so
-    /// `1.x.3` degraded to `1.0.3`).
-    #[test]
-    fn increment_version_rejects_malformed_current_version() {
-        for version in ["1.x.3", "1.2", "1.2.3.4", "v1.2.3", "", "not-a-version"] {
+        for (current, bump, expected) in cases {
             assert_eq!(
-                increment_version(version, "patch"),
-                None,
-                "'{}' must not be coerced into a bumpable version",
-                version
+                increment_version(current, bump).as_deref(),
+                expected,
+                "increment_version({current:?}, {bump:?})"
             );
         }
     }
@@ -1033,6 +871,7 @@ mod tests {
             bump_component_version_with_changelog(&component, "patch", Some(&entries), None)
                 .expect("post-version hook should run after version write");
 
+        assert_eq!(result.old_version, "0.1.0");
         assert_eq!(result.new_version, "0.1.1");
         let generated = fs::read_to_string(temp_dir.path().join("generated.lock")).unwrap();
         assert!(generated.contains("0.1.1"));

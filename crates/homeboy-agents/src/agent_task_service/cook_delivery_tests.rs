@@ -238,17 +238,6 @@ fn a_non_executed_lab_gate_blocker_names_its_typed_cause() {
     assert_eq!(delivery.gates[0].state, AgentTaskGateStatus::Unavailable);
 }
 
-/// The pre-#16049 spelling stopped parsing when its serde alias was retired
-/// (#16390); a delivery carrying it is not a delivery this binary understands.
-#[test]
-fn the_retired_no_op_gate_failed_spelling_is_no_longer_a_delivery() {
-    let delivery = CookDelivery::from_run_metadata(&delivery_metadata(
-        json!({ "promotion": promotion("no_op_gate_failed", failed_gate()) }),
-    ));
-
-    assert!(delivery.is_none());
-}
-
 #[test]
 fn publication_refusals_keep_the_writer_code_and_message() {
     let delivery = CookDelivery::from_run_metadata(&delivery_metadata(json!({
@@ -312,11 +301,6 @@ fn delivery_metadata(artifacts: Value) -> Value {
 fn runs_without_a_delivery_record_have_no_delivery() {
     for metadata in [
         json!({}),
-        // The retired per-stage keys are not delivery evidence.
-        json!({
-            "latest_promotion": promotion("applied", passed_gate()),
-            "cook_finalization": published("review_ready"),
-        }),
         // A record of another schema version is not one this binary reads.
         json!({ "cook_delivery": { "schema": "homeboy/cook-delivery/v1", "state": "published" } }),
         // Neither is a record without delivery evidence.

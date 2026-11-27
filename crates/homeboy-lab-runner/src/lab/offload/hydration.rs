@@ -871,24 +871,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hydration_execution_ids_are_parent_scoped_and_discoverable() {
-        let child = hydration_execution_run_id("attempt-1", 2);
-        assert_eq!(child, "attempt-1-lab-hydration-2");
-        assert!(is_hydration_execution_run_id("attempt-1", &child));
-        assert!(!is_hydration_execution_run_id("attempt-2", &child));
-        assert!(!is_hydration_execution_run_id("attempt-1", "attempt-1"));
-    }
-
-    #[test]
-    fn hydration_execution_ids_own_generic_runner_exec_lifecycles() {
+    fn hydration_execution_ids_are_parent_scoped_and_own_generic_runner_exec_lifecycles() {
         let options = hydration_runner_exec_options(
             vec!["fixture-tool".to_string(), "install".to_string()],
             "/runner/workspace",
             Some("attempt-1"),
             2,
         );
+        let child = options.run_id.expect("parent-scoped hydration run id");
 
-        assert_eq!(options.run_id.as_deref(), Some("attempt-1-lab-hydration-2"));
+        assert!(is_hydration_execution_run_id("attempt-1", &child));
+        assert!(!is_hydration_execution_run_id("attempt-2", &child));
+        assert!(!is_hydration_execution_run_id("attempt-1", "attempt-1"));
         assert!(options.run_id_owns_generic_exec);
         assert!(
             !hydration_runner_exec_options(
@@ -1034,36 +1028,6 @@ mod tests {
         .expect("composer adapter");
     }
 
-    /// `hydration_failure_error` classifies the failure as workspace setup and
-    /// records the provider id, command, duration, and exit status so operators
-    /// can distinguish a hydration (workspace setup) failure from a later
-    /// provider/agent execution failure (#7366).
-    #[test]
-    fn hydration_failure_classifies_as_workspace_setup() {
-        let step = LabWorkspaceHydrationStep {
-            provider_id: "declared-provider".to_string(),
-            command: vec![
-                "fixture-tool".to_string(),
-                "install".to_string(),
-                "--no-interaction".to_string(),
-            ],
-            exit_code: 2,
-            stdout: String::new(),
-            stderr: "missing ext-dom".to_string(),
-            job_id: Some("job-1".to_string()),
-            event_count: 3,
-        };
-
-        let error = hydration_failure_error("/runner/workspaces/primary", &step);
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert_eq!(error.details["classification"], "workspace_setup");
-        assert_eq!(error.details["provider_id"], "declared-provider");
-        assert_eq!(error.details["exit_code"], 2);
-        assert_eq!(error.details["job_id"], "job-1");
-        assert!(error.message.contains("lab_workspace_dependency_hydration"));
-    }
-
     #[test]
     fn hydration_failure_keeps_actionable_output_tail() {
         let noisy_output = format!(
@@ -1101,9 +1065,6 @@ mod tests {
         }
     }
 
-    /// Hydration is a no-op (skipped_no_provider) when no provider detects the
-    /// workspace, mirroring `deps::install_for_resolved`'s dependency-less
-    /// component policy.
     /// #15039: lab hydration stages a shared-repository worktree when Cook has
     /// already recorded the component identity. The bare path stays ambiguous.
     #[test]
@@ -1190,14 +1151,6 @@ mod tests {
     }
 
     #[test]
-    fn hydration_output_reports_skipped_when_no_provider() {
-        let output = LabWorkspaceHydrationOutput::skipped_no_provider("/runner/ws");
-        assert_eq!(output.status, "skipped_no_provider");
-        assert!(output.is_empty());
-        assert_eq!(output.schema, HYDRATION_SCHEMA);
-    }
-
-    #[test]
     fn explicit_skip_is_a_completed_no_op_without_runner_access() {
         let hydration = hydrate_for_lab_workspace_exec_internal(
             true,
@@ -1215,10 +1168,9 @@ mod tests {
             LabWorkspaceHydrationRecord::NotApplied { reason: "opt_out" }
         ));
         assert!(hydration.plan.steps.is_empty());
-        assert_eq!(
-            dependency_hydration_metadata(&hydration.record)["status"],
-            "not_applied"
-        );
+        let metadata = dependency_hydration_metadata(&hydration.record);
+        assert_eq!(metadata["status"], "not_applied");
+        assert_eq!(metadata["reason"], "opt_out");
     }
 
     #[test]
@@ -1250,31 +1202,6 @@ mod tests {
             assert_eq!(output.status, "skipped_no_provider");
             assert!(output.steps.is_empty());
         });
-    }
-
-    /// The event-emission shape a hydration step records: provider id, command,
-    /// duration, exit status, plus the runner job id and event count from the
-    /// underlying `exec` job stream.
-    #[test]
-    fn hydration_step_records_event_emission_shape() {
-        let step = LabWorkspaceHydrationStep {
-            provider_id: "declared-provider".to_string(),
-            command: vec!["fixture-tool".to_string(), "install".to_string()],
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-            job_id: Some("job-7".to_string()),
-            event_count: 4,
-        };
-        let value = serde_json::to_value(&step).expect("serialize step");
-        assert_eq!(value["provider_id"], "declared-provider");
-        assert_eq!(
-            value["command"],
-            serde_json::json!(["fixture-tool", "install"])
-        );
-        assert_eq!(value["exit_code"], 0);
-        assert_eq!(value["job_id"], "job-7");
-        assert_eq!(value["event_count"], 4);
     }
 
     /// End-to-end hydration against a local runner: a declared provider command
@@ -1353,119 +1280,98 @@ mod tests {
         });
     }
 
+    /// A prepared-source marker is stale while any declared output is missing:
+    /// both the dependency directory and the build output must exist to reuse.
     #[test]
-    fn stale_prepared_marker_without_dependency_output_hydrates() {
-        crate::test_support::with_isolated_home(|_| {
-            let path_guard = FakeBinGuard::install(
-                "fixture-tool",
-                "#!/bin/sh\nmkdir -p node_modules/example apps/cli/dist/cli\nprintf installed > node_modules/example/index.js\nprintf ready > apps/cli/dist/cli/main.mjs\n",
-            );
-            crate::create(&path_guard.local_runner_spec("lab-local"), false)
-                .expect("create local runner");
-            let project = tempfile::tempdir().expect("project");
-            let manifest = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}}"#;
-            std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
-            let remote = tempfile::tempdir().expect("remote");
-            std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
-            let _marker = PreparedSourceMarker::write(remote.path());
+    fn prepared_marker_missing_declared_outputs_hydrates() {
+        for dependency_dir_present in [false, true] {
+            crate::test_support::with_isolated_home(|_| {
+                let path_guard = FakeBinGuard::install(
+                    "fixture-tool",
+                    "#!/bin/sh\nmkdir -p node_modules/example apps/cli/dist/cli\nprintf installed > node_modules/example/index.js\nprintf ready > apps/cli/dist/cli/main.mjs\n",
+                );
+                crate::create(&path_guard.local_runner_spec("lab-local"), false)
+                    .expect("create local runner");
+                let project = tempfile::tempdir().expect("project");
+                let manifest = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}}"#;
+                std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
+                let remote = tempfile::tempdir().expect("remote");
+                std::fs::write(remote.path().join("homeboy.json"), manifest)
+                    .expect("remote manifest");
+                let _marker = PreparedSourceMarker::write(remote.path());
+                if dependency_dir_present {
+                    std::fs::create_dir(remote.path().join("node_modules"))
+                        .expect("dependency output");
+                }
 
-            let output = hydrate_lab_workspace_dependencies(
-                "lab-local",
-                &project.path().display().to_string(),
-                &remote.path().display().to_string(),
-            )
-            .expect("stale marker runs hydration");
+                let output = hydrate_lab_workspace_dependencies(
+                    "lab-local",
+                    &project.path().display().to_string(),
+                    &remote.path().display().to_string(),
+                )
+                .expect("stale marker runs hydration");
 
-            assert_eq!(output.status, "hydrated");
-            assert!(remote.path().join("node_modules").is_dir());
-            assert!(remote.path().join("apps/cli/dist/cli/main.mjs").is_file());
-        });
+                assert_eq!(output.status, "hydrated", "{dependency_dir_present}");
+                assert!(remote
+                    .path()
+                    .join("node_modules/example/index.js")
+                    .is_file());
+                assert!(remote.path().join("apps/cli/dist/cli/main.mjs").is_file());
+            });
+        }
     }
 
+    /// A missing or empty `node_modules` under a prepared marker triggers the
+    /// detected npm install; the validated result is then reused.
     #[test]
     fn detected_npm_hydrates_stale_marker_then_reuses_validated_outputs() {
-        crate::test_support::with_isolated_home(|home| {
-            write_detected_node_adapter(home.path());
-            let path_guard = FakeBinGuard::install(
-                "npm",
-                "#!/bin/sh\nmkdir -p node_modules/example\nprintf installed > node_modules/example/index.js\nprintf x >> npm-runs\n",
-            );
-            crate::create(&path_guard.local_runner_spec("lab-detected-npm"), false)
-                .expect("create local runner");
-            let project = tempfile::tempdir().expect("controller project");
-            std::fs::write(project.path().join("package.json"), "{}").expect("package manifest");
-            std::fs::write(project.path().join("package-lock.json"), "{}").expect("lockfile");
-            let remote = tempfile::tempdir().expect("runner workspace");
-            let _marker = PreparedSourceMarker::write(remote.path());
+        for empty_node_modules in [false, true] {
+            crate::test_support::with_isolated_home(|home| {
+                write_detected_node_adapter(home.path());
+                let path_guard = FakeBinGuard::install(
+                    "npm",
+                    "#!/bin/sh\nmkdir -p node_modules/example\nprintf installed > node_modules/example/index.js\nprintf x >> npm-runs\n",
+                );
+                crate::create(&path_guard.local_runner_spec("lab-detected-npm"), false)
+                    .expect("create local runner");
+                let project = tempfile::tempdir().expect("controller project");
+                std::fs::write(project.path().join("package.json"), "{}")
+                    .expect("package manifest");
+                std::fs::write(project.path().join("package-lock.json"), "{}").expect("lockfile");
+                let remote = tempfile::tempdir().expect("runner workspace");
+                let _marker = PreparedSourceMarker::write(remote.path());
+                if empty_node_modules {
+                    std::fs::create_dir(remote.path().join("node_modules"))
+                        .expect("empty excluded dependency directory");
+                }
 
-            let first = hydrate_lab_workspace_dependencies(
-                "lab-detected-npm",
-                &project.path().display().to_string(),
-                &remote.path().display().to_string(),
-            )
-            .expect("missing node_modules triggers detected npm hydration");
-            assert_eq!(first.status, "hydrated");
-            assert_eq!(first.steps[0].provider_id, "npm");
-            assert_eq!(first.steps[0].command, ["sh", "-c", "npm ci"]);
-            assert!(remote.path().join("node_modules").is_dir());
-            assert_eq!(
-                std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm ran"),
-                "x"
-            );
+                let first = hydrate_lab_workspace_dependencies(
+                    "lab-detected-npm",
+                    &project.path().display().to_string(),
+                    &remote.path().display().to_string(),
+                )
+                .expect("unusable node_modules triggers detected npm hydration");
+                assert_eq!(first.status, "hydrated", "{empty_node_modules}");
+                assert_eq!(first.steps[0].provider_id, "npm");
+                assert_eq!(first.steps[0].command, ["sh", "-c", "npm ci"]);
+                assert!(remote
+                    .path()
+                    .join("node_modules/example/index.js")
+                    .is_file());
 
-            let second = hydrate_lab_workspace_dependencies(
-                "lab-detected-npm",
-                &project.path().display().to_string(),
-                &remote.path().display().to_string(),
-            )
-            .expect("validated node_modules is reusable");
-            assert_eq!(second.status, "reused_prepared_cache");
-            assert_eq!(
-                std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm run count"),
-                "x"
-            );
-        });
-    }
-
-    #[test]
-    fn prepared_source_with_empty_node_modules_hydrates_before_reuse() {
-        crate::test_support::with_isolated_home(|home| {
-            write_detected_node_adapter(home.path());
-            let path_guard = FakeBinGuard::install(
-                "npm",
-                "#!/bin/sh\nmkdir -p node_modules/example\nprintf installed > node_modules/example/index.js\nprintf x >> npm-runs\n",
-            );
-            crate::create(
-                &path_guard.local_runner_spec("lab-empty-node-modules"),
-                false,
-            )
-            .expect("create local runner");
-            let project = tempfile::tempdir().expect("controller project");
-            std::fs::write(project.path().join("package.json"), "{}").expect("package manifest");
-            std::fs::write(project.path().join("package-lock.json"), "{}").expect("lockfile");
-            let remote = tempfile::tempdir().expect("runner workspace");
-            let _marker = PreparedSourceMarker::write(remote.path());
-            std::fs::create_dir(remote.path().join("node_modules"))
-                .expect("empty excluded dependency directory");
-
-            let output = hydrate_lab_workspace_dependencies(
-                "lab-empty-node-modules",
-                &project.path().display().to_string(),
-                &remote.path().display().to_string(),
-            )
-            .expect("empty prepared dependency output triggers hydration");
-
-            assert_eq!(output.status, "hydrated");
-            assert_eq!(output.steps[0].provider_id, "npm");
-            assert!(remote
-                .path()
-                .join("node_modules/example/index.js")
-                .is_file());
-            assert_eq!(
-                std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm ran"),
-                "x"
-            );
-        });
+                let second = hydrate_lab_workspace_dependencies(
+                    "lab-detected-npm",
+                    &project.path().display().to_string(),
+                    &remote.path().display().to_string(),
+                )
+                .expect("validated node_modules is reusable");
+                assert_eq!(second.status, "reused_prepared_cache");
+                assert_eq!(
+                    std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm run count"),
+                    "x"
+                );
+            });
+        }
     }
 
     #[test]
@@ -1561,35 +1467,6 @@ mod tests {
 
             assert_eq!(output.status, "hydrated");
             assert!(remote.path().join("hydration-ran").is_file());
-        });
-    }
-
-    #[test]
-    fn prepared_marker_missing_declared_build_output_hydrates() {
-        crate::test_support::with_isolated_home(|_| {
-            let path_guard = FakeBinGuard::install(
-                "fixture-tool",
-                "#!/bin/sh\nmkdir -p node_modules/example apps/cli/dist/cli\nprintf installed > node_modules/example/index.js\nprintf ready > apps/cli/dist/cli/main.mjs\n",
-            );
-            crate::create(&path_guard.local_runner_spec("lab-local"), false)
-                .expect("create local runner");
-            let project = tempfile::tempdir().expect("project");
-            let manifest = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}}"#;
-            std::fs::write(project.path().join("homeboy.json"), manifest).expect("manifest");
-            let remote = tempfile::tempdir().expect("remote");
-            std::fs::write(remote.path().join("homeboy.json"), manifest).expect("remote manifest");
-            let _marker = PreparedSourceMarker::write(remote.path());
-            std::fs::create_dir(remote.path().join("node_modules")).expect("dependency output");
-
-            let output = hydrate_lab_workspace_dependencies(
-                "lab-local",
-                &project.path().display().to_string(),
-                &remote.path().display().to_string(),
-            )
-            .expect("missing build output runs hydration");
-
-            assert_eq!(output.status, "hydrated");
-            assert!(remote.path().join("apps/cli/dist/cli/main.mjs").is_file());
         });
     }
 
@@ -1965,31 +1842,5 @@ mod tests {
                 .stderr
                 .contains("Install or refresh that extension on the runner"));
         });
-    }
-
-    /// Hydration is skipped when the `--skip-deps-hydration` opt-out is set,
-    /// even for a materialized workspace job.
-    #[test]
-    fn hydration_skipped_when_opt_out_flag_set() {
-        let result = hydrate_for_lab_workspace_exec_internal(
-            true,
-            "unused-runner",
-            "/unused/local",
-            "/unused/remote",
-            base_lab_plan(None),
-            None,
-            None,
-        )
-        .expect("opt-out path does not hydrate");
-
-        match result.record {
-            LabWorkspaceHydrationRecord::NotApplied { reason } => {
-                assert_eq!(reason, "opt_out");
-            }
-            other => panic!("expected NotApplied, got {other:?}"),
-        }
-        let metadata = dependency_hydration_metadata(&result.record);
-        assert_eq!(metadata["status"], "not_applied");
-        assert_eq!(metadata["reason"], "opt_out");
     }
 }

@@ -101,213 +101,114 @@ fn installed_git_rig_check_keeps_default_lab_offload() {
 }
 
 #[test]
-fn lab_command_preserves_portable_contract_shape() {
-    let cli = Cli::parse_from(["homeboy", "review", "lint"]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "review lint");
-    assert!(command.is_portable());
-    assert!(command.routing_policy.requires_extension_parity);
-}
-
-#[test]
-fn extension_update_routes_locally_without_explicit_lab_runner() {
+fn commands_owning_their_runner_or_local_diagnostics_route_locally() {
     let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "extension".to_string(),
-        "update".to_string(),
-        "wordpress".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-    let _preflight = capture_fixture_preflight(&cli, &normalized);
-
-    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
-        .expect("extension update without --runner should not offload");
-
-    assert_eq!(outcome, None);
-    assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
-}
-
-#[test]
-fn extension_dev_run_keeps_its_runner_workflow_on_the_controller() {
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "extension".to_string(),
-        "dev-run".to_string(),
-        "wordpress".to_string(),
-        "--source".to_string(),
-        "/tmp/wordpress".to_string(),
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "homeboy".to_string(),
-        "extension".to_string(),
-        "show".to_string(),
-        "wordpress".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-    let _preflight = capture_fixture_preflight(&cli, &normalized);
-
-    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
-        .expect("dev-run should execute its own runner lifecycle");
-
-    assert_eq!(outcome, None);
-    assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
-}
-
-#[test]
-fn fuzz_doctor_routes_locally_without_explicit_lab_runner() {
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "fuzz".to_string(),
-        "doctor".to_string(),
-        "--extension".to_string(),
-        "nodejs".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-    let _preflight = capture_fixture_preflight(&cli, &normalized);
-
-    let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
-        .expect("fuzz doctor without --runner should remain a local diagnostic");
-
-    assert_eq!(outcome, None);
-    assert!(std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err());
-}
-
-#[test]
-fn global_runner_for_runs_show_has_local_mirror_guidance() {
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-    let cli = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "homeboy-lab",
-        "runs",
-        "show",
-        "run-123",
-    ]);
-
-    let err = route_after_parse_with_provenance(
-        &cli,
-        &[
-            "homeboy".into(),
-            "--runner".into(),
-            "homeboy-lab".into(),
-            "runs".into(),
-            "show".into(),
-            "run-123".into(),
-        ],
-        None,
-        None,
-    )
-    .expect_err("runs show rejects global runner with guidance");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("homeboy runs show run-123"));
-    assert!(err.message.contains("without --runner"));
-}
-
-#[test]
-fn runs_list_runner_option_after_subcommand_routes_locally() {
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-
-    for normalized in [
+    for argv in [
+        vec!["homeboy", "extension", "update", "wordpress"],
+        // dev-run executes its own runner lifecycle.
         vec![
-            "homeboy".to_string(),
-            "runs".to_string(),
-            "list".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-            "--status".to_string(),
-            "running".to_string(),
-            "--limit".to_string(),
-            "20".to_string(),
+            "homeboy",
+            "extension",
+            "dev-run",
+            "wordpress",
+            "--source",
+            "/tmp/wordpress",
+            "--runner",
+            "homeboy-lab",
+            "homeboy",
+            "extension",
+            "show",
+            "wordpress",
+        ],
+        vec!["homeboy", "fuzz", "doctor", "--extension", "nodejs"],
+        // Command-local `--runner` options are not global placement.
+        vec![
+            "homeboy",
+            "runs",
+            "list",
+            "--runner",
+            "homeboy-lab",
+            "--status",
+            "running",
+        ],
+        vec!["homeboy", "runs", "list", "--runner=homeboy-lab"],
+        vec![
+            "homeboy",
+            "runs",
+            "artifact",
+            "attach",
+            "--runner",
+            "homeboy-lab",
+            "--path",
+            "/tmp/matrix-summary.json",
+            "--name",
+            "matrix-summary",
+            "run-123",
         ],
         vec![
-            "homeboy".to_string(),
-            "runs".to_string(),
-            "list".to_string(),
-            "--runner=homeboy-lab".to_string(),
-            "--status".to_string(),
-            "running".to_string(),
-            "--limit".to_string(),
-            "20".to_string(),
+            "homeboy",
+            "runs",
+            "artifact",
+            "attach",
+            "--runner=homeboy-lab",
+            "--path=/tmp/matrix-summary.json",
+            "--name=matrix-summary",
+            "run-123",
         ],
     ] {
+        let normalized = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
         let cli = Cli::parse_from(&normalized);
+        let _preflight = capture_fixture_preflight(&cli, &normalized);
 
         let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
-            .expect("runs list subcommand runner option should not be rejected");
+            .unwrap_or_else(|error| panic!("{argv:?} must route locally: {error}"));
 
-        assert_eq!(outcome, None);
+        assert_eq!(outcome, None, "{argv:?}");
+        assert!(
+            std::env::var(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV).is_err(),
+            "{argv:?}"
+        );
     }
 }
 
 #[test]
-fn global_runner_for_runs_list_keeps_placement_guidance() {
+fn global_runner_on_runs_reads_is_rejected_with_local_guidance() {
     let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "runs".to_string(),
-        "list".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    let err = route_after_parse_with_provenance(&cli, &normalized, None, None)
-        .expect_err("top-level runner on runs list should keep placement guidance");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err
-        .message
-        .contains("homeboy runs list --runner homeboy-lab"));
-}
-
-#[test]
-fn runs_artifact_attach_runner_option_routes_locally() {
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-
-    for normalized in [
-        vec![
-            "homeboy".to_string(),
-            "runs".to_string(),
-            "artifact".to_string(),
-            "attach".to_string(),
-            "--runner".to_string(),
-            "homeboy-lab".to_string(),
-            "--path".to_string(),
-            "/tmp/matrix-summary.json".to_string(),
-            "--name".to_string(),
-            "matrix-summary".to_string(),
-            "run-123".to_string(),
-        ],
-        vec![
-            "homeboy".to_string(),
-            "runs".to_string(),
-            "artifact".to_string(),
-            "attach".to_string(),
-            "--runner=homeboy-lab".to_string(),
-            "--path=/tmp/matrix-summary.json".to_string(),
-            "--name=matrix-summary".to_string(),
-            "run-123".to_string(),
-        ],
+    for (argv, guidance) in [
+        (
+            vec![
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "runs",
+                "show",
+                "run-123",
+            ],
+            vec!["homeboy runs show run-123", "without --runner"],
+        ),
+        (
+            vec!["homeboy", "--runner", "homeboy-lab", "runs", "list"],
+            vec!["homeboy runs list --runner homeboy-lab"],
+        ),
     ] {
+        let normalized = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
         let cli = Cli::parse_from(&normalized);
 
-        let outcome = route_after_parse_with_provenance(&cli, &normalized, None, None)
-            .expect("runs artifact attach command-local runner option should not be rejected");
+        let err = route_after_parse_with_provenance(&cli, &normalized, None, None)
+            .expect_err("global runner on a runs read is rejected with guidance");
 
-        assert_eq!(outcome, None);
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        for expected in guidance {
+            assert!(err.message.contains(expected), "{argv:?}: {}", err.message);
+        }
     }
 }
 
 #[test]
-fn agent_task_cook_keeps_its_coordinator_local_for_all_placements() {
-    let automatic = Cli::parse_from([
-        "homeboy",
+fn cook_coordinators_stay_local_for_all_placements() {
+    // Controller coordination stays local while typed child attempts retain
+    // the selected Lab runner and its normal placement enforcement (#8519).
+    let cook = [
         "agent-task",
         "cook",
         "--prompt",
@@ -316,65 +217,41 @@ fn agent_task_cook_keeps_its_coordinator_local_for_all_placements() {
         "homeboy@cook-routing",
         "--verify",
         "cargo test --locked",
-    ]);
-    let automatic_command = lab_offload_command(&automatic.command).unwrap().unwrap();
-    assert!(!automatic_command.is_portable());
-    assert!(!automatic_command.routing_policy.default_lab_offload);
-
-    let explicit = Cli::parse_from([
-        "homeboy",
-        "--runner",
-        "homeboy-lab",
+    ];
+    let batch = [
         "agent-task",
-        "cook",
-        "--prompt",
-        "implement the fix",
-        "--to-worktree",
-        "homeboy@cook-routing",
-        "--verify",
-        "cargo test --locked",
-    ]);
-    let explicit_command = lab_offload_command(&explicit.command).unwrap().unwrap();
-    assert_eq!(explicit.runner.as_deref(), Some("homeboy-lab"));
-    assert!(!explicit_command.is_portable());
-
-    let lab = Cli::parse_from([
+        "fanout",
+        "cook-batch",
+        "--repo",
         "homeboy",
-        "--placement",
-        "lab",
-        "agent-task",
-        "cook",
-        "--prompt",
-        "implement the fix",
-        "--to-worktree",
-        "homeboy@cook-routing",
         "--verify",
-        "cargo test --locked",
-    ]);
-    assert!(!lab_offload_command(&lab.command)
-        .unwrap()
-        .unwrap()
-        .is_portable());
-    assert_eq!(lab.placement, crate::cli_surface::Placement::Lab);
-}
+        "cargo test --locked agent_task",
+        "--run-plan",
+        "https://github.com/Extra-Chill/homeboy/issues/7011",
+    ];
+    for (globals, command, label) in [
+        (vec![], cook.as_slice(), None),
+        (vec!["--runner", "homeboy-lab"], cook.as_slice(), None),
+        (vec!["--placement", "lab"], cook.as_slice(), None),
+        (
+            vec!["--runner", "homeboy-lab"],
+            batch.as_slice(),
+            Some("agent-task fanout cook-batch"),
+        ),
+    ] {
+        let mut argv = vec!["homeboy"];
+        argv.extend(globals);
+        argv.extend(command);
+        let cli = Cli::parse_from(&argv);
 
-#[test]
-fn unscoped_provider_discovery_does_not_offload() {
-    // Controller and runner have different extensions, runtime defaults,
-    // secrets, and provider readiness, so relocating an unscoped read changes
-    // the meaning of its answer. Offload stays opt-in (#9763).
-    let cli = Cli::parse_from(["homeboy", "agent-task", "providers"]);
+        let lab_command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(cli.runner, None);
-    assert_eq!(cli.placement, crate::cli_surface::Placement::Auto);
-    assert!(!command.routing_policy.default_lab_offload);
-    assert_eq!(
-        command.source_path_mode,
-        runners::LabOffloadSourcePathMode::RunnerResident,
-        "runner-resident source mode is what exempts this read from warm-controller offload promotion"
-    );
+        if let Some(label) = label {
+            assert_eq!(lab_command.hot_label, label, "{argv:?}");
+        }
+        assert!(!lab_command.is_portable(), "{argv:?}");
+        assert!(!lab_command.routing_policy.default_lab_offload, "{argv:?}");
+    }
 }
 
 #[test]
@@ -555,199 +432,57 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
 }
 
 #[test]
-fn agent_task_fanout_cook_batch_run_plan_keeps_cook_coordinators_local() {
-    // `--runner` implies Lab placement and conflicts with an explicit
-    // `--placement` at parse time (#9002); the runner-pinned coordinator uses
-    // `--runner` alone.
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "agent-task".to_string(),
-        "fanout".to_string(),
-        "cook-batch".to_string(),
-        "--repo".to_string(),
-        "homeboy".to_string(),
-        "--verify".to_string(),
-        "cargo test --locked agent_task".to_string(),
-        "--run-plan".to_string(),
-        "https://github.com/Extra-Chill/homeboy/issues/7011".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
+fn strip_component_target_replaces_component_selector_with_path() {
+    for (args, expected) in [
+        (
+            vec!["homeboy", "review", "lint", "--fix", "dmc"],
+            vec!["homeboy", "review", "lint", "--fix", "--path", "/src/dmc"],
+        ),
+        (
+            vec!["homeboy", "review", "lint", "--fix", "--component", "dmc"],
+            vec!["homeboy", "review", "lint", "--fix", "--path", "/src/dmc"],
+        ),
+        // Passthrough args after `--` are preserved verbatim.
+        (
+            vec!["homeboy", "lint", "--fix", "dmc", "--", "dmc"],
+            vec![
+                "homeboy", "lint", "--fix", "--", "dmc", "--path", "/src/dmc",
+            ],
+        ),
+    ] {
+        let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
 
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(command.hot_label, "agent-task fanout cook-batch");
-    assert!(!command.is_portable());
-    assert!(!command.routing_policy.default_lab_offload);
-    // Controller coordination stays local while typed child attempts retain
-    // the selected Lab runner and its normal placement enforcement (#8519).
-    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(
+            strip_component_target_args(&args, "dmc", "/src/dmc"),
+            expected,
+            "{args:?}"
+        );
+    }
 }
 
 #[test]
-fn lab_command_with_mutation_flag_stays_portable_for_patch_capture() {
-    let cli = Cli::parse_from(["homeboy", "review", "lint", "--fix"]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "review lint");
-    assert!(command.is_portable());
-    assert!(command.routing_policy.requires_extension_parity);
-}
-
-#[test]
-fn lab_command_with_ratchet_stays_portable_for_patch_capture() {
-    let cli = Cli::parse_from(["homeboy", "review", "lint", "--ratchet"]);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-
-    assert_eq!(command.hot_label, "review lint");
-    assert!(command.is_portable());
-    assert!(command.routing_policy.requires_extension_parity);
-}
-
-#[test]
-fn strip_component_target_replaces_positional_with_path() {
-    let args = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-        "--fix".to_string(),
-        "sample-component".to_string(),
-    ];
-
-    let rewritten = strip_component_target_args(&args, "sample-component", "/src/sample");
-
-    assert_eq!(
-        rewritten,
+fn rewrite_component_target_skips_path_override_or_missing_component() {
+    for argv in [
         vec![
-            "homeboy".to_string(),
-            "review".to_string(),
-            "lint".to_string(),
-            "--fix".to_string(),
-            "--path".to_string(),
-            "/src/sample".to_string(),
-        ]
-    );
-}
+            "homeboy",
+            "review",
+            "lint",
+            "--fix",
+            "sample-component",
+            "--path",
+            "/explicit/path",
+        ],
+        // No component and no --path: source resolves from CWD.
+        vec!["homeboy", "review", "lint", "--fix"],
+    ] {
+        let cli = Cli::parse_from(&argv);
+        let normalized = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
 
-#[test]
-fn strip_component_target_replaces_component_flag_with_path() {
-    let args = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-        "--fix".to_string(),
-        "--component".to_string(),
-        "sample-component".to_string(),
-    ];
-
-    let rewritten = strip_component_target_args(&args, "sample-component", "/src/sample");
-
-    assert_eq!(
-        rewritten,
-        vec![
-            "homeboy".to_string(),
-            "review".to_string(),
-            "lint".to_string(),
-            "--fix".to_string(),
-            "--path".to_string(),
-            "/src/sample".to_string(),
-        ]
-    );
-}
-
-#[test]
-fn strip_component_target_only_strips_first_positional_match() {
-    // Only the bare positional component token is dropped.
-    let args = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-        "--fix".to_string(),
-        "dmc".to_string(),
-    ];
-
-    let rewritten = strip_component_target_args(&args, "dmc", "/src/dmc");
-
-    assert_eq!(
-        rewritten,
-        vec![
-            "homeboy".to_string(),
-            "review".to_string(),
-            "lint".to_string(),
-            "--fix".to_string(),
-            "--path".to_string(),
-            "/src/dmc".to_string(),
-        ]
-    );
-}
-
-#[test]
-fn strip_component_target_preserves_passthrough_args() {
-    let args = vec![
-        "homeboy".to_string(),
-        "lint".to_string(),
-        "--fix".to_string(),
-        "dmc".to_string(),
-        "--".to_string(),
-        "dmc".to_string(),
-    ];
-
-    let rewritten = strip_component_target_args(&args, "dmc", "/src/dmc");
-
-    assert_eq!(
-        rewritten,
-        vec![
-            "homeboy".to_string(),
-            "lint".to_string(),
-            "--fix".to_string(),
-            "--".to_string(),
-            "dmc".to_string(),
-            "--path".to_string(),
-            "/src/dmc".to_string(),
-        ]
-    );
-}
-
-#[test]
-fn rewrite_component_target_skips_when_path_override_present() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "review",
-        "lint",
-        "--fix",
-        "sample-component",
-        "--path",
-        "/explicit/path",
-    ]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-        "--fix".to_string(),
-        "sample-component".to_string(),
-        "--path".to_string(),
-        "/explicit/path".to_string(),
-    ];
-
-    assert!(rewrite_component_target_to_path(&cli.command, &normalized).is_none());
-}
-
-#[test]
-fn rewrite_component_target_skips_without_component() {
-    // No positional component and no --path: source resolves from CWD, so
-    // there is nothing to rewrite.
-    let cli = Cli::parse_from(["homeboy", "review", "lint", "--fix"]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-        "--fix".to_string(),
-    ];
-
-    assert!(rewrite_component_target_to_path(&cli.command, &normalized).is_none());
+        assert!(
+            rewrite_component_target_to_path(&cli.command, &normalized).is_none(),
+            "{argv:?}"
+        );
+    }
 }
 
 #[test]
@@ -775,63 +510,38 @@ fn lab_route_source_path_args_rewrites_review_lint_component_without_patch_captu
 }
 
 #[test]
-fn rewrite_ad_hoc_lab_workspace_adds_path_for_pathless_lint() {
+fn rewrite_ad_hoc_lab_workspace_inserts_cwd_path_before_passthrough() {
     let dir = tempdir().unwrap();
     let _cwd = CwdGuard::set(dir.path());
     let cwd = std::env::current_dir().expect("current dir");
-    let cli = Cli::parse_from(["homeboy", "review", "lint"]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-    ];
+    let cwd = cwd.to_string_lossy();
+    for (argv, expected) in [
+        (
+            vec!["homeboy", "review", "lint"],
+            vec!["homeboy", "review", "lint", "--path", &cwd],
+        ),
+        (
+            vec!["homeboy", "review", "test", "--", "--filter", "ExampleTest"],
+            vec![
+                "homeboy",
+                "review",
+                "test",
+                "--path",
+                &cwd,
+                "--",
+                "--filter",
+                "ExampleTest",
+            ],
+        ),
+    ] {
+        let cli = Cli::parse_from(&argv);
+        let normalized = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
 
-    let rewritten = rewrite_ad_hoc_lab_workspace_to_path(&cli.command, &normalized)
-        .expect("pathless lint should become explicit path");
+        let rewritten = lab_route_source_path_args(&cli.command, &normalized, false)
+            .expect("pathless review command gets an explicit path");
 
-    assert_eq!(
-        rewritten,
-        vec![
-            "homeboy".to_string(),
-            "review".to_string(),
-            "lint".to_string(),
-            "--path".to_string(),
-            cwd.to_string_lossy().to_string(),
-        ]
-    );
-}
-
-#[test]
-fn rewrite_ad_hoc_lab_workspace_inserts_path_before_passthrough() {
-    let dir = tempdir().unwrap();
-    let _cwd = CwdGuard::set(dir.path());
-    let cwd = std::env::current_dir().expect("current dir");
-    let cli = Cli::parse_from(["homeboy", "review", "test", "--", "--filter", "ExampleTest"]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "review".to_string(),
-        "test".to_string(),
-        "--".to_string(),
-        "--filter".to_string(),
-        "ExampleTest".to_string(),
-    ];
-
-    let rewritten = rewrite_ad_hoc_lab_workspace_to_path(&cli.command, &normalized)
-        .expect("pathless test should become explicit path");
-
-    assert_eq!(
-        rewritten,
-        vec![
-            "homeboy".to_string(),
-            "review".to_string(),
-            "test".to_string(),
-            "--path".to_string(),
-            cwd.to_string_lossy().to_string(),
-            "--".to_string(),
-            "--filter".to_string(),
-            "ExampleTest".to_string(),
-        ]
-    );
+        assert_eq!(rewritten, expected, "{argv:?}");
+    }
 }
 
 #[test]
@@ -890,29 +600,61 @@ fn route_runner_for(args: &[&str], inferred: &Option<String>) -> Option<String> 
 }
 
 #[test]
-fn controller_local_lifecycle_reads_never_acquire_a_default_lab_runner() {
-    // These are read-only introspection commands over a durable record this
-    // controller owns. Relocating them does not just cost a round trip — it
-    // asks a machine that has never seen the record to answer for it, which is
-    // exactly the `agent-task run record not found` in #11599.
-    let inferred = connected_default_lab_runner();
-    for args in [
-        ["homeboy", "agent-task", "providers"].as_slice(),
-        // 5e6897ff16 "refactor(agent-task): return canonical status
-        // resource" removed the separate `--full` toggle: `status` always
-        // returns the canonical resource now, so there is no longer a
-        // distinct compact/full variant whose routing needs separate
-        // coverage here.
-        ["homeboy", "agent-task", "status", OWNER_LOCAL_RUN_ID].as_slice(),
-        ["homeboy", "runs", "logs", OWNER_LOCAL_RUN_ID].as_slice(),
-        ["homeboy", "agent-task", "diagnose", OWNER_LOCAL_RUN_ID].as_slice(),
-        ["homeboy", "runs", "evidence", OWNER_LOCAL_RUN_ID].as_slice(),
-    ] {
+fn route_runner_follows_record_ownership_and_explicit_authority() {
+    // Controller-local lifecycle reads (and the next actions diagnosis prints
+    // for them) resolve against the controller that owns the record, not a
+    // connected default Lab runner that never saw it (#11599). Explicit
+    // `--placement local` owns the whole lifecycle (#11600), while an explicit
+    // runner, explicit Lab placement, or a contract that declares automatic
+    // offload still reaches the runner (#9651/#9763).
+    let id = OWNER_LOCAL_RUN_ID;
+    let lab = connected_default_lab_runner();
+    let local_reads = [
+        vec!["homeboy", "agent-task", "providers"],
+        vec!["homeboy", "agent-task", "status", id],
+        vec!["homeboy", "runs", "logs", id],
+        vec!["homeboy", "agent-task", "diagnose", id],
+        vec!["homeboy", "agent-task", "diagnose", id, "--full"],
+        vec!["homeboy", "runs", "evidence", id],
+        vec![
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "retry",
+            id,
+            "--run",
+        ],
+    ];
+    let runner_routed = [
+        vec![
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "providers",
+        ],
+        vec![
+            "homeboy",
+            "agent-task",
+            "providers",
+            "--runner",
+            "homeboy-lab",
+        ],
+        vec!["homeboy", "--placement", "lab", "agent-task", "providers"],
+        vec!["homeboy", "agent-task", "run-plan", "--plan", "-"],
+        vec!["homeboy", "agent-task", "retry", id, "--run"],
+    ];
+    for args in &local_reads {
+        assert_eq!(route_runner_for(args, &lab), None, "{args:?}");
+    }
+    for args in &runner_routed {
         assert_eq!(
-            route_runner_for(args, &inferred),
-            None,
-            "{args:?} must resolve against the owner of its durable record",
+            route_runner_for(args, &lab),
+            Some("homeboy-lab".to_string()),
+            "{args:?}"
         );
+        assert_eq!(route_runner_for(args, &None), None, "{args:?}");
     }
 }
 
@@ -1014,120 +756,4 @@ fn controller_local_record_owns_lifecycle_reads_and_cook_retries_before_lab_sele
             "Cook retries are replayed by their controller lifecycle, not generic Lab routing"
         );
     });
-}
-
-#[test]
-fn every_generated_next_action_command_round_trips_to_the_record_owner() {
-    // A generated next action that walks the operator back into the failure it
-    // was printed to resolve is worse than no guidance at all (#11599). Each of
-    // these strings is emitted verbatim by a diagnosis/status projection.
-    let inferred = connected_default_lab_runner();
-    for generated in [
-        format!("homeboy agent-task status {OWNER_LOCAL_RUN_ID}"),
-        format!("homeboy runs logs {OWNER_LOCAL_RUN_ID}"),
-        format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID}"),
-        format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID} --full"),
-        format!("homeboy runs evidence {OWNER_LOCAL_RUN_ID}"),
-    ] {
-        let args: Vec<&str> = generated.split_whitespace().collect();
-        assert_eq!(
-            route_runner_for(&args, &inferred),
-            None,
-            "`{generated}` must resolve against the controller that owns the record",
-        );
-    }
-}
-
-#[test]
-fn explicit_local_placement_keeps_a_retry_controller_owned() {
-    // `--placement local` at creation is an ownership statement for the whole
-    // lifecycle. Acquiring a Lab runner here is what staged a retry handoff for
-    // a controller-local Cook and left its successor unable to decode a
-    // canonical placement decision (#11600).
-    assert_eq!(
-        route_runner_for(
-            &[
-                "homeboy",
-                "--placement",
-                "local",
-                "agent-task",
-                "retry",
-                OWNER_LOCAL_RUN_ID,
-                "--run",
-            ],
-            &connected_default_lab_runner(),
-        ),
-        None,
-    );
-}
-
-#[test]
-fn an_explicit_runner_still_reaches_the_runner_for_provider_discovery() {
-    // Pinning is its own authority: a runner catalog read is exactly what
-    // `--runner` is for, and #9651/#9763 kept that probe available.
-    for args in [
-        [
-            "homeboy",
-            "--runner",
-            "homeboy-lab",
-            "agent-task",
-            "providers",
-        ],
-        [
-            "homeboy",
-            "agent-task",
-            "providers",
-            "--runner",
-            "homeboy-lab",
-        ],
-    ] {
-        assert_eq!(
-            route_runner_for(&args, &connected_default_lab_runner()),
-            Some("homeboy-lab".to_string()),
-            "explicit runner must remain load-bearing in the advertised invocation shape",
-        );
-    }
-}
-
-#[test]
-fn explicit_lab_placement_still_reaches_the_default_runner() {
-    assert_eq!(
-        route_runner_for(
-            &["homeboy", "--placement", "lab", "agent-task", "providers",],
-            &connected_default_lab_runner(),
-        ),
-        Some("homeboy-lab".to_string()),
-    );
-}
-
-#[test]
-fn genuine_lab_workloads_still_offload_automatically() {
-    // The fix must not turn off automatic offload for the commands whose
-    // contracts actually declare it.
-    let inferred = connected_default_lab_runner();
-    for args in [
-        ["homeboy", "agent-task", "run-plan", "--plan", "-"].as_slice(),
-        [
-            "homeboy",
-            "agent-task",
-            "retry",
-            OWNER_LOCAL_RUN_ID,
-            "--run",
-        ]
-        .as_slice(),
-    ] {
-        assert_eq!(
-            route_runner_for(args, &inferred),
-            Some("homeboy-lab".to_string()),
-            "{args:?} declares automatic Lab offload and must keep it",
-        );
-    }
-}
-
-#[test]
-fn no_connected_runner_yields_no_route_runner_regardless_of_contract() {
-    assert_eq!(
-        route_runner_for(&["homeboy", "agent-task", "run-plan", "--plan", "-"], &None),
-        None,
-    );
 }

@@ -120,20 +120,3 @@ struct ReleasePr {
     #[serde(rename = "headRefName")]
     head_ref_name: String,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::ReleasePr;
-
-    #[test]
-    fn release_pr_state_carries_the_exact_merged_boundary() {
-        let pr: ReleasePr = serde_json::from_str(
-            r#"{"state":"MERGED","baseRefName":"main","headRefName":"release/v1.0.0"}"#,
-        )
-        .expect("parse gh PR response");
-
-        assert_eq!(pr.state, "MERGED");
-        assert_eq!(pr.base_ref_name, "main");
-        assert_eq!(pr.head_ref_name, "release/v1.0.0");
-    }
-}

@@ -125,13 +125,18 @@ printf '%s|%s|%s\n' "$source" "$ref" "$cache_dir" >> "$UPDATE_CALLS"
 release_dir="${cache_dir}.releases/fixture.$$"
 rm -rf "$cache_dir" "$release_dir"
 mkdir -p "$release_dir"
-git init --quiet "$release_dir"
+if [ -d "$source/.git" ]; then
+    git clone --quiet "$source" "$release_dir"
+    git -C "$release_dir" checkout --quiet "$ref"
+else
+    git init --quiet "$release_dir"
+    git -C "$release_dir" remote add origin "$source"
+fi
 git -C "$release_dir" config user.email smoke@example.com
 git -C "$release_dir" config user.name Smoke
-git -C "$release_dir" remote add origin "$source"
 printf '%s\n' '{}' > "$release_dir/package-lock.json"
 git -C "$release_dir" add package-lock.json
-git -C "$release_dir" commit --quiet -m 'promoted source fixture'
+git -C "$release_dir" diff --cached --quiet || git -C "$release_dir" commit --quiet -m 'promoted source fixture'
 source_sha="$(git -C "$release_dir" rev-parse HEAD)"
 
 mkdir -p "$release_dir/node_modules/@automattic/wp-codebox-core/dist" "$release_dir/node_modules/sharp" "$release_dir/packages/cli/dist"
@@ -144,8 +149,9 @@ cat > "$release_dir/packages/cli/dist/index.js" <<'NODE'
 if (process.argv.includes('--version')) { process.stdout.write(process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0'); process.exit(0); }
 if (process.argv.slice(-3).join(' ') === 'runtime descriptor --json') { process.stdout.write(JSON.stringify({ schema: 'wp-codebox/runtime-descriptor/v1', readiness: { status: 'available', browserRuntime: { status: 'ready' } }, contractManifest: { schemas: { runtimeBoundary: { browserContainedSiteOpen: 'wp-codebox/browser-contained-site-open/v1' } } } })); process.exit(0); }
 if (process.argv.includes('doctor') && process.argv.includes('--json')) {
-  const ref = process.env.WP_CODEBOX_SOURCE_REF ?? 'main';
-  const commit = process.env.WP_CODEBOX_SOURCE_SHA ?? '';
+  const identity = JSON.parse(require('node:fs').readFileSync(require('node:path').join(__dirname, '../../../.homeboy-runtime-identity.json'), 'utf8'));
+  const ref = identity.source_ref;
+  const commit = identity.source_sha;
   process.stdout.write(JSON.stringify({ schema: 'wp-codebox/doctor/v1', status: 'ok', checks: [{ id: 'wp-codebox.source', status: 'ok', message: 'source provenance verified; no configured upstream is available and remote fetch was not attempted', details: { provenance: { schema: 'wp-codebox/cli-build-provenance/v1', package: { name: '@automattic/wp-codebox-cli', version: process.env.FAKE_WP_CODEBOX_SOURCE_VERSION ?? '0.21.0' }, dist: { sha256: 'source-dist' }, git: { ref, commit } }, git: { evidence: 'unavailable', reason: 'no configured upstream', remoteFetch: 'not-attempted' } } }] }) + '\n');
   process.exit(0);
 }
@@ -153,7 +159,7 @@ console.log('wp-codebox source stub');
 NODE
 chmod +x "$release_dir/packages/cli/dist/index.js"
 cli_sha256="$(shasum -a 256 "$release_dir/packages/cli/dist/index.js" | awk '{print $1}')"
-printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_sha\":\"$source_sha\",\"cli_sha256\":\"$cli_sha256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$release_dir/.homeboy-runtime-identity.json"
+printf '%s\n' "{\"schema\":\"homeboy/wp-codebox-managed-runtime-identity/v1\",\"source_ref\":\"$ref\",\"source_sha\":\"$source_sha\",\"cli_sha256\":\"$cli_sha256\",\"required_capabilities\":[\"wp-codebox/browser-contained-site-open/v1\"]}" > "$release_dir/.homeboy-runtime-identity.json"
 ln -s "$release_dir" "$cache_dir"
 SH
 chmod +x "${ROOT_DIR}/scripts/build/update-wp-codebox-cache.sh"
@@ -689,5 +695,45 @@ if [ ! -x "${TMPDIR}/external-cli-install/source/packages/cli/dist/index.js" ]; 
     cat "${TMPDIR}/external-cli-setup.out" >&2
     exit 1
 fi
+
+# Warm source caches must converge to the manifest pin, not merely satisfy
+# minimum_version. A matching pin is a no-op; a moving override checks origin.
+PIN_SOURCE="${TMPDIR}/pin-origin"
+PIN_INSTALL="${TMPDIR}/pin-install"
+PIN_REF="$(jq -r '.wp_codebox.ref' "${ROOT_DIR}/wordpress.json")"
+git init --quiet -b main "${PIN_SOURCE}"
+git -C "${PIN_SOURCE}" config user.email smoke@example.com
+git -C "${PIN_SOURCE}" config user.name Smoke
+printf '%s\n' '{}' > "${PIN_SOURCE}/package-lock.json"
+git -C "${PIN_SOURCE}" add .
+git -C "${PIN_SOURCE}" commit --quiet -m old
+git -C "${PIN_SOURCE}" tag v0.33.0
+git -C "${PIN_SOURCE}" commit --quiet --allow-empty -m pinned
+git -C "${PIN_SOURCE}" tag "${PIN_REF}"
+
+pin_setup() {
+    (
+        cd "${EXTENSION_DIR}"
+        HOME="${TMPDIR}/pin-home" \
+        PATH="${FAKE_BIN}:${NODE_BIN_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" \
+        HOMEBOY_WP_CODEBOX_INSTALL_MODE=source \
+        HOMEBOY_WP_CODEBOX_INSTALL_DIR="${PIN_INSTALL}" \
+        HOMEBOY_WP_CODEBOX_SOURCE="${PIN_SOURCE}" \
+        HOMEBOY_WP_CODEBOX_REF="$1" \
+        bash "${ROOT_DIR}/scripts/build/setup.sh" > "$2" 2>&1
+    )
+}
+pin_setup v0.33.0 "${TMPDIR}/pin-old.out"
+pin_setup '' "${TMPDIR}/pin-refresh.out"
+grep -q 'Installing WP Codebox CLI' "${TMPDIR}/pin-refresh.out"
+[ "$(git -C "${PIN_INSTALL}/source" rev-parse HEAD)" = "$(git -C "${PIN_SOURCE}" rev-parse "${PIN_REF}")" ]
+pin_setup '' "${TMPDIR}/pin-current.out"
+grep -q 'managed source is already current' "${TMPDIR}/pin-current.out"
+! grep -q 'Installing WP Codebox CLI' "${TMPDIR}/pin-current.out"
+pin_setup main "${TMPDIR}/branch-first.out"
+git -C "${PIN_SOURCE}" commit --quiet --allow-empty -m advanced
+pin_setup main "${TMPDIR}/branch-refresh.out"
+grep -q 'Installing WP Codebox CLI' "${TMPDIR}/branch-refresh.out"
+[ "$(git -C "${PIN_INSTALL}/source" rev-parse HEAD)" = "$(git -C "${PIN_SOURCE}" rev-parse HEAD)" ]
 
 echo "WP Codebox setup smoke passed"

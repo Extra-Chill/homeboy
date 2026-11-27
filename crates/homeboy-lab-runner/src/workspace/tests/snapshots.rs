@@ -148,75 +148,6 @@ fn shell_quote(path: &std::path::Path) -> String {
 }
 
 #[test]
-fn workspace_snapshots_render_metadata_for_synced_workspace() {
-    crate::test_support::with_isolated_home(|_| {
-        let source_parent = tempfile::tempdir().expect("source parent");
-        let source = source_parent.path().join("blocks-engine@figma-fixture");
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        fs::create_dir_all(&source).expect("source dir");
-        git(&source, &["init"]);
-        git(&source, &["config", "user.email", "test@example.com"]);
-        git(&source, &["config", "user.name", "Test User"]);
-        git(
-            &source,
-            &["checkout", "-b", "run/figma-matrix-refreshed-20260627"],
-        );
-        fs::write(source.join("fixture.txt"), "figma\n").expect("fixture");
-        git(&source, &["add", "."]);
-        git(&source, &["commit", "-m", "fixture"]);
-        let commit =
-            crate::workspace::util::git_output(&source, &["rev-parse", "HEAD"]).expect("commit");
-
-        create_local_runner("lab-local-snapshots", runner_root.path());
-        let (synced, _) = sync_workspace(
-            "lab-local-snapshots",
-            sync_options(
-                source.display().to_string(),
-                Some("run-figma-1".to_string()),
-            ),
-            &crate::WorkspaceControl::default(),
-        )
-        .expect("sync workspace");
-
-        let (output, exit_code) = workspace_snapshots(
-            "lab-local-snapshots",
-            RunnerWorkspaceSnapshotFilters {
-                repo: Some("blocks-engine".to_string()),
-                source_ref: Some("run/figma-matrix-refreshed-20260627".to_string()),
-                source_commit: Some(commit.clone()),
-                run_id: Some("run-figma-1".to_string()),
-                limit: 10,
-            },
-        )
-        .expect("snapshots");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.variant, "workspace_snapshots");
-        assert_eq!(output.command, "runner.workspace.snapshots");
-        assert_eq!(output.filters.repo.as_deref(), Some("blocks-engine"));
-        assert_eq!(output.snapshots.len(), 1);
-        let snapshot = &output.snapshots[0];
-        assert_eq!(snapshot.runner_id, "lab-local-snapshots");
-        assert_eq!(snapshot.repo, "blocks-engine");
-        assert_eq!(snapshot.local_path, synced.local_path);
-        assert_eq!(snapshot.remote_path, synced.remote_path);
-        assert_eq!(snapshot.sync_mode, "snapshot");
-        assert_eq!(snapshot.snapshot_identity, synced.snapshot_identity);
-        assert_eq!(
-            snapshot.source_ref.as_deref(),
-            Some("run/figma-matrix-refreshed-20260627")
-        );
-        assert_eq!(snapshot.source_commit.as_deref(), Some(commit.as_str()));
-        assert_eq!(snapshot.source_dirty, Some(false));
-        assert_eq!(snapshot.run_id.as_deref(), Some("run-figma-1"));
-        assert!(snapshot.created_at.contains('T'));
-        assert!(snapshot
-            .exec_command
-            .contains("homeboy runner exec --workspace-ref"));
-    });
-}
-
-#[test]
 fn stale_truncated_metadata_does_not_block_current_workspace_sync() {
     crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -306,20 +237,24 @@ fn ssh_snapshot_listing_preserves_entries_and_isolates_invalid_metadata() {
 }
 
 #[test]
-fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
+fn workspace_snapshots_filter_by_repo_ref_commit_and_run_and_render_metadata() {
     crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         create_local_runner("lab-local-filter", runner_root.path());
-        let first = git_source("homeboy@one", "feature/one", "one\n");
-        let second = git_source("blocks-engine@two", "feature/two", "two\n");
+        let first = git_source(
+            "blocks-engine@figma-fixture",
+            "run/figma-matrix-refreshed-20260627",
+            "one\n",
+        );
+        let second = git_source("homeboy@two", "feature/two", "two\n");
         let first_commit = crate::workspace::util::git_output(first.path(), &["rev-parse", "HEAD"])
             .expect("first commit");
 
-        sync_workspace(
+        let (synced, _) = sync_workspace(
             "lab-local-filter",
             sync_options(
                 first.path().display().to_string(),
-                Some("run-one".to_string()),
+                Some("run-figma-1".to_string()),
             ),
             &crate::WorkspaceControl::default(),
         )
@@ -334,26 +269,49 @@ fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
         )
         .expect("sync second");
 
-        let (output, _) = workspace_snapshots(
+        let (output, exit_code) = workspace_snapshots(
             "lab-local-filter",
             RunnerWorkspaceSnapshotFilters {
-                repo: Some("homeboy".to_string()),
-                source_ref: Some("feature/one".to_string()),
-                source_commit: Some(first_commit),
-                run_id: Some("run-one".to_string()),
+                repo: Some("blocks-engine".to_string()),
+                source_ref: Some("run/figma-matrix-refreshed-20260627".to_string()),
+                source_commit: Some(first_commit.clone()),
+                run_id: Some("run-figma-1".to_string()),
                 limit: 10,
             },
         )
         .expect("filtered snapshots");
 
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.variant, "workspace_snapshots");
+        assert_eq!(output.command, "runner.workspace.snapshots");
+        assert_eq!(output.filters.repo.as_deref(), Some("blocks-engine"));
         assert_eq!(output.snapshots.len(), 1);
-        assert_eq!(output.snapshots[0].repo, "homeboy");
-        assert_eq!(output.snapshots[0].run_id.as_deref(), Some("run-one"));
+        let snapshot = &output.snapshots[0];
+        assert_eq!(snapshot.runner_id, "lab-local-filter");
+        assert_eq!(snapshot.repo, "blocks-engine");
+        assert_eq!(snapshot.local_path, synced.local_path);
+        assert_eq!(snapshot.remote_path, synced.remote_path);
+        assert_eq!(snapshot.sync_mode, "snapshot");
+        assert_eq!(snapshot.snapshot_identity, synced.snapshot_identity);
+        assert_eq!(
+            snapshot.source_ref.as_deref(),
+            Some("run/figma-matrix-refreshed-20260627")
+        );
+        assert_eq!(
+            snapshot.source_commit.as_deref(),
+            Some(first_commit.as_str())
+        );
+        assert_eq!(snapshot.source_dirty, Some(false));
+        assert_eq!(snapshot.run_id.as_deref(), Some("run-figma-1"));
+        assert!(snapshot.created_at.contains('T'));
+        assert!(snapshot
+            .exec_command
+            .contains("homeboy runner exec --workspace-ref"));
 
         let (none, _) = workspace_snapshots(
             "lab-local-filter",
             RunnerWorkspaceSnapshotFilters {
-                repo: Some("homeboy".to_string()),
+                repo: Some("blocks-engine".to_string()),
                 source_ref: Some("feature/two".to_string()),
                 source_commit: None,
                 run_id: None,
@@ -366,95 +324,7 @@ fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
 }
 
 #[test]
-fn same_repository_and_commit_share_prepared_source_cache_across_worktrees() {
-    crate::test_support::with_isolated_home(|_| {
-        let runner_root = tempfile::tempdir().expect("runner root");
-        create_local_runner("lab-local-prepared-cache-worktree", runner_root.path());
-        let source = git_source(
-            "homeboy@prepared-cache-worktree",
-            "fix/prepared-cache",
-            "source\n",
-        );
-        git(
-            source.path(),
-            &[
-                "remote",
-                "add",
-                "origin",
-                "https://example.test/prepared-cache-worktree.git",
-            ],
-        );
-        // A second wave child at the identical commit, materializing from an
-        // independent worktree of the same repository rather than the first
-        // child's checkout path.
-        let second_attempt_parent = tempfile::tempdir().expect("second attempt parent");
-        let second_attempt_path = second_attempt_parent.path().join("workspace");
-        git(
-            source.path(),
-            &[
-                "worktree",
-                "add",
-                "--detach",
-                second_attempt_path.to_str().expect("second attempt path"),
-                "HEAD",
-            ],
-        );
-
-        let mut options = sync_options(
-            source.path().display().to_string(),
-            Some("job-one".to_string()),
-        );
-        options.mode = RunnerWorkspaceSyncMode::Git;
-        options.controller_routed_git = true;
-        let (first, _) = sync_workspace(
-            "lab-local-prepared-cache-worktree",
-            options.clone(),
-            &crate::WorkspaceControl::default(),
-        )
-        .expect("first child materializes source");
-        std::fs::write(
-            std::path::Path::new(&first.remote_path).join("dependency-marker"),
-            "hydrated\n",
-        )
-        .expect("simulate dependency hydration");
-        save_prepared_source_cache(
-            "lab-local-prepared-cache-worktree",
-            &first.local_path,
-            &first.remote_path,
-        )
-        .expect("save immutable prepared source");
-
-        options.path = second_attempt_path.display().to_string();
-        options.run_isolation_token = Some("job-two".to_string());
-        let (second, _) = sync_workspace(
-            "lab-local-prepared-cache-worktree",
-            options,
-            &crate::WorkspaceControl::default(),
-        )
-        .expect("second child materializes from its own worktree");
-
-        assert_ne!(first.remote_path, second.remote_path);
-        assert_eq!(
-            second
-                .materialization_plan
-                .actual_materialization_mode
-                .as_deref(),
-            Some("prepared_source_view"),
-            "a sibling worktree of the same repository at the identical commit must reuse \
-             the already-hydrated prepared source instead of hydrating again"
-        );
-        assert!(
-            std::path::Path::new(&second.remote_path)
-                .join("dependency-marker")
-                .is_file(),
-            "the reused view must carry the first child's completed hydration"
-        );
-        make_cache_fixture_writable(&runner_root.path().join("_lab_prepared_sources"));
-    });
-}
-
-#[test]
-fn same_commit_prepared_source_cache_creates_private_job_views() {
+fn same_commit_prepared_source_cache_creates_private_job_views_across_worktrees() {
     crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root");
         create_local_runner("lab-local-prepared-cache", runner_root.path());
@@ -466,6 +336,20 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
                 "add",
                 "origin",
                 "https://example.test/prepared-cache.git",
+            ],
+        );
+        // The second job materializes from an independent worktree of the same
+        // repository at the identical commit, not from the first job's path.
+        let second_attempt_parent = tempfile::tempdir().expect("second attempt parent");
+        let second_attempt_path = second_attempt_parent.path().join("workspace");
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                second_attempt_path.to_str().expect("second attempt path"),
+                "HEAD",
             ],
         );
         let mut options = sync_options(
@@ -496,13 +380,14 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
             .iter()
             .any(|entry| entry.contains("event=created")));
 
+        options.path = second_attempt_path.display().to_string();
         options.run_isolation_token = Some("job-two".to_string());
         let (second, _) = sync_workspace(
             "lab-local-prepared-cache",
             options,
             &crate::WorkspaceControl::default(),
         )
-        .expect("same commit receives private cached view");
+        .expect("same commit from a sibling worktree receives private cached view");
 
         assert_ne!(first.remote_path, second.remote_path);
         assert_eq!(

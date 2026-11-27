@@ -138,7 +138,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lifecycle_contract_covers_fuzz_safe_phases() {
+    fn lifecycle_contract_and_result_use_the_extension_wire_shape() {
         let contract: LifecycleContract = serde_json::from_value(json!({
             "phases": [
                 { "id": "prepare", "phase": "prepare", "extension_hook": "runtime.prepare" },
@@ -155,10 +155,8 @@ mod tests {
         assert_eq!(contract.version, LIFECYCLE_CONTRACT_VERSION);
         assert_eq!(contract.phases.len(), 6);
         assert_eq!(contract.phases[2].phase, LifecyclePhaseKind::Snapshot);
-    }
 
-    #[test]
-    fn lifecycle_result_metadata_serializes_snapshot_refs() {
+        // The result written back carries snapshot refs under their own schema.
         let result = LifecycleResultMetadata {
             schema: LIFECYCLE_RESULT_SCHEMA.to_string(),
             version: LIFECYCLE_CONTRACT_VERSION,

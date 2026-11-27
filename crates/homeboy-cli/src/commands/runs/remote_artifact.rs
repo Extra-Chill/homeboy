@@ -941,48 +941,6 @@ mod tests {
     }
 
     #[test]
-    fn attach_rejects_local_path_outside_allowed_roots() {
-        let _guard = artifact_root_test_lock();
-        with_isolated_home(|home| {
-            let artifact_root = home.path().join("artifacts");
-            homeboy::core::set_artifact_root_override(Some(artifact_root));
-            let workspace = home.path().join("runner-workspace");
-            let outside = home.path().join("outside.txt");
-            fs::create_dir_all(&workspace).expect("workspace");
-            fs::write(&outside, b"outside").expect("outside");
-            runner::create(
-                &format!(
-                    r#"{{"id":"issue-6403-guard","kind":"local","workspace_root":"{}"}}"#,
-                    workspace.display()
-                ),
-                false,
-            )
-            .expect("runner");
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .start_run(NewRunRecord::builder("runner-exec").build())
-                .expect("run");
-
-            let result = attach(
-                &store,
-                RunsArtifactAttachArgs {
-                    run_id: run.id,
-                    runner: "issue-6403-guard".to_string(),
-                    path: outside.display().to_string(),
-                    name: "outside".to_string(),
-                },
-            );
-            let Err(err) = result else {
-                panic!("outside path should fail");
-            };
-
-            assert!(err
-                .to_string()
-                .contains("allowed runner workspace/output root"));
-        });
-    }
-
-    #[test]
     fn managed_runtime_evidence_is_retrievable_while_active_and_after_terminal() {
         let _guard = artifact_root_test_lock();
         with_isolated_home(|home| {
@@ -1255,16 +1213,18 @@ mod tests {
     }
 
     #[test]
-    fn attach_rejects_parent_dir_components() {
+    fn attach_rejects_paths_outside_the_runner_workspace() {
         let _guard = artifact_root_test_lock();
         with_isolated_home(|home| {
             let artifact_root = home.path().join("artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root));
             let workspace = home.path().join("runner-workspace");
+            let outside = home.path().join("outside.txt");
             fs::create_dir_all(&workspace).expect("workspace");
+            fs::write(&outside, b"outside").expect("outside");
             runner::create(
                 &format!(
-                    r#"{{"id":"issue-6403-parent","kind":"local","workspace_root":"{}"}}"#,
+                    r#"{{"id":"issue-6403-guard","kind":"local","workspace_root":"{}"}}"#,
                     workspace.display()
                 ),
                 false,
@@ -1275,20 +1235,24 @@ mod tests {
                 .start_run(NewRunRecord::builder("runner-exec").build())
                 .expect("run");
 
-            let result = attach(
-                &store,
-                RunsArtifactAttachArgs {
-                    run_id: run.id,
-                    runner: "issue-6403-parent".to_string(),
-                    path: workspace.join("../outside.txt").display().to_string(),
-                    name: "outside".to_string(),
-                },
-            );
-            let Err(err) = result else {
-                panic!("parent-dir path should fail");
-            };
-
-            assert!(err.to_string().contains("parent directory"));
+            for (path, expected) in [
+                (outside, "allowed runner workspace/output root"),
+                (workspace.join("../outside.txt"), "parent directory"),
+            ] {
+                let result = attach(
+                    &store,
+                    RunsArtifactAttachArgs {
+                        run_id: run.id.clone(),
+                        runner: "issue-6403-guard".to_string(),
+                        path: path.display().to_string(),
+                        name: "outside".to_string(),
+                    },
+                );
+                let Err(err) = result else {
+                    panic!("{} should fail", path.display());
+                };
+                assert!(err.to_string().contains(expected), "{err}");
+            }
         });
     }
 
@@ -1716,36 +1680,22 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_downloads_requires_runner_for_run_filter() {
-        let result = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
-            mutation: MutationArgs::from(false),
-            runner: None,
-            run_id: Some("run-1".to_string()),
-        });
-        let Err(err) = result else {
-            panic!("missing runner should fail");
-        };
-
-        assert!(err.to_string().contains("--run-id requires --runner"));
-    }
-
-    #[test]
-    fn cleanup_downloads_rejects_path_traversal_filters() {
-        for (runner, run_id) in [
-            (Some("../outside".to_string()), None),
-            (Some("local".to_string()), Some("../outside".to_string())),
-            (Some("/tmp/outside".to_string()), None),
+    fn cleanup_downloads_rejects_invalid_filters() {
+        for (runner, run_id, expected) in [
+            (None, Some("run-1"), "--run-id requires --runner"),
+            (Some("../outside"), None, "single path component"),
+            (Some("local"), Some("../outside"), "single path component"),
+            (Some("/tmp/outside"), None, "single path component"),
         ] {
             let result = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
                 mutation: MutationArgs::from(false),
-                runner,
-                run_id,
+                runner: runner.map(str::to_string),
+                run_id: run_id.map(str::to_string),
             });
             let Err(err) = result else {
-                panic!("path traversal should fail");
+                panic!("{runner:?}/{run_id:?} should fail");
             };
-
-            assert!(err.to_string().contains("single path component"));
+            assert!(err.to_string().contains(expected), "{err}");
         }
     }
 }

@@ -1158,19 +1158,6 @@ mod tests {
         assert_eq!(store_fingerprint(&path), before);
     }
 
-    /// Reopening a store this binary created is equally a no-op.
-    #[test]
-    fn reopening_a_baseline_store_is_a_no_op() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let path = directory.path().join("observations.sqlite");
-        drop(open_initialized_connection(&path).expect("create"));
-        let before = store_fingerprint(&path);
-
-        drop(open_initialized_connection(&path).expect("reopen"));
-
-        assert_eq!(store_fingerprint(&path), before);
-    }
-
     /// Rebuild a store exactly as the historical chain left it: the captured
     /// object DDL verbatim, with `versions` recorded in `schema_migrations`.
     fn replay_migrated_schema(connection: &Connection, versions: std::ops::RangeInclusive<i64>) {

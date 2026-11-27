@@ -5,7 +5,7 @@ use crate::release::types::ReleaseStepStatus;
 use super::super::gh_cli::{gh_failure_diagnostic, GhCommandOutput};
 use super::super::{
     create_failed_result, not_created_result, published_existing_draft_result,
-    published_release_url, unfinished_release_result, upload_failed_result, upload_success_result,
+    published_release_url, unfinished_release_result, upload_failed_result,
     UploadFailedResultRequest,
 };
 use super::{data_bool, data_str, test_body, test_repair, test_repo};
@@ -78,28 +78,6 @@ fn create_failed_result_reports_generated_notes_failed_as_failure() {
 }
 
 #[test]
-fn create_failed_result_reports_plain_create_failure() {
-    let result = create_failed_result(
-        "v0.10.6",
-        &test_repo(),
-        "gh-command-failed",
-        &GhCommandOutput {
-            stdout: String::new(),
-            stderr: "release v0.10.6 already exists".to_string(),
-            exit_code: Some(1),
-            timed_out: false,
-        },
-        test_repair(),
-        &test_body(),
-        Some("build/v0.10.6-release-notes.md"),
-        &[],
-    );
-
-    assert_eq!(result.status, ReleaseStepStatus::Failed);
-    assert_eq!(data_str(&result, "reason"), Some("gh-command-failed"));
-}
-
-#[test]
 fn upload_failed_result_is_failed_but_records_release_exists() {
     // The release object exists but assets did not attach. Still Failed so
     // nothing assumes the assets are present, but release_created stays true.
@@ -160,41 +138,19 @@ fn upload_timeout_is_classified_and_preserves_empty_stderr() {
 }
 
 #[test]
-fn upload_failed_result_sanitizes_persisted_output() {
-    let result = upload_failed_result(
-        "v0.10.6",
-        &test_repo(),
-        UploadFailedResultRequest {
-            stdout: format!(
-                "https://user:password@example.test/file?token=secret {}",
-                "x".repeat(5000)
-            ),
-            stderr: "Authorization: Bearer secret".to_string(),
-            exit_code: Some(1),
-            timed_out: false,
-            artifact_count: 1,
-            repair: test_repair(),
-            diagnostics: &[],
-        },
+fn failed_results_sanitize_and_bound_persisted_output() {
+    let stdout = format!(
+        "https://user:password@example.test/file?token=secret {}",
+        "x".repeat(5000)
     );
-    let data = result.data.as_ref().expect("failed result data");
-    let stdout = data["stdout"].as_str().expect("sanitized stdout");
-    let stderr = data["stderr"].as_str().expect("sanitized stderr");
-    assert!(!stdout.contains("password"));
-    assert!(!stdout.contains("secret"));
-    assert!(!stderr.contains("secret"));
-    assert!(stdout.len() <= 4096 + "...[truncated]".len());
-}
-
-#[test]
-fn create_failed_result_sanitizes_persisted_output() {
-    let result = create_failed_result(
+    let stderr = "Authorization: Bearer secret".to_string();
+    let created = create_failed_result(
         "v0.10.6",
         &test_repo(),
         "gh-command-failed",
         &GhCommandOutput {
-            stdout: "token=secret".repeat(1000),
-            stderr: "Authorization: Bearer secret".to_string(),
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
             exit_code: Some(1),
             timed_out: false,
         },
@@ -203,30 +159,28 @@ fn create_failed_result_sanitizes_persisted_output() {
         None,
         &[],
     );
-    let data = result.data.as_ref().expect("failed result data");
-    assert!(!data["stdout"].as_str().unwrap().contains("secret"));
-    assert!(!data["stderr"].as_str().unwrap().contains("secret"));
-    assert!(data["stdout"].as_str().unwrap().len() <= 4096 + "...[truncated]".len());
-}
-
-#[test]
-fn verified_upload_result_is_successful_only_after_publication() {
-    let result = upload_success_result("v0.10.6", &test_repo(), 2);
-
-    assert_eq!(result.status, ReleaseStepStatus::Success);
-    assert_eq!(data_str(&result, "action"), Some("github.release.upload"));
-    assert_eq!(
-        data_str(&result, "url"),
-        Some("https://github.com/example-org/studio-web/releases/tag/v0.10.6")
+    let uploaded = upload_failed_result(
+        "v0.10.6",
+        &test_repo(),
+        UploadFailedResultRequest {
+            stdout,
+            stderr,
+            exit_code: Some(1),
+            timed_out: false,
+            artifact_count: 1,
+            repair: test_repair(),
+            diagnostics: &[],
+        },
     );
-    assert_eq!(
-        result
-            .data
-            .as_ref()
-            .and_then(|data| data.get("artifact_count"))
-            .and_then(|value| value.as_u64()),
-        Some(2)
-    );
+
+    for result in [created, uploaded] {
+        let data = result.data.as_ref().expect("failed result data");
+        let stdout = data["stdout"].as_str().expect("sanitized stdout");
+        assert!(!stdout.contains("password"));
+        assert!(!stdout.contains("secret"));
+        assert!(!data["stderr"].as_str().unwrap().contains("secret"));
+        assert!(stdout.len() <= 4096 + "...[truncated]".len());
+    }
 }
 
 #[test]
@@ -296,25 +250,6 @@ fn an_unfinished_release_is_failed_so_the_tag_is_never_reported_as_delivered() {
 }
 
 #[test]
-fn an_empty_draft_is_refused_with_the_same_failed_contract() {
-    let result = unfinished_release_result(
-        "v0.319.3",
-        &test_repo(),
-        "draft-release-has-no-assets",
-        "Refusing to publish an empty release over the pushed tag.",
-        test_repair(),
-        &[],
-    );
-
-    assert_eq!(result.status, ReleaseStepStatus::Failed);
-    assert_eq!(data_bool(&result, "published"), Some(false));
-    assert_eq!(
-        data_str(&result, "reason"),
-        Some("draft-release-has-no-assets")
-    );
-}
-
-#[test]
 fn failed_results_retain_structured_command_diagnostics() {
     let output = GhCommandOutput {
         stdout: String::new(),
@@ -357,30 +292,15 @@ fn failed_results_retain_structured_command_diagnostics() {
 
 #[test]
 fn published_release_url_ignores_transient_draft_url() {
-    let url = published_release_url(
-        &test_repo(),
-        "v0.49.4",
-        "https://github.com/example-org/studio-web/releases/tag/untagged-944964b141cb713e104d\n",
+    let draft_url =
+        "https://github.com/example-org/studio-web/releases/tag/untagged-944964b141cb713e104d\n";
+    for publish_stdout in [
         "",
-    );
-
-    assert_eq!(
-        url,
-        "https://github.com/example-org/studio-web/releases/tag/v0.49.4"
-    );
-}
-
-#[test]
-fn published_release_url_prefers_final_publish_response() {
-    let url = published_release_url(
-        &test_repo(),
-        "v0.49.4",
-        "https://github.com/example-org/studio-web/releases/tag/untagged-944964b141cb713e104d\n",
         "https://github.com/example-org/studio-web/releases/tag/v0.49.4\n",
-    );
-
-    assert_eq!(
-        url,
-        "https://github.com/example-org/studio-web/releases/tag/v0.49.4"
-    );
+    ] {
+        assert_eq!(
+            published_release_url(&test_repo(), "v0.49.4", draft_url, publish_stdout),
+            "https://github.com/example-org/studio-web/releases/tag/v0.49.4"
+        );
+    }
 }

@@ -956,7 +956,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bench_digest_renders_summary_percentiles() {
+    fn missing_result_artifact_renders_unknown_status() {
         let context = FailureDigestContext {
             output_dir: PathBuf::from("/tmp/missing-homeboy-report-tests"),
             results: Map::from_iter([("bench".to_string(), Value::String("pass".to_string()))]),
@@ -974,31 +974,22 @@ mod tests {
     /// name as a filename. That rendering is a cross-repository contract with
     /// the writers in homeboy-action (`output_stem` in
     /// `apply-differential-gate.py`, `command_result_filename` in
-    /// `generate-failure-digest.sh`), and the two disagreed: the writer emits
-    /// `review-test.json`, the reader asked for `review test.json`, and every
-    /// multi-word command's digest reported `head artifact unavailable` with an
-    /// `os error 2` (#13436).
+    /// `generate-failure-digest.sh`): any character outside `[A-Za-z0-9._-]`
+    /// becomes `-`, leading and trailing `-` are trimmed, and an
+    /// otherwise-empty stem falls back rather than producing `.json` (#13436).
     #[test]
-    fn command_result_stem_matches_the_written_artifact_name() {
-        assert_eq!(command_result_stem("review test"), "review-test");
-        assert_eq!(command_result_stem("review test"), "review-test");
-        assert_eq!(command_result_stem("review lint"), "review-lint");
-        // Single-word commands were already correct and must stay byte-identical.
-        assert_eq!(command_result_stem("test"), "test");
-        assert_eq!(command_result_stem("bench"), "bench");
-    }
-
-    /// Mirrors the writer's rule rather than just its common cases: any
-    /// character outside `[A-Za-z0-9._-]` becomes `-`, leading and trailing
-    /// `-` are trimmed, and an otherwise-empty stem falls back rather than
-    /// producing a dotfile named `.json`.
-    #[test]
-    fn command_result_stem_mirrors_the_writers_full_rule() {
-        assert_eq!(command_result_stem("review/test"), "review-test");
-        assert_eq!(command_result_stem("a.b_c-d"), "a.b_c-d");
-        assert_eq!(command_result_stem("  spaced  "), "spaced");
-        assert_eq!(command_result_stem("   "), "homeboy-output");
-        assert_eq!(command_result_stem(""), "homeboy-output");
+    fn command_result_stem_matches_the_writers_rule() {
+        for (command, stem) in [
+            ("review test", "review-test"),
+            ("review/test", "review-test"),
+            ("bench", "bench"),
+            ("a.b_c-d", "a.b_c-d"),
+            ("  spaced  ", "spaced"),
+            ("   ", "homeboy-output"),
+            ("", "homeboy-output"),
+        ] {
+            assert_eq!(command_result_stem(command), stem, "{command:?}");
+        }
     }
 
     /// The reader must find what the writer wrote. This is the end-to-end

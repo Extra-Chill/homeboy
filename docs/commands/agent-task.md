@@ -85,6 +85,8 @@ opts out.
 
 ## Incomplete Cook drafts
 
+For a green candidate whose agent explicitly declares `completion: incomplete`, use `homeboy agent-task recover <attempt> --publish-partial`. This preserves the recorded form, quotes its remaining scope in a draft PR, files a follow-up on the source task's GitHub tracker, and links the PR and both tracker entries. Status and batch summaries report `succeeded_partial`; the source task is not closed. `--preflight` validates without publishing or filing issues.
+
 Once deterministic gates pass, a missing or failed review form never blocks publication: Cook publishes the gated candidate SHA as a draft, with deterministic task, diff-stat and gate evidence plus the review failure reason. `--publish-incomplete-draft` remains opt-in preservation for candidates that failed their gates.
 
 `agent-task cook --publish-incomplete-draft` opts into preserving a non-empty

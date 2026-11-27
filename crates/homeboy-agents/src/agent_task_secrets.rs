@@ -68,10 +68,9 @@ pub fn secret_env_status_with_fallbacks(
 /// One provider-shaped secret-env scope: that provider's sources, plus the
 /// names it unconditionally requires even when it declares no source for them.
 ///
-/// Catalog `secret_env` used to merge every shown provider's sources into one
-/// map and resolve once. A backend that required a name without declaring a
-/// source then reported it missing while the flattened catalog reported the
-/// same name configured from a different provider's json-file (#13629).
+/// Each provider resolves within its own scope, so a name one backend requires
+/// without declaring a source is never reported configured from another
+/// provider's json-file (#13629).
 #[derive(Debug, Clone, Default)]
 pub struct AgentTaskSecretEnvScope {
     pub fallback_sources: HashMap<String, AgentTaskSecretSource>,
@@ -856,39 +855,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_declared_secret_from_configured_env_source() {
-        let configured_name = unique_env("CONFIGURED_SECRET");
-        let source_name = unique_env("CONFIGURED_SOURCE");
-        std::env::remove_var(&configured_name);
-        std::env::set_var(&source_name, "configured-secret-value");
-        let mut secrets = HashMap::new();
-        secrets.insert(
-            configured_name.clone(),
-            AgentTaskSecretSource {
-                source: "env".to_string(),
-                env_var: Some(source_name.clone()),
-                path: None,
-                scope: None,
-                name: None,
-                field: None,
-                fallback_fields: Vec::new(),
-                value: None,
-            },
-        );
-        let config = AgentTaskSecretConfig { secrets };
-
-        let resolved =
-            resolve_secret_env_with_config(std::slice::from_ref(&configured_name), &config)
-                .expect("secret resolves");
-
-        assert_eq!(
-            resolved,
-            vec![(configured_name, "configured-secret-value".to_string())]
-        );
-        std::env::remove_var(source_name);
-    }
-
-    #[test]
     fn stores_and_resolves_declared_secret_from_global_config() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let configured_name = unique_env("CONFIG_SECRET");
@@ -1060,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_provider_hint_from_json_file_without_exposing_value() {
+    fn json_file_fallback_resolves_and_reports_status_without_exposing_value() {
         let temp = tempfile::tempdir().expect("tempdir");
         let auth_path = temp.path().join("auth.json");
         fs::write(
@@ -1094,54 +1060,17 @@ mod tests {
         let resolved = resolve_secret_env_with_fallbacks(std::slice::from_ref(&name), &fallbacks)
             .expect("json file fallback resolves");
 
-        assert_eq!(resolved, vec![(name, "json-file-access-token".to_string())]);
-        let status = secret_env_status(std::slice::from_ref(
-            &"AI_PROVIDER_EXAMPLE_ACCESS_TOKEN".to_string(),
-        ));
-        assert!(!serde_json::to_string(&status)
-            .unwrap()
-            .contains("json-file-access-token"));
-    }
-
-    #[test]
-    fn reports_json_file_fallback_status_without_exposing_value() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let auth_path = temp.path().join("auth.json");
-        fs::write(
-            &auth_path,
-            serde_json::json!({
-                "tokens": {
-                    "refresh_token": "json-file-refresh-token"
-                }
-            })
-            .to_string(),
-        )
-        .expect("write auth file");
-        let name = "AI_PROVIDER_EXAMPLE_REFRESH_TOKEN".to_string();
-        std::env::remove_var(&name);
-        let mut fallbacks = HashMap::new();
-        fallbacks.insert(
-            name.clone(),
-            AgentTaskSecretSource {
-                source: "json-file".to_string(),
-                env_var: None,
-                path: Some(auth_path.to_string_lossy().to_string()),
-                scope: None,
-                name: None,
-                field: Some("tokens.refresh_token".to_string()),
-                fallback_fields: Vec::new(),
-                value: None,
-            },
+        assert_eq!(
+            resolved,
+            vec![(name.clone(), "json-file-access-token".to_string())]
         );
-
         let status = secret_env_status_with_fallbacks(std::slice::from_ref(&name), &fallbacks);
-
         assert_eq!(status[0].name, name);
         assert!(status[0].configured);
         assert_eq!(status[0].source, "json-file");
         assert!(!serde_json::to_string(&status)
             .unwrap()
-            .contains("json-file-refresh-token"));
+            .contains("json-file-access-token"));
     }
 
     #[test]

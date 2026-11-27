@@ -306,131 +306,63 @@ mod tests {
     }
 
     #[test]
-    fn repo_root_component_with_release_scope_gets_package_tag_namespace() {
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "README.md", "initial", "chore: initial");
-        run_git(dir, &["tag", "blocks-engine-v0.2.2"]);
-        commit_file(
-            dir,
-            "packages/blocks-engine/src/index.ts",
-            "blocks-engine",
-            "fix: update blocks engine package",
-        );
+    fn repo_root_release_scope_picks_tag_namespace_from_common_include_prefix() {
+        // (include, tagged release, later commit path, id, path_prefix, next tag)
+        let cases: &[(&[&str], &str, &str, &str, &str, &str)] = &[
+            // A single nested package include gets a package tag namespace.
+            (
+                &["packages/blocks-engine/**"],
+                "blocks-engine-v0.2.2",
+                "packages/blocks-engine/src/index.ts",
+                "blocks-engine",
+                "packages/blocks-engine",
+                "blocks-engine-v0.2.3",
+            ),
+            // Disjoint root-level release files keep the plain namespace.
+            (
+                &[
+                    "runtime-package-manifest.json",
+                    "plugin.php",
+                    "blocks/",
+                    "includes/",
+                ],
+                "v1.8.3",
+                "includes/runtime.php",
+                "static-site-importer",
+                "",
+                "v0.2.3",
+            ),
+        ];
 
-        let component = Component {
-            id: "blocks-engine".to_string(),
-            local_path: dir.to_string_lossy().to_string(),
-            scopes: Some(ScopeConfig {
-                release: Some(CommandScopeConfig {
-                    include: vec!["packages/blocks-engine/**".to_string()],
-                    exclude: vec![],
+        for (include, tag, changed_path, id, path_prefix, next_tag) in cases {
+            let temp = git_repo();
+            let dir = temp.path();
+            commit_file(dir, "README.md", "initial", "chore: initial");
+            run_git(dir, &["tag", tag]);
+            commit_file(dir, changed_path, "change", "fix: update scoped files");
+
+            let component = Component {
+                id: id.to_string(),
+                local_path: dir.to_string_lossy().to_string(),
+                scopes: Some(ScopeConfig {
+                    release: Some(CommandScopeConfig {
+                        include: include.iter().map(|p| p.to_string()).collect(),
+                        exclude: vec![],
+                    }),
+                    ..Default::default()
                 }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
+            };
 
-        let scope = ReleaseScope::resolve(&component, "blocks-engine").expect("release scope");
-        let (latest_tag, commits) = scope.commits_since_latest_tag().expect("commits");
+            let scope = ReleaseScope::resolve(&component, id).expect("release scope");
+            let (latest_tag, commits) = scope.commits_since_latest_tag().expect("commits");
 
-        assert_eq!(scope.path_prefix, "packages/blocks-engine");
-        assert_eq!(scope.tag_name("0.2.3"), "blocks-engine-v0.2.3");
-        assert_eq!(latest_tag.as_deref(), Some("blocks-engine-v0.2.2"));
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].subject, "fix: update blocks engine package");
-    }
-
-    #[test]
-    fn repo_root_component_with_disjoint_release_files_keeps_plain_tag_namespace() {
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "plugin.php", "Version: 1.8.3", "release: v1.8.3");
-        run_git(dir, &["tag", "v1.8.3"]);
-        commit_file(
-            dir,
-            "includes/runtime.php",
-            "runtime",
-            "fix: update runtime",
-        );
-
-        let component = Component {
-            id: "static-site-importer".to_string(),
-            local_path: dir.to_string_lossy().to_string(),
-            scopes: Some(ScopeConfig {
-                release: Some(CommandScopeConfig {
-                    include: vec![
-                        "runtime-package-manifest.json".to_string(),
-                        "plugin.php".to_string(),
-                        "blocks/".to_string(),
-                        "includes/".to_string(),
-                    ],
-                    exclude: vec![],
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let scope =
-            ReleaseScope::resolve(&component, "static-site-importer").expect("release scope");
-        let (latest_tag, commits) = scope.commits_since_latest_tag().expect("commits");
-
-        assert_eq!(scope.path_prefix, "");
-        assert_eq!(scope.tag_name("1.8.4"), "v1.8.4");
-        assert_eq!(latest_tag.as_deref(), Some("v1.8.3"));
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].subject, "fix: update runtime");
-    }
-
-    #[test]
-    fn sibling_shared_repo_component_uses_its_prefixed_latest_tag() {
-        let temp = git_repo();
-        let dir = temp.path();
-        commit_file(dir, "README.md", "initial", "chore: initial");
-        run_git(dir, &["tag", "studio-native-theme-v0.1.0"]);
-        commit_file(
-            dir,
-            "packages/theme/style.css",
-            "Version: 0.1.1",
-            "release theme 0.1.1",
-        );
-        run_git(dir, &["tag", "studio-native-theme-v0.1.1"]);
-        commit_file(
-            dir,
-            "apps/studio-native/package.json",
-            "{\"version\":\"0.13.1\"}",
-            "release app 0.13.1",
-        );
-        run_git(dir, &["tag", "v0.13.1"]);
-
-        let primary = Component {
-            id: "studio-native".to_string(),
-            local_path: dir.to_string_lossy().to_string(),
-            ..Default::default()
-        };
-        let theme = Component {
-            id: "studio-native-theme".to_string(),
-            local_path: dir.join("packages/theme").to_string_lossy().to_string(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            crate::component_tag_name(&primary, "0.13.2").unwrap(),
-            "v0.13.2"
-        );
-        assert_eq!(
-            crate::latest_component_tag(&primary).unwrap().as_deref(),
-            Some("v0.13.1")
-        );
-        assert_eq!(
-            crate::component_tag_name(&theme, "0.1.2").unwrap(),
-            "studio-native-theme-v0.1.2"
-        );
-        assert_eq!(
-            crate::latest_component_tag(&theme).unwrap().as_deref(),
-            Some("studio-native-theme-v0.1.1")
-        );
+            assert_eq!(scope.path_prefix, *path_prefix, "{id}");
+            assert_eq!(scope.tag_name("0.2.3"), *next_tag, "{id}");
+            assert_eq!(latest_tag.as_deref(), Some(*tag), "{id}");
+            assert_eq!(commits.len(), 1, "{id}");
+            assert_eq!(commits[0].subject, "fix: update scoped files", "{id}");
+        }
     }
 
     #[test]

@@ -81,11 +81,10 @@ pub(super) fn cli_placement_str(placement: homeboy_lab_contract::Placement) -> &
 
 /// Report the resolved execution placement once identity is known.
 ///
-/// Non-preview dispatch previously never reported this at all: an operator
-/// backgrounding a Cook (the common case, since durable identity is reported
-/// before materialization can even start) never saw preview's output and had
-/// no other line telling them a requested Lab placement had silently degraded
-/// to local execution (#14729).
+/// An operator backgrounding a Cook (the common case, since durable identity is
+/// reported before materialization can even start) never sees preview's output,
+/// so this is the line that tells them a requested Lab placement degraded to
+/// local execution (#14729).
 pub(crate) fn announce_resolved_execution_placement() {
     if let Some(line) = resolved_execution_placement_line() {
         eprintln!("{line}");

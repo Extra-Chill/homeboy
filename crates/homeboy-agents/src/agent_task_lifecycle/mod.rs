@@ -86,7 +86,10 @@ pub use control_plane_identities::{
 pub(crate) use cook_admission_phase::handoff_materialized;
 pub use cook_admission_phase::CookAdmissionPhase;
 pub use cook_effects::*;
-pub use cook_run_state::{legal_actions, CookRunEvent, CookRunPhase, CookRunState, CookRunStatus};
+pub use cook_run_state::{
+    legal_actions, live_gate_owner, CookRunEvent, CookRunPhase, CookRunState, CookRunStatus,
+    LiveGateOwner, LIVE_GATE_HEARTBEAT_WINDOW_SECONDS,
+};
 pub use durable_progress::record_promotion_progress_in_store;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

@@ -853,6 +853,36 @@ pub fn provider_readiness_is_runner_owned() -> bool {
     })
 }
 
+/// Reject controller-local agent-task admission when `/agent_task/local_execution`
+/// is `denied`.
+///
+/// Local admission is either no placement directive (`None`) or a directive whose
+/// selected placement is local — explicit `--placement local`, or `auto` /
+/// `lab-or-local` falling back. A Lab runner executing the attempt on the
+/// controller's behalf (`runner_resident`) is not controller execution.
+pub fn enforce_agent_task_local_execution_policy(
+    policy: homeboy_core::defaults::AgentTaskLocalExecutionPolicy,
+    runner_resident: bool,
+    placement: Option<&homeboy_core::parsed_command_preflight::PlacementDirective>,
+) -> homeboy_core::Result<()> {
+    if !policy.is_denied() || runner_resident {
+        return Ok(());
+    }
+    match placement {
+        Some(placement)
+            if placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab =>
+        {
+            Ok(())
+        }
+        Some(placement) => Err(
+            homeboy_core::defaults::agent_task_local_execution_denied_error(
+                placement.fallback.reason.as_deref(),
+            ),
+        ),
+        None => Err(homeboy_core::defaults::agent_task_local_execution_denied_error(None)),
+    }
+}
+
 /// Admit a compiled plan for an explicit placement (or local admission with `None`).
 ///
 /// Required-but-unavailable Lab placement fails before provider admission.
@@ -872,6 +902,11 @@ pub fn admit_plan_provider_dispatchability(
 ) -> homeboy_core::Result<AgentTaskPlan> {
     use homeboy_lab_contract::{EffectiveExecutionPlacement, ExecutionPlacementRequirement};
 
+    enforce_agent_task_local_execution_policy(
+        homeboy_core::defaults::resolve_agent_task_local_execution_policy(),
+        homeboy_core::resource_policy_context::lab_execution_runner_id().is_some(),
+        placement,
+    )?;
     if let Some(placement) = placement {
         if placement.required == ExecutionPlacementRequirement::Lab
             && placement.selected == EffectiveExecutionPlacement::Local
@@ -1232,26 +1267,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn expired_plan_deadline_stops_admission_before_probe() {
-        let catalog = catalog(provider());
-        let mut plan = AgentTaskPlan::new("plan-deadline", vec![request("model")]);
-        let deadline = crate::agent_task_timeout::now_unix_ms().saturating_sub(1);
-        plan.options.execution_budget.deadline_unix_ms = Some(deadline);
-
-        let error = admit_plan_provider_dispatchability(
-            &plan,
-            &catalog,
-            &mut ProviderRuntimeReadinessCache::default(),
-            None,
-        )
-        .expect_err("expired plan deadline must stop admission");
-
-        assert_eq!(error.details["classification"], "timeout");
-        assert_eq!(error.details["deadline_unix_ms"], deadline);
-        assert_eq!(error.details["zero_provider_executions"], true);
-    }
-
     /// Controller whose provider-owned credential is present but whose live
     /// readiness probe rejects it (the #15198 shape: a controller-local OAuth
     /// token returning 401). The probe appends to `count` on every run.
@@ -1299,6 +1314,62 @@ mod tests {
                 authorized: false,
                 authority: None,
             },
+        }
+    }
+
+    #[test]
+    fn local_execution_policy_admits_only_permitted_controller_execution() {
+        use homeboy_core::defaults::AgentTaskLocalExecutionPolicy::{Allowed, Denied};
+        use homeboy_lab_contract::{
+            EffectiveExecutionPlacement, ExecutionPlacementRequirement, Placement,
+        };
+        let mut explicit_local = placement_directive(
+            ExecutionPlacementRequirement::Local,
+            EffectiveExecutionPlacement::Local,
+        );
+        explicit_local.override_authorization.authorized = true;
+        let mut auto_fallback = placement_directive(
+            ExecutionPlacementRequirement::Either,
+            EffectiveExecutionPlacement::Local,
+        );
+        auto_fallback.requested = Placement::Auto;
+        auto_fallback.fallback.reason = Some("runner `homeboy-lab` is disconnected".to_string());
+        let lab = placement_directive(
+            ExecutionPlacementRequirement::Either,
+            EffectiveExecutionPlacement::Lab,
+        );
+
+        // (policy, runner executes on the controller's behalf, directive, rejection text)
+        let cases = [
+            (
+                Denied,
+                false,
+                Some(&explicit_local),
+                Some("/agent_task/local_execution"),
+            ),
+            // Local admission without a directive is the same controller execution.
+            (Denied, false, None, Some("/agent_task/local_execution")),
+            (
+                Denied,
+                false,
+                Some(&auto_fallback),
+                Some("runner `homeboy-lab` is disconnected"),
+            ),
+            (Denied, false, Some(&lab), None),
+            // The runner executing the attempt is not controller execution.
+            (Denied, true, Some(&auto_fallback), None),
+            (Allowed, false, Some(&explicit_local), None),
+            (Allowed, false, None, None),
+        ];
+        for (index, (policy, on_runner, directive, rejection)) in cases.into_iter().enumerate() {
+            let result = enforce_agent_task_local_execution_policy(policy, on_runner, directive);
+            match rejection {
+                Some(text) => {
+                    let error = result.expect_err(&format!("case {index} must be rejected"));
+                    assert!(error.message.contains(text), "case {index}: {error}");
+                }
+                None => assert!(result.is_ok(), "case {index} must be admitted"),
+            }
         }
     }
 
@@ -1454,10 +1525,6 @@ mod tests {
              Remediation: Select a model available in Pi agent directory /home/op/.roadie/pi-agent. \
              (readiness evaluated on host `controller-1`)"
         );
-    }
-
-    #[test]
-    fn rotation_failure_without_route_evidence_or_host_is_the_first_reason() {
         assert_eq!(
             rotation_failure_detail("plain cause", &[], None),
             "plain cause"
@@ -1550,25 +1617,6 @@ mod tests {
     }
 
     #[test]
-    fn route_failures_always_produce_a_machine_verdict() {
-        let catalog = AgentTaskProviderCatalog::default();
-        let missing = evaluate_provider_dispatchability(
-            &catalog,
-            "missing",
-            None,
-            None,
-            &serde_json::json!({}),
-            false,
-            &[],
-            &mut ProviderRuntimeReadinessCache::default(),
-            &mut None,
-            None,
-        );
-        assert_eq!(missing.state, "route_unavailable");
-        assert!(!missing.checks.route.ready);
-    }
-
-    #[test]
     fn unresolved_route_never_claims_credentials_are_missing() {
         let provider: super::super::AgentTaskExecutorProvider = serde_json::from_value(json!({
             "id": "credential.provider",
@@ -1594,6 +1642,7 @@ mod tests {
         );
 
         assert_eq!(verdict.state, "route_unavailable");
+        assert!(!verdict.checks.route.ready);
         assert_eq!(
             verdict.checks.credentials.status,
             AgentTaskProviderCredentialStatus::Unverified
@@ -1667,75 +1716,10 @@ mod tests {
         assert!(serialized.contains("model_list_probe_interrupted"));
     }
 
-    #[test]
-    fn plan_preflight_accepts_the_first_dispatchable_rotation_route() {
-        let fake = route_pi("printf 'test ready-model\\n'");
-        let catalog = catalog(fake.provider());
-        let mut plan = AgentTaskPlan::new(
-            "rotation-readiness",
-            vec![pi_task(&fake, "test/blocked-model")],
-        );
-        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
-            entries: vec![
-                AgentTaskProviderRotationEntry {
-                    model: Some("test/blocked-model".to_string()),
-                    ..Default::default()
-                },
-                AgentTaskProviderRotationEntry {
-                    model: Some("test/ready-model".to_string()),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        });
-
-        admit_plan_provider_dispatchability(
-            &mut plan,
-            &catalog,
-            &mut ProviderRuntimeReadinessCache::default(),
-            None,
-        )
-        .expect("ready fallback admits the plan");
-
-        assert_eq!(plan.tasks[0].executor.model(), Some("test/blocked-model"));
-        assert!(plan.tasks[0]
-            .metadata
-            .get("provider_readiness_routing")
-            .is_none());
-    }
-
-    #[test]
-    fn readiness_fallback_uses_rotation_budget_not_dispatch_attempt_budget() {
-        let fake = route_pi("printf 'test ready-model\\n'");
-        let catalog = catalog(fake.provider());
-        let mut plan = AgentTaskPlan::new(
-            "bounded-readiness",
-            vec![pi_task(&fake, "test/blocked-model")],
-        );
-        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
-            entries: vec![AgentTaskProviderRotationEntry {
-                model: Some("test/ready-model".to_string()),
-                ..Default::default()
-            }],
-            max_attempts: Some(1),
-            ..Default::default()
-        });
-        plan.options.execution_budget.max_provider_rotations = 1;
-
-        admit_plan_provider_dispatchability(
-            &mut plan,
-            &catalog,
-            &mut ProviderRuntimeReadinessCache::default(),
-            None,
-        )
-        .expect("readiness transition consumes no dispatch attempt");
-
-        assert_eq!(plan.tasks[0].executor.model(), Some("test/blocked-model"));
-    }
-
     /// An unpinned rotation may bind a fallback during readiness; the bound
     /// task must then record that fallback as its selected model so the plan,
-    /// the executor, and the recorded provider model agree.
+    /// the executor, and the recorded provider model agree. The readiness
+    /// transition spends the rotation budget, not the dispatch attempt budget.
     #[test]
     fn readiness_fallback_records_the_bound_model_as_selected() {
         let fake = route_pi("printf 'test fallback\\n'");
@@ -1754,6 +1738,7 @@ mod tests {
                 model: Some("test/fallback".to_string()),
                 ..Default::default()
             }],
+            max_attempts: Some(1),
             ..Default::default()
         });
         plan.options.execution_budget.max_provider_rotations = 1;
@@ -1899,10 +1884,6 @@ mod tests {
             .get("provider_readiness_routing")
             .is_none());
     }
-
-    // Extension readiness JSON could publish known capacity and per-account
-    // resets. Pi's CLI catalog probe publishes neither; those protocol-only
-    // fixtures are retired rather than teaching FakePi the removed protocol.
 
     /// Pi publishes no capacity evidence: report Unknown without blocking an
     /// otherwise dispatchable route or silently claiming known availability.

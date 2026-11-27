@@ -709,23 +709,34 @@ mod tests {
 
     #[test]
     fn code_quality_failure_message_separates_test_findings_from_runner_infra() {
-        let findings = runner_output(1, "FAILURES!\nTests: 3, Assertions: 4, Failures: 1", "");
-        let infra = runner_output(
-            2,
-            "Error: Playground bootstrap helper not found at /tmp/missing",
-            "",
-        );
+        let cases = [
+            (
+                runner_output(1, "FAILURES!\nTests: 3, Assertions: 4, Failures: 1", ""),
+                false,
+                "Tests failed (exit code 1)",
+            ),
+            (
+                runner_output(
+                    2,
+                    "Error: Playground bootstrap helper not found at /tmp/missing",
+                    "",
+                ),
+                true,
+                "Tests runner infrastructure failure (exit code 2)",
+            ),
+            // Core only recognizes ecosystem-agnostic infra markers; ecosystem
+            // signatures belong to the owning extension.
+            (
+                runner_output(1, "test harness infrastructure failure", ""),
+                true,
+                "Tests runner infrastructure failure (exit code 1)",
+            ),
+        ];
 
-        assert!(!is_runner_infrastructure_failure(&findings));
-        assert!(is_runner_infrastructure_failure(&infra));
-        assert_eq!(
-            code_quality_failure_message("Tests", &findings),
-            "Tests failed (exit code 1)"
-        );
-        assert_eq!(
-            code_quality_failure_message("Tests", &infra),
-            "Tests runner infrastructure failure (exit code 2)"
-        );
+        for (output, is_infra, message) in cases {
+            assert_eq!(is_runner_infrastructure_failure(&output), is_infra);
+            assert_eq!(code_quality_failure_message("Tests", &output), message);
+        }
     }
 
     /// A release test gate that executed nothing must not be summarized as a
@@ -736,42 +747,42 @@ mod tests {
     /// gate reported `total: 0` and the release still printed "Tests failed
     /// (exit code 1)", which routed the investigation to the test baseline
     /// instead of the runtime provider that actually failed.
+    /// A release test gate that executed nothing must not be summarized as a
+    /// test failure (homeboy#14426: the runtime provider failed, PHPUnit never
+    /// ran, and "Tests failed" routed the investigation to the test baseline).
+    /// Absent counts (plain `scripts.test` runners) and measured failures keep
+    /// the ordinary wording.
     #[test]
-    fn zero_executed_tests_are_not_summarized_as_a_test_failure() {
-        assert_eq!(
-            self_check_test_failure_message(Some(&TestCounts::new(0, 0, 0, 0)), 1),
-            "Test gate could not execute: test runner reported zero executed tests (exit code 1)"
-        );
+    fn self_check_test_failure_message_distinguishes_unexecuted_suites() {
+        let cases = [
+            (
+                Some(TestCounts::new(0, 0, 0, 0)),
+                "Test gate could not execute: test runner reported zero executed tests (exit code 1)",
+            ),
+            (None, "Tests failed (exit code 1)"),
+            (Some(TestCounts::new(3, 2, 1, 0)), "Tests failed (exit code 1)"),
+        ];
+
+        for (counts, expected) in cases {
+            assert_eq!(
+                self_check_test_failure_message(counts.as_ref(), 1),
+                expected
+            );
+        }
     }
 
     /// Absent counts are the ordinary shape for a plain `scripts.test` shell
     /// runner, so they must keep the original wording. Pinning this stops a
     /// later "unmeasured means it could not execute" generalization from
     /// relabelling every healthy script-based gate.
-    #[test]
-    fn missing_test_counts_keep_the_test_failure_summary() {
-        assert_eq!(
-            self_check_test_failure_message(None, 1),
-            "Tests failed (exit code 1)"
-        );
-    }
-
     /// A measured suite with real failures keeps the original wording, so this
     /// change stays scoped to unmeasured runs.
     #[test]
-    fn measured_test_failures_keep_the_test_failure_summary() {
-        assert_eq!(
-            self_check_test_failure_message(Some(&TestCounts::new(3, 2, 1, 0)), 1),
-            "Tests failed (exit code 1)"
-        );
-    }
-
-    #[test]
-    fn test_validate_lint_quality() {
-        assert!(
-            !validate_lint_quality(&component_without_quality_runners(), "fixture")
-                .expect_passed_with_value(false)
-        );
+    fn quality_gates_pass_without_running_when_no_runner_is_configured() {
+        let component = component_without_quality_runners();
+        assert!(!validate_lint_quality(&component, "fixture").expect_passed_with_value(false));
+        assert!(!validate_test_quality(&component)
+            .expect("missing test runner should not block release"));
     }
 
     #[test]
@@ -830,34 +841,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_test_quality() {
-        assert!(!validate_test_quality(&component_without_quality_runners())
-            .expect("missing test runner should not block release"));
-    }
-
-    #[test]
-    fn validate_lint_quality_runs_component_scripts() {
+    fn quality_gates_run_component_scripts() {
         let dir = tempfile::tempdir().expect("temp dir");
         write_script(
             dir.path(),
             "lint.sh",
             "printf 'release lint script ran\\n'\n",
         );
-
-        let component = script_component(
-            dir.path(),
-            ComponentScriptsConfig {
-                lint: vec!["sh scripts/lint.sh".to_string()],
-                ..Default::default()
-            },
-        );
-
-        assert!(validate_lint_quality(&component, "fixture").expect_passed_with_value(true));
-    }
-
-    #[test]
-    fn validate_test_quality_runs_component_scripts() {
-        let dir = tempfile::tempdir().expect("temp dir");
         write_script(
             dir.path(),
             "test.sh",
@@ -867,11 +857,13 @@ mod tests {
         let component = script_component(
             dir.path(),
             ComponentScriptsConfig {
+                lint: vec!["sh scripts/lint.sh".to_string()],
                 test: vec!["sh scripts/test.sh".to_string()],
                 ..Default::default()
             },
         );
 
+        assert!(validate_lint_quality(&component, "fixture").expect_passed_with_value(true));
         assert!(validate_test_quality(&component).expect("test script should pass"));
     }
 
@@ -881,53 +873,31 @@ mod tests {
             let _guard = test_env_guard();
             let source = tempfile::tempdir().expect("source dir");
             let marker = source.path().join("child-ran");
-            let component = extension_test_component(
-                home.path(),
-                source.path(),
-                &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-            );
-            std::env::remove_var("DECLARED_RELEASE_SECRET");
+            let script = format!("#!/bin/sh\ntouch '{}'\n", marker.display());
 
+            // Static declaration missing.
+            let component = extension_test_component(home.path(), source.path(), &script);
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
             let error = validate_test_quality(&component)
                 .expect_err("release preflight must reject missing secret before spawn");
-
             assert!(error.message.contains("DECLARED_RELEASE_SECRET"));
             assert!(error
                 .details
                 .to_string()
                 .contains("agent-task auth map-env"));
             assert!(!marker.exists(), "release test child must not start");
-        });
-    }
 
-    #[test]
-    fn validate_test_quality_redacts_injected_secret_from_release_evidence() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let _guard = test_env_guard();
-            let source = tempfile::tempdir().expect("source dir");
-            let marker = source.path().join("child-ran");
-            let component = extension_test_component(
-                home.path(),
-                source.path(),
-                &format!(
-                    "#!/bin/sh\ntouch '{}'\nprintf 'received=%s\\n' \"$DECLARED_RELEASE_SECRET\" >&2\nexit 1\n",
-                    marker.display()
-                ),
-            );
-            std::env::set_var("DECLARED_RELEASE_SECRET", "release-fixture-secret");
-
+            // Static present, matching conditional projection missing.
+            let component =
+                conditional_extension_test_component(home.path(), source.path(), &script);
+            std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
+            std::env::remove_var("PROJECTED_RELEASE_SECRET");
             let error = validate_test_quality(&component)
-                .expect_err("fixture child intentionally fails after injection");
+                .expect_err("missing conditional secret blocks release child");
             std::env::remove_var("DECLARED_RELEASE_SECRET");
-
-            assert!(marker.exists(), "release test child received declared env");
-            let rendered = format!("{}\n{}", error, error.details);
-            assert!(rendered.contains("[REDACTED]"));
-            assert!(!rendered.contains("release-fixture-secret"));
-            assert!(!error.details["command_evidence"]["command"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("release-fixture-secret"));
+            assert!(error.message.contains("PROJECTED_RELEASE_SECRET"));
+            assert!(!error.to_string().contains("available-static-secret"));
+            assert!(!marker.exists(), "release test child must not start");
         });
     }
 
@@ -956,30 +926,10 @@ mod tests {
             assert!(rendered.contains("[REDACTED]"));
             assert!(!rendered.contains("static-release-secret"));
             assert!(!rendered.contains("projected-release-secret"));
-        });
-    }
-
-    #[test]
-    fn validate_test_quality_missing_conditional_secret_fails_before_spawn() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let _guard = test_env_guard();
-            let source = tempfile::tempdir().expect("source dir");
-            let marker = source.path().join("conditional-child-ran");
-            let component = conditional_extension_test_component(
-                home.path(),
-                source.path(),
-                &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
-            );
-            std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
-            std::env::remove_var("PROJECTED_RELEASE_SECRET");
-
-            let error = validate_test_quality(&component)
-                .expect_err("missing conditional secret blocks release child");
-            std::env::remove_var("DECLARED_RELEASE_SECRET");
-
-            assert!(error.message.contains("PROJECTED_RELEASE_SECRET"));
-            assert!(!error.to_string().contains("available-static-secret"));
-            assert!(!marker.exists());
+            assert!(!error.details["command_evidence"]["command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("static-release-secret"));
         });
     }
 
@@ -1253,65 +1203,36 @@ mod tests {
     }
 
     #[test]
-    fn validate_lint_quality_fails_failing_component_script() {
-        // A self-check lint that exits 1 with a plain failure message (no infra
-        // markers) is a genuine lint failure — the release hard-blocks.
-        let dir = tempfile::tempdir().expect("temp dir");
-        write_script(
-            dir.path(),
-            "lint.sh",
-            "printf 'lint failed\\n' >&2\nexit 1\n",
-        );
+    fn validate_lint_quality_blocks_failing_component_script() {
+        // Plain failures, missing harness files, and high exit codes are all
+        // genuine lint failures — the release hard-blocks.
+        let cases = [
+            (
+                "printf 'lint failed\\n' >&2\nexit 1\n",
+                "Lint failed (exit code 1)",
+            ),
+            (
+                "printf 'runner-steps.sh: No such file or directory\\n' >&2\nexit 1\n",
+                "Lint failed (exit code 1)",
+            ),
+            ("exit 7\n", "Lint failed (exit code 7)"),
+        ];
 
-        let component = script_component(
-            dir.path(),
-            ComponentScriptsConfig {
-                lint: vec!["sh scripts/lint.sh".to_string()],
-                ..Default::default()
-            },
-        );
+        for (body, expected) in cases {
+            let dir = tempfile::tempdir().expect("temp dir");
+            write_script(dir.path(), "lint.sh", body);
+            let component = script_component(
+                dir.path(),
+                ComponentScriptsConfig {
+                    lint: vec!["sh scripts/lint.sh".to_string()],
+                    ..Default::default()
+                },
+            );
 
-        let err = validate_lint_quality(&component, "fixture").expect_failed();
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.to_string().contains("Lint failed (exit code 1)"));
-    }
-
-    #[test]
-    fn validate_lint_quality_blocks_missing_runner_steps_harness() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        write_script(
-            dir.path(),
-            "lint.sh",
-            "printf 'runner-steps.sh: No such file or directory\\n' >&2\nexit 1\n",
-        );
-
-        let component = script_component(
-            dir.path(),
-            ComponentScriptsConfig {
-                lint: vec!["sh scripts/lint.sh".to_string()],
-                ..Default::default()
-            },
-        );
-
-        let error = validate_lint_quality(&component, "fixture").expect_failed();
-        assert!(error.to_string().contains("Lint failed (exit code 1)"));
-    }
-
-    #[test]
-    fn validate_lint_quality_blocks_high_exit_code() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        write_script(dir.path(), "lint.sh", "exit 7\n");
-
-        let component = script_component(
-            dir.path(),
-            ComponentScriptsConfig {
-                lint: vec!["sh scripts/lint.sh".to_string()],
-                ..Default::default()
-            },
-        );
-
-        let error = validate_lint_quality(&component, "fixture").expect_failed();
-        assert!(error.to_string().contains("Lint failed (exit code 7)"));
+            let err = validate_lint_quality(&component, "fixture").expect_failed();
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.to_string().contains(expected), "{body}: {err}");
+        }
     }
 
     #[test]
@@ -1468,91 +1389,34 @@ exit 1
     }
 
     #[test]
-    fn lint_failure_recommends_scoped_skip_checks_lint() {
-        // #9641: a failing lint gate must recommend the narrowest bypass
-        // (--skip-checks=lint), state which gates stay enabled, and present the
-        // bare --skip-checks only as an explicit last resort.
-        let hints = super::scoped_skip_guidance("lint");
-
-        let scoped = hints
-            .iter()
-            .find(|h| h.contains("--skip-checks=lint"))
-            .expect("lint failure must recommend --skip-checks=lint");
-        assert!(
-            scoped.contains("keeps test enabled"),
-            "scoped hint must name the gates that stay enabled: {scoped}"
-        );
-        let last_resort = hints
-            .iter()
-            .find(|h| h.contains("Last resort"))
-            .expect("bare --skip-checks must be flagged as a last resort");
-        assert!(
-            last_resort.contains("disables ALL"),
-            "bare --skip-checks must warn it disables all gates: {last_resort}"
-        );
-        // The last-resort broad bypass must appear after the scoped one.
-        let scoped_idx = hints.iter().position(|h| h == scoped).unwrap();
-        let broad_idx = hints.iter().position(|h| h == last_resort).unwrap();
-        assert!(
-            scoped_idx < broad_idx,
-            "scoped bypass must be recommended before the broad last resort"
-        );
-    }
-
-    #[test]
-    fn test_failure_recommends_scoped_skip_checks_test() {
-        let hints = super::scoped_skip_guidance("test");
-        let scoped = hints
-            .iter()
-            .find(|h| h.contains("--skip-checks=test"))
-            .expect("test failure must recommend --skip-checks=test");
-        assert!(
-            scoped.contains("keeps lint enabled"),
-            "scoped hint must name the gates that stay enabled: {scoped}"
-        );
-    }
-
-    #[test]
-    fn unknown_gate_falls_back_to_generic_scoped_guidance() {
-        let hints = super::scoped_skip_guidance("mystery");
-        assert!(
-            hints
+    fn quality_failure_recommends_scoped_skip_checks_before_broad_bypass() {
+        // #9641: a failing gate must recommend the narrowest bypass, state which
+        // gates stay enabled, and present bare --skip-checks only as a last resort.
+        for (gate, scoped_flag, keeps) in [
+            ("lint", "--skip-checks=lint", Some("keeps test enabled")),
+            ("test", "--skip-checks=test", Some("keeps lint enabled")),
+            ("mystery", "--skip-checks=<lint|test>", None),
+        ] {
+            let hints = super::scoped_skip_guidance(gate);
+            let scoped_idx = hints
                 .iter()
-                .any(|h| h.contains("--skip-checks=<lint|test>")),
-            "unknown gate should still steer toward a scoped bypass: {hints:?}"
-        );
-        assert!(
-            hints.iter().any(|h| h.contains("Last resort")),
-            "unknown gate should still flag bare --skip-checks as a last resort: {hints:?}"
-        );
-    }
+                .position(|h| h.contains(scoped_flag))
+                .unwrap_or_else(|| panic!("{gate} must recommend {scoped_flag}: {hints:?}"));
+            if let Some(keeps) = keeps {
+                assert!(hints[scoped_idx].contains(keeps), "{hints:?}");
+            }
+            let broad_idx = hints
+                .iter()
+                .position(|h| h.contains("Last resort"))
+                .expect("bare --skip-checks must be flagged as a last resort");
+            assert!(hints[broad_idx].contains("disables ALL"), "{hints:?}");
+            assert!(scoped_idx < broad_idx, "{hints:?}");
+        }
 
-    #[test]
-    fn quality_error_tried_hints_prefer_scoped_bypass() {
-        // The full error hint list (not just the helper) must carry the scoped
-        // command and flag the broad bypass as a last resort.
+        // The structured error carries the same guidance.
         let err = super::quality_error("lint", "Lint failed (exit code 1)".to_string());
         let rendered = format!("{:?}", err);
-        assert!(
-            rendered.contains("--skip-checks=lint"),
-            "error tried hints must include the scoped bypass: {rendered}"
-        );
-        assert!(
-            rendered.contains("Last resort"),
-            "error tried hints must flag bare --skip-checks as a last resort: {rendered}"
-        );
-    }
-
-    #[test]
-    fn code_quality_failure_message_detects_generic_infra_marker_at_exit_one() {
-        // Core only recognizes ecosystem-agnostic infra markers. Ecosystem-specific
-        // failure signatures are detected by the owning extension, not here.
-        let output = runner_output(1, "test harness infrastructure failure", "");
-
-        assert!(is_runner_infrastructure_failure(&output));
-        assert_eq!(
-            code_quality_failure_message("Tests", &output),
-            "Tests runner infrastructure failure (exit code 1)"
-        );
+        assert!(rendered.contains("--skip-checks=lint"), "{rendered}");
+        assert!(rendered.contains("Last resort"), "{rendered}");
     }
 }

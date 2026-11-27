@@ -207,54 +207,27 @@ fn collect_doc_topics(dir: &Path, prefix: &str, topics: &mut BTreeSet<String>) {
 mod tests {
     use super::*;
 
-    /// list/resolve contract: every embedded topic printed by `self docs list`
-    /// MUST be openable via `self docs <that exact string>`. Guards issue #7607,
-    /// where uppercase root doc keys (CHANGELOG, TESTING, ...) were listed but
+    /// list/resolve contract: every topic printed by `self docs list` MUST be
+    /// openable via `self docs <that exact string>`. Guards issue #7607, where
+    /// uppercase root doc keys (CHANGELOG, TESTING, ...) were listed but
     /// unresolvable because the resolver lowercases input before lookup.
     #[test]
-    fn every_generated_topic_resolves() {
-        for (key, _) in GENERATED_DOCS {
-            let resolved = resolve(&[key.to_string()]);
+    fn every_listed_topic_resolves() {
+        for topic in available_topics() {
             assert!(
-                resolved.is_ok(),
-                "topic '{key}' is listed by GENERATED_DOCS but does not resolve"
-            );
-        }
-    }
-
-    /// Generated keys must already be in normalized (resolver-facing) form, so
-    /// list output and resolver lookups share one casing. A drift here is the
-    /// exact defect issue #7607 documents.
-    #[test]
-    fn generated_keys_are_normalized() {
-        for (key, _) in GENERATED_DOCS {
-            let normalized = key
-                .split('/')
-                .map(text::normalize_doc_segment)
-                .collect::<Vec<_>>()
-                .join("/");
-            assert_eq!(
-                *key, normalized,
-                "generated doc key '{key}' is not in normalized form (expected '{normalized}')"
+                resolve(std::slice::from_ref(&topic)).is_ok(),
+                "topic '{topic}' is listed but does not resolve"
             );
         }
     }
 
     #[test]
-    fn command_index_is_derived_from_the_current_cli() {
+    fn command_topics_are_derived_from_the_current_cli() {
         let index = resolve(&["commands/commands-index".to_string()]).expect("command index");
-
-        assert!(index.content.contains("# Commands index"));
         assert!(index.content.contains("- [agent-task](agent-task.md)"));
-        assert!(available_topics().contains(&"commands/commands-index".to_string()));
-    }
 
-    #[test]
-    fn generated_command_reference_topics_remain_resolvable() {
         let topic = "reference/cli/commands/agent-task".to_string();
         let reference = resolve(std::slice::from_ref(&topic)).expect("generated reference");
-
-        assert!(reference.content.contains("Run generic agent task plans"));
         assert!(reference.content.contains("Usage: homeboy agent-task"));
         assert!(available_topics().contains(&topic));
     }

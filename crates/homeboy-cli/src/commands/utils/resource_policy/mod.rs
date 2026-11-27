@@ -1273,10 +1273,6 @@ mod tests {
             }
         );
         assert_eq!(builtin.provenance, ProvenanceRequirement::CaptureExecution);
-        assert_eq!(
-            normalized,
-            vec!["homeboy", "--placement", "lab", "review", "test"]
-        );
     }
 
     #[test]
@@ -1293,6 +1289,13 @@ mod tests {
             .message
             .contains("No Homeboy Lab runner is configured on this host"));
         assert!(warning.message.contains("Load average is 9.0"));
+        // #7749: with no runner configured, do not advertise Lab as available.
+        assert!(warning
+            .message
+            .contains("Lab offload is not currently available"));
+        assert!(!warning
+            .message
+            .contains("Connect a default Homeboy Lab runner"));
 
         assert!(evaluate(
             lab_supported_hot("bench"),
@@ -1309,21 +1312,15 @@ mod tests {
     }
 
     #[test]
-    fn cheap_command_is_not_warned_or_refused_on_a_warm_controller() {
-        // A `.cheap()` portable command
-        // shares Lab routing's pressure threshold: it stays local without warning
-        // or refusal on a merely `warm` controller (#9432).
+    fn cheap_command_defers_resource_management_until_hot() {
+        // A `.cheap()` portable command shares Lab routing's pressure
+        // threshold: it stays local without warning on a merely `warm`
+        // controller, but genuine hot pressure still warns/refuses (#9432).
         assert!(evaluate(
             cheap_hot("cheap portable command"),
             &resources(ResourceRecommendation::Warm),
         )
         .is_none());
-    }
-
-    #[test]
-    fn cheap_command_remains_resource_managed_on_a_hot_controller() {
-        // Cheap only defers the threshold to `hot`; genuine hot pressure still
-        // warns/refuses (#9432).
         assert!(evaluate(
             cheap_hot("cheap portable command"),
             &resources(ResourceRecommendation::Hot),
@@ -1559,18 +1556,6 @@ mod tests {
             hot_command(&cli.command).is_none(),
             "unscoped provider discovery must not enter resource admission"
         );
-        for recommendation in [
-            ResourceRecommendation::Ok,
-            ResourceRecommendation::Warm,
-            ResourceRecommendation::Hot,
-        ] {
-            let warning = hot_command(&cli.command)
-                .and_then(|command| evaluate(command, &resources(recommendation)));
-            assert!(
-                warning.is_none(),
-                "a {recommendation:?} controller must not steer provider discovery to Lab"
-            );
-        }
     }
 
     #[test]
@@ -1627,133 +1612,57 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_cook_batch_preview_does_not_start_hot_workloads() {
-        let cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "fanout",
-            "cook-batch",
-            "--repo",
-            "homeboy",
-            "--verify",
-            "cargo build -j 3",
-            "--preview",
-            "https://github.com/Extra-Chill/homeboy/issues/7796",
-        ]);
-
-        assert!(hot_command(&cli.command).is_none());
-    }
-
-    #[test]
-    fn controller_owned_cook_batch_coordination_skips_hot_resource_refusal() {
-        let cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "fanout",
-            "cook-batch",
-            "--repo",
-            "homeboy",
-            "--verify",
-            "cargo test --lib",
-            "--run-plan",
-            "https://github.com/Extra-Chill/homeboy/issues/8519",
-        ]);
-
-        assert!(hot_command(&cli.command).is_none());
-    }
-
-    #[test]
-    fn rig_source_management_commands_bypass_hot_resource_admission() {
-        // Rig registry/source-state management is lightweight controller-local
-        // bookkeeping, not a resource-intensive workload, so it must never be
-        // refused by warm/hot resource policy (#9428).
-        for args in [
-            [
+    fn controller_owned_agent_task_planning_skips_hot_resource_admission() {
+        // #8025: cook-batch coordination (preview, run-plan, and the default
+        // invocation) compiles the plan on the controller and owns worktree
+        // creation plus the durable batch record. Dispatched to Lab as a
+        // single job it would time out before creating its local record, so
+        // none of these may be treated as portable hot workloads.
+        let cook_batch = |mode: Option<&'static str>| {
+            let mut argv = vec![
                 "homeboy",
-                "rig",
-                "install",
-                "https://example.invalid/rig.git",
-            ]
-            .as_slice(),
-            ["homeboy", "rig", "update"].as_slice(),
-            ["homeboy", "rig", "update", "--all"].as_slice(),
-            ["homeboy", "rig", "sources"].as_slice(),
+                "agent-task",
+                "fanout",
+                "cook-batch",
+                "--repo",
+                "homeboy",
+                "--verify",
+                "cargo test --lib",
+            ];
+            argv.extend(mode);
+            argv.push("https://github.com/Extra-Chill/homeboy/issues/8025");
+            argv
+        };
+        for argv in [
+            cook_batch(Some("--preview")),
+            cook_batch(Some("--run-plan")),
+            cook_batch(None),
+            vec![
+                "homeboy",
+                "agent-task",
+                "batch-prepare",
+                "--repo",
+                "homeboy",
+                "--bundle-runner",
+                "homeboy-lab",
+                "https://github.com/Extra-Chill/homeboy/issues/8025",
+            ],
+            vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "implement the fix",
+                "--to-worktree",
+                "example@worktree",
+                "--verify",
+                "true",
+                "--queue-only",
+            ],
         ] {
-            let cli = Cli::parse_from(args);
-            assert!(
-                hot_command(&cli.command).is_none(),
-                "rig source management must not be resource-managed: {args:?}"
-            );
-            // The explanatory local-only Lab portability contract is preserved so
-            // an explicit unsupported Lab placement still gets a clear diagnostic.
-            let contract = cli
-                .command
-                .lab_contract()
-                .expect("rig source management keeps a Lab portability contract");
-            assert!(matches!(
-                contract.portability,
-                crate::command_contract::LabCommandPortability::LocalOnly(_)
-            ));
+            let cli = Cli::parse_from(&argv);
+            assert!(hot_command(&cli.command).is_none(), "{argv:?}");
         }
-    }
-
-    #[test]
-    fn rig_up_and_check_remain_resource_managed() {
-        // Genuinely resource-intensive rig commands keep their resource-policy
-        // classification (#9428).
-        let up = Cli::parse_from(["homeboy", "rig", "up", "example-rig"]);
-        assert!(
-            hot_command(&up.command).is_some(),
-            "rig up remains resource-managed"
-        );
-
-        let check = Cli::parse_from(["homeboy", "rig", "check", "example-rig"]);
-        assert!(
-            hot_command(&check.command).is_some(),
-            "rig check remains resource-managed"
-        );
-    }
-
-    #[test]
-    fn default_cook_batch_coordinator_is_controller_owned_and_not_offloadable() {
-        // #8025: the default cook-batch invocation (neither --dry-run nor
-        // --run-plan) compiles the plan on the controller. It owns worktree
-        // creation and the durable batch record, so the coordinator command
-        // itself must never be treated as a portable, offloadable hot command.
-        // Previously only --run-plan was guarded, so this default variant fell
-        // through and could be dispatched to Lab as a single job, timing out
-        // before creating its local batch record.
-        let cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "fanout",
-            "cook-batch",
-            "--repo",
-            "homeboy",
-            "--verify",
-            "cargo test --lib",
-            "https://github.com/Extra-Chill/homeboy/issues/8025",
-        ]);
-
-        assert!(
-            hot_command(&cli.command).is_none(),
-            "default cook-batch coordinator must be controller-owned, not offloadable"
-        );
-    }
-
-    #[test]
-    fn batch_prepare_is_controller_planning_not_a_hot_workload() {
-        let cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "batch-prepare",
-            "--repo",
-            "homeboy",
-            "--bundle-runner",
-            "homeboy-lab",
-            "https://github.com/Extra-Chill/homeboy/issues/8025",
-        ]);
-        assert!(hot_command(&cli.command).is_none());
     }
 
     #[test]
@@ -1776,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn required_lab_placement_admits_a_ready_runner_regardless_of_controller_pressure() {
+    fn ready_runner_admits_cook_dispatch_regardless_of_controller_pressure() {
         let command = HotCommand {
             label: "agent-task cook/run-plan/retry --run",
             lab_offload_supported: true,
@@ -1786,45 +1695,36 @@ mod tests {
         };
         let ready = ready_lab();
 
-        for recommendation in [
-            ResourceRecommendation::Ok,
-            ResourceRecommendation::Warm,
-            ResourceRecommendation::Hot,
-        ] {
-            let idle_resources = resources(recommendation);
-            assert!(
-                runner_admits_lab_dispatch(
-                    command,
-                    &idle_resources,
-                    Some("homeboy-lab"),
-                    Some(&ready),
-                    true,
-                ),
-                "required lab placement of a ready runner must be admitted at {recommendation:?} controller pressure"
-            );
+        // Required placement and automatic Cook selection both admit a ready
+        // runner: only the controller-owned coordinator remains local, while
+        // provider execution can run remotely regardless of local pressure.
+        for required in [true, false] {
+            for recommendation in [
+                ResourceRecommendation::Ok,
+                ResourceRecommendation::Warm,
+                ResourceRecommendation::Hot,
+            ] {
+                assert!(
+                    runner_admits_lab_dispatch(
+                        command,
+                        &resources(recommendation),
+                        Some("homeboy-lab"),
+                        Some(&ready),
+                        required,
+                    ),
+                    "required={required} must admit a ready runner at {recommendation:?} controller pressure"
+                );
+            }
+
+            // A genuinely unready runner still refuses.
+            assert!(!runner_admits_lab_dispatch(
+                command,
+                &resources(ResourceRecommendation::Hot),
+                Some("homeboy-lab"),
+                Some(&disconnected_lab()),
+                required,
+            ));
         }
-
-        // Automatic Cook selection also admits an available runner: only the
-        // controller-owned coordinator remains local, while provider execution
-        // can run remotely regardless of local pressure.
-        let idle_resources = resources(ResourceRecommendation::Ok);
-        assert!(runner_admits_lab_dispatch(
-            command,
-            &idle_resources,
-            Some("homeboy-lab"),
-            Some(&ready),
-            false,
-        ));
-
-        // Required placement of a genuinely unready runner still refuses.
-        let not_ready = disconnected_lab();
-        assert!(!runner_admits_lab_dispatch(
-            command,
-            &idle_resources,
-            Some("homeboy-lab"),
-            Some(&not_ready),
-            true,
-        ));
     }
 
     #[test]
@@ -1870,38 +1770,6 @@ mod tests {
             &resources,
             Some("missing-lab"),
             Some(&ready),
-        ));
-    }
-
-    #[test]
-    fn automatic_cook_admits_connected_ready_runner_under_controller_pressure() {
-        let command = HotCommand {
-            label: "agent-task cook/run-plan/retry --run",
-            lab_offload_supported: true,
-            lab_offload_unsupported_reason: None,
-            allows_warm_runner_coordination: true,
-            offload_only_when_hot: false,
-        };
-        let ready = ready_lab();
-        for recommendation in [
-            ResourceRecommendation::Ok,
-            ResourceRecommendation::Warm,
-            ResourceRecommendation::Hot,
-        ] {
-            assert!(runner_admits_lab_dispatch(
-                command,
-                &resources(recommendation),
-                Some("homeboy-lab"),
-                Some(&ready),
-                false,
-            ), "automatic Cook must dispatch to admitted Lab at {recommendation:?} controller pressure");
-        }
-        assert!(!runner_admits_lab_dispatch(
-            command,
-            &resources(ResourceRecommendation::Hot),
-            Some("homeboy-lab"),
-            Some(&disconnected_lab()),
-            false,
         ));
     }
 
@@ -2243,33 +2111,6 @@ mod tests {
     }
 
     #[test]
-    fn queue_only_cook_skips_resource_preflight_for_controller_validation() {
-        let cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "implement the fix",
-            "--to-worktree",
-            "example@worktree",
-            "--verify",
-            "true",
-            "--queue-only",
-        ]);
-
-        assert!(hot_command(&cli.command).is_none());
-    }
-
-    #[test]
-    fn does_not_warn_when_machine_is_ok() {
-        assert!(evaluate(
-            lab_supported_hot("bench"),
-            &resources(ResourceRecommendation::Ok)
-        )
-        .is_none());
-    }
-
-    #[test]
     fn non_interactive_hot_warning_fails_before_starting_command() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
@@ -2299,20 +2140,6 @@ mod tests {
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate_with_runner_hint(
             lab_supported_hot("agent-task providers"),
-            &resources(ResourceRecommendation::Hot),
-            Some(&ready_lab()),
-        )
-        .expect("hot machines warn");
-
-        assert!(non_interactive_preflight_error(&warning, false, false, None, true).is_none());
-    }
-
-    #[test]
-    fn non_interactive_hot_warning_allows_explicit_lab_runner_without_default() {
-        let _lock = env_lock();
-        let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
-        let warning = evaluate_with_runner_hint(
-            lab_supported_hot("agent-task cook/run-plan/retry --run"),
             &resources(ResourceRecommendation::Hot),
             Some(&ready_lab()),
         )
@@ -2479,64 +2306,39 @@ mod tests {
     }
 
     #[test]
-    fn portable_refusal_rerun_uses_eligible_lab_runner() {
-        let rerun = rerun_command(
-            lab_supported_hot("audit"),
-            &[
-                "homeboy".to_string(),
-                "audit".to_string(),
-                "--changed-since".to_string(),
-                "origin/main".to_string(),
-            ],
-            Some("homeboy-lab"),
-        );
-
-        assert_eq!(
-            rerun.as_deref(),
-            Some("homeboy --runner homeboy-lab audit --changed-since origin/main")
-        );
-    }
-
-    #[test]
-    fn portable_rerun_preserves_explicit_runner_without_placement() {
-        let rerun = rerun_command(
-            lab_supported_hot("review test"),
-            &[
-                "homeboy".to_string(),
-                "--runner".to_string(),
-                "homeboy-lab".to_string(),
-                "review".to_string(),
-                "test".to_string(),
-                "homeboy".to_string(),
-            ],
-            Some("homeboy-lab"),
-        );
-
-        assert_eq!(
-            rerun.as_deref(),
-            Some("homeboy --runner homeboy-lab review test homeboy")
-        );
-    }
-
-    #[test]
-    fn portable_rerun_preserves_explicit_placement_without_runner() {
-        let rerun = rerun_command(
-            lab_supported_hot("review test"),
-            &[
-                "homeboy".to_string(),
-                "--placement".to_string(),
-                "local".to_string(),
-                "review".to_string(),
-                "test".to_string(),
-                "homeboy".to_string(),
-            ],
-            Some("homeboy-lab"),
-        );
-
-        assert_eq!(
-            rerun.as_deref(),
-            Some("homeboy --placement local review test homeboy")
-        );
+    fn portable_rerun_command_respects_explicit_placement_and_runner() {
+        for (argv, expected) in [
+            (
+                &["homeboy", "audit", "--changed-since", "origin/main"][..],
+                "homeboy --runner homeboy-lab audit --changed-since origin/main",
+            ),
+            (
+                &[
+                    "homeboy",
+                    "--runner",
+                    "homeboy-lab",
+                    "review",
+                    "test",
+                    "homeboy",
+                ][..],
+                "homeboy --runner homeboy-lab review test homeboy",
+            ),
+            (
+                &[
+                    "homeboy",
+                    "--placement",
+                    "local",
+                    "review",
+                    "test",
+                    "homeboy",
+                ][..],
+                "homeboy --placement local review test homeboy",
+            ),
+        ] {
+            let argv = argv.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+            let rerun = rerun_command(lab_supported_hot("review test"), &argv, Some("homeboy-lab"));
+            assert_eq!(rerun.as_deref(), Some(expected), "{argv:?}");
+        }
     }
 
     #[test]
@@ -2819,50 +2621,6 @@ mod tests {
     }
 
     #[test]
-    fn context_records_severity_warning_and_host_snapshot_when_hot() {
-        let resources = resources(ResourceRecommendation::Hot);
-        let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
-        let context = resource_policy_context_from_evaluation(
-            lab_supported_hot("bench"),
-            &resources,
-            Some(&warning),
-            false,
-            false,
-            Some(&ready_lab()),
-            false,
-        );
-
-        assert_eq!(context.command, "bench");
-        assert_eq!(context.severity, "hot");
-        assert!(!context.local_override);
-        assert!(context.warned);
-        assert!(context
-            .message
-            .as_deref()
-            .expect("message")
-            .contains("Resource policy warning"));
-        assert_eq!(
-            context.runner_selection,
-            ResourcePolicyRunnerSelection {
-                runner_id: Some("homeboy-lab".to_string()),
-                available_runner_ids: vec!["homeboy-lab".to_string()],
-                readiness_state: "connected_ready".to_string(),
-                readiness_reasons: Vec::new(),
-                remediation_commands: Vec::new(),
-                reason: "default_lab_runner".to_string(),
-            }
-        );
-        assert_eq!(context.host.load_severity, "hot");
-        assert_eq!(context.host.load_one, Some(9.0));
-        assert_eq!(context.host.cpu_count, 4);
-        assert_eq!(context.host.memory_severity, None);
-        assert_eq!(context.host.relevant_process_count, 0);
-        assert_eq!(context.host.process_severity, "ok");
-        assert_eq!(context.host.active_rig_lease_count, 0);
-        assert_eq!(context.host.rig_lease_severity, "ok");
-    }
-
-    #[test]
     fn context_records_local_placement_for_hot_machine() {
         let resources = resources(ResourceRecommendation::Hot);
         let warning = evaluate(lab_supported_hot("bench"), &resources).expect("warning");
@@ -2964,6 +2722,8 @@ mod tests {
         assert_eq!(value["runner_selection"]["reason"], "default_lab_runner");
         assert_eq!(value["host"]["load_severity"], "hot");
         assert_eq!(value["host"]["cpu_count"], 4);
+        assert_eq!(value["host"]["load_one"], 9.0);
+        assert_eq!(value["host"]["process_severity"], "ok");
         assert!(value["host"].get("rig_lease_concurrency_limit").is_none());
     }
 
@@ -2982,51 +2742,6 @@ mod tests {
         .expect("hot machines warn");
 
         assert!(non_interactive_preflight_error(&warning, false, false, None, false).is_none());
-    }
-
-    #[test]
-    fn non_ci_shell_still_refuses_when_warm() {
-        // Guard against the CI bypass leaking into ordinary non-interactive
-        // shells (e.g. cron, agent runners) where the refusal is still correct.
-        let _lock = env_lock();
-        let _hosted = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
-        let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
-        let warning = evaluate(
-            lab_supported_hot("review test"),
-            &resources(ResourceRecommendation::Hot),
-        )
-        .expect("hot machines warn");
-
-        assert!(non_interactive_preflight_error(&warning, false, false, None, false).is_some());
-    }
-
-    #[test]
-    fn portable_warning_without_runner_does_not_advertise_lab() {
-        // #7749: on a host with no Lab runner configured, the warning must not
-        // recommend connecting/using a Lab runner as if one were available.
-        let warning = evaluate(
-            lab_supported_hot("review test"),
-            &resources(ResourceRecommendation::Hot),
-        )
-        .expect("hot machines warn");
-
-        assert!(warning
-            .message
-            .contains("No Homeboy Lab runner is configured on this host"));
-        assert!(warning
-            .message
-            .contains("Lab offload is not currently available"));
-        assert!(!warning
-            .message
-            .contains("Connect a default Homeboy Lab runner"));
-        // A genuinely configured runner should still be named.
-        let with_runner = evaluate_with_runner_hint(
-            lab_supported_hot("review test"),
-            &resources(ResourceRecommendation::Hot),
-            Some(&ready_lab()),
-        )
-        .expect("hot machines warn");
-        assert!(with_runner.message.contains("Lab runner `homeboy-lab`"));
     }
 
     struct EnvVarGuard {

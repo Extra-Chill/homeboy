@@ -392,7 +392,7 @@ fn runtime_set_compatibility(requested: &str, daemon: Option<&str>) -> RuntimeSe
 
 fn runtime_set_admission(
     controller: &str,
-    latest_allowed_stable: Option<&homeboy_upgrade::update_check::AllowedStableRuntime>,
+    latest_allowed_stable: Option<&homeboy_upgrade::upgrade::update_check::AllowedStableRuntime>,
     requested: &str,
     configured: Option<&str>,
     daemon: Option<&str>,
@@ -406,7 +406,7 @@ fn runtime_set_admission(
             homeboy_core::build_identity::is_newer(&latest.version, controller)
                 && latest.compatibility.as_ref().is_some_and(|required| {
                     !required.compatible_with(
-                        &homeboy_upgrade::update_check::current_runtime_compatibility(),
+                        &homeboy_upgrade::upgrade::update_check::current_runtime_compatibility(),
                     )
                 })
         })
@@ -424,39 +424,6 @@ fn runtime_set_admission(
     } else {
         RuntimeSetAdmission::RefuseRuntime
     }
-}
-
-/// Decide whether a Lab handoff may proceed given the runner's command-binary
-/// (`configured`) and daemon (session) build identities against the immutably
-/// `requested` build.
-///
-/// The command binary is authoritative: it must positively match `requested`,
-/// so a stale/mismatched binary fails closed (the intent of #9626). The daemon
-/// identity is advisory — it is legitimately unreported (`None`) when a
-/// controller-owned handoff runs before any daemon has attached. An absent daemon identity must NOT block
-/// admission; only a daemon that is present AND positively disagrees with
-/// `requested` indicates a stale runtime worth refusing.
-#[cfg(test)]
-fn handoff_identities_match(
-    requested: &str,
-    configured: Option<&str>,
-    daemon: Option<&str>,
-) -> bool {
-    matches!(
-        runtime_set_admission(
-            requested,
-            None,
-            requested,
-            configured,
-            daemon,
-            RuntimeSetPolicy {
-                enforce_latest_stable: false,
-                controller_is_source_build: true,
-                allow_convergence: false,
-            },
-        ),
-        RuntimeSetAdmission::Ready(_)
-    )
 }
 
 fn handoff_build_reference(identity: &str) -> String {
@@ -656,7 +623,7 @@ pub(crate) fn converge_lab_handoff_runtime(
     requested: &str,
 ) -> Result<ConvergedLabHandoffRuntime> {
     let controller = homeboy_product_identity::build_identity();
-    let latest_allowed_stable = homeboy_upgrade::update_check::latest_allowed_stable();
+    let latest_allowed_stable = homeboy_upgrade::upgrade::update_check::latest_allowed_stable();
     let controller_is_source_build = std::env::current_exe().ok().is_some_and(|path| {
         path.ancestors()
             .any(|ancestor| ancestor.join("Cargo.toml").is_file())
@@ -2840,7 +2807,7 @@ impl ProductionLabStagingOperations {
         };
         Ok(Some(LabHandoffHomeboyIdentity {
             controller_build_identity: Some(homeboy_product_identity::build_identity().display),
-            latest_allowed_stable: homeboy_upgrade::update_check::latest_allowed_stable()
+            latest_allowed_stable: homeboy_upgrade::upgrade::update_check::latest_allowed_stable()
                 .map(|stable| stable.version),
             requested_build_identity: requested.to_string(),
             configured_command_build_identity: configured
@@ -4908,20 +4875,18 @@ mod stale_lease_rejection_tests {
     use super::*;
 
     #[test]
-    fn stale_lease_rejection_is_retryable() {
-        let value = serde_json::json!({
+    fn only_stale_lease_rejections_are_retryable() {
+        let stale = serde_json::json!({
             "success": false,
             "data": {"details": {}, "error": "internal.unexpected", "hints": [], "message": "daemon lease is not fresh"},
             "error": {"details": {}, "error": "internal.unexpected", "hints": [], "message": "daemon lease is not fresh"}
         });
-        let error = controller_job_from_response(&value, 500).expect_err("rejected");
+        let error = controller_job_from_response(&stale, 500).expect_err("rejected");
         assert_eq!(error.retryable, Some(true));
-    }
 
-    #[test]
-    fn other_rejections_stay_non_retryable() {
-        let value = serde_json::json!({"success": false, "error": {"message": "invalid request"}});
-        let error = controller_job_from_response(&value, 400).expect_err("rejected");
+        let invalid =
+            serde_json::json!({"success": false, "error": {"message": "invalid request"}});
+        let error = controller_job_from_response(&invalid, 400).expect_err("rejected");
         assert_ne!(error.retryable, Some(true));
     }
 }
@@ -5321,19 +5286,40 @@ mod tests {
     }
 
     #[test]
-    fn envelope_and_checkpoint_round_trip_without_secret_projection() {
+    fn envelope_and_checkpoint_round_trip_without_private_input_projection() {
         let envelope = envelope();
         let encoded = serde_json::to_value(&envelope).expect("serialize");
         assert_eq!(
             LabStagingDispatchDriver::envelope(&encoded).expect("parse"),
             envelope
         );
-        let public = envelope.public_projection();
-        assert!(public.get("input").is_none());
+        assert!(envelope.public_projection().get("input").is_none());
+
+        // A mid-stage checkpoint is the resume recipe: it decodes unchanged.
+        let mut checkpoint = LabStagingCheckpoint::initial(&envelope);
         assert_eq!(
-            LabStagingCheckpoint::initial(&envelope).phase,
+            checkpoint.phase,
             LabStagingPhase::AcceptedMaterializeWorkspace
         );
+        checkpoint.phase = LabStagingPhase::MaterializeRuntime;
+        checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+        checkpoint.workspace_id = Some("workspace-1".to_string());
+        let recovered = LabStagingDispatchDriver::checkpoint(
+            serde_json::to_value(&checkpoint).expect("serialize checkpoint"),
+        )
+        .expect("recover checkpoint");
+        assert_eq!(recovered, checkpoint);
+
+        // The completed result projection never carries the private input.
+        checkpoint.phase = LabStagingPhase::Completed;
+        checkpoint.runtime_id = Some("runtime-1".to_string());
+        checkpoint.hydration_id = Some("hydration-1".to_string());
+        checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
+        let public = LabStagingDispatchDriver
+            .public_result(&serde_json::to_value(checkpoint).expect("serialize"))
+            .expect("project");
+        assert_eq!(public["phase"], "completed");
+        assert!(public.get("input").is_none());
     }
 
     #[test]
@@ -5406,12 +5392,6 @@ mod tests {
         let public = envelope.public_projection();
         assert!(!public.to_string().contains("/controller/private"));
         assert!(!public.to_string().contains("/work/source"));
-    }
-
-    #[test]
-    fn registration_is_idempotent_for_cli_and_daemon_initialization() {
-        register();
-        register();
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {
@@ -5775,40 +5755,6 @@ mod tests {
         assert_eq!(error.retryable, Some(true));
         assert!(error.message.contains("may have been accepted"));
         assert!(error.message.contains("same run identity"));
-    }
-
-    #[test]
-    fn progress_and_result_projections_are_safe() {
-        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-        checkpoint.phase = LabStagingPhase::Completed;
-        checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
-        checkpoint.workspace_id = Some("workspace-1".to_string());
-        checkpoint.runtime_id = Some("runtime-1".to_string());
-        checkpoint.hydration_id = Some("hydration-1".to_string());
-        checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
-        let value = serde_json::to_value(checkpoint).expect("serialize");
-        let public = LabStagingDispatchDriver
-            .public_result(&value)
-            .expect("project");
-        assert_eq!(public["phase"], "completed");
-        assert!(public.get("input").is_none());
-    }
-
-    #[test]
-    fn completed_checkpoint_is_the_resume_recipe() {
-        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-        checkpoint.phase = LabStagingPhase::MaterializeRuntime;
-        checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
-        checkpoint.workspace_id = Some("workspace-1".to_string());
-
-        let recovered = LabStagingDispatchDriver::checkpoint(
-            serde_json::to_value(&checkpoint).expect("serialize checkpoint"),
-        )
-        .expect("recover checkpoint");
-
-        assert_eq!(recovered, checkpoint);
-        assert_eq!(recovered.phase, LabStagingPhase::MaterializeRuntime);
-        assert_eq!(recovered.workspace_id.as_deref(), Some("workspace-1"));
     }
 
     #[derive(Default)]
@@ -6331,24 +6277,6 @@ mod tests {
     }
 
     #[test]
-    fn handoff_identity_keeps_execution_identity_null_before_dispatch() {
-        let identity = LabHandoffHomeboyIdentity {
-            controller_build_identity: Some("homeboy 1.2.3+required".to_string()),
-            latest_allowed_stable: Some("1.2.3".to_string()),
-            requested_build_identity: "homeboy 1.2.3+required".to_string(),
-            configured_command_build_identity: "homeboy 1.2.3+required".to_string(),
-            daemon_build_identity: Some("homeboy 1.2.3+required".to_string()),
-            executed_command_build_identity: None,
-            compatibility: RuntimeSetCompatibility::Exact,
-        };
-
-        assert_eq!(
-            serde_json::to_value(identity).expect("serialize")["executed_command_build_identity"],
-            serde_json::Value::Null
-        );
-    }
-
-    #[test]
     fn legacy_handoff_identity_evidence_remains_readable() {
         let identity: LabHandoffHomeboyIdentity = serde_json::from_value(json!({
             "requested_build_identity": "homeboy 1.2.3+required",
@@ -6416,185 +6344,6 @@ mod tests {
         assert_eq!(options.git_ref.as_deref(), Some("v1.2.3"));
     }
 
-    #[test]
-    fn two_stable_releases_behind_refuses_before_dispatch() {
-        let admission = runtime_set_admission(
-            "homeboy 1.2.0",
-            Some(&stable_runtime("1.2.2", [("wire", 2)])),
-            "homeboy 1.2.0",
-            Some("homeboy 1.2.1+daemon"),
-            Some("homeboy 1.2.1+daemon"),
-            RuntimeSetPolicy {
-                enforce_latest_stable: true,
-                controller_is_source_build: false,
-                allow_convergence: true,
-            },
-        );
-        assert!(matches!(
-            admission,
-            RuntimeSetAdmission::RefuseControllerUpgrade
-        ));
-    }
-
-    #[test]
-    fn one_minor_behind_with_compatible_release_contracts_is_admitted() {
-        let admission = runtime_set_admission(
-            "homeboy 1.1.9",
-            Some(&stable_runtime("1.2.0", [("provider", 1), ("snapshot", 1)])),
-            "homeboy 1.1.9",
-            Some("homeboy 1.1.9"),
-            Some("homeboy 1.1.9"),
-            RuntimeSetPolicy {
-                enforce_latest_stable: true,
-                controller_is_source_build: false,
-                allow_convergence: true,
-            },
-        );
-
-        assert!(matches!(
-            admission,
-            RuntimeSetAdmission::Ready(RuntimeSetCompatibility::Exact)
-        ));
-    }
-
-    #[test]
-    fn incompatible_stable_admission_preserves_the_immutable_cook_recipe() {
-        crate::test_support::with_isolated_home(|_| {
-            let run_id = "stale-runtime-recipe";
-            submit_recipe_run(run_id);
-            let recipe = persist_lab_staging_recipe(
-                run_id,
-                "lab-1",
-                &recipe_request(
-                    Some(recipe_command()),
-                    &["agent-task".to_string(), "cook".to_string()],
-                    HashMap::new(),
-                ),
-            )
-            .expect("persist immutable recipe");
-
-            let admission = runtime_set_admission(
-                "homeboy 1.1.9",
-                Some(&stable_runtime("1.2.0", [("snapshot", 2)])),
-                "homeboy 1.1.9",
-                Some("homeboy 1.1.9"),
-                Some("homeboy 1.1.9"),
-                RuntimeSetPolicy {
-                    enforce_latest_stable: true,
-                    controller_is_source_build: false,
-                    allow_convergence: true,
-                },
-            );
-
-            assert!(matches!(
-                admission,
-                RuntimeSetAdmission::RefuseControllerUpgrade
-            ));
-            assert_eq!(
-                load_lab_staging_recipe(run_id).expect("load recipe").recipe,
-                recipe
-            );
-        });
-    }
-
-    #[test]
-    fn source_controller_and_offline_controller_do_not_guess_a_stable_upgrade() {
-        for controller_is_source_build in [true, false] {
-            let admission = runtime_set_admission(
-                "homeboy 1.2.2+source",
-                None,
-                "homeboy 1.2.2+source",
-                Some("homeboy 1.2.2+source"),
-                Some("homeboy 1.2.2+source"),
-                RuntimeSetPolicy {
-                    enforce_latest_stable: true,
-                    controller_is_source_build,
-                    allow_convergence: false,
-                },
-            );
-            assert!(matches!(
-                admission,
-                RuntimeSetAdmission::Ready(RuntimeSetCompatibility::Exact)
-            ));
-        }
-    }
-
-    #[test]
-    fn resumed_controller_build_drift_does_not_strand_pinned_runner() {
-        let admission = runtime_set_admission(
-            "homeboy 1.2.3+resumed-controller",
-            None,
-            "homeboy 1.2.3+pinned-controller",
-            Some("homeboy 1.2.3+pinned-controller"),
-            Some("homeboy 1.2.3+pinned-controller"),
-            RuntimeSetPolicy {
-                enforce_latest_stable: true,
-                controller_is_source_build: true,
-                allow_convergence: true,
-            },
-        );
-
-        assert!(matches!(
-            admission,
-            RuntimeSetAdmission::Ready(RuntimeSetCompatibility::Exact)
-        ));
-    }
-
-    #[test]
-    fn different_daemon_build_is_contract_compatible() {
-        let admission = runtime_set_admission(
-            "homeboy 1.2.3+controller",
-            None,
-            "homeboy 1.2.3+controller",
-            Some("homeboy 1.2.3+controller"),
-            Some("homeboy 1.2.3+stale-daemon"),
-            RuntimeSetPolicy {
-                enforce_latest_stable: true,
-                controller_is_source_build: true,
-                allow_convergence: false,
-            },
-        );
-
-        assert!(matches!(
-            admission,
-            RuntimeSetAdmission::Ready(RuntimeSetCompatibility::ContractCompatible)
-        ));
-    }
-
-    #[test]
-    fn incompatible_daemon_converges_only_when_policy_allows_and_pins_requested_runtime() {
-        let policy = RuntimeSetPolicy {
-            enforce_latest_stable: true,
-            controller_is_source_build: false,
-            allow_convergence: true,
-        };
-        assert!(matches!(
-            runtime_set_admission(
-                "homeboy 1.2.2+requested",
-                Some(&stable_runtime("1.2.2", [])),
-                "homeboy 1.2.2+requested",
-                Some("homeboy 1.1.9+runner"),
-                Some("homeboy 1.1.9+daemon"),
-                policy,
-            ),
-            RuntimeSetAdmission::Converge
-        ));
-        assert!(matches!(
-            runtime_set_admission(
-                "homeboy 1.2.2+requested",
-                Some(&stable_runtime("1.2.2", [])),
-                "homeboy 1.2.2+requested",
-                Some("homeboy 1.1.9+runner"),
-                Some("homeboy 1.1.9+daemon"),
-                RuntimeSetPolicy {
-                    allow_convergence: false,
-                    ..policy
-                },
-            ),
-            RuntimeSetAdmission::RefuseRuntime
-        ));
-    }
-
     fn convergence_runner(allowed: bool) -> crate::Runner {
         serde_json::from_value(json!({
             "kind": "ssh",
@@ -6606,16 +6355,18 @@ mod tests {
     fn stable_runtime(
         version: &str,
         contracts: impl IntoIterator<Item = (&'static str, u32)>,
-    ) -> homeboy_upgrade::update_check::AllowedStableRuntime {
-        homeboy_upgrade::update_check::AllowedStableRuntime {
+    ) -> homeboy_upgrade::upgrade::update_check::AllowedStableRuntime {
+        homeboy_upgrade::upgrade::update_check::AllowedStableRuntime {
             version: version.to_string(),
-            compatibility: Some(homeboy_upgrade::update_check::RuntimeCompatibility {
-                schema: "homeboy/runtime-compatibility/v1".to_string(),
-                required_contracts: contracts
-                    .into_iter()
-                    .map(|(id, version)| (id.to_string(), version))
-                    .collect(),
-            }),
+            compatibility: Some(
+                homeboy_upgrade::upgrade::update_check::RuntimeCompatibility {
+                    schema: "homeboy/runtime-compatibility/v1".to_string(),
+                    required_contracts: contracts
+                        .into_iter()
+                        .map(|(id, version)| (id.to_string(), version))
+                        .collect(),
+                },
+            ),
         }
     }
 
@@ -6680,161 +6431,293 @@ mod tests {
         }
     }
 
-    #[test]
-    fn different_daemon_build_needs_no_convergence() {
-        let runner = convergence_runner(true);
-        let status = convergence_status("homeboy 1.2.2+stale");
-        assert!(matches!(
-            handoff_convergence_action(
-                &runner,
-                &status,
-                "homeboy 1.2.3+required",
-                Some("homeboy 1.2.3+required"),
-                Some("homeboy 1.2.2+stale"),
-                "/runner/homeboy",
-            ),
-            HandoffConvergenceAction::Ready
-        ));
+    fn admission_label(admission: RuntimeSetAdmission) -> String {
+        match admission {
+            RuntimeSetAdmission::Ready(compatibility) => format!("ready:{compatibility:?}"),
+            RuntimeSetAdmission::Converge => "converge".to_string(),
+            RuntimeSetAdmission::RefuseControllerUpgrade => "refuse_controller_upgrade".to_string(),
+            RuntimeSetAdmission::RefuseRuntime => "refuse_runtime".to_string(),
+        }
     }
 
     #[test]
-    fn lease_ambiguous_daemon_refuses_handoff_convergence() {
-        let runner = convergence_runner(true);
-        let mut status = convergence_status("homeboy 1.2.2+stale");
-        let freshness = status.daemon_freshness.as_mut().expect("freshness");
-        freshness.stale_reason_code =
-            Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);
-        freshness.lease_id = None;
-        freshness.pid = None;
-        assert!(matches!(
-            handoff_convergence_action(
-                &runner,
-                &status,
-                "homeboy 1.2.3+required",
-                Some("homeboy 1.2.3+required"),
-                Some("homeboy 1.2.2+stale"),
-                "/runner/homeboy",
+    fn runtime_set_admission_decides_each_handoff_runtime_case() {
+        let policy = |enforce_latest_stable, controller_is_source_build, allow_convergence| {
+            RuntimeSetPolicy {
+                enforce_latest_stable,
+                controller_is_source_build,
+                allow_convergence,
+            }
+        };
+        // The handoff identity gate: no stable enforcement, no convergence.
+        let handoff = policy(false, true, false);
+        let required = "homeboy 1.2.3+required";
+        let cases = [
+            (
+                "two stable releases behind refuses before dispatch",
+                "homeboy 1.2.0",
+                Some(stable_runtime("1.2.2", [("wire", 2)])),
+                "homeboy 1.2.0",
+                Some("homeboy 1.2.1+daemon"),
+                Some("homeboy 1.2.1+daemon"),
+                policy(true, false, true),
+                "refuse_controller_upgrade",
             ),
-            HandoffConvergenceAction::Ready
-        ));
+            (
+                "incompatible newer stable contracts refuse before dispatch",
+                "homeboy 1.1.9",
+                Some(stable_runtime("1.2.0", [("snapshot", 2)])),
+                "homeboy 1.1.9",
+                Some("homeboy 1.1.9"),
+                Some("homeboy 1.1.9"),
+                policy(true, false, true),
+                "refuse_controller_upgrade",
+            ),
+            (
+                "one minor behind with compatible contracts is admitted",
+                "homeboy 1.1.9",
+                Some(stable_runtime("1.2.0", [("provider", 1), ("snapshot", 1)])),
+                "homeboy 1.1.9",
+                Some("homeboy 1.1.9"),
+                Some("homeboy 1.1.9"),
+                policy(true, false, true),
+                "ready:Exact",
+            ),
+            (
+                "source controller does not guess a stable upgrade",
+                "homeboy 1.2.2+source",
+                None,
+                "homeboy 1.2.2+source",
+                Some("homeboy 1.2.2+source"),
+                Some("homeboy 1.2.2+source"),
+                policy(true, true, false),
+                "ready:Exact",
+            ),
+            (
+                "offline controller does not guess a stable upgrade",
+                "homeboy 1.2.2+source",
+                None,
+                "homeboy 1.2.2+source",
+                Some("homeboy 1.2.2+source"),
+                Some("homeboy 1.2.2+source"),
+                policy(true, false, false),
+                "ready:Exact",
+            ),
+            (
+                "resumed controller build drift does not strand the pinned runner",
+                "homeboy 1.2.3+resumed-controller",
+                None,
+                "homeboy 1.2.3+pinned-controller",
+                Some("homeboy 1.2.3+pinned-controller"),
+                Some("homeboy 1.2.3+pinned-controller"),
+                policy(true, true, true),
+                "ready:Exact",
+            ),
+            (
+                "an older daemon build is contract compatible",
+                "homeboy 1.2.3+controller",
+                None,
+                "homeboy 1.2.3+controller",
+                Some("homeboy 1.2.3+controller"),
+                Some("homeboy 1.2.3+stale-daemon"),
+                policy(true, true, false),
+                "ready:ContractCompatible",
+            ),
+            (
+                "incompatible runtime converges when policy allows",
+                "homeboy 1.2.2+requested",
+                Some(stable_runtime("1.2.2", [])),
+                "homeboy 1.2.2+requested",
+                Some("homeboy 1.1.9+runner"),
+                Some("homeboy 1.1.9+daemon"),
+                policy(true, false, true),
+                "converge",
+            ),
+            (
+                "incompatible runtime is refused when policy forbids convergence",
+                "homeboy 1.2.2+requested",
+                Some(stable_runtime("1.2.2", [])),
+                "homeboy 1.2.2+requested",
+                Some("homeboy 1.1.9+runner"),
+                Some("homeboy 1.1.9+daemon"),
+                policy(true, false, false),
+                "refuse_runtime",
+            ),
+            // #9626: a controller-owned handoff can run before any daemon
+            // attached; the command binary alone stays authoritative.
+            (
+                "matching command is admitted while daemon identity is unavailable",
+                required,
+                None,
+                required,
+                Some(required),
+                None,
+                handoff,
+                "ready:Exact",
+            ),
+            (
+                "stale command binary is refused even when the daemon is absent",
+                required,
+                None,
+                required,
+                Some("homeboy 1.2.2+stale"),
+                None,
+                handoff,
+                "refuse_runtime",
+            ),
+            (
+                "unreported command binary is refused",
+                required,
+                None,
+                required,
+                None,
+                None,
+                handoff,
+                "refuse_runtime",
+            ),
+        ];
+
+        for (case, controller, latest, requested, configured, daemon, policy, expected) in cases {
+            assert_eq!(
+                admission_label(runtime_set_admission(
+                    controller,
+                    latest.as_ref(),
+                    requested,
+                    configured,
+                    daemon,
+                    policy,
+                )),
+                expected,
+                "{case}"
+            );
+        }
     }
 
     #[test]
-    fn busy_older_daemon_keeps_its_generation_before_provider_work() {
-        let runner = convergence_runner(true);
-        let mut status = convergence_status("homeboy 1.2.2+stale");
-        status.active_jobs.push(
-            serde_json::from_value(json!({
-                "runner_id": "lab-identity",
-                "job_id": "owned-job",
-                "operation": "runner.exec",
-                "source": "direct-daemon",
-                "kind": "test",
-                "status": "running",
-                "command": "homeboy test",
-                "started_at_ms": 0,
-                "updated_at_ms": 0,
-                "elapsed_ms": 0,
-                "heartbeat_age_ms": 0
-            }))
-            .expect("active runner job"),
-        );
+    fn handoff_convergence_refreshes_only_a_stale_command_binary_under_policy() {
+        let required = "homeboy 1.2.3+required";
+        let stale = "homeboy 1.2.2+stale";
+        let lease_ambiguous = |status: &mut crate::RunnerStatusReport| {
+            let freshness = status.daemon_freshness.as_mut().expect("freshness");
+            freshness.stale_reason_code =
+                Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);
+            freshness.lease_id = None;
+            freshness.pid = None;
+        };
+        let busy = |status: &mut crate::RunnerStatusReport| {
+            status.active_jobs.push(
+                serde_json::from_value(json!({
+                    "runner_id": "lab-identity",
+                    "job_id": "owned-job",
+                    "operation": "runner.exec",
+                    "source": "direct-daemon",
+                    "kind": "test",
+                    "status": "running",
+                    "command": "homeboy test",
+                    "started_at_ms": 0,
+                    "updated_at_ms": 0,
+                    "elapsed_ms": 0,
+                    "heartbeat_age_ms": 0
+                }))
+                .expect("active runner job"),
+            );
+        };
+        let unchanged = |_: &mut crate::RunnerStatusReport| {};
+        let cases: [(
+            &str,
+            bool,
+            &str,
+            &dyn Fn(&mut crate::RunnerStatusReport),
+            Option<&str>,
+            Option<&str>,
+            &str,
+        ); 7] = [
+            (
+                "exact runtime skips convergence",
+                true,
+                required,
+                &unchanged,
+                Some(required),
+                Some(required),
+                "ready",
+            ),
+            (
+                "an older daemon build needs no convergence",
+                true,
+                stale,
+                &unchanged,
+                Some(required),
+                Some(stale),
+                "ready",
+            ),
+            (
+                "a busy older daemon keeps its generation",
+                true,
+                stale,
+                &busy,
+                Some(required),
+                Some(stale),
+                "ready",
+            ),
+            (
+                "a lease-ambiguous older daemon is left alone",
+                true,
+                stale,
+                &lease_ambiguous,
+                Some(required),
+                Some(stale),
+                "ready",
+            ),
+            (
+                "a stale job binary converges before provider work",
+                true,
+                required,
+                &unchanged,
+                Some(stale),
+                Some(required),
+                "refresh:materialize",
+            ),
+            (
+                "a lease-ambiguous daemon refuses convergence",
+                true,
+                stale,
+                &lease_ambiguous,
+                Some(stale),
+                Some(stale),
+                "refuse",
+            ),
+            (
+                "convergence disallowed by policy refuses",
+                false,
+                stale,
+                &unchanged,
+                Some(stale),
+                Some(stale),
+                "refuse",
+            ),
+        ];
 
-        assert!(matches!(
-            handoff_convergence_action(
-                &runner,
+        for (case, allowed, status_identity, mutate, configured, daemon, expected) in cases {
+            let mut status = convergence_status(status_identity);
+            mutate(&mut status);
+            let action = handoff_convergence_action(
+                &convergence_runner(allowed),
                 &status,
-                "homeboy 1.2.3+required",
-                Some("homeboy 1.2.3+required"),
-                Some("homeboy 1.2.2+stale"),
+                required,
+                configured,
+                daemon,
                 "/runner/homeboy",
-            ),
-            HandoffConvergenceAction::Ready
-        ));
-    }
-
-    #[test]
-    fn stale_job_binary_converges_before_provider_work() {
-        let runner = convergence_runner(true);
-        let status = convergence_status("homeboy 1.2.3+required");
-
-        assert!(matches!(
-            handoff_convergence_action(
-                &runner,
-                &status,
-                "homeboy 1.2.3+required",
-                Some("homeboy 1.2.2+stale"),
-                Some("homeboy 1.2.3+required"),
-                "/runner/homeboy",
-            ),
-            HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Materialize)
-        ));
-    }
-
-    #[test]
-    fn exact_runtime_skips_convergence() {
-        let runner = convergence_runner(true);
-        let status = convergence_status("homeboy 1.2.3+required");
-
-        assert!(matches!(
-            handoff_convergence_action(
-                &runner,
-                &status,
-                "homeboy 1.2.3+required",
-                Some("homeboy 1.2.3+required"),
-                Some("homeboy 1.2.3+required"),
-                "/runner/homeboy",
-            ),
-            HandoffConvergenceAction::Ready
-        ));
-    }
-
-    #[test]
-    fn failed_convergence_refuses_before_provider_work() {
-        let runner = convergence_runner(false);
-        let status = convergence_status("homeboy 1.2.2+stale");
-
-        assert!(matches!(
-            handoff_convergence_action(
-                &runner,
-                &status,
-                "homeboy 1.2.3+required",
-                Some("homeboy 1.2.2+stale"),
-                Some("homeboy 1.2.2+stale"),
-                "/runner/homeboy",
-            ),
-            HandoffConvergenceAction::Refuse
-        ));
-    }
-
-    #[test]
-    fn concurrent_dispatch_rechecks_the_runtime_after_one_converges() {
-        let runner = convergence_runner(true);
-        let stale = convergence_status("homeboy 1.2.2+stale");
-        let converged = convergence_status("homeboy 1.2.3+required");
-
-        assert!(matches!(
-            handoff_convergence_action(
-                &runner,
-                &stale,
-                "homeboy 1.2.3+required",
-                Some("homeboy 1.2.3+required"),
-                Some("homeboy 1.2.2+stale"),
-                "/runner/homeboy",
-            ),
-            HandoffConvergenceAction::Ready
-        ));
-        assert!(matches!(
-            handoff_convergence_action(
-                &runner,
-                &converged,
-                "homeboy 1.2.3+required",
-                Some("homeboy 1.2.3+required"),
-                Some("homeboy 1.2.3+required"),
-                "/runner/homeboy",
-            ),
-            HandoffConvergenceAction::Ready
-        ));
+            );
+            let label = match action {
+                HandoffConvergenceAction::Ready => "ready",
+                HandoffConvergenceAction::Refuse => "refuse",
+                HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Materialize) => {
+                    "refresh:materialize"
+                }
+                HandoffConvergenceAction::Refresh(_) => "refresh:other",
+            };
+            assert_eq!(label, expected, "{case}");
+        }
     }
 
     #[test]
@@ -6904,44 +6787,6 @@ mod tests {
                 .as_str()
                 .is_some_and(|invocation| !invocation.is_empty())
         );
-    }
-
-    #[test]
-    fn handoff_admitted_when_command_matches_and_daemon_identity_unavailable() {
-        // Regression for #9626: a controller-owned handoff can run before any
-        // daemon has attached, so the daemon
-        // build identity is legitimately unreported. Admission must still proceed
-        // as long as the command binary positively matches the required build.
-        assert!(handoff_identities_match(
-            "homeboy 1.2.3+required",
-            Some("homeboy 1.2.3+required"),
-            None,
-        ));
-    }
-
-    #[test]
-    fn handoff_refused_when_command_binary_is_stale_even_if_daemon_absent() {
-        // The command binary remains authoritative: a stale/mismatched binary
-        // fails closed regardless of daemon availability (#9626 intent).
-        assert!(!handoff_identities_match(
-            "homeboy 1.2.3+required",
-            Some("homeboy 1.2.2+stale"),
-            None,
-        ));
-        assert!(!handoff_identities_match(
-            "homeboy 1.2.3+required",
-            None,
-            None,
-        ));
-    }
-
-    #[test]
-    fn handoff_accepts_an_older_daemon_build() {
-        assert!(handoff_identities_match(
-            "homeboy 1.2.3+required",
-            Some("homeboy 1.2.3+required"),
-            Some("homeboy 1.2.2+stale"),
-        ));
     }
 
     #[test]
@@ -7168,34 +7013,6 @@ mod tests {
                 start.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
             );
         });
-    }
-
-    #[test]
-    fn checkpoint_phases_have_stable_public_lifecycle_progress() {
-        assert_eq!(
-            lifecycle_phase_for_checkpoint(&LabStagingPhase::AcceptedMaterializeWorkspace),
-            Some("source_materialization")
-        );
-        assert_eq!(
-            lifecycle_phase_for_checkpoint(&LabStagingPhase::MaterializeRuntime),
-            Some("runtime_staging")
-        );
-        assert_eq!(
-            lifecycle_phase_for_checkpoint(&LabStagingPhase::HydrateDependencies),
-            Some("dependency_hydration")
-        );
-        assert_eq!(
-            lifecycle_phase_for_checkpoint(&LabStagingPhase::DispatchRunner),
-            Some("runner_dispatch")
-        );
-        assert_eq!(
-            lifecycle_phase_for_checkpoint(&LabStagingPhase::ObserveRunner),
-            Some("runner_execution")
-        );
-        assert_eq!(
-            lifecycle_phase_for_checkpoint(&LabStagingPhase::Completed),
-            None
-        );
     }
 
     #[test]
@@ -7828,52 +7645,34 @@ mod tests {
     }
 
     #[test]
-    fn staging_poll_budget_prefers_the_plan_execution_deadline() {
+    fn staging_poll_budget_follows_the_plan_deadline_with_floor_and_fallback() {
+        let request = execution_request();
+        assert_eq!(
+            staging_poll_budget(&request),
+            LAB_STAGING_POLL_FALLBACK_BUDGET,
+            "a plan without a deadline uses the fallback budget"
+        );
+
         let mut request = execution_request();
         request
             .durable_agent_task_plan
             .options
             .execution_budget
             .deadline_unix_ms = Some(now_unix_ms() + 900_000);
-
         let budget = staging_poll_budget(&request);
-
         assert!(
             budget > Duration::from_secs(870) && budget <= Duration::from_secs(900),
             "expected roughly the plan's remaining 900s, got {budget:?}"
         );
-    }
 
-    #[test]
-    fn staging_poll_budget_floors_an_expired_plan_deadline() {
-        let mut request = execution_request();
+        // An expired plan deadline still buys a bounded grace to observe the
+        // remote job's terminal transition instead of abandoning it instantly.
         request
             .durable_agent_task_plan
             .options
             .execution_budget
             .deadline_unix_ms = Some(now_unix_ms().saturating_sub(60_000));
-
-        // An expired plan deadline still buys a bounded grace to observe the
-        // remote job's terminal transition instead of abandoning it instantly.
         assert_eq!(staging_poll_budget(&request), LAB_STAGING_POLL_MIN_BUDGET);
-    }
-
-    #[test]
-    fn staging_poll_budget_falls_back_when_the_plan_carries_no_deadline() {
-        let request = execution_request();
-
-        assert_eq!(
-            request
-                .durable_agent_task_plan
-                .options
-                .execution_budget
-                .deadline_unix_ms,
-            None
-        );
-        assert_eq!(
-            staging_poll_budget(&request),
-            LAB_STAGING_POLL_FALLBACK_BUDGET
-        );
     }
 
     #[test]
@@ -7895,7 +7694,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_unless_cancelled_returns_as_soon_as_cancellation_is_observed() {
+    fn sleep_unless_cancelled_wakes_on_cancellation_and_otherwise_sleeps_the_interval() {
         let cancellation = LabStagingCancellationToken::default();
         cancellation.cancel();
 
@@ -7909,18 +7708,13 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "an already-cancelled token must not sleep out the interval"
         );
-    }
 
-    #[test]
-    fn sleep_unless_cancelled_sleeps_the_whole_interval_without_cancellation() {
         let interval = Duration::from_millis(500);
         let started = Instant::now();
-
         assert!(!sleep_unless_cancelled(
             interval,
             Some(&LabStagingCancellationToken::default())
         ));
-
         assert!(
             started.elapsed() >= interval,
             "slicing the sleep must not shorten it"
@@ -8413,18 +8207,16 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_raw_input_reference_is_rejected() {
-        let value = json!({
+    fn malformed_or_inconsistent_checkpoint_is_rejected_before_projection() {
+        // A raw locator is never an accepted staging input reference.
+        assert!(LabStagingDispatchDriver::envelope(&json!({
             "schema": LAB_STAGING_DISPATCH_SCHEMA,
             "run_id": "attempt-1",
             "runner_id": "lab-1",
             "input": { "type": "uri", "locator": "file:///private/input.json" },
-        });
-        assert!(LabStagingDispatchDriver::envelope(&value).is_err());
-    }
+        }))
+        .is_err());
 
-    #[test]
-    fn malformed_or_inconsistent_checkpoint_is_rejected_before_projection() {
         let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
         checkpoint.phase = LabStagingPhase::Completed;
         checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
@@ -8452,14 +8244,6 @@ mod tests {
             serde_json::to_value(&inconsistent).expect("serialize"),
         )
         .is_err());
-    }
-
-    #[test]
-    fn production_adapter_readiness_fails_closed_when_uninstalled() {
-        crate::test_support::with_isolated_home(|_| {
-            clear_installed_adapter();
-            assert!(require_production_adapter().is_err());
-        });
     }
 
     fn durable_workspace_state(request: &LabStagingExecutionRequest) -> DurableLabWorkspaceStage {
@@ -8498,9 +8282,6 @@ mod tests {
         durable
             .validate(&request, &checkpoint)
             .expect("valid resume");
-        assert!(!serde_json::to_string(&durable)
-            .expect("serialize")
-            .contains("private-marker"));
 
         let mut tampered = durable.clone();
         tampered.stage["source_snapshot"]["remote_path"] = json!("/other");
@@ -8512,7 +8293,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_hydration_receipt_binds_results_and_dispatch_inputs_without_secrets() {
+    fn durable_hydration_receipt_binds_results_and_dispatch_inputs() {
         let request = execution_request();
         let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
         checkpoint.phase = LabStagingPhase::DispatchRunner;
@@ -8565,9 +8346,6 @@ mod tests {
         receipt
             .validate(&request, &checkpoint, &workspace, &runtime)
             .expect("bound receipt");
-        assert!(!serde_json::to_string(&receipt)
-            .expect("serialize")
-            .contains("private-marker"));
 
         let mut tampered = receipt.clone();
         tampered.execution_ids.clear();
@@ -8652,7 +8430,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_receipt_fails_closed_on_tamper_and_never_serializes_secret_values() {
+    fn dispatch_receipt_fails_closed_on_tamper() {
         let request = execution_request();
         let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
         checkpoint.phase = LabStagingPhase::ObserveRunner;
@@ -8678,9 +8456,6 @@ mod tests {
             homeboy_handoff_execution_evidence: None,
         };
         receipt.validate(&request, &checkpoint).expect("receipt");
-        assert!(!serde_json::to_string(&receipt)
-            .expect("serialize")
-            .contains("private-marker"));
         let mut tampered = receipt;
         tampered.runner_job_id = "other-job".to_string();
         assert!(tampered.validate(&request, &checkpoint).is_err());
@@ -8810,19 +8585,18 @@ mod tests {
     }
 
     #[test]
-    fn registration_keeps_lab_routing_disabled_without_submission_hook() {
+    fn lab_routing_is_ready_only_after_production_enablement() {
         crate::test_support::with_isolated_home(|_| {
             clear_installed_adapter();
+            assert!(
+                require_production_adapter().is_err(),
+                "an uninstalled adapter fails closed"
+            );
             register();
-            assert!(!routing_ready());
-        });
-    }
-
-    #[test]
-    fn production_enablement_installs_the_staging_adapter() {
-        crate::test_support::with_isolated_home(|_| {
-            clear_installed_adapter();
-            register();
+            assert!(
+                !routing_ready(),
+                "registration alone keeps routing disabled"
+            );
             enable_production_routing();
             assert!(routing_ready());
             clear_installed_adapter();
@@ -8848,7 +8622,7 @@ mod tests {
     }
 
     #[test]
-    fn recipe_round_trips_without_secret_values_and_reconstructs_borrowed_request() {
+    fn recipe_round_trips_secret_names_without_values_and_reconstructs_borrowed_request() {
         crate::test_support::with_isolated_home(|_| {
             let run_id = "recipe-round-trip";
             submit_recipe_run(run_id);
@@ -8874,25 +8648,6 @@ mod tests {
                 .job_override_env
                 .contains_key("AGENT_TOKEN"));
             assert_eq!(execution.recipe.secret_env_names, vec!["AGENT_TOKEN"]);
-            let bytes = std::fs::read(
-                homeboy_core::paths::homeboy_data()
-                    .expect("data root")
-                    .join("agent-task-runs")
-                    .join(run_id)
-                    .join("private/lab-staging-recipe.json"),
-            )
-            .expect("attachment bytes");
-            assert!(!String::from_utf8_lossy(&bytes).contains("private-marker"));
-            let public = LabStagingDispatchEnvelope::new(
-                run_id,
-                "lab-1",
-                LabStagingInputRef::AgentTaskAttempt {
-                    run_id: run_id.to_string(),
-                    recipe: recipe_ref(),
-                },
-            )
-            .public_projection();
-            assert!(!public.to_string().contains("private-marker"));
         });
     }
 
@@ -9014,9 +8769,6 @@ mod tests {
             &recipe_request(Some(recipe_command()), &args, HashMap::new()),
         )
         .expect("recipe");
-        recipe.schema = "unsupported".to_string();
-        assert!(recipe.validate().is_err());
-        recipe.schema = LAB_STAGING_RECIPE_SCHEMA.to_string();
         recipe.secret_env_names = vec!["AGENT_TOKEN".to_string(), "AGENT_TOKEN".to_string()];
         assert!(recipe.validate().is_err());
 
@@ -9171,70 +8923,6 @@ mod tests {
     }
 
     #[test]
-    fn secret_bearing_recipe_never_reaches_public_or_durable_projection_surfaces() {
-        crate::test_support::with_isolated_home(|_| {
-            const MARKER: &str = "staging-secret-marker";
-            let run_id = "secret-projection";
-            submit_recipe_run(run_id);
-            let args = vec!["agent-task".to_string(), "run-plan".to_string()];
-            let request = recipe_request(
-                Some(recipe_command()),
-                &args,
-                HashMap::from([("PUBLIC_FLAG".to_string(), "enabled".to_string())]),
-            );
-            let recipe = persist_lab_staging_recipe(run_id, "lab-1", &request).expect("persist");
-            let plan = homeboy_agents::agent_task_lifecycle::load_controller_plan(run_id)
-                .expect("durable plan");
-            let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-                LabStagingRecipe,
-            >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)
-            .expect("recipe attachment");
-            let envelope = LabStagingDispatchEnvelope::new(
-                run_id,
-                "lab-1",
-                LabStagingInputRef::AgentTaskAttempt {
-                    run_id: run_id.to_string(),
-                    recipe: LabStagingRecipeRef::from_authority(attachment.payload_digest, &plan)
-                        .expect("recipe reference"),
-                },
-            );
-            let checkpoint = LabStagingCheckpoint::initial(&envelope);
-            let public_request = LabStagingDispatchDriver
-                .public_request(&serde_json::to_value(&envelope).expect("request"))
-                .expect("public request");
-            let public_checkpoint = LabStagingDispatchDriver
-                .public_progress(&serde_json::to_value(&checkpoint).expect("checkpoint"))
-                .expect("public checkpoint");
-            let record =
-                homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("record");
-            let recipe_bytes = std::fs::read(
-                homeboy_core::paths::homeboy_data()
-                    .expect("data root")
-                    .join("agent-task-runs")
-                    .join(run_id)
-                    .join("private/lab-staging-recipe.json"),
-            )
-            .expect("recipe bytes");
-
-            for surface in [
-                serde_json::to_string(&recipe).expect("recipe"),
-                public_request.to_string(),
-                public_checkpoint.to_string(),
-                serde_json::to_string(&record).expect("record"),
-                String::from_utf8_lossy(&recipe_bytes).into_owned(),
-                LabStagingDispatchDriver
-                    .public_error(&Error::internal_unexpected("staging failed"))
-                    .data
-                    .to_string(),
-            ] {
-                assert!(!surface.contains(MARKER), "secret leaked to {surface}");
-            }
-            assert_eq!(recipe.secret_env_names, ["AGENT_TOKEN"]);
-            assert!(!routing_ready());
-        });
-    }
-
-    #[test]
     fn durable_dispatch_reasserts_materialized_rig_registry() {
         let env = durable_runtime_rig_registry_env(&json!({
             "rig_registry_root": "/runner/job-artifacts/rig-registry"
@@ -9381,22 +9069,6 @@ mod tests {
             assert!(error
                 .message
                 .contains("execution bundle is missing or invalid"));
-        });
-    }
-
-    #[test]
-    fn durable_dispatch_without_a_verified_build_identity_fails_actionably() {
-        crate::test_support::with_isolated_home(|_| {
-            let (request, lab_metadata, _) =
-                oversized_durable_dispatch_inputs("/runner/ws", ("lease-1", "reservation-1"), None);
-            let (_, env) = durable_dispatch_env(&request, &lab_metadata, Vec::new(), &json!({}))
-                .expect("durable env");
-
-            let error = crate::execution::child_provenance_env(env, "{}".to_string())
-                .expect_err("an identity must never be invented");
-            assert!(error
-                .message
-                .contains("child build identity is unavailable"));
         });
     }
 

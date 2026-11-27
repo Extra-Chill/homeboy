@@ -126,7 +126,8 @@ fn pr_comment_with_client(
 ) -> Result<GithubPrOutput> {
     gh.ensure_ready()?;
 
-    // Opt-in: legacy callers neither fetch the PR nor change closed-PR behavior.
+    // Opt-in: callers without an expected head neither fetch the PR nor change
+    // closed-PR behavior.
     // Read once before any comment lookup or mutation, for every posting mode.
     if let Some(expected_head_sha) = options.expected_head_sha.as_deref() {
         #[derive(serde::Deserialize)]
@@ -586,17 +587,6 @@ mod tests {
         let got = parse_comments_list_json(raw, "ci:x").unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, 1);
-    }
-
-    #[test]
-    fn parse_comments_list_empty_input_is_ok() {
-        let got = parse_comments_list_json("", "ci:x").unwrap();
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn pr_comment_mode_default_is_fresh() {
-        let opts = PrCommentOptions::default();
-        assert_eq!(opts.mode, PrCommentMode::Fresh);
+        assert!(parse_comments_list_json("", "ci:x").unwrap().is_empty());
     }
 }

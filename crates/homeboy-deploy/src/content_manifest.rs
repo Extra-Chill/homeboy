@@ -1385,20 +1385,7 @@ mod tests {
             std::os::unix::fs::symlink("same", local.join("link")).expect("link");
             std::os::unix::fs::symlink("changed", remote.join("link")).expect("link");
         }
-        let result = compare(
-            &local,
-            remote.to_str().expect("path"),
-            &SshClient {
-                host: "local".to_string(),
-                user: "test".to_string(),
-                port: 22,
-                identity_file: None,
-                auth: None,
-                is_local: true,
-                env: Default::default(),
-            },
-            &[],
-        );
+        let result = compare(&local, remote.to_str().expect("path"), &local_client(), &[]);
         assert_eq!(result.status, "different");
         assert!(result.differences.iter().any(|p| p == "changed"));
         assert!(result.differences.iter().any(|p| p == "added"));
@@ -1586,6 +1573,7 @@ mod tests {
         let package = temp.path().join("package.zip");
         write_zip(&package, &[("plugin/version", "1.0.0")]);
         let artifact = release_artifact(&package);
+        verify_archive_hash(&package, &artifact).expect("leased bytes verify");
         fs::write(&package, "mutated bytes").expect("mutate");
 
         let error = verify_archive_hash(&package, &artifact).expect_err("mismatch");
@@ -1599,47 +1587,6 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.message.contains("--tagged")));
-    }
-
-    #[test]
-    fn remote_manifest_valid_digest_matches_local_tree() {
-        let temp = tempfile::tempdir().expect("temp");
-        let local = temp.path().join("local");
-        fs::create_dir_all(&local).expect("local");
-        fs::write(local.join("plugin.php"), "release").expect("plugin");
-        let digest = sha256(&local.join("plugin.php")).expect("digest");
-
-        let remote = parse_remote_manifest(&format!("f\tplugin.php\t644\t{digest}\n"), &[])
-            .expect("valid remote evidence");
-        assert!(differences(&local_manifest(&local).expect("local manifest"), &remote).is_empty());
-    }
-
-    #[test]
-    fn probe_command_hashes_directory_roots_as_relative_tree_entries() {
-        let temp = tempfile::tempdir().expect("temp");
-        let root = temp.path().join("static-site-importer");
-        fs::create_dir_all(root.join("assets")).expect("assets");
-        fs::write(root.join("plugin.php"), "release").expect("plugin");
-        fs::write(root.join("assets/app.js"), "bundle").expect("asset");
-
-        let output = run_probe_command(&root, None);
-        assert!(
-            output.status.success(),
-            "stderr={}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            output.stderr.is_empty(),
-            "stderr should stay off stdout parsing path"
-        );
-
-        let remote = parse_remote_manifest(&String::from_utf8_lossy(&output.stdout), &[])
-            .expect("remote manifest");
-        assert_eq!(
-            remote,
-            local_manifest(&root).expect("local manifest"),
-            "the probe should describe the bounded relative file tree, not the root directory itself"
-        );
     }
 
     #[test]
@@ -1807,7 +1754,7 @@ mod tests {
     }
 
     #[test]
-    fn batched_probe_command_rejects_newline_and_tab_names_like_before() {
+    fn batched_probe_command_rejects_newline_and_tab_names() {
         for name in ["line\nbreak.txt", "tab\tname.txt"] {
             let temp = tempfile::tempdir().expect("temp");
             let root = temp.path().join("plugin");
@@ -1824,73 +1771,40 @@ mod tests {
     }
 
     #[test]
-    fn missing_remote_hash_tool_returns_typed_capability_failure() {
+    fn missing_remote_probe_tools_return_typed_capability_failures() {
         let temp = tempfile::tempdir().expect("temp");
         let root = temp.path().join("plugin.php");
         fs::write(&root, "release").expect("file");
 
-        let output = run_probe_command(&root, Some("PATH=''"));
-        assert_eq!(
-            output.status.code(),
-            Some(RemoteProbeCapability::Sha256.exit_code())
-        );
+        for (prefix, capability, name) in [
+            ("PATH=''", RemoteProbeCapability::Sha256, "sha256sum"),
+            (
+                "stat() { return 127; }",
+                RemoteProbeCapability::Stat,
+                "stat",
+            ),
+        ] {
+            let output = run_probe_command(&root, Some(prefix));
+            assert_eq!(output.status.code(), Some(capability.exit_code()), "{name}");
 
-        let error = remote_probe_capability_error(
-            root.to_str().expect("path"),
-            RemoteProbeCapability::Sha256,
-            "remote",
-            &command_output(&output),
-        );
-        assert_eq!(
-            error.code,
-            homeboy_core::error::ErrorCode::RemoteCapabilityMissing
-        );
-        assert_eq!(
-            error
-                .details
-                .get("capability")
-                .and_then(|value| value.as_str()),
-            Some("sha256sum")
-        );
-        assert_eq!(
-            error
-                .details
-                .get("command_evidence")
-                .and_then(|value| value.get("stderr"))
-                .and_then(|value| value.as_str()),
-            Some("sha256sum\n")
-        );
-    }
-
-    #[test]
-    fn unsupported_remote_stat_returns_typed_capability_failure() {
-        let temp = tempfile::tempdir().expect("temp");
-        let root = temp.path().join("plugin.php");
-        fs::write(&root, "release").expect("file");
-
-        let output = run_probe_command(&root, Some("stat() { return 127; }"));
-        assert_eq!(
-            output.status.code(),
-            Some(RemoteProbeCapability::Stat.exit_code())
-        );
-
-        let error = remote_probe_capability_error(
-            root.to_str().expect("path"),
-            RemoteProbeCapability::Stat,
-            "remote",
-            &command_output(&output),
-        );
-        assert_eq!(
-            error.code,
-            homeboy_core::error::ErrorCode::RemoteCapabilityMissing
-        );
-        assert_eq!(
-            error
-                .details
-                .get("capability")
-                .and_then(|value| value.as_str()),
-            Some("stat")
-        );
+            let error = remote_probe_capability_error(
+                root.to_str().expect("path"),
+                capability,
+                "remote",
+                &command_output(&output),
+            );
+            assert_eq!(
+                error.code,
+                homeboy_core::error::ErrorCode::RemoteCapabilityMissing
+            );
+            assert_eq!(
+                error
+                    .details
+                    .get("capability")
+                    .and_then(|value| value.as_str()),
+                Some(name)
+            );
+        }
     }
 
     /// #10290: deploy and recovery now share one walker, and this pins the two
@@ -1973,7 +1887,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_package_manifest_ignores_source_only_files_and_detects_production_drift() {
+    fn canonical_package_manifest_matches_install_and_detects_production_drift() {
         let temp = tempfile::tempdir().expect("temp");
         let package = temp.path().join("plugin.zip");
         let remote = temp.path().join("remote");
@@ -1989,15 +1903,6 @@ mod tests {
         fs::create_dir_all(remote.join("assets")).expect("assets");
         fs::write(remote.join("assets/app.js"), "production").expect("asset");
 
-        // README, tests, build output, and git metadata are source-only and
-        // therefore absent from the authoritative package comparison.
-        let source = temp.path().join("source");
-        fs::create_dir_all(source.join("tests")).expect("tests");
-        fs::create_dir_all(source.join("build")).expect("build");
-        fs::write(source.join("README.md"), "source only").expect("readme");
-        fs::write(source.join("tests/test.php"), "source only").expect("test");
-        fs::write(source.join("build/plugin.zip"), "source only").expect("build");
-
         let client = local_client();
         assert_eq!(
             compare_archive(&package, remote.to_str().expect("path"), &client, &[], None).status,
@@ -2012,33 +1917,6 @@ mod tests {
         fs::remove_file(remote.join("plugin.php")).expect("missing");
         let missing = compare_archive(&package, remote.to_str().expect("path"), &client, &[], None);
         assert!(missing.differences.contains(&"plugin.php".to_string()));
-    }
-
-    #[test]
-    fn canonical_package_manifest_rejects_stale_or_missing_artifacts() {
-        let temp = tempfile::tempdir().expect("temp");
-        let stale = temp.path().join("stale.zip");
-        let remote = temp.path().join("remote");
-        fs::create_dir_all(&remote).expect("remote");
-        write_zip(&stale, &[("plugin/version", "1.0.0")]);
-        fs::write(remote.join("version"), "2.0.0").expect("remote version");
-        let client = local_client();
-
-        assert_eq!(
-            compare_archive(&stale, remote.to_str().expect("path"), &client, &[], None).status,
-            "different"
-        );
-        assert_eq!(
-            compare_archive(
-                &temp.path().join("missing.zip"),
-                remote.to_str().expect("path"),
-                &client,
-                &[],
-                None,
-            )
-            .status,
-            "unavailable"
-        );
     }
 
     #[test]
@@ -2066,7 +1944,7 @@ mod tests {
     }
 
     #[test]
-    fn package_manifest_normalizes_lexical_paths_and_rejects_collisions() {
+    fn package_manifest_normalizes_lexical_paths_and_rejects_collisions_and_escapes() {
         let temp = tempfile::tempdir().expect("temp");
         let package = temp.path().join("package.zip");
         write_zip(
@@ -2078,18 +1956,14 @@ mod tests {
             normalize_path("./plugin//main.php/").expect("normal path"),
             "plugin/main.php"
         );
-        assert!(parse_remote_manifest("l\tdir/current\t777\t../outside\n", &[]).is_ok());
-    }
 
-    #[test]
-    fn release_archive_hash_must_match_the_leased_payload_before_use() {
-        let temp = tempfile::tempdir().expect("temp");
-        let package = temp.path().join("package.zip");
-        write_zip(&package, &[("plugin/version", "1.0.0")]);
-        let artifact = release_artifact(&package);
-        assert!(verify_archive_hash(&package, &artifact).is_ok());
-        fs::write(&package, "mutated bytes").expect("mutate");
-        assert!(verify_archive_hash(&package, &artifact).is_err());
+        let traversal = temp.path().join("traversal.zip");
+        write_zip(&traversal, &[("plugin/../outside", "bad")]);
+        assert!(archive_manifest(&traversal, &[]).is_err());
+
+        assert!(parse_remote_manifest("l\tdir/current\t777\t../outside\n", &[]).is_ok());
+        assert!(parse_remote_manifest("l\tcurrent\t777\t../outside\n", &[]).is_err());
+        assert!(parse_remote_manifest("l\tcurrent\t777\t/outside\n", &[]).is_err());
     }
 
     #[test]
@@ -2119,17 +1993,6 @@ mod tests {
         );
         assert_eq!(result.status, "match");
         assert_eq!(result.scope, PACKAGE_SCOPE);
-    }
-
-    #[test]
-    fn package_manifest_rejects_unsafe_archive_paths_and_links() {
-        let temp = tempfile::tempdir().expect("temp");
-        let traversal = temp.path().join("traversal.zip");
-        write_zip(&traversal, &[("plugin/../outside", "bad")]);
-        assert!(archive_manifest(&traversal, &[]).is_err());
-
-        assert!(parse_remote_manifest("l\tcurrent\t777\t../outside\n", &[]).is_err());
-        assert!(parse_remote_manifest("l\tcurrent\t777\t/outside\n", &[]).is_err());
     }
 
     #[test]

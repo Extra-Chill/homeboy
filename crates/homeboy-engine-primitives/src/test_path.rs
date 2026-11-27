@@ -80,35 +80,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_test_path_directory_patterns() {
-        assert!(is_test_path("tests/core/audit.rs"));
-        assert!(is_test_path("tests/Unit/FooTest.php"));
-        assert!(is_test_path("test/helpers.js"));
-        assert!(is_test_path("src/__tests__/foo.test.ts"));
-        assert!(is_test_path("inc/Tests/Abilities/FooTest.php"));
-        assert!(is_test_path("some/deep/path/tests/unit/bar.rs"));
-    }
-
-    #[test]
-    fn test_is_test_path_filename_patterns() {
-        assert!(is_test_path("src/core/audit_test.rs"));
-        assert!(is_test_path("src/core/audit_tests.rs"));
-        assert!(is_test_path("inc/Abilities/SystemAbilitiesTest.php"));
-        assert!(is_test_path("src/components/Button.test.tsx"));
-        assert!(is_test_path("src/utils/parse.spec.ts"));
-        assert!(is_test_path("lib/test_runner.py"));
-        assert!(is_test_path("src/commands/bench/tests.rs"));
-        assert!(is_test_path("src/core/triage/test.rs"));
-        assert!(is_test_path("src/commands/trace/test_fixture.rs"));
-        assert!(is_test_path("src/core/runner/exec_fixtures.rs"));
-    }
-
-    #[test]
-    fn test_is_test_path_negative() {
-        assert!(!is_test_path("src/core/audit.rs"));
-        assert!(!is_test_path("inc/Abilities/SystemAbilities.php"));
-        assert!(!is_test_path("src/components/Button.tsx"));
-        assert!(!is_test_path("src/utils/test_helpers.rs"));
-        assert!(!is_test_path("src/testing/framework.rs"));
+    fn is_test_path_matches_test_directories_and_filenames() {
+        for (path, expected) in [
+            // Directory patterns.
+            ("tests/core/audit.rs", true),
+            ("test/helpers.js", true),
+            ("src/__tests__/foo.test.ts", true),
+            ("inc/Tests/Abilities/FooTest.php", true),
+            ("some/deep/path/tests/unit/bar.rs", true),
+            // Filename patterns.
+            ("src/core/audit_test.rs", true),
+            ("src/core/audit_tests.rs", true),
+            ("inc/Abilities/SystemAbilitiesTest.php", true),
+            ("src/components/Button.test.tsx", true),
+            ("src/utils/parse.spec.ts", true),
+            ("lib/test_runner.py", true),
+            ("src/commands/bench/tests.rs", true),
+            ("src/core/triage/test.rs", true),
+            ("src/commands/trace/test_fixture.rs", true),
+            ("src/core/runner/exec_fixtures.rs", true),
+            // Production paths.
+            ("src/core/audit.rs", false),
+            ("inc/Abilities/SystemAbilities.php", false),
+            ("src/components/Button.tsx", false),
+            ("src/utils/test_helpers.rs", false),
+            ("src/testing/framework.rs", false),
+        ] {
+            assert_eq!(is_test_path(path), expected, "{path}");
+        }
     }
 }

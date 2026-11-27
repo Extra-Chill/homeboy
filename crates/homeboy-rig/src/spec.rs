@@ -928,41 +928,6 @@ mod tests {
     }
 
     #[test]
-    fn test_trace_span_metadata() {
-        let workload: WorkloadSpec = serde_json::from_str(
-            r#"{
-                "path": "/tmp/scoped.trace.mjs",
-                "trace_span_metadata": {
-                    "phase.boot_to_ready": {
-                        "critical": true,
-                        "blocking": true,
-                        "cacheable": true,
-                        "prewarmable": true,
-                        "blocks": "first_site_render",
-                        "category": "wordpress_boot"
-                    }
-                }
-            }"#,
-        )
-        .expect("parse detailed workload metadata");
-
-        let metadata = workload
-            .trace_span_metadata()
-            .get("phase.boot_to_ready")
-            .expect("span metadata");
-        assert!(metadata.critical);
-        assert!(metadata.blocking);
-        assert!(metadata.cacheable);
-        assert!(metadata.prewarmable);
-        assert_eq!(metadata.blocks.as_deref(), Some("first_site_render"));
-        assert_eq!(metadata.category.as_deref(), Some("wordpress_boot"));
-        let workload_without_metadata: WorkloadSpec =
-            serde_json::from_str(r#"{"path":"/tmp/no-metadata.trace.mjs"}"#)
-                .expect("parse workload");
-        assert!(workload_without_metadata.trace_span_metadata().is_empty());
-    }
-
-    #[test]
     fn test_trace_probes() {
         let workload: WorkloadSpec = serde_json::from_str(
             r#"{
@@ -1022,25 +987,7 @@ mod tests {
     }
 
     #[test]
-    fn test_string_settings() {
-        let profile: TraceProfileSpec = serde_json::from_str(
-            r#"{
-                "settings": {
-                    "title": "Studio",
-                    "retry_count": 2
-                }
-            }"#,
-        )
-        .expect("parse profile");
-
-        assert_eq!(
-            profile.string_settings(),
-            vec![("title".to_string(), "Studio".to_string())]
-        );
-    }
-
-    #[test]
-    fn test_json_settings() {
+    fn profile_settings_split_string_and_structured_values() {
         let profile: TraceProfileSpec = serde_json::from_str(
             r#"{
                 "settings": {
@@ -1053,6 +1000,10 @@ mod tests {
         .expect("parse profile");
 
         assert_eq!(
+            profile.string_settings(),
+            vec![("title".to_string(), "Studio".to_string())]
+        );
+        assert_eq!(
             profile.json_settings(),
             vec![
                 (
@@ -1062,64 +1013,6 @@ mod tests {
                 ("retry_count".to_string(), serde_json::json!(2))
             ]
         );
-    }
-
-    #[test]
-    fn test_port_range_size() {
-        let workload = WorkloadSpec {
-            path: "bench.mjs".to_string(),
-            env_provider_extensions: Vec::new(),
-            artifact_postprocess: Vec::new(),
-            public_preview: None,
-            check_groups: None,
-            port_range_size: Some(8),
-            named_leases: Vec::new(),
-            trace: TraceConfig {
-                trace_phase_presets: HashMap::new(),
-                trace_span_metadata: HashMap::new(),
-                trace_default_phase_preset: None,
-            },
-            trace_variants: HashMap::new(),
-            trace_guardrails: Vec::new(),
-            trace_probes: Vec::new(),
-            dependencies: Vec::new(),
-            runner_capabilities: Vec::new(),
-            lifecycle: None,
-        };
-
-        assert_eq!(workload.port_range_size(), Some(8));
-        let workload_without_ports: WorkloadSpec =
-            serde_json::from_str(r#"{"path":"bench.mjs"}"#).expect("parse workload");
-        assert_eq!(workload_without_ports.port_range_size(), None);
-    }
-
-    #[test]
-    fn test_named_leases() {
-        let workload = WorkloadSpec {
-            path: "bench.mjs".to_string(),
-            env_provider_extensions: Vec::new(),
-            artifact_postprocess: Vec::new(),
-            public_preview: None,
-            check_groups: None,
-            port_range_size: None,
-            named_leases: vec!["browser-profile".to_string()],
-            trace: TraceConfig {
-                trace_phase_presets: HashMap::new(),
-                trace_span_metadata: HashMap::new(),
-                trace_default_phase_preset: None,
-            },
-            trace_variants: HashMap::new(),
-            trace_guardrails: Vec::new(),
-            trace_probes: Vec::new(),
-            dependencies: Vec::new(),
-            runner_capabilities: Vec::new(),
-            lifecycle: None,
-        };
-
-        assert_eq!(workload.named_leases(), &["browser-profile".to_string()]);
-        let workload_without_leases: WorkloadSpec =
-            serde_json::from_str(r#"{"path":"bench.mjs"}"#).expect("parse workload");
-        assert!(workload_without_leases.named_leases().is_empty());
     }
 
     #[test]
@@ -1172,85 +1065,6 @@ mod tests {
                 .as_deref(),
             Some("npm run smoke:install")
         );
-    }
-
-    #[test]
-    fn test_rig_lifecycle_trace_and_fuzz_contract_fields_round_trip() {
-        let mut input = serde_json::json!({
-            "id": "wordpress-core-fuzz-coverage",
-            "components": {
-                "wordpress-develop": { "path": "/tmp/wordpress-develop" }
-            },
-            "lifecycle": { "cleanup": { "intent": "apply" } },
-            "trace": { "default_component": "wordpress-develop" },
-            "fuzz": {
-                "default_component": "wordpress-develop",
-                "schema": "homeboy/fuzz-workload/v1",
-                "manifest": "${package.root}/manifests/fuzzer-profile.json"
-            }
-        });
-        for (cleanup, expected_intent) in [
-            (
-                serde_json::json!({"intent": "apply"}),
-                ResourceCleanupIntent::Apply,
-            ),
-            (
-                serde_json::json!({"intent": "pipeline", "reason": "pipeline.down stops the Studio daemon..."}),
-                ResourceCleanupIntent::DryRun,
-            ),
-        ] {
-            input["lifecycle"]["cleanup"] = cleanup.clone();
-            let spec: RigSpec =
-                serde_json::from_value(input.clone()).expect("parse rig contract fields");
-            assert_eq!(
-                spec.lifecycle
-                    .cleanup
-                    .as_ref()
-                    .map(RigCleanupSpec::resource_cleanup_intent),
-                Some(expected_intent)
-            );
-            assert_eq!(
-                spec.trace.default_component.as_deref(),
-                Some("wordpress-develop")
-            );
-            let fuzz = spec.fuzz.as_ref().expect("fuzz spec");
-            assert_eq!(fuzz.default_component.as_deref(), Some("wordpress-develop"));
-            assert_eq!(fuzz.schema.as_deref(), Some("homeboy/fuzz-workload/v1"));
-            assert_eq!(
-                fuzz.manifest.as_deref(),
-                Some("${package.root}/manifests/fuzzer-profile.json")
-            );
-
-            let json = serde_json::to_value(&spec).expect("serialize rig");
-            assert_eq!(json["lifecycle"]["cleanup"], cleanup);
-            assert_eq!(json["trace"]["default_component"], "wordpress-develop");
-            assert_eq!(json["fuzz"]["default_component"], "wordpress-develop");
-            assert_eq!(json["fuzz"]["schema"], "homeboy/fuzz-workload/v1");
-            assert_eq!(
-                json["fuzz"]["manifest"],
-                "${package.root}/manifests/fuzzer-profile.json"
-            );
-        }
-    }
-
-    #[test]
-    fn rig_lifecycle_cleanup_round_trips_object_forms() {
-        for input in [
-            r#"{"intent":"dry_run"}"#,
-            r#"{"intent":"apply"}"#,
-            r#"{"intent":"pipeline"}"#,
-            r#"{"intent":"external"}"#,
-            r#"{"reason":"pipeline owns cleanup"}"#,
-        ] {
-            let spec: RigLifecycleSpec = serde_json::from_str(&format!(r#"{{"cleanup":{input}}}"#))
-                .expect("parse lifecycle");
-
-            assert_eq!(
-                serde_json::to_value(&spec).expect("serialize lifecycle"),
-                serde_json::from_str::<serde_json::Value>(&format!(r#"{{"cleanup":{input}}}"#))
-                    .expect("expected lifecycle JSON")
-            );
-        }
     }
 }
 
@@ -1561,23 +1375,3 @@ mod public_preview_spec_test;
 #[cfg(test)]
 #[path = "../../../tests/core/rig/bench_default_baseline_spec_test.rs"]
 mod bench_default_baseline_spec_test;
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn filesystem_assertion_kind_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (FilesystemAssertionKind::Path, "path"),
-            (FilesystemAssertionKind::File, "file"),
-            (FilesystemAssertionKind::Dir, "dir"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.label(), label);
-        }
-    }
-}

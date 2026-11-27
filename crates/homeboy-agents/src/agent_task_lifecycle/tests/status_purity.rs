@@ -57,11 +57,10 @@ fn status_leaves_every_lifecycle_state_byte_identical() {
 }
 
 /// The pending fixtures above are not inert: the explicit owner converges each
-/// of them. This is what makes the purity assertion meaningful, and it is the
-/// replacement for every test that used to observe these transitions through a
-/// status read.
+/// of them. This is what makes the purity assertion meaningful: these
+/// transitions are observed through reconcile, never through a status read.
 #[test]
-fn reconcile_apply_owns_the_transitions_status_no_longer_performs() {
+fn reconcile_apply_owns_the_transitions_status_does_not_perform() {
     with_isolated_home(|_| {
         let store = AgentTaskLifecycleStore::from_environment().expect("store");
         seed_status_purity_fixtures_for_test().expect("seed fixtures");

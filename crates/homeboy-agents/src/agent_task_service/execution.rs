@@ -3695,6 +3695,57 @@ mod tests {
         assert!(error.message.contains("cleanup_deadline_ms"));
     }
 
+    fn persist_single_attempt_recipe(
+        store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+        cook_id: &str,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+    ) {
+        super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(store)
+            .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
+                schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
+                cook_id: cook_id.to_string(),
+                attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
+                    lineage: None,
+                    attempt: 1,
+                    run_id: run_id.to_string(),
+                    plan: plan.clone(),
+                }],
+                promotion_transport: json!({
+                    "provider_invocation": null,
+                    "attempt_dispatch": { "kind": "local" },
+                }),
+                gate_policy: json!({
+                    "verify": [],
+                    "private_verify": [],
+                    "private_gate_reveal": "summary_only",
+                }),
+                retry_budget: json!({
+                    "max_attempts": 2,
+                    "execution_budget": plan.options.execution_budget,
+                }),
+                finalization: json!({
+                    "no_finalize": true,
+                    "base": "main",
+                    "head": null,
+                    "title": "title",
+                    "commit_message": "message",
+                    "protected_branches": [],
+                    "ai_tool": "test",
+                    "ai_model": null,
+                    "ai_used_for": "test",
+                    "to_worktree": "target",
+                    "source_worktree_path": null,
+                    "task_base_sha": null,
+                }),
+                source_refs: Vec::new(),
+                runtime_generation: homeboy_core::build_identity::current().display,
+                sensitive_mappings: Vec::new(),
+                harvest_context: Default::default(),
+            })
+            .expect("persist recipe");
+    }
+
     #[test]
     fn reconcile_cancelled_cook_attempt_admits_a_durable_retry_but_operator_cancel_does_not() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -3734,51 +3785,7 @@ mod tests {
                 })
             }
             .expect("stale runner-backed Cook attempt");
-            let recipe_store =
-                super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
-            recipe_store
-                .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
-                    schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
-                    cook_id: cook_id.to_string(),
-                    attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
-                        lineage: None,
-                        attempt: 1,
-                        run_id: run_id.to_string(),
-                        plan: plan.clone(),
-                    }],
-                    promotion_transport: json!({
-                        "provider_invocation": null,
-                        "attempt_dispatch": { "kind": "local" },
-                    }),
-                    gate_policy: json!({
-                        "verify": [],
-                        "private_verify": [],
-                        "private_gate_reveal": "summary_only",
-                    }),
-                    retry_budget: json!({
-                        "max_attempts": 2,
-                        "execution_budget": plan.options.execution_budget,
-                    }),
-                    finalization: json!({
-                        "no_finalize": true,
-                        "base": "main",
-                        "head": null,
-                        "title": "title",
-                        "commit_message": "message",
-                        "protected_branches": [],
-                        "ai_tool": "test",
-                        "ai_model": null,
-                        "ai_used_for": "test",
-                        "to_worktree": "target",
-                        "source_worktree_path": null,
-                        "task_base_sha": null,
-                    }),
-                    source_refs: Vec::new(),
-                    runtime_generation: homeboy_core::build_identity::current().display,
-                    sensitive_mappings: Vec::new(),
-                    harvest_context: Default::default(),
-                })
-                .expect("persist recipe");
+            persist_single_attempt_recipe(&store, cook_id, run_id, &plan);
 
             let report = super::super::reconcile_run_in_store(&store, run_id, false)
                 .expect("reconcile stale attempt");
@@ -3844,50 +3851,7 @@ mod tests {
                 true
             })
             .expect("mark retryable source attempt");
-        let recipe_store = super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
-        recipe_store
-            .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
-                schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
-                cook_id: cook_id.to_string(),
-                attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
-                    lineage: None,
-                    attempt: 1,
-                    run_id: run_id.to_string(),
-                    plan: plan.clone(),
-                }],
-                promotion_transport: json!({
-                "provider_invocation": null,
-                "attempt_dispatch": { "kind": "local" },
-                }),
-                gate_policy: json!({
-                "verify": [],
-                "private_verify": [],
-                "private_gate_reveal": "summary_only",
-                }),
-                retry_budget: json!({
-                "max_attempts": 2,
-                "execution_budget": plan.options.execution_budget,
-                }),
-                finalization: json!({
-                "no_finalize": true,
-                "base": "main",
-                "head": null,
-                "title": "title",
-                "commit_message": "message",
-                "protected_branches": [],
-                "ai_tool": "test",
-                "ai_model": null,
-                "ai_used_for": "test",
-                "to_worktree": "target",
-                "source_worktree_path": null,
-                "task_base_sha": null,
-                }),
-                source_refs: Vec::new(),
-                runtime_generation: homeboy_core::build_identity::current().display,
-                sensitive_mappings: Vec::new(),
-                harvest_context: Default::default(),
-            })
-            .expect("persist recipe in injected root");
+        persist_single_attempt_recipe(&store, cook_id, run_id, &plan);
         agent_task_lifecycle::record_cook_attempt_in_store(&store, cook_id, 1, run_id)
             .expect("index source attempt");
         let source = store.read_record(run_id).expect("read source attempt");
@@ -4244,53 +4208,46 @@ mod tests {
 
     #[test]
     fn local_execution_persists_terminal_state_cleanup_and_candidate_artifacts() {
-        let first = homeboy_core::test_support::HermeticTestContext::new();
-        let first_store = agent_task_lifecycle::AgentTaskLifecycleStore::new(first.path_roots());
-        let first_workspace = tempfile::tempdir().expect("first workspace");
-        initialize_workspace(first_workspace.path());
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+        let workspace = tempfile::tempdir().expect("workspace");
+        initialize_workspace(workspace.path());
         let run_id = "same-local-follow-up-run";
 
-        {
-            let (store, plan_id, workspace) = (
-                &first_store,
-                "first-local-follow-up",
-                first_workspace.path(),
-            );
-            let result = run_loaded_plan_with_derived_cook_baseline_in_store(
-                store,
-                one_task_plan(plan_id, workspace),
-                Some(run_id),
-                Arc::new(SuccessfulExecutor),
-                None,
-                Some(HarvestExecutionContext::default()),
-            )
-            .expect("execute through the explicit lifecycle store");
-            assert_eq!(result.exit_code, 0);
+        let result = run_loaded_plan_with_derived_cook_baseline_in_store(
+            &store,
+            one_task_plan("first-local-follow-up", workspace.path()),
+            Some(run_id),
+            Arc::new(SuccessfulExecutor),
+            None,
+            Some(HarvestExecutionContext::default()),
+        )
+        .expect("execute through the explicit lifecycle store");
+        assert_eq!(result.exit_code, 0);
 
-            let record = store.read_record(run_id).expect("rooted terminal record");
-            assert_eq!(
-                record.state(),
-                homeboy_lifecycle_contract::RunExecutionState::Succeeded
-            );
-            assert_eq!(
-                record.metadata["provider_executions"][0]["state"],
-                "succeeded"
-            );
-            assert!(
-                record.metadata["provider_executions"][0]["post_provider_cleanup_finished_at"]
-                    .is_string()
-            );
-            let aggregate = store.read_aggregate(run_id).expect("rooted aggregate");
-            assert!(aggregate.outcomes[0].candidate.is_some());
-            assert!(aggregate.outcomes[0]
-                .artifacts
-                .iter()
-                .filter_map(|artifact| artifact.path.as_deref())
-                .all(|path| Path::new(path).starts_with(store.artifact_root())));
-            let scratch_index = store.data_root().join("controller-scratch/resources.json");
-            let scratch = std::fs::read_to_string(scratch_index).expect("rooted scratch index");
-            assert!(scratch.contains(run_id));
-        }
+        let record = store.read_record(run_id).expect("rooted terminal record");
+        assert_eq!(
+            record.state(),
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
+        );
+        assert_eq!(
+            record.metadata["provider_executions"][0]["state"],
+            "succeeded"
+        );
+        assert!(
+            record.metadata["provider_executions"][0]["post_provider_cleanup_finished_at"]
+                .is_string()
+        );
+        let aggregate = store.read_aggregate(run_id).expect("rooted aggregate");
+        assert!(aggregate.outcomes[0].candidate.is_some());
+        assert!(aggregate.outcomes[0]
+            .artifacts
+            .iter()
+            .filter_map(|artifact| artifact.path.as_deref())
+            .all(|path| Path::new(path).starts_with(store.artifact_root())));
+        let scratch_index = store.data_root().join("controller-scratch/resources.json");
+        let scratch = std::fs::read_to_string(scratch_index).expect("rooted scratch index");
+        assert!(scratch.contains(run_id));
     }
 
     #[test]

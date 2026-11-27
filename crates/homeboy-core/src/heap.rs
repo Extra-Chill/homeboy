@@ -32,10 +32,6 @@ pub(crate) fn release_freed_heap_once() {
     }
 }
 
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-#[allow(dead_code)]
-pub(crate) fn release_freed_heap_once() {}
-
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod tests {
     fn rss_kb() -> usize {

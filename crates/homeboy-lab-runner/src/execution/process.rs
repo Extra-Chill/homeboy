@@ -892,23 +892,23 @@ mod tests {
 
     #[test]
     fn controller_loopback_proxy_is_rejected_without_an_explicit_projection() {
-        let env = HashMap::from([(
-            "HTTPS_PROXY".to_string(),
-            "socks5://127.0.0.1:8080".to_string(),
-        )]);
-        let error = controller_proxy_projection_names(&env)
-            .expect_err("raw controller loopback must not reach a remote runner");
-        assert_eq!(
-            error.code,
-            homeboy_core::error::ErrorCode::ValidationInvalidArgument
-        );
-        assert!(error.message.contains("homeboy://controller-proxy"));
-    }
-
-    #[test]
-    fn lowercase_controller_loopback_proxy_is_rejected_without_an_explicit_projection() {
-        let env = HashMap::from([("all_proxy".to_string(), "http://localhost:8080".to_string())]);
-        assert!(controller_proxy_projection_names(&env).is_err());
+        for (name, value) in [
+            ("HTTPS_PROXY", "socks5://127.0.0.1:8080"),
+            ("all_proxy", "http://localhost:8080"),
+        ] {
+            let env = HashMap::from([(name.to_string(), value.to_string())]);
+            let error = controller_proxy_projection_names(&env)
+                .expect_err("raw controller loopback must not reach a remote runner");
+            assert_eq!(
+                error.code,
+                homeboy_core::error::ErrorCode::ValidationInvalidArgument,
+                "{name}"
+            );
+            assert!(
+                error.message.contains("homeboy://controller-proxy"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -983,14 +983,6 @@ mod tests {
         let lab_offload = json_payload(GUTENBERG_LAB_OFFLOAD_BYTES);
         let source_snapshot = json_payload(GUTENBERG_SOURCE_SNAPSHOT_BYTES);
         let bundle = execution_bundle(GUTENBERG_EXECUTION_BUNDLE_BYTES, &provenance_dir);
-        assert_eq!(
-            (lab_offload.len(), source_snapshot.len(), bundle.len()),
-            (
-                GUTENBERG_LAB_OFFLOAD_BYTES,
-                GUTENBERG_SOURCE_SNAPSHOT_BYTES,
-                GUTENBERG_EXECUTION_BUNDLE_BYTES,
-            )
-        );
 
         let mut env = HashMap::from([
             (
@@ -1173,46 +1165,59 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_preflight_admits_inline_provenance_matching_or_unobserved_builds() {
-        let skewed = (Some("homeboy 1.0.0+a"), Some("homeboy 1.0.1+b"));
-        // Inline provenance never needs references, so drift is admitted.
+    fn dispatch_preflight_admits_provenance_the_child_can_read() {
         let inline = HashMap::from([(
             homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
             "{}".to_string(),
         )]);
-        assert!(preflight_provenance_build_skew(&inline, skewed.0, skewed.1, "lab").is_ok());
         let oversized = oversized_dispatch_env();
-        assert!(preflight_provenance_build_skew(
-            &oversized,
-            Some("homeboy 1.0.0+a"),
-            Some("homeboy 1.0.0+a"),
-            "lab"
-        )
-        .is_ok());
-        assert!(preflight_provenance_build_skew(&oversized, skewed.0, None, "lab").is_ok());
-        assert!(preflight_provenance_build_skew(&oversized, None, skewed.1, "lab").is_ok());
-    }
-
-    #[test]
-    fn dispatch_preflight_admits_oversized_provenance_across_one_release_skew() {
-        // #18376: controller and runner upgrade independently; a cook placed
-        // while they are a release apart must still run, in either direction.
-        let oversized = oversized_dispatch_env();
-        let older_child = (
-            Some("homeboy 0.469.6+82c2f73e"),
-            Some("homeboy 0.470.0+c463cb25"),
-        );
-        assert!(
-            preflight_provenance_build_skew(&oversized, older_child.0, older_child.1, "lab")
-                .is_ok()
-        );
-        assert!(preflight_provenance_build_skew(
-            &oversized,
-            Some("homeboy 0.470.4+b"),
-            Some("homeboy 0.470.3+a"),
-            "lab"
-        )
-        .is_ok());
+        for (name, env, child, runner) in [
+            // Inline provenance never needs references, so drift is admitted.
+            (
+                "inline across drift",
+                &inline,
+                Some("homeboy 1.0.0+a"),
+                Some("homeboy 1.0.1+b"),
+            ),
+            (
+                "matching builds",
+                &oversized,
+                Some("homeboy 1.0.0+a"),
+                Some("homeboy 1.0.0+a"),
+            ),
+            (
+                "unobserved runner",
+                &oversized,
+                Some("homeboy 1.0.0+a"),
+                None,
+            ),
+            (
+                "unobserved child",
+                &oversized,
+                None,
+                Some("homeboy 1.0.1+b"),
+            ),
+            // #18376: controller and runner upgrade independently; a cook
+            // placed while they are a release apart must still run, in either
+            // direction.
+            (
+                "child one release older",
+                &oversized,
+                Some("homeboy 0.469.6+82c2f73e"),
+                Some("homeboy 0.470.0+c463cb25"),
+            ),
+            (
+                "child one patch newer",
+                &oversized,
+                Some("homeboy 0.470.4+b"),
+                Some("homeboy 0.470.3+a"),
+            ),
+        ] {
+            assert!(
+                preflight_provenance_build_skew(env, child, runner, "lab").is_ok(),
+                "{name}"
+            );
+        }
     }
 
     /// A build identity one release away from this runner's build.

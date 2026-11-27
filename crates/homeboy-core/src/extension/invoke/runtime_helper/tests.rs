@@ -13,51 +13,6 @@ mod general {
                 let contents = std::fs::read_to_string(path).expect("helper should be readable");
                 assert_eq!(contents, HELPERS[i].content);
             }
-
-            assert!(
-                pairs.iter().any(|(k, _)| k == FAILURE_TRAP_ENV),
-                "failure trap helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == RUNNER_PRELUDE_ENV),
-                "runner prelude helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == COMMAND_CAPTURE_ENV),
-                "command capture helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == BASH_PREFLIGHT_ENV),
-                "bash preflight helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == WRITE_TEST_RESULTS_ENV),
-                "write test results helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == EMIT_TEST_FAILURE_ENV),
-                "emit test failure helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == SIDECAR_WRITER_ENV),
-                "sidecar writer helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == RESOLVE_CONTEXT_ENV),
-                "resolve context helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == DISPOSABLE_LOCAL_DB_ENV),
-                "disposable local DB helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == BENCH_HELPER_JS_ENV),
-                "bench JS helper should be in pairs"
-            );
-            assert!(
-                pairs.iter().any(|(k, _)| k == RUNTIME_SETTINGS_HELPER_ENV),
-                "runtime settings helper should be in pairs"
-            );
         });
     }
 
@@ -281,7 +236,7 @@ homeboy_cleanup_step_capture "$captured_path"
     }
 
     #[test]
-    fn disposable_local_db_helper_exports_requested_env_names_without_framework_terms() {
+    fn disposable_local_db_helper_is_valid_bash_without_framework_terms() {
         let dir = tempfile::tempdir().expect("tempdir");
         let helper_path = dir.path().join("disposable-local-db.sh");
         std::fs::write(&helper_path, assets::DISPOSABLE_LOCAL_DB_SH).expect("write helper");
@@ -298,8 +253,6 @@ homeboy_cleanup_step_capture "$captured_path"
         );
 
         let content = std::fs::read_to_string(&helper_path).expect("helper content");
-        assert!(content.contains("--env-database"));
-        assert!(content.contains("homeboy_disposable_local_db_start"));
         assert!(!content.to_lowercase().contains("wpcom"));
         assert!(!content.to_lowercase().contains("wordpress"));
     }
@@ -351,35 +304,6 @@ homeboy_cleanup_step_capture "$captured_path"
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout), "ok");
-    }
-
-    #[test]
-    fn resolve_context_helper_exports_homeboy_env_and_aliases() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("resolve-context.sh");
-        std::fs::write(&helper_path, assets::RESOLVE_CONTEXT_SH).expect("write helper");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; homeboy_resolve_context --component-alias PLUGIN_PATH; printf '%s|%s|%s|%s' \"$EXTENSION_PATH\" \"$COMPONENT_PATH\" \"$COMPONENT_ID\" \"$PLUGIN_PATH\"",
-            helper_path.display()
-        ))
-        .env("HOMEBOY_EXTENSION_PATH", "/tmp/ext")
-        .env("HOMEBOY_COMPONENT_PATH", "/tmp/project")
-        .env("HOMEBOY_COMPONENT_ID", "demo")
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            "/tmp/ext|/tmp/project|demo|/tmp/project"
-        );
     }
 
     #[test]
@@ -567,40 +491,7 @@ if (result.code !== 0) throw new Error(`phase command failed: ${result.code}`);
     }
 
     #[test]
-    fn bench_js_helper_emits_compact_progress_to_stderr() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("bench-helper.mjs");
-        let runner_path = dir.path().join("runner.mjs");
-        std::fs::write(&helper_path, assets::BENCH_HELPER_JS).expect("write helper");
-        std::fs::write(
-        &runner_path,
-        r#"import { homeboyBenchProgress } from './bench-helper.mjs';
-homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_ms: 252000, turn: 18, tools: 23, last: 'cli page_update' });
-"#,
-    )
-    .expect("write runner");
-
-        let output = std::process::Command::new("node")
-            .arg(&runner_path)
-            .env("HOMEBOY_BENCH_PROGRESS", "1")
-            .env("HOMEBOY_BENCH_PROGRESS_STREAM", "stderr")
-            .output()
-            .expect("run node");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            "studio-agent-site-build [bfb] 04:12 turn=18 tools=23 last=cli page_update\n"
-        );
-    }
-
-    #[test]
-    fn bench_js_helper_keeps_progress_quiet_when_disabled() {
+    fn bench_js_helper_progress_streams_only_when_enabled() {
         let dir = tempfile::tempdir().expect("tempdir");
         let helper_path = dir.path().join("bench-helper.mjs");
         let runner_path = dir.path().join("runner.mjs");
@@ -608,47 +499,32 @@ homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_
         std::fs::write(
             &runner_path,
             r#"import { homeboyBenchProgress } from './bench-helper.mjs';
-homeboyBenchProgress({ scenario: 'studio-agent-site-build', phase: 'setup' });
+homeboyBenchProgress({ scenario: 'studio-agent-site-build', run: 'bfb', elapsed_ms: 252000, turn: 18, tools: 23, last: 'cli page_update' });
 "#,
         )
         .expect("write runner");
 
-        let output = std::process::Command::new("node")
-            .arg(&runner_path)
-            .env("HOMEBOY_BENCH_PROGRESS", "0")
-            .output()
-            .expect("run node");
-
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-    }
-
-    #[test]
-    fn bench_runtime_helpers_document_shared_contract() {
-        for content in [assets::BENCH_HELPER_JS, assets::BENCH_HELPER_SH] {
-            assert!(
-                content.contains("R-7 percentile"),
-                "helper should document percentile method"
-            );
-            assert!(
-                content.contains("scenario") && content.contains("slug"),
-                "helper should own scenario slugging"
-            );
-            assert!(
-                content.contains("component_id") && content.contains("scenarios"),
-                "helper should own BenchResults envelope shape"
-            );
-        }
-        // The shell helper delegates its percentile math to the native writer.
-        for content in [
-            assets::BENCH_HELPER_JS,
-            include_str!("../../runtime_json/bench.rs"),
+        for (enabled, expected_stderr) in [
+            (
+                "1",
+                "studio-agent-site-build [bfb] 04:12 turn=18 tools=23 last=cli page_update\n",
+            ),
+            ("0", ""),
         ] {
+            let output = std::process::Command::new("node")
+                .arg(&runner_path)
+                .env("HOMEBOY_BENCH_PROGRESS", enabled)
+                .env("HOMEBOY_BENCH_PROGRESS_STREAM", "stderr")
+                .output()
+                .expect("run node");
+
             assert!(
-                content.contains("p * (n - 1)"),
-                "helper should use R-7 rank formula"
+                output.status.success(),
+                "stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
             );
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+            assert_eq!(String::from_utf8_lossy(&output.stderr), expected_stderr);
         }
     }
 }

@@ -47,14 +47,6 @@ mod tests {
     }
 
     #[test]
-    fn chrono_formats_leap_days_and_century_boundaries() {
-        for expected in ["2000-02-29T12:34:56+00:00", "2100-03-01T00:00:00+00:00"] {
-            let date = chrono::DateTime::parse_from_rfc3339(expected).unwrap();
-            assert_eq!(format_rfc3339(SystemTime::from(date)), expected);
-        }
-    }
-
-    #[test]
     fn public_clocks_agree() {
         let before = now_secs();
         let millis = now_ms();

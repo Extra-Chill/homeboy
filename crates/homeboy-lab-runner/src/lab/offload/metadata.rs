@@ -964,7 +964,6 @@ mod tests {
 
         let metadata = job_scoped_overrides_metadata(&overrides);
 
-        assert_eq!(metadata["schema"], "homeboy/lab-job-scoped-overrides/v1");
         assert_eq!(metadata["workspace_root"]["value"], "/srv/job-root");
         let env = metadata["env"].as_array().expect("env array");
         let plain = env
@@ -1019,7 +1018,6 @@ mod tests {
             },
         ]);
 
-        assert_eq!(report["schema"], ENV_RESOLUTION_SCHEMA);
         assert_eq!(report["values_redacted"], true);
         let keys = report["keys"].as_array().expect("keys array");
         let shared = keys

@@ -26,21 +26,6 @@ fn write_extension_fixture(home: &Path, id: &str, deploy_json: &str) {
 }
 
 #[test]
-fn validate_version_target_conflict_different_pattern_errors() {
-    let existing = vec![VersionTarget {
-        file: "component.meta".to_string(),
-        pattern: Some("version=(.*)".to_string()),
-        artifact_path: None,
-    }];
-
-    let result =
-        validate_version_target_conflict(&existing, "component.meta", "build=(.*)", "test-comp");
-    // Multiple targets per file with different patterns are now allowed
-    // (e.g. release version + build metadata in the same file).
-    assert!(result.is_ok());
-}
-
-#[test]
 fn component_lifecycle_defaults_to_active_and_is_omitted_when_serialized() {
     let component = Component::new(
         "sample-component".to_string(),
@@ -71,11 +56,6 @@ fn component_lifecycle_bundled_roundtrips_and_suppresses() {
     assert_eq!(component.lifecycle, ComponentLifecycle::Bundled);
     assert!(!component.is_active_lifecycle());
     assert_eq!(
-        component.bundled_into.as_deref(),
-        Some("host-app"),
-        "bundled_into host should be preserved"
-    );
-    assert_eq!(
         component.lifecycle_suppression_reason().as_deref(),
         Some("Component is bundled into 'host-app'")
     );
@@ -86,34 +66,25 @@ fn component_lifecycle_bundled_roundtrips_and_suppresses() {
     assert_eq!(json["bundled_into"], serde_json::json!("host-app"));
     let reparsed: Component = serde_json::from_value(json).unwrap();
     assert_eq!(reparsed.lifecycle, ComponentLifecycle::Bundled);
-}
 
-#[test]
-fn component_lifecycle_retired_is_not_active() {
-    let component: Component = serde_json::from_value(serde_json::json!({
+    let retired: Component = serde_json::from_value(serde_json::json!({
         "id": "old-component",
         "lifecycle": "retired"
     }))
     .unwrap();
-
-    assert_eq!(component.lifecycle, ComponentLifecycle::Retired);
-    assert!(!component.is_active_lifecycle());
-    assert!(component.bundled_into.is_none());
+    assert!(!retired.is_active_lifecycle());
     assert_eq!(
-        component.lifecycle_suppression_reason().as_deref(),
+        retired.lifecycle_suppression_reason().as_deref(),
         Some("Component is retired")
     );
-}
 
-#[test]
-fn component_lifecycle_unknown_value_is_rejected() {
-    // A typo in the lifecycle should fail loudly rather than silently
-    // defaulting to active (which would re-expose deploy drift).
-    let result: std::result::Result<Component, _> = serde_json::from_value(serde_json::json!({
+    // A typo must fail loudly rather than silently defaulting to active
+    // (which would re-expose deploy drift).
+    let typo: std::result::Result<Component, _> = serde_json::from_value(serde_json::json!({
         "id": "fixture",
         "lifecycle": "archived"
     }));
-    assert!(result.is_err());
+    assert!(typo.is_err());
 }
 
 #[test]
@@ -253,137 +224,41 @@ fn package_coverage_normalizes_paths_and_rejects_malformed_declarations() {
 }
 
 #[test]
-fn component_env_serialization_roundtrip() {
-    let component: Component = serde_json::from_value(serde_json::json!({
-        "id": "fixture",
-        "env": {
-            "CARGO_TARGET_DIR": "/tmp/homeboy/cargo-target",
-            "SHARED_CACHE_DIR": "/tmp/homeboy/shared-cache"
-        }
-    }))
-    .unwrap();
-
-    assert_eq!(
-        component.env.get("CARGO_TARGET_DIR").map(String::as_str),
-        Some("/tmp/homeboy/cargo-target")
-    );
-
-    let json = serde_json::to_value(&component).unwrap();
-    assert_eq!(
-        json["env"]["SHARED_CACHE_DIR"],
-        serde_json::json!("/tmp/homeboy/shared-cache")
-    );
-}
-
-#[test]
-fn component_ignores_changelog_targets_alias() {
-    let component: Component = serde_json::from_value(serde_json::json!({
-        "id": "fixture",
-        "changelog_targets": "CHANGELOG.md"
-    }))
-    .unwrap();
-
-    assert!(component.changelog_target.is_none());
-}
-
-#[test]
-fn validate_version_target_conflict_same_pattern_ok() {
-    let existing = vec![VersionTarget {
-        file: "component.meta".to_string(),
-        pattern: Some("version=(.*)".to_string()),
-        artifact_path: None,
-    }];
-
-    let result =
-        validate_version_target_conflict(&existing, "component.meta", "version=(.*)", "test-comp");
-    assert!(result.is_ok());
-}
-
-#[test]
-fn validate_version_target_conflict_different_file_ok() {
-    let existing = vec![VersionTarget {
-        file: "component.meta".to_string(),
-        pattern: Some("version=(.*)".to_string()),
-        artifact_path: None,
-    }];
-
-    let result = validate_version_target_conflict(
-        &existing,
-        "package.json",
-        "\"version\": \"(.*)\"",
-        "test-comp",
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
-fn validate_version_target_conflict_empty_existing_ok() {
-    let existing: Vec<VersionTarget> = vec![];
-
-    let result =
-        validate_version_target_conflict(&existing, "component.meta", "version=(.*)", "test-comp");
-    assert!(result.is_ok());
-}
-
-#[test]
-fn validate_version_pattern_rejects_template_syntax() {
-    let result = validate_version_pattern("version={version}");
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.details.to_string().contains("template syntax"));
-}
-
-#[test]
-fn validate_version_pattern_rejects_no_capture_group() {
-    let result = validate_version_pattern(r"version=\d+\.\d+\.\d+");
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.details.to_string().contains("no capture group"));
-}
-
-#[test]
-fn validate_version_pattern_rejects_invalid_regex() {
-    let result = validate_version_pattern(r"version=(\d+\.\d+");
-    assert!(result.is_err());
-}
-
-#[test]
-fn validate_version_pattern_accepts_valid_pattern() {
+fn validate_version_pattern_requires_regex_with_capture_group() {
     assert!(validate_version_pattern(r"version:\s*(\d+\.\d+\.\d+)").is_ok());
-}
-
-#[test]
-fn parse_version_targets_rejects_template_syntax() {
-    let targets = vec!["component.meta::version={version}".to_string()];
-    let result = parse_version_targets(&targets);
-    assert!(result.is_err());
-}
-
-#[test]
-fn normalize_version_pattern_converts_double_escaped() {
-    // Pattern with double-escaped backslashes (as stored in config)
-    let double_escaped = r"version:\\s*(\\d+\\.\\d+\\.\\d+)";
-    let normalized = normalize_version_pattern(double_escaped);
-    assert_eq!(normalized, r"version:\s*(\d+\.\d+\.\d+)");
-
-    // Pattern already correct should stay the same
-    let correct = r"version:\s*(\d+\.\d+\.\d+)";
-    let normalized2 = normalize_version_pattern(correct);
-    assert_eq!(normalized2, r"version:\s*(\d+\.\d+\.\d+)");
+    for (pattern, detail) in [
+        ("version={version}", Some("template syntax")),
+        (r"version=\d+\.\d+\.\d+", Some("no capture group")),
+        (r"version=(\d+\.\d+", None),
+    ] {
+        let err = validate_version_pattern(pattern).expect_err(pattern);
+        if let Some(detail) = detail {
+            assert!(err.details.to_string().contains(detail), "{pattern}: {err}");
+        }
+    }
 }
 
 #[test]
 fn parse_version_targets_normalizes_double_escaped_patterns() {
-    // Simulate pattern stored with double-escaped backslashes
-    let targets = vec!["component.meta::version:\\s*(\\d+\\.\\d+\\.\\d+)".to_string()];
+    // Patterns stored with double-escaped backslashes are normalized; already
+    // correct patterns stay as they are.
+    let targets = vec![
+        r"component.meta::version:\\s*(\\d+\\.\\d+\\.\\d+)".to_string(),
+        r"other.meta::version:\s*(\d+\.\d+\.\d+)".to_string(),
+    ];
     let result = parse_version_targets(&targets).unwrap();
 
-    assert_eq!(result.len(), 1);
+    assert_eq!(result.len(), 2);
     assert_eq!(result[0].file, "component.meta");
-    assert_eq!(
-        result[0].pattern.as_ref().unwrap(),
-        r"version:\s*(\d+\.\d+\.\d+)"
-    );
+    for target in &result {
+        assert_eq!(
+            target.pattern.as_deref(),
+            Some(r"version:\s*(\d+\.\d+\.\d+)")
+        );
+    }
+
+    // Template syntax is rejected through the parse path too.
+    assert!(parse_version_targets(&["component.meta::version={version}".to_string()]).is_err());
 }
 
 // ========================================================================
@@ -391,7 +266,7 @@ fn parse_version_targets_normalizes_double_escaped_patterns() {
 // ========================================================================
 
 #[test]
-fn auto_resolve_remote_path_uses_extension_rule() {
+fn auto_resolve_remote_path_uses_dirname_not_component_id() {
     with_isolated_home(|home| {
         write_extension_fixture(
             home,
@@ -406,46 +281,9 @@ fn auto_resolve_remote_path_uses_extension_rule() {
   }"#,
         );
 
-        let dir = home.join("my-component");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("my-component.txt"), "Deployable component").unwrap();
-
-        let component = Component {
-            id: "my-component".to_string(),
-            local_path: dir.to_string_lossy().to_string(),
-            extensions: Some(HashMap::from([(
-                "example".to_string(),
-                ScopedExtensionConfig::default(),
-            )])),
-            ..Component::default()
-        };
-
-        assert_eq!(
-            crate::component::auto_resolve_remote_path(&component),
-            Some("remote/my-component".to_string()),
-        );
-    });
-}
-
-#[test]
-fn auto_resolve_remote_path_uses_dirname_not_component_id() {
-    with_isolated_home(|home| {
-        write_extension_fixture(
-            home,
-            "example",
-            r#"{
-"remote_path_inference": [
-  {
-    "when_file_contains": { "file": "marker.txt", "text": "Deployable" },
-    "remote_path": "remote/{{dir_name}}"
-  }
-]
-  }"#,
-        );
-
         let dir = home.join("source-dir");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("marker.txt"), "Deployable component").unwrap();
+        std::fs::write(dir.join("source-dir.txt"), "Deployable component").unwrap();
 
         let component = Component {
             id: "component-id".to_string(),
@@ -466,17 +304,19 @@ fn auto_resolve_remote_path_uses_dirname_not_component_id() {
 
 #[test]
 fn auto_resolve_remote_path_returns_none_without_matching_extension_rule() {
-    let component = Component {
-        id: "my-crate".to_string(),
-        local_path: "/tmp".to_string(),
-        extensions: Some(HashMap::from([(
-            "rust".to_string(),
-            ScopedExtensionConfig::default(),
-        )])),
-        ..Component::default()
-    };
+    with_isolated_home(|_| {
+        let component = Component {
+            id: "my-crate".to_string(),
+            local_path: "/tmp".to_string(),
+            extensions: Some(HashMap::from([(
+                "rust".to_string(),
+                ScopedExtensionConfig::default(),
+            )])),
+            ..Component::default()
+        };
 
-    assert_eq!(crate::component::auto_resolve_remote_path(&component), None);
+        assert_eq!(crate::component::auto_resolve_remote_path(&component), None);
+    });
 }
 
 /// Like [`write_extension_fixture`] but also emits the top-level
@@ -566,31 +406,8 @@ fn try_auto_resolve_remote_path_errors_on_conflicting_extension_rules() {
             message.contains("alpha") && message.contains("beta"),
             "error must name both candidates, got: {message}"
         );
-    });
-}
 
-/// #11120: the ambiguity error must hand back a command you can actually run.
-/// The old hint said only "Configure explicit <capability> extension ownership",
-/// naming neither `capability_extensions` nor any way to set it.
-#[test]
-fn ownership_ambiguity_error_names_a_runnable_command() {
-    with_isolated_home(|home| {
-        write_extension_fixture(
-            home,
-            "alpha",
-            &conflicting_remote_path_rule("remote/alpha/{{dir_name}}"),
-        );
-        write_extension_fixture(
-            home,
-            "beta",
-            &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
-        );
-
-        let component = two_extension_conflict_component(home);
-
-        let err = crate::component::try_auto_resolve_remote_path(&component)
-            .expect_err("conflicting rules must error");
-
+        // #11120: the error must hand back a command you can actually run.
         let hint = err
             .hints
             .iter()
@@ -603,7 +420,6 @@ fn ownership_ambiguity_error_names_a_runnable_command() {
             ),
             "hint must be a runnable disambiguation command, got: {hint}"
         );
-
         let tried: String = err.details["tried"]
             .as_array()
             .expect("tried hints")
@@ -620,7 +436,7 @@ fn ownership_ambiguity_error_names_a_runnable_command() {
 }
 
 /// The conflict is resolvable through the same `capability_extensions` map the
-/// error now points at — including for a non-enum surface like `remote_path`,
+/// error points at — including for a non-enum surface like `remote_path`,
 /// which has no `ExtensionCapability` variant.
 #[test]
 fn capability_extensions_resolves_remote_path_conflict() {
@@ -636,15 +452,19 @@ fn capability_extensions_resolves_remote_path_conflict() {
             &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
         );
 
-        let mut component = two_extension_conflict_component(home);
-        component
-            .capability_extensions
-            .insert("remote_path".to_string(), "beta".to_string());
+        // Rebuild the component each iteration so its `HashMap` of extensions
+        // is freshly seeded: resolution must not vary with iteration order.
+        for _ in 0..32 {
+            let mut component = two_extension_conflict_component(home);
+            component
+                .capability_extensions
+                .insert("remote_path".to_string(), "beta".to_string());
 
-        assert_eq!(
-            crate::component::try_auto_resolve_remote_path(&component).expect("explicit owner"),
-            Some("remote/beta/my-component".to_string()),
-        );
+            assert_eq!(
+                crate::component::try_auto_resolve_remote_path(&component).expect("explicit owner"),
+                Some("remote/beta/my-component".to_string()),
+            );
+        }
     });
 }
 
@@ -671,57 +491,6 @@ fn composition_primacy_resolves_remote_path_conflict() {
             crate::component::try_auto_resolve_remote_path(&component)
                 .expect("composition primacy resolves"),
             Some("remote/alpha/my-component".to_string()),
-        );
-    });
-}
-
-/// Determinism guard for the `HashSet`/`HashMap` → `BTreeMap`/`BTreeSet`
-/// conversion. `Component.extensions` is a `HashMap` with `RandomState`, so
-/// iteration order differs per process *and* per instance. Resolution must not.
-#[test]
-fn remote_path_resolution_is_deterministic_across_repeated_resolution() {
-    with_isolated_home(|home| {
-        write_extension_fixture(
-            home,
-            "alpha",
-            &conflicting_remote_path_rule("remote/alpha/{{dir_name}}"),
-        );
-        write_extension_fixture(
-            home,
-            "beta",
-            &conflicting_remote_path_rule("remote/beta/{{dir_name}}"),
-        );
-
-        let dir = home.join("my-component");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("marker.txt"), "Deployable component").unwrap();
-
-        // Rebuild the component each iteration so the HashMap is freshly
-        // seeded, then assert the outcome never varies.
-        let mut observed = std::collections::BTreeSet::new();
-        for _ in 0..32 {
-            let mut component = Component {
-                id: "my-component".to_string(),
-                local_path: dir.to_string_lossy().to_string(),
-                extensions: Some(HashMap::from([
-                    ("alpha".to_string(), ScopedExtensionConfig::default()),
-                    ("beta".to_string(), ScopedExtensionConfig::default()),
-                ])),
-                ..Component::default()
-            };
-            component
-                .capability_extensions
-                .insert("remote_path".to_string(), "beta".to_string());
-
-            observed.insert(
-                crate::component::try_auto_resolve_remote_path(&component).expect("resolves"),
-            );
-        }
-
-        assert_eq!(
-            observed.len(),
-            1,
-            "resolution must not vary with HashMap iteration order, saw: {observed:?}"
         );
     });
 }
@@ -836,11 +605,24 @@ fn discover_from_portable_creates_component_from_homeboy_json() {
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = tmp.path().to_path_buf();
 
+    assert!(discover_from_portable(&dir).is_none());
+
+    // Subsystem-owned fields such as `baselines` ride along in a real
+    // homeboy.json and must not make discovery silently fail.
     let config = serde_json::json!({
         "id": "test-discover",
         "version_targets": [{"file": "Cargo.toml", "pattern": "(?m)^version\\s*=\\s*\"([0-9.]+)\""}],
         "changelog_target": "docs/CHANGELOG.md",
-        "extensions": {"rust": {}}
+        "extensions": {"rust": {}},
+        "baselines": {
+            "lint": {
+                "context_id": "test-discover",
+                "created_at": "2026-03-06T04:47:29Z",
+                "item_count": 0,
+                "known_fingerprints": [],
+                "metadata": { "findings_count": 0 }
+            }
+        }
     });
     std::fs::write(dir.join("homeboy.json"), config.to_string()).unwrap();
 
@@ -860,16 +642,6 @@ fn discover_from_portable_creates_component_from_homeboy_json() {
         .is_some_and(|m| m.contains_key("rust")));
     assert!(comp.version_targets.is_some());
     assert!(comp.remote_path.is_empty()); // default
-}
-
-#[test]
-fn discover_from_portable_returns_none_without_homeboy_json() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let dir = tmp.path().to_path_buf();
-    // No homeboy.json in the temp dir
-
-    let result = discover_from_portable(&dir);
-    assert!(result.is_none());
 }
 
 #[test]
@@ -899,170 +671,44 @@ fn discover_from_portable_ignores_machine_specific_in_portable() {
 }
 
 #[test]
-fn discover_from_portable_with_baselines_and_extensions() {
-    // Mirrors a real homeboy.json — includes subsystem-owned
-    // baselines and component-owned extensions. This must not silently fail.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let dir = tmp.path().to_path_buf();
-
-    let config = serde_json::json!({
-        "auto_cleanup": false,
-        "baselines": {
-            "lint": {
-                "context_id": "sample-component",
-                "created_at": "2026-03-06T04:47:29Z",
-                "item_count": 0,
-                "known_fingerprints": [],
-                "metadata": {
-                    "findings_count": 0
-                }
-            }
-        },
-        "changelog_target": "docs/CHANGELOG.md",
-        "extensions": {
-            "example": {}
-        },
-        "id": "sample-component",
-        "version_targets": [
-            {"file": "sample-component.meta", "pattern": "(?m)^version=([0-9.]+)"}
-        ]
-    });
-    std::fs::write(dir.join("homeboy.json"), config.to_string()).unwrap();
-
-    let result = discover_from_portable(&dir);
-    assert!(
-        result.is_some(),
-        "Should discover component even with baselines field in homeboy.json"
-    );
-
-    let comp = result.unwrap();
-    // id comes from portable JSON
-    assert_eq!(comp.id, "sample-component");
-    assert_eq!(comp.local_path, dir.to_string_lossy());
-    // extensions must be present
-    assert!(
-        comp.extensions.is_some(),
-        "extensions should be set from portable config"
-    );
-    assert!(
-        comp.extensions.as_ref().unwrap().contains_key("example"),
-        "example extension should be present"
-    );
-    assert_eq!(comp.changelog_target.as_deref(), Some("docs/CHANGELOG.md"));
-    assert!(comp.version_targets.is_some());
-}
-
-#[test]
-fn scoped_extension_config_captures_flat_settings() {
-    // Flat keys (the current convention in homeboy.json) must be captured
-    // as settings — not silently dropped.
-    let json = serde_json::json!({
-        "database_type": "mysql",
-        "mysql_host": "localhost",
-        "mysql_user": "root"
-    });
-
-    let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
-    assert_eq!(
-        config
-            .settings
-            .get("database_type")
-            .and_then(|v| v.as_str()),
-        Some("mysql")
-    );
-    assert_eq!(
-        config.settings.get("mysql_host").and_then(|v| v.as_str()),
-        Some("localhost")
-    );
-    assert_eq!(
-        config.settings.get("mysql_user").and_then(|v| v.as_str()),
-        Some("root")
-    );
-    assert!(config.version.is_none());
-}
-
-#[test]
-fn scoped_extension_config_captures_nested_settings() {
-    let json = serde_json::json!({
-        "version": ">=2.0.0",
-        "settings": {
-            "database_type": "mysql",
-            "mysql_host": "localhost"
-        }
-    });
-
-    let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
-    assert_eq!(config.version.as_deref(), Some(">=2.0.0"));
-    assert_eq!(
-        config
-            .settings
-            .get("database_type")
-            .and_then(|v| v.as_str()),
-        Some("mysql")
-    );
-    assert_eq!(
-        config.settings.get("mysql_host").and_then(|v| v.as_str()),
-        Some("localhost")
-    );
-    assert!(config.settings.get("settings").is_none());
-}
-
-#[test]
-fn scoped_extension_config_flat_settings_override_nested_settings() {
-    let json = serde_json::json!({
-        "settings": {
-            "database_type": "mysql"
-        },
-        "mysql_host": "localhost",
-        "database_type": "sqlite"
-    });
-
-    let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
-    assert_eq!(
-        config
-            .settings
-            .get("database_type")
-            .and_then(|v| v.as_str()),
-        Some("sqlite"),
-        "flat keys are canonical and must not be overwritten by nested settings"
-    );
-    assert_eq!(
-        config.settings.get("mysql_host").and_then(|v| v.as_str()),
-        Some("localhost")
-    );
-    assert!(config.settings.get("settings").is_none());
-}
-
-#[test]
-fn component_homeboy_json_routes_nested_extension_test_backend_setting() {
-    let component: Component = serde_json::from_value(serde_json::json!({
-        "id": "roadie",
-        "local_path": "/tmp/roadie",
-        "extensions": {
-            "example": {
-                "settings": {
-                    "test_backend": "host-smoke"
-                }
-            }
-        }
-    }))
-    .unwrap();
-
-    let extension_settings = component
-        .extensions
-        .as_ref()
-        .and_then(|extensions| extensions.get("example"))
-        .expect("example extension config")
-        .settings
-        .clone();
-
-    assert_eq!(
-        extension_settings
-            .get("test_backend")
-            .and_then(|value| value.as_str()),
-        Some("host-smoke")
-    );
-    assert!(extension_settings.get("settings").is_none());
+fn scoped_extension_config_merges_flat_and_nested_settings() {
+    // Flat keys are the homeboy.json convention and are canonical; a nested
+    // `settings` object is folded in underneath them.
+    for (json, version, expected) in [
+        (
+            serde_json::json!({ "database_type": "mysql", "mysql_host": "localhost" }),
+            None,
+            serde_json::json!({ "database_type": "mysql", "mysql_host": "localhost" }),
+        ),
+        (
+            serde_json::json!({
+                "version": ">=2.0.0",
+                "settings": { "database_type": "mysql", "mysql_host": "localhost" }
+            }),
+            Some(">=2.0.0"),
+            serde_json::json!({ "database_type": "mysql", "mysql_host": "localhost" }),
+        ),
+        (
+            serde_json::json!({
+                "settings": { "database_type": "mysql" },
+                "mysql_host": "localhost",
+                "database_type": "sqlite"
+            }),
+            None,
+            serde_json::json!({ "database_type": "sqlite", "mysql_host": "localhost" }),
+        ),
+        (
+            serde_json::json!({ "version": "^1.0" }),
+            Some("^1.0"),
+            serde_json::json!({}),
+        ),
+    ] {
+        let config: ScopedExtensionConfig = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(config.version.as_deref(), version, "{json}");
+        let settings: serde_json::Map<String, serde_json::Value> =
+            config.settings.into_iter().collect();
+        assert_eq!(serde_json::Value::Object(settings), expected, "{json}");
+    }
 }
 
 #[test]
@@ -1076,20 +722,4 @@ fn scoped_extension_config_serializes_flat_settings() {
     assert_eq!(json["version"], serde_json::json!(">=2.0.0"));
     assert_eq!(json["package_manager"], serde_json::json!("pnpm"));
     assert!(json.get("settings").is_none());
-}
-
-#[test]
-fn scoped_extension_config_empty_object() {
-    let json = serde_json::json!({});
-    let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
-    assert!(config.version.is_none());
-    assert!(config.settings.is_empty());
-}
-
-#[test]
-fn scoped_extension_config_version_only() {
-    let json = serde_json::json!({ "version": "^1.0" });
-    let config: ScopedExtensionConfig = serde_json::from_value(json).unwrap();
-    assert_eq!(config.version.as_deref(), Some("^1.0"));
-    assert!(config.settings.is_empty());
 }

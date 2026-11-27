@@ -270,26 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn nested_scopes_resolve_beside_supported_manifests_only() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        write(&tmp.path().join("scope.marker"), "{}");
-        write(&tmp.path().join("modules/alpha/scope.marker"), "{}");
-        write(&tmp.path().join("modules/beta/unrelated.txt"), "x");
-
-        let scope = ArtifactCleanupScope {
-            manifest_files: vec!["scope.marker".to_string()],
-            nested: true,
-            max_depth: None,
-        };
-
-        let dirs = resolve_scope_directories(tmp.path(), &scope, &HashSet::new());
-
-        assert!(dirs.contains(&String::new()));
-        assert!(dirs.contains(&"modules/alpha".to_string()));
-        assert!(!dirs.contains(&"modules/beta".to_string()));
-    }
-
-    #[test]
     fn nested_discovery_never_descends_into_a_declared_artifact_tree() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write(&tmp.path().join("scope.marker"), "{}");

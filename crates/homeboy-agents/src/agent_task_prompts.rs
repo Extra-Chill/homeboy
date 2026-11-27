@@ -399,9 +399,10 @@ mod tests {
     }
 
     #[test]
-    fn stores_markdown_prompts_under_configured_data_root() {
+    fn saved_prompts_live_under_the_data_root_and_resolve_by_ref() {
         let temp = tempfile::tempdir().expect("prompt store");
         let store = PromptStore::from_data_root(temp.path().to_path_buf());
+        store.save("alpha", "first").expect("save alpha");
         let record = store
             .save("Cook: PR 123.md", "# Cook\nDo the thing.\n")
             .expect("saved prompt");
@@ -409,18 +410,6 @@ mod tests {
         assert_eq!(record.id, "Cook__PR_123");
         assert!(record.path.ends_with("agent-task/prompts/Cook__PR_123.md"));
         assert!(record.path.starts_with(&temp.path().display().to_string()));
-        assert_eq!(
-            store.read("Cook__PR_123").expect("read prompt"),
-            "# Cook\nDo the thing.\n"
-        );
-    }
-
-    #[test]
-    fn lists_and_resolves_prompt_refs() {
-        let temp = tempfile::tempdir().expect("prompt store");
-        let store = PromptStore::from_data_root(temp.path().to_path_buf());
-        store.save("beta", "second").expect("save beta");
-        store.save("alpha", "first").expect("save alpha");
 
         let ids: Vec<String> = store
             .list()
@@ -428,15 +417,14 @@ mod tests {
             .into_iter()
             .map(|record| record.id)
             .collect();
-        assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
-        assert_eq!(
-            store.resolve("prompt:alpha").expect("resolve ref"),
-            Some("first".to_string())
-        );
-        assert_eq!(
-            store.resolve("@prompt:alpha").expect("resolve at ref"),
-            Some("first".to_string())
-        );
+        assert_eq!(ids, vec!["Cook__PR_123".to_string(), "alpha".to_string()]);
+        for reference in ["prompt:Cook__PR_123", "@prompt:Cook__PR_123"] {
+            assert_eq!(
+                store.resolve(reference).expect("resolve ref"),
+                Some("# Cook\nDo the thing.\n".to_string()),
+                "{reference}"
+            );
+        }
         assert_eq!(store.resolve("plain prompt").expect("plain prompt"), None);
     }
 }

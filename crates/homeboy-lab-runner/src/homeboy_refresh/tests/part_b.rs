@@ -144,56 +144,13 @@ fn merge_refresh_patch(runner_id: &str, homeboy_path: &str) -> serde_json::Value
 }
 
 #[test]
-fn refresh_patch_deletes_a_homeboy_synthesized_path_for_ssh_runners() {
-    crate::test_support::with_isolated_home(|_| {
-        let controller = tempfile::tempdir().expect("controller home");
-        let ctl_home = controller.path().join("ctl-home");
-        let workspace = controller.path().join("w");
-        let synthesized_path = format!(
-            "{home}/.local/bin:{home}/.pi/bin:{ws}/_homeboy_binaries/homeboy-a:{ws}/_homeboy_binaries/homeboy-b:/usr/bin",
-            home = ctl_home.display(),
-            ws = workspace.display(),
-        );
-        create_ssh_runner_with_path_env("lab-ssh", &workspace, &synthesized_path);
-
-        let homeboy_path = format!(
-            "{}/_homeboy_binaries/homeboy-c/homeboy",
-            workspace.display()
-        );
-        let patch = merge_refresh_patch("lab-ssh", &homeboy_path);
-
-        // The persisted PATH was homeboy-synthesized (controller-home entries
-        // plus one `_homeboy_binaries` slot per refresh), so the patch deletes
-        // it instead of shipping it to every SSH client and remote job (#15158).
-        assert!(patch["env"]["PATH"].is_null());
-        assert_eq!(patch["env"]["HOMEBOY_COMMAND"], homeboy_path.as_str());
-
-        let runner = crate::load("lab-ssh").expect("reload runner");
-        assert_eq!(runner.env.get("PATH"), None);
-        assert_eq!(
-            runner.env.get("HOMEBOY_COMMAND").map(String::as_str),
-            Some(homeboy_path.as_str())
-        );
-
-        // Effective env for an SSH runner without a persisted PATH performs no
-        // controller PATH discovery either: no PATH key may appear.
-        let effective = crate::effective_env("lab-ssh").expect("effective env");
-        assert_eq!(effective.get("PATH"), None);
-        assert_eq!(
-            effective.get("HOMEBOY_COMMAND").map(String::as_str),
-            Some(homeboy_path.as_str())
-        );
-    });
-}
-
-#[test]
 fn consecutive_refreshes_never_accumulate_homeboy_binary_path_dirs() {
     crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller home");
         let ctl_home = controller.path().join("ctl-home");
         let workspace = controller.path().join("w");
         let synthesized_path = format!(
-            "{home}/.local/bin:{ws}/_homeboy_binaries/homeboy-a:{ws}/_homeboy_binaries/homeboy-b:/usr/bin",
+            "{home}/.local/bin:{home}/.pi/bin:{ws}/_homeboy_binaries/homeboy-a:{ws}/_homeboy_binaries/homeboy-b:/usr/bin",
             home = ctl_home.display(),
             ws = workspace.display(),
         );
@@ -225,6 +182,14 @@ fn consecutive_refreshes_never_accumulate_homeboy_binary_path_dirs() {
                 workspace.display()
             ))
             .as_deref()
+        );
+        // Effective env for an SSH runner without a persisted PATH performs no
+        // controller PATH discovery either (#15158).
+        assert_eq!(
+            crate::effective_env("lab-ssh")
+                .expect("effective env")
+                .get("PATH"),
+            None
         );
     });
 }
@@ -330,25 +295,6 @@ fn dev_sync_resource_replaces_existing_extension_overlay_by_id() {
 }
 
 #[test]
-fn dev_sync_resource_keeps_last_duplicate_overlay_for_same_id() {
-    let existing = serde_json::json!({
-        "schema": "homeboy/runner-dev-sync/v1",
-        "extensions": [
-            {"id": "nodejs", "source_path": "/old/nodejs", "content_hash": "old"},
-            {"id": "nodejs", "source_path": "/newer/nodejs", "content_hash": "newer"}
-        ]
-    });
-
-    let updated =
-        updated_dev_sync_resource(Some(existing), None, &[]).expect("normalizes dev-sync resource");
-    let extensions = updated["extensions"].as_array().expect("extensions array");
-
-    assert_eq!(extensions.len(), 1);
-    assert_eq!(extensions[0]["source_path"], "/newer/nodejs");
-    assert_eq!(extensions[0]["content_hash"], "newer");
-}
-
-#[test]
 fn dev_sync_resource_replacement_persists_reconciled_overlay_records() {
     crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{
@@ -423,6 +369,13 @@ fn extension_only_dev_sync_plan_does_not_refresh_homeboy_binary() {
         assert!(plan.followup_commands.is_empty());
         assert_eq!(plan.extensions.len(), 1);
         assert_eq!(plan.extensions[0].id, "nodejs");
+
+        let binary_sync = RunnerDevSyncOptions {
+            extensions: Vec::new(),
+            ..options
+        };
+        assert!(should_sync_homeboy_binary(&binary_sync));
+        assert!(!dev_sync_next_actions("lab-local", &binary_sync).is_empty());
     });
 }
 
@@ -453,28 +406,13 @@ fn extension_only_dev_sync_scrubs_dev_binary_env() {
 }
 
 #[test]
-fn dev_sync_without_extensions_still_refreshes_homeboy_binary() {
-    let options = RunnerDevSyncOptions {
-        runner_id: "lab".to_string(),
-        homeboy_source: None,
-        homeboy_binary: None,
-        extensions: Vec::new(),
-        reconnect: false,
-        dry_run: true,
-    };
-
-    assert!(should_sync_homeboy_binary(&options));
-    assert!(!dev_sync_next_actions("lab", &options).is_empty());
-}
-
-#[test]
-fn ssh_dev_sync_rejects_darwin_binary_before_upload() {
+fn dev_sync_rejects_darwin_binary_only_for_ssh_runners() {
     let dir = tempfile::tempdir().expect("binary dir");
     let binary = dir.path().join("homeboy");
     std::fs::write(&binary, [0xcf, 0xfa, 0xed, 0xfe]).expect("write macho binary");
-    let runner = super::super::super::Runner {
+    let runner = |kind| super::super::super::Runner {
         id: "homeboy-lab".to_string(),
-        kind: RunnerKind::Ssh,
+        kind,
         server_id: Some("lab-server".to_string()),
         workspace_root: Some("/home/chubes/Developer".to_string()),
         settings: Default::default(),
@@ -484,8 +422,10 @@ fn ssh_dev_sync_rejects_darwin_binary_before_upload() {
         policy: Default::default(),
     };
 
-    let err =
-        validate_dev_sync_binary_for_runner(&runner, &binary).expect_err("darwin binary rejected");
+    validate_dev_sync_binary_for_runner(&runner(RunnerKind::Local), &binary)
+        .expect("local runner accepts binary");
+    let err = validate_dev_sync_binary_for_runner(&runner(RunnerKind::Ssh), &binary)
+        .expect_err("darwin binary rejected");
 
     assert!(err.message.contains("Darwin/Mach-O"));
     let tried = err.details["tried"].as_array().expect("tried remediation");
@@ -690,77 +630,6 @@ fn ssh_source_snapshot_requires_matching_source_binary_and_slot_identity() {
 }
 
 #[test]
-fn local_dev_sync_allows_darwin_binary() {
-    let dir = tempfile::tempdir().expect("binary dir");
-    let binary = dir.path().join("homeboy");
-    std::fs::write(&binary, [0xcf, 0xfa, 0xed, 0xfe]).expect("write macho binary");
-    let runner = super::super::super::Runner {
-        id: "lab-local".to_string(),
-        kind: RunnerKind::Local,
-        server_id: None,
-        workspace_root: Some("/tmp/homeboy".to_string()),
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
-    };
-
-    validate_dev_sync_binary_for_runner(&runner, &binary).expect("local runner accepts binary");
-}
-
-#[test]
-fn extension_overlay_lifecycle_uses_ttl_cleanup_policy() {
-    let lifecycle = super::super::super::extension_materialization::dev_extension_lifecycle(
-        "lab",
-        "/runner/ws/dev/rust/hash",
-        "rust",
-    );
-
-    assert_eq!(lifecycle.owner, "runner.dev_sync.extension_overlay");
-    assert_eq!(lifecycle.ttl.as_deref(), Some("P7D"));
-    assert_eq!(
-        lifecycle.cleanup_policy,
-        homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl
-    );
-    assert_eq!(
-        lifecycle.status,
-        homeboy_core::resource_lifecycle_index::ResourceLifecycleResourceStatus::Active
-    );
-}
-
-#[test]
-fn refresh_patch_updates_the_selected_binary_and_control_plane_environment() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{
-                "id": "lab-local",
-                "kind": "local",
-                "workspace_root": "/runner/ws",
-                "homeboy_path": "/old/homeboy",
-                "resources": {
-                    "dev_sync": {"schema":"homeboy/runner-dev-sync/v1"},
-                    "keep": {"enabled": true}
-                }
-            }"#,
-            false,
-        )
-        .expect("create runner");
-
-        let patch = refreshed_runner_patch_in_roots("lab-local", "/runner/ws/homeboy")
-            .expect("build refresh patch");
-
-        assert_eq!(patch["homeboy_path"], "/runner/ws/homeboy");
-        assert_eq!(patch["env"]["HOMEBOY_COMMAND"], "/runner/ws/homeboy");
-        assert!(
-            patch["env"]["HOMEBOY_COMMAND"] == "/runner/ws/homeboy",
-            "refresh updates env to pin daemon startup and queued jobs to the selected binary"
-        );
-        assert!(patch["env"]["HOMEBOY_DAEMON_STATE_DIR"].is_null());
-    });
-}
-
-#[test]
 fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
     crate::test_support::with_isolated_home(|_| {
         crate::create(
@@ -789,62 +658,6 @@ fn ssh_bootstrap_success_promotes_verified_exact_sha_with_provenance() {
         assert_eq!(
             crate::load("lab-local")
                 .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/verified/homeboy")
-        );
-    });
-}
-
-#[test]
-fn controller_binary_selection_reports_fresh_main_control_plane_fields() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
-            false,
-        )
-        .expect("runner");
-
-        assert_eq!(
-            {
-                let lease = acquire_runner_binary_promotion_in_roots(
-                    &ambient_roots(),
-                    "lab-local",
-                    "verified",
-                    crate::lab_selection::emit_runtime_promotion_wait,
-                )
-                .expect("promotion lease");
-                promote_verified_runner_binary_in_roots(
-                    &ambient_roots(),
-                    &lease,
-                    "lab-local",
-                    "/verified/homeboy",
-                )
-            }
-            .expect("persist controller selection"),
-            ["env", "homeboy_path"]
-        );
-        assert_eq!(
-            {
-                let lease = acquire_runner_binary_promotion_in_roots(
-&ambient_roots(),
-"lab-local",
-"verified",
-crate::lab_selection::emit_runtime_promotion_wait,
-)
-                    .expect("promotion lease");
-                promote_verified_runner_binary_in_roots(
-                &ambient_roots(),
-                &lease, "lab-local", "/verified/homeboy")
-            }
-                .expect("repeat controller selection"),
-            ["env", "homeboy_path"],
-            "promotion always declares the control-plane environment and selected executable it normalizes"
-        );
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload controller registry")
                 .settings
                 .homeboy_path
                 .as_deref(),
@@ -1001,85 +814,49 @@ fn equivalent_refresh_waiter_reloads_the_owner_selection_after_promotion_handoff
 }
 
 #[test]
-fn divergent_refresh_candidate_is_rejected_while_owner_keeps_selection() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab","kind":"local","homeboy_path":"/stable"}"#,
-            false,
-        )
-        .expect("create runner");
-        let owner = acquire_runner_binary_promotion_in_roots(
-            &ambient_roots(),
-            "lab",
-            "newer",
-            crate::lab_selection::emit_runtime_promotion_wait,
-        )
-        .expect("owner lease");
+fn non_equivalent_refresh_candidate_is_rejected_while_owner_keeps_selection() {
+    for (owner_key, contender_key) in [("newer", "diverged"), ("descendant", "ancestor")] {
+        crate::test_support::with_isolated_home(|_| {
+            crate::create(
+                r#"{"id":"lab","kind":"local","homeboy_path":"/stable"}"#,
+                false,
+            )
+            .expect("create runner");
+            let owner = acquire_runner_binary_promotion_in_roots(
+                &ambient_roots(),
+                "lab",
+                owner_key,
+                crate::lab_selection::emit_runtime_promotion_wait,
+            )
+            .expect("owner lease");
 
-        let error = std::thread::spawn(|| {
-            acquire_runner_binary_promotion_in_roots(&ambient_roots(), "lab", "diverged", |_| {
-                panic!("divergent candidate must not queue")
+            let error = std::thread::spawn(move || {
+                acquire_runner_binary_promotion_in_roots(
+                    &ambient_roots(),
+                    "lab",
+                    contender_key,
+                    |_| panic!("non-equivalent candidate must not queue"),
+                )
             })
-        })
-        .join()
-        .expect("divergent contender exits")
-        .expect_err("divergent candidate remains fail-closed");
-        assert_eq!(
-            error.code,
-            homeboy_core::ErrorCode::RuntimePromotionContended
-        );
-        assert_eq!(error.details["holder_compatibility_key"], "newer");
-        assert_eq!(
-            crate::load("lab")
-                .expect("reload runner")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/stable")
-        );
-        drop(owner);
-    });
-}
-
-#[test]
-fn strict_ancestor_refresh_candidate_is_rejected_while_owner_keeps_selection() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab","kind":"local","homeboy_path":"/stable"}"#,
-            false,
-        )
-        .expect("create runner");
-        let owner = acquire_runner_binary_promotion_in_roots(
-            &ambient_roots(),
-            "lab",
-            "descendant",
-            crate::lab_selection::emit_runtime_promotion_wait,
-        )
-        .expect("owner lease");
-
-        let error = std::thread::spawn(|| {
-            acquire_runner_binary_promotion_in_roots(&ambient_roots(), "lab", "ancestor", |_| {
-                panic!("strict ancestor candidate must not queue")
-            })
-        })
-        .join()
-        .expect("strict ancestor contender exits")
-        .expect_err("strict ancestor candidate remains fail-closed");
-        assert_eq!(
-            error.code,
-            homeboy_core::ErrorCode::RuntimePromotionContended
-        );
-        assert_eq!(error.details["holder_compatibility_key"], "descendant");
-        assert_eq!(
-            crate::load("lab")
-                .expect("reload runner")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/stable")
-        );
-        drop(owner);
-    });
+            .join()
+            .expect("contender exits")
+            .expect_err("non-equivalent candidate remains fail-closed");
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::RuntimePromotionContended
+            );
+            assert_eq!(error.details["holder_compatibility_key"], owner_key);
+            assert_eq!(
+                crate::load("lab")
+                    .expect("reload runner")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/stable")
+            );
+            drop(owner);
+        });
+    }
 }
 
 #[test]
@@ -1190,93 +967,33 @@ fn daemonless_runner_refresh_promotes_without_reconnecting() {
 }
 
 #[test]
-fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
-            false,
-        )
-        .expect("runner");
-        let mut plan = ssh_bootstrap_plan();
-        plan.mode = "select".to_string();
-        plan.git_ref = None;
-        let result = ssh_bootstrap_promote_with(
-            &plan,
-            || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),
-            |path, _| {
-                homeboy_core::config::with_config_lock(|| {
-                    let patch = refreshed_runner_patch_in_roots("lab-local", path)?;
-                    match merge(Some("lab-local"), &patch.to_string(), &[])? {
-                        MergeOutput::Single(result) => Ok((result.updated_fields, None)),
-                        MergeOutput::Bulk(_) => Ok((Vec::new(), None)),
-                    }
-                })
-            },
-        )
-        .expect("selected binary promotes");
-        assert_eq!(result.source_sha, None);
-        assert_eq!(result.identity["data"]["git_commit"], "abc123");
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/verified/homeboy")
-        );
-    });
-}
-
-#[test]
-fn ssh_bootstrap_transport_failure_leaves_config_unchanged() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
-            false,
-        )
-        .expect("runner");
-        let result = ssh_bootstrap_promote_with(
-            &ssh_bootstrap_plan(),
-            || Err(Error::internal_io("transport failed".to_string(), None)),
-            |_, _| panic!("must not promote"),
-        );
-        assert!(result.is_err());
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/old")
-        );
-    });
-}
-
-#[test]
-fn ssh_bootstrap_identity_mismatch_leaves_config_unchanged() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
-            false,
-        )
-        .expect("runner");
-        let result = ssh_bootstrap_promote_with(
-            &ssh_bootstrap_plan(),
-            || {
-                Ok("HOMEBOY_REFRESH_SOURCE_SHA=abc123\n{\"data\":{\"git_commit\":\"other\",\"git_dirty\":false}}".to_string())
-            },
-            |_, _| panic!("must not promote"),
-        );
-        assert!(result.is_err());
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/old")
-        );
-    });
+fn failed_ssh_bootstrap_leaves_config_unchanged() {
+    let transport_failure = || Err(Error::internal_io("transport failed".to_string(), None));
+    let identity_mismatch = || {
+        Ok("HOMEBOY_REFRESH_SOURCE_SHA=abc123\n{\"data\":{\"git_commit\":\"other\",\"git_dirty\":false}}".to_string())
+    };
+    let executors: [&dyn Fn() -> Result<String>; 2] = [&transport_failure, &identity_mismatch];
+    for execute in executors {
+        crate::test_support::with_isolated_home(|_| {
+            crate::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/old"}"#,
+                false,
+            )
+            .expect("runner");
+            let result = ssh_bootstrap_promote_with(&ssh_bootstrap_plan(), execute, |_, _| {
+                panic!("must not promote")
+            });
+            assert!(result.is_err());
+            assert_eq!(
+                crate::load("lab-local")
+                    .expect("reload")
+                    .settings
+                    .homeboy_path
+                    .as_deref(),
+                Some("/old")
+            );
+        });
+    }
 }
 
 #[test]

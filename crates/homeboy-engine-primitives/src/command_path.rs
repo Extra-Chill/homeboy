@@ -258,114 +258,41 @@ mod tests {
     }
 
     #[test]
-    fn test_build_tool_path_prepends_existing_toolchain_dirs() {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let home = tmp.path().join("home");
-        let local = home.join(".local/bin");
-        let cargo = home.join(".cargo/bin");
-        fs::create_dir_all(&local).expect("local bin");
-        fs::create_dir_all(&cargo).expect("cargo bin");
-
-        let inherited = OsString::from("/usr/bin:/bin");
-        let path = build_tool_path(Some(&home), &[], Some(&inherited)).expect("path");
-        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
-
-        assert_eq!(parts[0], local);
-        assert_eq!(parts[1], cargo);
-        assert!(parts.contains(&PathBuf::from("/usr/bin")));
-        assert!(parts.contains(&PathBuf::from("/bin")));
-        assert!(!parts.contains(&home.join(".kimaki/bin")));
-    }
-
-    #[test]
-    fn test_tool_path_prepends_nvm_node_bins() {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let home = tmp.path().join("home");
-        let node_20 = home.join(".nvm/versions/node/v20.0.0/bin");
-        let node_24 = home.join(".nvm/versions/node/v24.13.1/bin");
-        fs::create_dir_all(&node_20).expect("node 20 bin");
-        fs::create_dir_all(&node_24).expect("node 24 bin");
-        // A version directory without a bin subdir is skipped, not emitted bare.
-        fs::create_dir_all(home.join(".nvm/versions/node/v18.0.0")).expect("node 18");
-
-        let inherited = OsString::from("/usr/bin:/bin");
-        let path = build_tool_path(Some(&home), &[], Some(&inherited)).expect("path");
-        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
-
-        assert_eq!(parts[0], node_24);
-        assert_eq!(parts[1], node_20);
-        assert!(!parts.contains(&home.join(".nvm/versions/node/v18.0.0")));
-        assert!(parts.contains(&PathBuf::from("/usr/bin")));
-    }
-
-    #[test]
-    fn test_tool_path_discovers_only_node_prefixed_local_opt_installs() {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let home = tmp.path().join("home");
-        let node = home.join(".local/opt/node-v24.13.1-linux-x64/bin");
-        let other = home.join(".local/opt/other-tool/bin");
-        fs::create_dir_all(&node).expect("node bin");
-        fs::create_dir_all(&other).expect("other bin");
-
-        let path = build_tool_path(Some(&home), &[], None).expect("path");
-        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
-
-        assert_eq!(parts, vec![node]);
-    }
-
-    #[test]
-    fn test_node_discovery_follows_home_bin_dirs() {
+    fn tool_path_orders_home_bins_then_node_installs_then_inherited() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let home = tmp.path().join("home");
         let local = home.join(".local/bin");
         let cargo = home.join(".cargo/bin");
         let local_node = home.join(".local/opt/node-v24.13.1-linux-x64/bin");
-        let nvm_node = home.join(".nvm/versions/node/v20.0.0/bin");
-        for dir in [&local, &cargo, &local_node, &nvm_node] {
+        let nvm_20 = home.join(".nvm/versions/node/v20.0.0/bin");
+        let nvm_24 = home.join(".nvm/versions/node/v24.13.1/bin");
+        for dir in [&local, &cargo, &local_node, &nvm_20, &nvm_24] {
             fs::create_dir_all(dir).expect("bin");
         }
+        // Non-node local installs and version dirs without a bin are skipped.
+        fs::create_dir_all(home.join(".local/opt/other-tool/bin")).expect("other bin");
+        fs::create_dir_all(home.join(".nvm/versions/node/v18.0.0")).expect("node 18");
 
-        let inherited = OsString::from("/usr/bin:/bin");
+        let inherited = OsString::from(format!("/usr/bin:{}:/bin", local.display()));
         let path = build_tool_path(Some(&home), &[], Some(&inherited)).expect("path");
-        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
-
-        assert_eq!(parts[0], local);
-        assert_eq!(parts[1], cargo);
-        assert_eq!(parts[2], local_node);
-        assert_eq!(
-            parts[3], nvm_node,
-            "node discovery still precedes system dirs"
-        );
-    }
-
-    #[test]
-    fn test_tool_path_keeps_existing_path_without_home() {
-        let inherited = OsString::from("/usr/bin:/bin");
-        let path = build_tool_path(None, &[], Some(&inherited)).expect("path");
         let parts = std::env::split_paths(&path).collect::<Vec<_>>();
 
         assert_eq!(
             parts,
-            vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
+            vec![
+                local,
+                cargo,
+                local_node,
+                nvm_24,
+                nvm_20,
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ]
         );
     }
 
     #[test]
-    fn test_tool_path_deduplicates_entries() {
-        let tmp = tempfile::tempdir().expect("tmpdir");
-        let home = tmp.path().join("home");
-        let local = home.join(".local/bin");
-        fs::create_dir_all(&local).expect("local bin");
-
-        let inherited = OsString::from(local.to_string_lossy().into_owned());
-        let path = build_tool_path(Some(&home), &[], Some(&inherited)).expect("path");
-        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
-
-        assert_eq!(parts, vec![local]);
-    }
-
-    #[test]
-    fn test_tool_path_appends_existing_absolute_toolchain_dirs() {
+    fn tool_path_without_home_prepends_only_existing_absolute_dirs() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let homebrew = tmp.path().join("opt-homebrew-bin");
         let missing = tmp.path().join("missing-bin");
@@ -382,8 +309,10 @@ mod tests {
         .expect("path");
         let parts = std::env::split_paths(&path).collect::<Vec<_>>();
 
-        assert_eq!(parts[0], homebrew);
-        assert!(!parts.contains(&missing));
+        assert_eq!(
+            parts,
+            vec![homebrew, PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
+        );
     }
 
     #[test]

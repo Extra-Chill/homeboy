@@ -125,65 +125,11 @@ JSON
     assert!(env_dump.contains("results="));
     assert!(env_dump.contains("artifact="));
     assert!(env_dump.contains("run="));
-    run_dir.cleanup();
-}
 
-#[test]
-fn test_run_trace_list_workflow() {
-    let _home_env_guard = homeboy_core::test_support::home_env_guard();
-    let temp = exec_capable_tempdir();
-    let extension_dir = temp.path().join("extension");
-    let component_dir = temp.path().join("component");
-    fs::create_dir_all(&extension_dir).unwrap();
-    fs::create_dir_all(&component_dir).unwrap();
-    write_extension_manifest(&extension_dir);
-    let script = extension_dir.join("trace-runner.sh");
-    homeboy_test_support::write_executable(
-        &script,
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-printf '%s' "$HOMEBOY_TRACE_LIST_ONLY" > "$HOMEBOY_TRACE_ARTIFACT_DIR/list.txt"
-cat > "$HOMEBOY_TRACE_RESULTS_FILE" <<JSON
-{"component_id":"example","scenarios":[{"id":"close-window"}]}
-JSON
-"#,
-        0o755,
-    )
-    .unwrap();
-
-    let component = component_with_extension("example", &component_dir);
-    let context = trace_context(&component, &extension_dir);
-    let run_dir = RunDir::create().unwrap();
-    let args = TraceRunWorkflowArgs {
-        component_label: "example".to_string(),
-        component_id: "example".to_string(),
-        path_override: Some(component_dir.to_string_lossy().to_string()),
-        settings: Vec::new(),
-        runner_inputs: TraceRunnerInputs::default(),
-        scenario_id: String::new(),
-        json_summary: false,
-        rig_id: None,
-        overlays: Vec::new(),
-        keep_overlay: false,
-        span_definitions: Vec::new(),
-        baseline_flags: BaselineFlags {
-            baseline: false,
-            ignore_baseline: true,
-            ratchet: false,
-        },
-        regression_threshold_percent:
-            crate::extension::trace::baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-        regression_min_delta_ms: crate::extension::trace::baseline::DEFAULT_REGRESSION_MIN_DELTA_MS,
-        canonical_policy: TraceCanonicalPolicy::Development,
-        checkout_provenance: None,
-    };
-
-    let output = build_trace_runner(Some(&context), &component, &args, &run_dir, true).unwrap();
-    assert!(output.success);
-    assert_eq!(
-        fs::read_to_string(run_dir.path().join("artifacts/list.txt")).unwrap(),
-        "1"
-    );
+    let listed = build_trace_runner(Some(&context), &component, &args, &run_dir, true).unwrap();
+    assert!(listed.success);
+    let env_dump = fs::read_to_string(run_dir.path().join("artifacts/env.txt")).unwrap();
+    assert!(env_dump.contains("list=1"));
     run_dir.cleanup();
 }
 

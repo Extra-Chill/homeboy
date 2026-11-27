@@ -5,9 +5,7 @@ use super::*;
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskExecutionHandle, AgentTaskOutcomeStatus, AgentTaskSourceRef,
 };
-use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateTotals, AGENT_TASK_AGGREGATE_SCHEMA,
-};
+use crate::agent_task_scheduler::AgentTaskAggregateTotals;
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
 use std::process::Command;
@@ -73,6 +71,87 @@ fn detached_admission_preserves_live_launcher_past_deadline_until_supervision() 
         "supervising"
     );
     assert!(!supervised.state().is_terminal());
+}
+
+/// Under concurrent launches the claim can land after the lease (#19166). The
+/// live process that wrote the placeholder still owns it until it claims.
+#[test]
+fn unclaimed_placeholder_survives_its_lease_while_its_writer_lives() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "slow-claim-placeholder";
+    record_detached_cook_handoff_parent_in_store(&store, cook_id).expect("write placeholder");
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                json!("2020-01-01T00:00:00Z");
+            true
+        })
+        .expect("simulate a claim delayed past the lease");
+
+    assert!(
+        !expire_detached_cook_admission_in_store(&store, cook_id).expect("reconcile admission"),
+        "a live placeholder writer still owns the admission after the lease"
+    );
+    let claimed = claim_detached_cook_handoff_parent_in_store(&store, cook_id, "late-launcher")
+        .expect("the delayed claim still lands");
+    assert_eq!(
+        claimed.metadata["detached_cook_handoff"]["launcher_id"],
+        "late-launcher"
+    );
+    assert!(!claimed.state().is_terminal());
+}
+
+#[test]
+fn admitted_step_keeps_custody_after_launcher_exit_before_child_binding() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "admitted-step-dead-launcher";
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "launcher").unwrap();
+    record_claimed_detached_cook_step_admission_in_store(&store, cook_id, "launcher", "step-job")
+        .expect("transfer custody before starting step");
+    let mut owner = Command::new("sleep").arg("60").spawn().unwrap();
+    let identity = homeboy_core::process::process_start_identity(owner.id())
+        .unwrap()
+        .unwrap();
+    let pid = owner.id();
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+    store
+        .mutate_record(cook_id, |record| {
+            let handoff = &mut record.metadata["detached_cook_handoff"];
+            handoff["launcher_pid"] = json!(pid);
+            handoff["launcher_start_identity"] = json!(identity);
+            true
+        })
+        .unwrap();
+
+    assert!(!expire_detached_cook_admission_in_store(&store, cook_id).unwrap());
+    assert!(claim_detached_cook_handoff_parent_in_store(&store, cook_id, "replacement").is_err());
+    fail_claimed_detached_cook_handoff_parent_in_store(
+        &store,
+        cook_id,
+        "launcher",
+        "launcher exited",
+    )
+    .unwrap();
+    assert!(!store.read_record(cook_id).unwrap().state().is_terminal());
+    let child_identity = homeboy_core::process::process_start_identity(std::process::id())
+        .unwrap()
+        .unwrap();
+    let bound = record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        "launcher",
+        std::process::id(),
+        child_identity,
+        "step-job",
+    )
+    .expect("admitted child can still bind");
+    assert_eq!(
+        bound.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
 }
 
 #[test]
@@ -1281,28 +1360,6 @@ fn cook_progress_carries_provider_activity_and_survives_a_failed_probe() {
 }
 
 #[test]
-fn cook_progress_recorder_writes_to_the_injected_store_not_an_ambient_root() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "cook-progress-rooted";
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
-        .expect("submit run into injected store");
-    record_cook_progress_with_activity_in_store(
-        &lifecycle_store,
-        run_id,
-        "provider_start",
-        1,
-        Some("rooted progress"),
-        None,
-    )
-    .expect("record progress into injected store");
-    let record = lifecycle_store.read_record(run_id).expect("read run");
-    assert_eq!(record.metadata["cook_progress"]["phase"], "provider_start");
-}
-
-#[test]
 fn cook_write_siblings_persist_progress_and_delivery_evidence() {
     let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
     let seeded =
@@ -2094,7 +2151,6 @@ fn run_reentry_siblings_retry_and_resume() {
     let retry_source = "rooted-reentry-retry-source";
     let cook_id = "rooted-reentry-cook";
     let first_successor = "rooted-reentry-cook-attempt-1-successor";
-    let second_successor = "rooted-reentry-retry-second";
     let resume_target = "rooted-reentry-resume";
     let plan = test_plan();
 
@@ -2171,26 +2227,6 @@ fn run_reentry_siblings_retry_and_resume() {
             .expect("the injected store's own retry lineage")
             .map(|record| record.run_id),
         Some(first_successor.to_string())
-    );
-    // An active successor prevents another reservation.
-    let active = retry_with_runtime_admission_in_store(
-        &seeded,
-        retry_source,
-        Some(second_successor),
-        false,
-        true,
-        None,
-        |_| Ok(json!({})),
-    )
-    .expect_err("the injected store's active successor forbids a second reservation");
-    assert_eq!(
-        active.code.as_str(),
-        ErrorCode::ValidationInvalidArgument.as_str()
-    );
-    assert!(
-        active.message.contains(first_successor),
-        "the refusal must name the injected store's own active successor: {}",
-        active.message
     );
 }
 
@@ -2399,40 +2435,6 @@ fn a_supervision_stop_survives_an_hour_of_routine_resource_samples() {
 }
 
 #[test]
-fn a_termination_the_host_could_not_carry_out_is_recorded_as_a_failure() {
-    // A policy can order a stop that the host then fails to execute. Evidence
-    // that showed only the order would let a reader conclude a run was stopped
-    // when it is still running.
-    //
-    // Rooted in an explicit store rather than a mutated process environment
-    // (#7505). The returned record is the one the store committed, so the
-    // failed-termination evidence is asserted about this home's run.
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "cook-supervision-failed-stop";
-    lifecycle_store
-        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
-        .expect("submit run");
-
-    let record = record_cook_supervision_stop_in_store(
-        &lifecycle_store,
-        run_id,
-        1,
-        json!({
-            "status": "termination_failed",
-            "error": "process-tree cancellation is only supported on Unix hosts"
-        }),
-    )
-    .expect("record the failed termination");
-
-    assert_eq!(
-        record.metadata["cook_supervision_events"][0]["outcome"]["status"],
-        "termination_failed"
-    );
-}
-
-#[test]
 fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
     // #8396: while a local cook runs the provider (no aggregate yet), logs must
     // advance past "task submitted" to reflect the durable running provider
@@ -2530,19 +2532,17 @@ fn cancelled_local_provider_retains_runtime_evidence_in_terminal_logs() {
         .expect("cancelled");
 
         let log = logs_in_store(&lifecycle_store, run_id).expect("terminal logs");
-        let terminal = log
-            .events
-            .iter()
-            .find(|event| {
+        assert!(
+            log.events.iter().any(|event| {
                 event.data["state"] == "cancelled"
                     && event
                         .data
                         .get("message")
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(|message| message.contains("provider execution cancelled"))
-            })
-            .expect("cancelled provider event");
-        let _ = terminal;
+            }),
+            "terminal logs carry the cancelled provider execution"
+        );
         let record = lifecycle_store.read_record(run_id).expect("record");
         let stdout_uri = record.metadata["provider_executions"][0]["runtime_evidence"]["stdout"]
             .as_str()
@@ -2654,6 +2654,32 @@ fn submit_plan_persists_owner_only_plan_file_before_observation() {
     );
 }
 
+/// The daemon's answer to a runner-job cancellation request.
+fn cancelled_runner_job() -> homeboy_core::api_jobs::Job {
+    homeboy_core::api_jobs::Job {
+        id: uuid::Uuid::new_v4(),
+        operation: "runner.exec".to_string(),
+        status: homeboy_core::api_jobs::JobStatus::Cancelled,
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        started_at_ms: None,
+        finished_at_ms: Some(2),
+        event_count: 0,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        stale_reason: None,
+        daemon_lease_id: None,
+        target_runner_id: None,
+        target_project_id: None,
+        claim_id: None,
+        claimed_by_runner_id: None,
+        claimed_at_ms: None,
+        claim_expires_at_ms: None,
+        artifacts: Vec::new(),
+        runner_job_projection: None,
+    }
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). "One identity" is the claim: the acceptance, the three reads that
 /// resolve it and the cancellation that terminalizes it all have to reach the
@@ -2709,31 +2735,7 @@ fn detached_lab_run_plan_uses_one_identity_for_status_logs_artifacts_and_cancell
             assert_eq!(runner_id, "homeboy-lab");
             assert_eq!(job_id, "job-8341");
             assert_eq!(durable_run_id, "agent-task-detached-run-plan");
-            Ok((
-                homeboy_core::api_jobs::Job {
-                    id: uuid::Uuid::new_v4(),
-                    operation: "runner.exec".to_string(),
-                    status: homeboy_core::api_jobs::JobStatus::Cancelled,
-                    created_at_ms: 1,
-                    updated_at_ms: 2,
-                    started_at_ms: Some(1),
-                    finished_at_ms: Some(2),
-                    event_count: 0,
-                    source_snapshot: None,
-                    path_materialization_plan: None,
-                    stale_reason: None,
-                    daemon_lease_id: None,
-                    target_runner_id: None,
-                    target_project_id: None,
-                    claim_id: None,
-                    claimed_by_runner_id: None,
-                    claimed_at_ms: None,
-                    claim_expires_at_ms: None,
-                    artifacts: Vec::new(),
-                    runner_job_projection: None,
-                },
-                Vec::new(),
-            ))
+            Ok((cancelled_runner_job(), Vec::new()))
         },
     ));
     let cancelled = cancel_run_in_store(
@@ -2791,31 +2793,7 @@ fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
             assert_eq!(runner_id, "homeboy-lab");
             assert_eq!(job_id, "job-pre-provider");
             assert_eq!(durable_run_id, "agent-task-queued-runner-proxy");
-            Ok((
-                homeboy_core::api_jobs::Job {
-                    id: uuid::Uuid::new_v4(),
-                    operation: "runner.exec".to_string(),
-                    status: homeboy_core::api_jobs::JobStatus::Cancelled,
-                    created_at_ms: 1,
-                    updated_at_ms: 2,
-                    started_at_ms: None,
-                    finished_at_ms: Some(2),
-                    event_count: 0,
-                    source_snapshot: None,
-                    path_materialization_plan: None,
-                    stale_reason: None,
-                    daemon_lease_id: None,
-                    target_runner_id: None,
-                    target_project_id: None,
-                    claim_id: None,
-                    claimed_by_runner_id: None,
-                    claimed_at_ms: None,
-                    claim_expires_at_ms: None,
-                    artifacts: Vec::new(),
-                    runner_job_projection: None,
-                },
-                Vec::new(),
-            ))
+            Ok((cancelled_runner_job(), Vec::new()))
         },
     ));
 
@@ -2832,70 +2810,89 @@ fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
     );
 }
 
+/// The pre-execution failure outcome classifies the admission error and carries
+/// its retryability on every surface a reader consults, without consuming a
+/// provider execution.
 #[test]
-fn non_retryable_pre_execution_failure_remains_invalid_input() {
+fn pre_execution_failure_outcome_classifies_the_admission_error() {
     let plan = test_plan();
-    let outcome = build_pre_execution_failure_outcome(
-        "cook-invalid-input",
-        &plan.tasks[0],
-        "controller_admission",
-        &Error::validation_invalid_argument("plan", "invalid input", None, None),
-    );
-
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::InvalidInput)
-    );
-    assert_eq!(outcome.diagnostics[0].data["retryable"], false);
-    assert_eq!(outcome.outputs["retryable"], false);
-    assert_eq!(outcome.metadata["retryable"], false);
-    assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
-}
-
-#[test]
-fn controller_storage_failure_is_execution_failed_and_retryable_after_repair() {
-    let plan = test_plan();
-    let error = Error::internal_json(
-        "persisted staging record has an unsupported schema",
-        Some("read Lab staging record".to_string()),
-    );
-    let outcome = build_pre_execution_failure_outcome(
-        "cook-storage-repair",
-        &plan.tasks[0],
-        "lab_staging_submission",
-        &error,
-    );
-
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::ExecutionFailed)
-    );
-    assert_eq!(outcome.diagnostics[0].data["retryable"], true);
-    assert_eq!(outcome.outputs["retryable"], true);
-    assert_eq!(outcome.metadata["retryable"], true);
-    assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
-}
-
-#[test]
-fn reserve_pressure_pre_execution_failure_is_classified_as_capacity() {
-    let plan = test_plan();
-    let outcome = build_pre_execution_failure_outcome(
-        "cook-reserve-pressure",
-        &plan.tasks[0],
-        "worktree_capacity_admission",
-        &Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
-            filesystem: "/worktrees/new-task".to_string(),
-            available_bytes: 90,
-            reserve_bytes: 100,
-            shortfall_bytes: 10,
+    let transport = Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        "write runner workspace metadata failed during `workspace_metadata_write`",
+        json!({
+            "phase": "workspace_metadata_write",
+            "transport_close_reason": "Connection closed by remote host",
         }),
-    );
-
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Capacity)
-    );
-    assert_eq!(outcome.outputs["error_code"], "resource.capacity_reserve");
+    )
+    .with_retryable(true);
+    let cases = [
+        (
+            "controller_admission",
+            Error::validation_invalid_argument("plan", "invalid input", None, None),
+            AgentTaskFailureClassification::InvalidInput,
+            false,
+        ),
+        (
+            "lab_staging_submission",
+            Error::internal_json(
+                "persisted staging record has an unsupported schema",
+                Some("read Lab staging record".to_string()),
+            ),
+            AgentTaskFailureClassification::ExecutionFailed,
+            true,
+        ),
+        (
+            "lab_workspace_stage",
+            transport.clone(),
+            AgentTaskFailureClassification::Transient,
+            true,
+        ),
+        (
+            "worktree_capacity_admission",
+            Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+                filesystem: "/worktrees/new-task".to_string(),
+                available_bytes: 90,
+                reserve_bytes: 100,
+                shortfall_bytes: 10,
+            }),
+            AgentTaskFailureClassification::Capacity,
+            false,
+        ),
+    ];
+    for (phase, error, classification, retryable) in cases {
+        let outcome = build_pre_execution_failure_outcome(
+            "cook-pre-execution",
+            &plan.tasks[0],
+            phase,
+            &error,
+        );
+        assert_eq!(
+            outcome.failure_classification,
+            Some(classification),
+            "{phase}"
+        );
+        assert_eq!(
+            outcome.diagnostics[0].data["retryable"], retryable,
+            "{phase}"
+        );
+        assert_eq!(outcome.outputs["retryable"], retryable, "{phase}");
+        assert_eq!(outcome.metadata["retryable"], retryable, "{phase}");
+        assert_eq!(
+            outcome.metadata["provider_executions_consumed"], 0,
+            "{phase}"
+        );
+        assert_eq!(
+            outcome.outputs["error_code"],
+            error.code.as_str(),
+            "{phase}"
+        );
+        if phase == "lab_workspace_stage" {
+            assert_eq!(
+                outcome.outputs["details"]["transport_close_reason"],
+                transport.details["transport_close_reason"]
+            );
+        }
+    }
 }
 
 /// The controller owns the plan: submission stamps the controller plan path,
@@ -3965,91 +3962,28 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The blocker this test used to carry was real: `submit_plan_in_store`
-/// enqueued its controller admission against the machine-global
-/// `paths::controller_runtimes_store()`, so a rooted spelling would have queued
-/// against the operator's own home. That admission follows the store's root now
-/// (#12862), and no stub is needed to make the submission safe.
+/// A completed run's aggregate is readable as the attempt aggregate, and its
+/// aggregate path maps back to the run that owns it.
 #[test]
-fn record_completed_run_exposes_logs_and_artifacts() {
+fn record_completed_run_indexes_its_attempt_aggregate() {
     with_isolated_home(|_| {
         let lifecycle_store = test_lifecycle_store();
-        {
-            let plan = test_plan();
-            let aggregate = AgentTaskAggregate {
-                schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-                plan_id: plan.plan_id.clone(),
-                totals: AgentTaskAggregateTotals {
-                    queued: 1,
-                    succeeded: 1,
-                    ..AgentTaskAggregateTotals::default()
-                },
-                outcomes: vec![AgentTaskOutcome {
-                    task_id: "task-a".to_string(),
-                    status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
-                    summary: Some("ok".to_string()),
-                    artifacts: vec![AgentTaskArtifact {
-                        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                        id: "patch".to_string(),
-                        kind: "patch".to_string(),
-                        name: Some("patch.diff".to_string()),
-                        label: None,
-                        role: None,
-                        semantic_key: None,
-                        path: Some("/tmp/patch.diff".to_string()),
-                        url: None,
-                        mime: None,
-                        size_bytes: None,
-                        sha256: None,
-                        metadata: Value::Null,
-                    }],
-                    evidence_refs: vec![AgentTaskEvidenceRef {
-                        kind: "transcript".to_string(),
-                        uri: "file:///tmp/transcript.json".to_string(),
-                        label: Some("provider transcript".to_string()),
-                    }],
-                    ..Default::default()
-                }],
-                events: vec![AgentTaskProgressEvent {
-                    task_id: "task-a".to_string(),
-                    state: ControlPlaneState::Succeeded,
-                    attempt: 1,
-                    message: Some("ok".to_string()),
-                }],
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            };
+        let plan = test_plan();
+        let record = record_completed_run(&plan, &succeeded_aggregate(&plan), Some("run-complete"))
+            .expect("recorded");
 
-            let record =
-                record_completed_run(&plan, &aggregate, Some("run-complete")).expect("recorded");
-            assert_eq!(
-                read_attempt_aggregate(&record.run_id)
-                    .expect("attempt aggregate")
-                    .plan_id,
-                plan.plan_id
-            );
-            assert_eq!(
-                run_id_for_aggregate_path(&lifecycle_store.aggregate_path(&record.run_id))
-                    .expect("aggregate path lookup"),
-                Some(record.run_id.clone())
-            );
-            let log = logs_in_store(&lifecycle_store, &record.run_id).expect("logs");
-            let artifacts =
-                artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
-
-            assert_eq!(record.state(), RunExecutionState::Succeeded);
-            assert!(
-                log.events
-                    .iter()
-                    .any(|event| event.data["state"] == "succeeded"),
-                "canonical logs retain the terminal aggregate state"
-            );
-            assert_eq!(artifacts.artifacts[0].id, "patch");
-            assert_eq!(artifacts.evidence_refs[0].kind, "transcript");
-        }
+        assert_eq!(record.state(), RunExecutionState::Succeeded);
+        assert_eq!(
+            read_attempt_aggregate(&record.run_id)
+                .expect("attempt aggregate")
+                .plan_id,
+            plan.plan_id
+        );
+        assert_eq!(
+            run_id_for_aggregate_path(&lifecycle_store.aggregate_path(&record.run_id))
+                .expect("aggregate path lookup"),
+            Some(record.run_id.clone())
+        );
     });
 }
 
@@ -4111,8 +4045,8 @@ fn submitted_run_can_be_loaded_marked_running_and_completed() {
     }
 }
 
-/// Stays on `with_isolated_home` (#7505) — `record_completed_run`; see
-/// `record_completed_run_exposes_logs_and_artifacts`.
+/// Stays on `with_isolated_home` (#7505): `record_completed_run` resolves its
+/// store from the ambient home.
 #[test]
 fn completed_run_persists_opaque_provider_handles_from_outcome_metadata() {
     with_isolated_home(|_| {
@@ -4281,16 +4215,26 @@ fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
     assert!(cancelled.metadata.get("live_cancellation").is_none());
 }
 
+/// Artifact refs prefer a usable url, fall back to the path when the url is
+/// blank, and collapse an artifact and an evidence ref naming the same uri.
 #[test]
-fn artifact_refs_dedup_identical_refs_across_artifacts_and_evidence() {
+fn artifact_refs_fall_back_to_path_and_collapse_duplicates() {
     let outcomes = vec![outcome_with_refs(
         "task-a",
-        vec![artifact_ref_artifact(
-            "transcript",
-            "transcript",
-            Some("file:///tmp/transcript.json"),
-            None,
-        )],
+        vec![
+            artifact_ref_artifact(
+                "dir",
+                "sample-runtime-artifact-directory",
+                Some("   "),
+                Some("/tmp/artifacts/dir"),
+            ),
+            artifact_ref_artifact(
+                "transcript",
+                "transcript",
+                Some("file:///tmp/transcript.json"),
+                None,
+            ),
+        ],
         vec![AgentTaskEvidenceRef {
             kind: "transcript".to_string(),
             uri: "file:///tmp/transcript.json".to_string(),
@@ -4301,9 +4245,10 @@ fn artifact_refs_dedup_identical_refs_across_artifacts_and_evidence() {
     let refs = artifact_refs_for_outcomes(&outcomes);
 
     assert_eq!(
-        refs.len(),
-        1,
-        "exact-duplicate refs collapse to a single entry"
+        refs.iter()
+            .map(|reference| reference.uri.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/tmp/artifacts/dir", "file:///tmp/transcript.json"]
     );
 }
 

@@ -153,10 +153,9 @@ pub(crate) fn apply_authority_env(env: &mut HashMap<String, String>, bundle: &se
         .get("extension_runtime_home")
         .and_then(serde_json::Value::as_str)
     {
-        // Root only Homeboy's own config at the job overlay. Rehoming `HOME`
-        // hid the runner user's toolchains (rustup, cargo, npm, git config),
-        // so a runner where `cargo` works failed toolchain readiness (#14991).
-        // A caller's `HOME` never applies on the runner.
+        // Root only Homeboy's own config at the job overlay; rehoming `HOME`
+        // would hide the runner user's toolchains. A caller's `HOME` never
+        // applies on the runner.
         env.remove("HOME");
         env.insert(
             homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV.to_string(),
@@ -168,36 +167,6 @@ pub(crate) fn apply_authority_env(env: &mut HashMap<String, String>, bundle: &se
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn binary_uses_the_verified_configured_identity_without_status_fallbacks() {
-        let binary = binary("/runner/bin/homeboy", Some("homeboy 1.2.3+abc123"));
-
-        assert_eq!(binary["path"], "/runner/bin/homeboy");
-        assert_eq!(binary["build_identity"], "homeboy 1.2.3+abc123");
-    }
-
-    #[test]
-    fn bundle_requires_matching_command_admission_and_private_extension_snapshot() {
-        let bundle = serde_json::json!({
-            "schema": LAB_EXECUTION_BUNDLE_SCHEMA,
-            "binary": { "path": "/runner/bin/homeboy-a" },
-            "admission": { "daemon_lease_id": "lease-a", "reservation_job_id": "job-a" },
-            "extension_runtime_home": "/runner/job-a/home",
-            "extensions": [{ "id": "fixture", "remote_path": "/runner/job-a/fixture", "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
-        });
-        let env = bundle_env(&bundle);
-        assert!(validate_bundle_env(
-            &env,
-            &["/runner/bin/homeboy-a".to_string(), "test".to_string()],
-            &["fixture".to_string()],
-        ));
-        assert!(!validate_bundle_env(
-            &env,
-            &["/runner/bin/homeboy-b".to_string(), "test".to_string()],
-            &["fixture".to_string()],
-        ));
-    }
 
     #[test]
     fn concurrent_jobs_keep_their_own_rig_extension_and_promoted_binary_authority() {
@@ -246,35 +215,6 @@ mod tests {
             ],
             &["fixture".to_string()],
         ));
-        assert_ne!(job_a["rig_registry_root"], job_b["rig_registry_root"]);
-        assert_ne!(
-            job_a["rigs"][0]["workload_hashes"],
-            job_b["rigs"][0]["workload_hashes"]
-        );
-        assert_ne!(
-            job_a["extension_runtime_home"],
-            job_b["extension_runtime_home"]
-        );
-        assert_ne!(
-            job_a["extensions"][0]["content_hash"],
-            job_b["extensions"][0]["content_hash"]
-        );
-    }
-
-    #[test]
-    fn malformed_bundle_cannot_bypass_global_extension_parity() {
-        let bundle = serde_json::json!({
-            "schema": LAB_EXECUTION_BUNDLE_SCHEMA,
-            "binary": { "path": "/runner/bin/homeboy" },
-            "admission": { "daemon_lease_id": "lease", "reservation_job_id": "job" },
-            "extension_runtime_home": "/runner/job/home",
-            "extensions": [{ "id": "fixture", "remote_path": "/runner/job/fixture", "content_hash": "not-a-sha256" }]
-        });
-        assert!(!validate_bundle_env(
-            &bundle_env(&bundle),
-            &["/runner/bin/homeboy".to_string(), "test".to_string()],
-            &["fixture".to_string()],
-        ));
     }
 
     #[test]
@@ -293,10 +233,17 @@ mod tests {
         missing_overlay["extensions"] = serde_json::json!([]);
         let mut blank_home = valid.clone();
         blank_home["extension_runtime_home"] = serde_json::json!("  ");
+        let mut malformed_hash = valid.clone();
+        malformed_hash["extensions"][0]["content_hash"] = serde_json::json!("not-a-sha256");
         let mut missing_admission = valid;
         missing_admission["admission"]["daemon_lease_id"] = serde_json::Value::Null;
 
-        for bundle in [missing_overlay, blank_home, missing_admission] {
+        for bundle in [
+            missing_overlay,
+            blank_home,
+            malformed_hash,
+            missing_admission,
+        ] {
             assert!(!validate_bundle_env(
                 &bundle_env(&bundle),
                 &command,

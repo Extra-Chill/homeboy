@@ -1480,10 +1480,6 @@ fn synthetic_remote_dispatch_plan(
     plan
 }
 
-// The ambient `record_aggregate()` shim that used to sit here is gone; the
-// remote-dispatch failure recorder was its only caller and now writes the
-// aggregate into the same store it submitted the record to (#7505).
-
 pub(crate) fn record_aggregate_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
@@ -1690,7 +1686,7 @@ pub(crate) fn project_runner_evidence_refs(
 
 /// The authoritative model recorded on an aggregate outcome, if any.
 ///
-/// Recover the runner identity for canonical legacy patch artifacts. Diagnostic
+/// Recover the runner identity for canonical patch artifacts. Diagnostic
 /// artifacts can share an aggregate without participating in promotion.
 fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<String> {
     let runner_ids = aggregate
@@ -1951,7 +1947,7 @@ fn project_terminal_artifacts_in_store(
             });
             // Only artifacts consumed after terminalization need controller
             // bytes. Other declarations remain review metadata and can name a
-            // producer-local path that no longer exists.
+            // producer-local path that is gone.
             if !requires_durable_lab_projection(artifact) {
                 continue;
             }
@@ -3191,80 +3187,57 @@ mod tests {
         artifact
     }
 
+    /// A Lab run legitimately retains its legacy import alongside the
+    /// finalized projection, so equivalent duplicates resolve to the finalized
+    /// record rather than abort the owning Cook (#14164); duplicates that
+    /// disagree on content fail closed and name both records.
     #[test]
-    fn equivalent_duplicate_projections_resolve_to_the_finalized_record() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let store = homeboy_core::observation::ObservationStore::open_initialized()
-                .expect("observation store");
-            let run = store
-                .start_run(
-                    homeboy_core::observation::NewRunRecord::builder("agent-task")
-                        .cwd_path(home.path())
-                        .build(),
-                )
-                .expect("run");
-            let bytes = b"transcript bytes";
-            record_duplicate_projections(&store, &run.id, bytes, bytes);
-
-            // A Lab run legitimately retains its legacy import alongside the
-            // finalized projection, so this must resolve rather than abort the
-            // owning Cook (#14164).
-            let resolved = verified_controller_artifact_projection_path_in_store(
-                &store,
-                &run.id,
-                "task",
-                &transcript_artifact(bytes),
-            )
-            .expect("equivalent duplicates resolve")
-            .expect("a controller projection is available");
-
-            // Projection authority, not discovery order, selects the record.
-            assert!(
-                resolved
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.contains("agent-task-finalized")),
-                "expected the finalized projection, got {}",
-                resolved.display()
-            );
-            assert_eq!(std::fs::read(&resolved).expect("resolved bytes"), bytes);
-        });
-    }
-
-    #[test]
-    fn conflicting_duplicate_projections_still_fail_closed() {
-        homeboy_core::test_support::with_isolated_home(|home| {
-            let store = homeboy_core::observation::ObservationStore::open_initialized()
-                .expect("observation store");
-            let run = store
-                .start_run(
-                    homeboy_core::observation::NewRunRecord::builder("agent-task")
-                        .cwd_path(home.path())
-                        .build(),
-                )
-                .expect("run");
-            let bytes = b"transcript bytes";
-            record_duplicate_projections(&store, &run.id, b"different transcript", bytes);
-
-            let error = verified_controller_artifact_projection_path_in_store(
-                &store,
-                &run.id,
-                "task",
-                &transcript_artifact(bytes),
-            )
-            .expect_err("projections that disagree on content must fail closed");
-
-            assert!(
-                error.message.contains("conflicting"),
-                "got {}",
-                error.message
-            );
-            assert!(
-                error.message.contains("agent-task-finalized")
-                    && error.message.contains("agent-task-legacy"),
-                "the conflicting records must be named: {}",
-                error.message
-            );
-        });
+    fn duplicate_projections_resolve_when_equivalent_and_fail_closed_on_conflict() {
+        let bytes = b"transcript bytes";
+        for legacy in [&bytes[..], b"different transcript"] {
+            homeboy_core::test_support::with_isolated_home(|home| {
+                let store = homeboy_core::observation::ObservationStore::open_initialized()
+                    .expect("observation store");
+                let run = store
+                    .start_run(
+                        homeboy_core::observation::NewRunRecord::builder("agent-task")
+                            .cwd_path(home.path())
+                            .build(),
+                    )
+                    .expect("run");
+                record_duplicate_projections(&store, &run.id, legacy, bytes);
+                let result = verified_controller_artifact_projection_path_in_store(
+                    &store,
+                    &run.id,
+                    "task",
+                    &transcript_artifact(bytes),
+                );
+                if legacy == bytes {
+                    let resolved = result
+                        .expect("equivalent duplicates resolve")
+                        .expect("a controller projection is available");
+                    // Projection authority, not discovery order, selects the record.
+                    assert!(
+                        resolved
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.contains("agent-task-finalized")),
+                        "expected the finalized projection, got {}",
+                        resolved.display()
+                    );
+                    assert_eq!(std::fs::read(&resolved).expect("resolved bytes"), bytes);
+                } else {
+                    let error =
+                        result.expect_err("projections that disagree on content must fail closed");
+                    assert!(
+                        error.message.contains("conflicting")
+                            && error.message.contains("agent-task-finalized")
+                            && error.message.contains("agent-task-legacy"),
+                        "the conflicting records must be named: {}",
+                        error.message
+                    );
+                }
+            });
+        }
     }
 }

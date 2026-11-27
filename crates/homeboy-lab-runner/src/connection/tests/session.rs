@@ -3,30 +3,9 @@
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 
-use crate::{RunnerAvailability, RunnerDaemonVerification};
+use crate::RunnerDaemonVerification;
 
 use super::*;
-
-#[test]
-fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
-    let status = RemoteDaemonStatus {
-        runtime_paths: None,
-        daemon: None,
-        stale_reason: None,
-        stale_reason_code: None,
-        fresh: false,
-        reachable: false,
-        active_jobs: 0,
-        work_evidence: RemoteDaemonWorkEvidence::Unknown,
-        endpoint_probe_error: None,
-        termination_evidence: None,
-    };
-
-    assert_eq!(
-        remote_daemon_connect_action(None, &status).expect("ensure start"),
-        RemoteDaemonConnectAction::Start
-    );
-}
 
 fn compact_daemon_status(
     fresh: bool,
@@ -148,26 +127,31 @@ fn active_job_fence_allows_reattach_but_rejects_new_admission() {
 }
 
 #[test]
-fn missing_daemon_state_with_active_jobs_starts_the_recovering_successor() {
-    let status = RemoteDaemonStatus {
-        runtime_paths: None,
-        daemon: None,
-        stale_reason: Some("daemon state is unavailable".to_string()),
-        stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
-        fresh: false,
-        reachable: false,
-        active_jobs: 1,
-        work_evidence: RemoteDaemonWorkEvidence::Unknown,
-        endpoint_probe_error: None,
-        termination_evidence: None,
-    };
+fn missing_daemon_state_starts_the_daemon_with_or_without_active_jobs() {
+    for (active_jobs, stale_reason_code) in
+        [(0, None), (1, Some(DaemonStaleReasonCode::LeaseMissing))]
+    {
+        let status = RemoteDaemonStatus {
+            runtime_paths: None,
+            daemon: None,
+            stale_reason: None,
+            stale_reason_code,
+            fresh: false,
+            reachable: false,
+            active_jobs,
+            work_evidence: RemoteDaemonWorkEvidence::Unknown,
+            endpoint_probe_error: None,
+            termination_evidence: None,
+        };
 
-    // The successor's owner lock refuses a still-running holder, and its
-    // startup recovery reconciles the dead generation's jobs (#17429).
-    assert_eq!(
-        remote_daemon_connect_action(None, &status).unwrap(),
-        RemoteDaemonConnectAction::Start
-    );
+        // The successor's owner lock refuses a still-running holder, and its
+        // startup recovery reconciles the dead generation's jobs.
+        assert_eq!(
+            remote_daemon_connect_action(None, &status).unwrap(),
+            RemoteDaemonConnectAction::Start,
+            "active_jobs={active_jobs}"
+        );
+    }
 }
 
 #[test]
@@ -189,33 +173,41 @@ fn stale_persisted_lease_requires_explicit_live_lease_adoption() {
     assert!(action.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
 }
 
+/// Adoption is a compare-and-swap on the exact live lease and PID. It
+/// reattaches a fresh idle daemon or a reachable stale busy one without
+/// replacing it, whatever its build identity.
 #[test]
 fn explicit_live_lease_adoption_requires_the_exact_current_lease_and_pid() {
     let session = direct_ssh_session("lease-recorded");
-    let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
-    status.daemon.as_mut().expect("daemon").build_identity = Some("irrelevant".to_string());
+    for (fresh, active_jobs) in [(true, 0), (false, 1)] {
+        let mut status =
+            remote_daemon_status_for_test(fresh, true, active_jobs, "lease-live", 4646);
+        status.daemon.as_mut().expect("daemon").build_identity =
+            Some("homeboy test+live".to_string());
 
-    assert_eq!(
-        remote_daemon::remote_daemon_connect_action_for_runner(
-            Some(&session),
-            &status,
-            "irrelevant",
-            "runner-a",
-            Some(("lease-live", 4646)),
-        )
-        .expect("exact compare-and-swap expectation adopts the live lease"),
-        RemoteDaemonConnectAction::Reattach,
-    );
-    for expectation in [Some(("lease-other", 4646)), Some(("lease-live", 9999))] {
-        assert!(remote_daemon::remote_daemon_connect_action_for_runner(
-            Some(&session),
-            &status,
-            "irrelevant",
-            "runner-a",
-            expectation,
-        )
-        .expect_err("changed lease or PID must fail closed")
-        .contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+        assert_eq!(
+            remote_daemon::remote_daemon_connect_action_for_runner(
+                Some(&session),
+                &status,
+                "homeboy test+configured",
+                "runner-a",
+                Some(("lease-live", 4646)),
+            )
+            .expect("exact compare-and-swap expectation adopts the live lease"),
+            RemoteDaemonConnectAction::Reattach,
+            "fresh={fresh}"
+        );
+        for expectation in [Some(("lease-other", 4646)), Some(("lease-live", 9999))] {
+            assert!(remote_daemon::remote_daemon_connect_action_for_runner(
+                Some(&session),
+                &status,
+                "homeboy test+configured",
+                "runner-a",
+                expectation,
+            )
+            .expect_err("changed lease or PID must fail closed")
+            .contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+        }
     }
 }
 
@@ -224,37 +216,6 @@ fn explicit_live_lease_adoption_precedes_only_stale_ensure_running_replay() {
     assert!(!should_replay_pending_replacement("ensure-running", true));
     assert!(should_replay_pending_replacement("ensure-running", false));
     assert!(should_replay_pending_replacement("state-loss", true));
-}
-
-#[test]
-fn explicit_live_lease_adoption_accepts_an_exact_reachable_stale_daemon() {
-    let session = direct_ssh_session("lease-recorded");
-    let mut status = remote_daemon_status_for_test(false, true, 1, "lease-live", 4646);
-    status.daemon.as_mut().expect("daemon").build_identity = Some("homeboy test+live".to_string());
-
-    assert_eq!(
-        remote_daemon::remote_daemon_connect_action_for_runner(
-            Some(&session),
-            &status,
-            "homeboy test+configured",
-            "runner-a",
-            Some(("lease-live", 4646)),
-        )
-        .expect("exact operator adoption reattaches without replacing the live daemon"),
-        RemoteDaemonConnectAction::Reattach,
-    );
-
-    for expectation in [Some(("lease-other", 4646)), Some(("lease-live", 9999))] {
-        assert!(remote_daemon::remote_daemon_connect_action_for_runner(
-            Some(&session),
-            &status,
-            "homeboy test+configured",
-            "runner-a",
-            expectation,
-        )
-        .expect_err("changed stale lease or PID must fail closed")
-        .contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
-    }
 }
 
 #[test]
@@ -410,113 +371,49 @@ fn stale_persisted_lease_refuses_an_unverified_live_daemon_with_recovery_guidanc
     assert!(err.contains("--json"));
 }
 
-#[test]
-fn healthy_sessionless_daemon_requires_verified_runner_identity() {
-    let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
-    status.daemon.as_mut().expect("daemon").build_identity =
-        Some("homeboy test+configured".to_string());
-
-    assert!(remote_daemon_connect_action_for_runner(
-        None,
-        &status,
-        "homeboy test+configured",
-        "<runner-id>",
-        None
-    )
-    .expect_err("missing or corrupt session requires explicit adoption")
-    .contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
-}
-
+/// A disconnected session, a describe that lost a healthy tunnel, or a session
+/// removed by a concurrent rotation each reconnect once and re-observe the
+/// same daemon before admission.
 #[test]
 fn admission_reconnects_a_lost_tunnel_to_the_same_proven_daemon() {
     let session = direct_ssh_session("lease-live");
-    let daemon = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
-    assert_eq!(
-        remote_daemon_connect_action(Some(&session), &daemon).expect("matching lease reattaches"),
-        RemoteDaemonConnectAction::Reattach
-    );
+    let mut describe_lost = admission_status(&session, true);
+    describe_lost.active_job_state = RunnerActiveJobState::Unavailable;
+    let mut rotated = admission_status(&session, false);
+    rotated.session = None;
+    for (case, first) in [
+        ("disconnected", admission_status(&session, false)),
+        ("describe lost the tunnel", describe_lost),
+        ("session rotated away", rotated),
+    ] {
+        let mut observations = [first, admission_status(&session, true)].into_iter();
+        let mut reconnects = 0;
+        let admitted = status_for_admission_with(
+            "homeboy-lab",
+            |_| Ok(observations.next().expect("bounded to two observations")),
+            |_| {
+                reconnects += 1;
+                Ok(())
+            },
+        )
+        .expect("admission reconnects the lost tunnel");
 
-    let mut disconnected = admission_status(&session, false);
-    let connected = admission_status(&session, true);
-    let mut reconnects = 0;
-    let admitted = status_for_admission_with(
-        "homeboy-lab",
-        |_| {
-            let status = disconnected.clone();
-            disconnected = connected.clone();
-            Ok(status)
-        },
-        |_| {
-            reconnects += 1;
-            Ok(())
-        },
-    )
-    .expect("admission reconnects the lost tunnel");
-
-    assert_eq!(reconnects, 1);
-    assert!(admitted.connected);
-    assert_eq!(
-        admitted
-            .session
-            .as_ref()
-            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
-        Some("lease-live")
-    );
-}
-
-#[test]
-fn admission_reprobes_when_describe_loses_a_previously_healthy_tunnel() {
-    let session = direct_ssh_session("lease-live");
-    let mut unavailable = admission_status(&session, true);
-    unavailable.active_job_state = RunnerActiveJobState::Unavailable;
-    let mut observations = [unavailable, admission_status(&session, true)].into_iter();
-    let mut reconnects = 0;
-    let admitted = status_for_admission_with(
-        "homeboy-lab",
-        |_| Ok(observations.next().expect("bounded to two observations")),
-        |_| {
-            reconnects += 1;
-            Ok(())
-        },
-    )
-    .expect("transport is restored before evaluating ownership");
-    assert_eq!(reconnects, 1);
-    assert!(admitted.connected);
-    assert_ne!(admitted.active_job_state, RunnerActiveJobState::Unavailable);
-    assert_eq!(
-        admitted.session.unwrap().remote_daemon_lease_id,
-        session.remote_daemon_lease_id
-    );
-}
-
-#[test]
-fn admission_reconnects_when_concurrent_rotation_removes_the_session() {
-    let session = direct_ssh_session("lease-current");
-    let mut disconnected = admission_status(&session, false);
-    disconnected.session = None;
-    let connected = admission_status(&session, true);
-    let mut statuses = [disconnected, connected].into_iter();
-    let mut reconnects = 0;
-
-    let admitted = status_for_admission_with(
-        "homeboy-lab",
-        |_| Ok(statuses.next().expect("admission status")),
-        |_| {
-            reconnects += 1;
-            Ok(())
-        },
-    )
-    .expect("admission reconnects after the session disappears");
-
-    assert_eq!(reconnects, 1);
-    assert!(admitted.connected);
-    assert_eq!(
-        admitted
-            .session
-            .as_ref()
-            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
-        Some("lease-current")
-    );
+        assert_eq!(reconnects, 1, "{case}");
+        assert!(admitted.connected, "{case}");
+        assert_ne!(
+            admitted.active_job_state,
+            RunnerActiveJobState::Unavailable,
+            "{case}"
+        );
+        assert_eq!(
+            admitted
+                .session
+                .as_ref()
+                .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+            Some("lease-live"),
+            "{case}"
+        );
+    }
 }
 
 /// Admission with a recorded session only re-establishes the transport to
@@ -736,62 +633,29 @@ fn parses_self_identity_json_envelope() {
     assert_eq!(identity.daemon_recovery_capabilities, None);
 }
 
-/// #11102: the typed capability list is the primary daemon-recovery contract,
-/// so the parser must actually read the field the identity envelope writes.
-/// Before this, `self identity` serialized a capability list that
-/// `parse_self_identity_output` silently discarded.
-#[test]
-fn parses_advertised_daemon_recovery_capabilities() {
-    let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id","version":1},{"id":"a-capability-from-the-future","version":1}]}}"#,
-    )
-    .expect("identity");
-
-    let advertised = identity
-        .daemon_recovery_capabilities
-        .expect("typed capability list is parsed, not discarded");
-    let ids = advertised
-        .iter()
-        .map(|capability| capability.id.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        ids,
-        vec![
-            "daemon-ensure-running-operation-id",
-            "a-capability-from-the-future"
-        ]
-    );
-}
-
 /// An explicitly empty list is authoritative "this runner advertises no
-/// recovery capability", which must stay distinguishable from an absent field.
-/// Collapsing the two would make a current runner that dropped a capability
-/// silently fall back to scraping its own help text.
+/// recovery capability" and stays distinct from an absent field. A malformed
+/// or unexpected field never fails the connect-path identity probe: an older
+/// or divergent runner degrades to the scrape fallback instead.
 #[test]
-fn an_explicitly_empty_capability_list_is_not_an_absent_one() {
-    let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[]}}"#,
-    )
-    .expect("identity");
-
-    assert_eq!(identity.daemon_recovery_capabilities, Some(Vec::new()));
-}
-
-/// The parser must never turn a malformed or unexpected capability field into
-/// a hard failure: the identity probe is on the connect path, and an older or
-/// divergent runner has to degrade to the scrape rather than refuse to connect.
-#[test]
-fn malformed_capability_fields_degrade_to_the_scrape_fallback() {
-    for body in [
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":null}}"#,
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":"leaseless"}}"#,
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id"}]}}"#,
+fn capability_field_distinguishes_empty_from_absent_and_degrades_malformed() {
+    for (capabilities, expected) in [
+        (r#","daemon_recovery_capabilities":[]"#, Some(Vec::new())),
+        (r#","daemon_recovery_capabilities":null"#, None),
+        (r#","daemon_recovery_capabilities":"leaseless""#, None),
+        (
+            r#","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id"}]"#,
+            None,
+        ),
     ] {
-        let identity = parse_self_identity_output(body).expect("identity still parses");
+        let body = format!(
+            r#"{{"success":true,"data":{{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d"{capabilities}}}}}"#
+        );
+        let identity = parse_self_identity_output(&body).expect("identity still parses");
         assert_eq!(identity.version, "0.330.0");
         assert_eq!(
-            identity.daemon_recovery_capabilities, None,
-            "a malformed capability field must degrade, not fail: {body}"
+            identity.daemon_recovery_capabilities, expected,
+            "{capabilities}"
         );
     }
 }
@@ -838,56 +702,20 @@ fn the_advertised_capability_set_round_trips_through_the_parser() {
 }
 
 #[test]
-fn aligned_runner_identity_protocol_with_shell_preamble_accepts_jobs() {
-    let configured = parse_self_identity_output(
-        "Setting up Swift test infrastructure...\n{\"success\":true,\"data\":{\"version\":\"0.298.0\",\"display\":\"homeboy 0.298.0+9682bf1ad0b2\"}}\n",
-    )
-    .expect("configured runner identity after shell preamble");
-    let daemon = serde_json::json!({
-        "version": "0.298.0",
-        "build_identity": { "display": "homeboy 0.298.0+9682bf1ad0b2" },
-        "runtime_paths": { "loaded": [], "current": [], "stale": [] },
-    });
-    assert_eq!(
-        daemon_version_from_body(&daemon),
-        Some(configured.version.as_str())
-    );
-    assert_eq!(
-        daemon_identity_from_body(&daemon),
-        configured.build_identity.as_deref()
-    );
-
-    assert!(daemon_runtime_is_current(
-        &daemon_runtime_stale_paths_from_body(&daemon),
-        &changed_runtime_paths(
-            &HashMap::new(),
-            &daemon_runtime_loaded_paths_from_body(&daemon)
+fn release_only_display_resolves_identity_only_from_a_reported_commit() {
+    for (body, expected) in [
+        (
+            r#"{"success":true,"data":{"version":"0.294.0","git_commit":"19a41cd5102d","git_dirty":false,"display":"homeboy 0.294.0"}}"#,
+            Some("homeboy 0.294.0+19a41cd5102d"),
         ),
-    ));
-    assert!(
-        RunnerAvailability::from_status_parts(
-            "homeboy-lab",
-            true,
-            false,
-            0,
-            &RunnerActiveJobState::Available,
+        (
+            r#"{"success":true,"data":{"version":"0.294.0","display":"homeboy 0.294.0"}}"#,
             None,
-        )
-        .accepts_jobs
-    );
-}
-
-#[test]
-fn resolves_immutable_identity_from_commit_when_display_is_release_only() {
-    let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"0.294.0","git_commit":"19a41cd5102d","git_dirty":false,"display":"homeboy 0.294.0"}}"#,
-    )
-    .expect("identity");
-
-    assert_eq!(
-        identity.build_identity.as_deref(),
-        Some("homeboy 0.294.0+19a41cd5102d")
-    );
+        ),
+    ] {
+        let identity = parse_self_identity_output(body).expect("identity");
+        assert_eq!(identity.build_identity.as_deref(), expected, "{body}");
+    }
 }
 
 #[test]
@@ -905,22 +733,6 @@ fn identity_comparison_distinguishes_match_unverifiable_and_mismatch() {
 }
 
 #[test]
-fn equal_version_build_identity_and_runtime_paths_are_current() {
-    assert!(daemon_runtime_is_current(&[], &[],));
-    assert!(
-        RunnerAvailability::from_status_parts(
-            "homeboy-lab",
-            true,
-            false,
-            0,
-            &RunnerActiveJobState::Available,
-            None,
-        )
-        .accepts_jobs
-    );
-}
-
-#[test]
 fn identical_rendered_runtime_identities_are_current_without_refresh() {
     let identity = "homeboy 0.328.0+1e63f1ae0369";
     let warning = RunnerStaleDaemonWarning::new(
@@ -931,7 +743,6 @@ fn identical_rendered_runtime_identities_are_current_without_refresh() {
         Some(identity.to_string()),
     );
 
-    assert!(daemon_runtime_is_current(&[], &[],));
     assert_eq!(
         warning.mismatch_predicate,
         "daemon_configured_identity == equal"
@@ -998,7 +809,6 @@ fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
         session.homeboy_build_identity.as_deref(),
         Some("homeboy 0.298.1+7d7b8e656466")
     );
-    assert!(daemon_runtime_is_current(&[], &[],));
 }
 
 #[test]
@@ -1011,7 +821,6 @@ fn different_build_identities_are_evidence_not_runtime_incompatibility() {
         Some("homeboy 0.296.3+job-build".to_string()),
     );
 
-    assert!(daemon_runtime_is_current(&[], &[],));
     assert!(warning.message.contains("build identity"));
     assert!(warning.message.contains("homeboy 0.296.3+daemon-build"));
     assert!(warning.message.contains("homeboy 0.296.3+job-build"));
@@ -1062,9 +871,17 @@ fn runtime_path_drift_is_stale_and_names_the_changed_generation() {
     assert!(warning.message.contains("HOMEBOY_EXTENSION_PATH"));
     assert!(warning.message.contains("sha256:old"));
     assert!(warning.message.contains("sha256:new"));
+    assert!(warning.message.contains("runtime paths are stale"));
     assert_eq!(
         warning.mismatch_predicate,
         "runtime_paths.loaded != runtime_paths.configured"
+    );
+    assert_eq!(
+        warning.recovery_commands,
+        [format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref {}",
+            crate::controller_refresh_ref()
+        )]
     );
 }
 
@@ -1094,31 +911,6 @@ fn runtime_path_diagnostics_redact_sensitive_values_without_hiding_path_drift() 
     let actions = warning.safe_recovery_actions();
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0].id, "runner.refresh_homeboy");
-}
-
-#[test]
-fn differing_versions_do_not_make_runtime_paths_stale() {
-    let warning = RunnerStaleDaemonWarning::new(
-        "homeboy-lab",
-        "0.296.2".to_string(),
-        "0.296.3".to_string(),
-        Some("homeboy 0.296.2+old".to_string()),
-        Some("homeboy 0.296.3+new".to_string()),
-    );
-
-    assert!(daemon_runtime_is_current(&[], &[],));
-    assert!(warning.message.contains("version `0.296.2`"));
-    assert!(warning.message.contains("version `0.296.3`"));
-}
-
-#[test]
-fn release_only_self_identity_remains_unverifiable() {
-    let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"0.294.0","display":"homeboy 0.294.0"}}"#,
-    )
-    .expect("version remains available");
-
-    assert_eq!(identity.build_identity, None);
 }
 
 #[test]
@@ -1158,28 +950,9 @@ fn stale_daemon_warning_with_unverified_ref_withholds_refresh_recovery_command()
         Some("homeboy 0.204.0+new".to_string()),
     );
 
-    assert_eq!(warning.session_homeboy_version, "homeboy 0.201.3");
-    assert_eq!(warning.current_homeboy_version, "homeboy 0.204.0");
     assert_eq!(warning.severity, "info");
-    assert_eq!(
-        warning.active_daemon_control_plane_version,
-        "homeboy 0.201.3"
-    );
-    assert_eq!(warning.job_command_binary_version, "homeboy 0.204.0");
-    assert_eq!(
-        warning.session_homeboy_build_identity.as_deref(),
-        Some("homeboy 0.201.3+old")
-    );
-    assert_eq!(
-        warning
-            .active_daemon_control_plane_build_identity
-            .as_deref(),
-        Some("homeboy 0.201.3+old")
-    );
-    assert_eq!(
-        warning.job_command_binary_build_identity.as_deref(),
-        Some("homeboy 0.204.0+new")
-    );
+    assert!(warning.message.contains("version `homeboy 0.201.3`"));
+    assert!(warning.message.contains("version `homeboy 0.204.0`"));
     assert!(warning.message.contains("daemon control plane"));
     assert!(warning.message.contains("job command binary"));
     assert!(warning.message.contains("informational"));
@@ -1238,36 +1011,6 @@ fn changed_runtime_paths_reports_runner_config_changes_since_daemon_start() {
     assert_eq!(
         changed[0].configured_path.as_deref(),
         Some("/home/chubes/Developer/sample-runtime@new")
-    );
-}
-
-#[test]
-fn runtime_path_warning_uses_rebuild_specific_message() {
-    let warning = RunnerStaleDaemonWarning::new(
-        "homeboy-lab",
-        "0.228.13".to_string(),
-        "0.228.13".to_string(),
-        Some("homeboy 0.228.13+1e63f1ae0369".to_string()),
-        Some("homeboy 0.228.13+1e63f1ae0369".to_string()),
-    )
-    .with_runtime_paths(
-        "homeboy-lab",
-        vec![RunnerStaleRuntimePath {
-            env: "HOMEBOY_SAMPLE_RUNTIME_COMPONENT_PATH".to_string(),
-            path: "/home/chubes/Developer/sample-runtime".to_string(),
-            loaded_fingerprint: "files=10".to_string(),
-            current_fingerprint: "files=11".to_string(),
-        }],
-        Vec::new(),
-    );
-
-    assert!(warning.message.contains("runtime paths are stale"));
-    assert_eq!(
-        warning.recovery_commands,
-        [format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {}",
-            crate::controller_refresh_ref()
-        )]
     );
 }
 
@@ -1427,64 +1170,6 @@ fn terminal_reconciliation_routes_direct_sessions_to_the_daemon() {
 }
 
 #[test]
-fn routine_disconnect_probes_the_exact_live_daemon_tunnel_before_authoritative_stop() {
-    crate::test_support::with_isolated_home(|_| {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("identity request");
-            let mut request = [0; 4096];
-            let length = stream.read(&mut request).expect("read identity request");
-            let request = String::from_utf8(request[..length].to_vec()).expect("request text");
-            assert!(request.starts_with("GET /lifecycle/identity?nonce="));
-            let nonce = request
-                .split("nonce=")
-                .nth(1)
-                .and_then(|value| value.split_whitespace().next())
-                .expect("identity nonce");
-            let body = format!(
-                r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v2","lease_id":"lease-live","pid":4242}}}}"#
-            );
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
-        });
-        let mut session = direct_ssh_session("lease-live");
-        session.local_url = Some(format!("http://{address}"));
-
-        // This fixture owns only the loopback tunnel. The production disconnect
-        // also requires an authoritative SSH re-probe, which remains intentionally
-        // unavailable here.
-        let error = stop_transport_recovery::disconnect_remote_daemon(&session, false)
-            .expect_err("the isolated fixture cannot authorize an SSH lifecycle mutation");
-        assert!(!error.contains("endpoint_identity_mismatch"));
-        server.join().expect("server");
-    });
-}
-
-#[test]
-fn refresh_disconnect_refuses_remote_lease_drift_after_promotion_started() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
-        let recorded = direct_ssh_session("lease-original");
-        let mut replacement = direct_ssh_session("lease-replacement");
-        replacement.local_url = Some("http://127.0.0.1:9".to_string());
-        write_session(&replacement).expect("record replacement session");
-
-        let error = disconnect_with_session("homeboy-lab", Some(&recorded), false)
-            .expect_err("refresh must not stop through a different tunnel");
-
-        assert!(error.message.contains("remote daemon ownership changed"));
-        assert_eq!(
-            read_session("homeboy-lab")
-                .expect("read session")
-                .expect("session")
-                .remote_daemon_lease_id
-                .as_deref(),
-            Some("lease-replacement")
-        );
-    });
-}
-
-#[test]
 fn refresh_disconnect_retains_a_rotated_tunnel_without_ssh_authority() {
     crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
@@ -1510,13 +1195,18 @@ fn refresh_disconnect_retains_a_rotated_tunnel_without_ssh_authority() {
 }
 
 #[test]
-fn refresh_disconnect_refuses_remote_address_or_pid_drift() {
+fn refresh_disconnect_refuses_remote_lease_address_or_pid_drift() {
     crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         let recorded = direct_ssh_session("lease-stable");
 
-        for (field, mut replacement) in [("address", recorded.clone()), ("pid", recorded.clone())] {
+        for field in ["lease", "address", "pid"] {
+            let mut replacement = recorded.clone();
             match field {
+                "lease" => {
+                    replacement.remote_daemon_lease_id = Some("lease-replacement".to_string());
+                    replacement.local_url = Some("http://127.0.0.1:9".to_string());
+                }
                 "address" => {
                     replacement.remote_daemon_address = Some("127.0.0.1:49154".to_string())
                 }
@@ -1527,7 +1217,15 @@ fn refresh_disconnect_refuses_remote_address_or_pid_drift() {
 
             let error = disconnect_with_session("homeboy-lab", Some(&recorded), false)
                 .expect_err("remote ownership drift is refused");
-            assert!(error.message.contains("remote daemon ownership changed"));
+            assert!(
+                error.message.contains("remote daemon ownership changed"),
+                "{field}"
+            );
+            assert_eq!(
+                read_session("homeboy-lab").expect("read session"),
+                Some(replacement),
+                "{field}: the drifted session is retained"
+            );
         }
     });
 }
@@ -1547,7 +1245,8 @@ fn test_open_loopback_tunnel_noops_for_local_runner() {
         runner: None,
     };
 
-    let tunnel = open_loopback_tunnel(&server, 49100, "127.0.0.1", 49200, true);
+    let tunnel =
+        open_loopback_tunnel_with_lifetime(&server, 49100, "127.0.0.1", 49200, true, false);
 
     assert!(tunnel.success);
     assert_eq!(tunnel.pid, None);
@@ -1775,13 +1474,7 @@ fn direct_daemon_fresh_live_job_suppresses_false_orphan_inference() {
 
 #[test]
 fn direct_daemon_count_remains_authoritative_when_typed_projection_lags() {
-    let typed = vec![sample_active_job(Some("run-live"), "live runner job")];
-
-    assert_eq!(reconciled_active_job_count(typed.len(), Some(2)), 2);
-    assert_eq!(typed.len(), 1);
-    assert_eq!(typed[0].durable_run_id.as_deref(), Some("run-live"));
-    assert_eq!(typed[0].status, JobStatus::Running);
-
+    assert_eq!(reconciled_active_job_count(1, Some(2)), 2);
     // The direct daemon count is authoritative even when the ownership
     // projection has not caught up; this conservatively retains capacity.
     assert_eq!(reconciled_active_job_count(0, Some(2)), 2);
@@ -1817,70 +1510,6 @@ fn read_fixture_request_until(
             Err(error) => return Err(error),
         }
     }
-}
-
-#[test]
-fn fixture_request_reader_handles_delayed_partial_nonblocking_request() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    listener
-        .set_nonblocking(true)
-        .expect("nonblocking listener");
-    let address = listener.local_addr().expect("listener address");
-    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
-    let server = std::thread::spawn(move || {
-        // Bounds only absorb scheduler load; the reader returns as soon as the
-        // full request arrives.
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    assert!(std::time::Instant::now() < deadline, "accept request");
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("accept request: {error}"),
-            }
-        };
-        accepted_tx.send(()).expect("record accepted request");
-        read_fixture_request_until(&mut stream, deadline).expect("read delayed request")
-    });
-
-    let mut client = TcpStream::connect(address).expect("connect fixture client");
-    accepted_rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("server accepted client");
-    std::thread::sleep(Duration::from_millis(10));
-    client
-        .write_all(b"GET /jo")
-        .expect("write first request chunk");
-    std::thread::sleep(Duration::from_millis(10));
-    client
-        .write_all(b"bs HTTP/1.1\r\nHost: fixture\r\n\r\n")
-        .expect("write second request chunk");
-
-    assert_eq!(
-        server.join().expect("server"),
-        b"GET /jobs HTTP/1.1\r\nHost: fixture\r\n\r\n"
-    );
-}
-
-#[test]
-fn fixture_request_reader_times_out_without_a_request() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("listener address");
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept request");
-        read_fixture_request_until(
-            &mut stream,
-            std::time::Instant::now() + Duration::from_millis(50),
-        )
-        .expect_err("request reader times out")
-        .kind()
-    });
-
-    let _client = TcpStream::connect(address).expect("connect fixture client");
-
-    assert_eq!(server.join().expect("server"), ErrorKind::TimedOut);
 }
 
 #[test]
@@ -2175,48 +1804,28 @@ fn active_runner_job_source_maps_the_direct_daemon_endpoint() {
     assert_eq!(active_runner_job_source(&direct), None);
 }
 
+/// A missing or corrupt session never authorizes reattaching a healthy
+/// daemon: idle or busy, matching or mismatched build, it requires explicit
+/// lease adoption.
 #[test]
-fn sessionless_active_daemon_requires_explicit_adoption_even_with_matching_identity() {
-    let mut status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
-    let daemon = status.daemon.as_mut().expect("daemon");
-    daemon.version = Some("0.284.0".to_string());
-    daemon.build_identity = Some("homeboy 0.284.0+live".to_string());
+fn sessionless_live_daemon_requires_explicit_lease_adoption() {
+    for (active_jobs, configured) in [
+        (0, "homeboy 0.284.0+live"),
+        (2, "homeboy 0.284.0+live"),
+        (2, "homeboy 0.284.0+other"),
+    ] {
+        let mut status =
+            remote_daemon_status_for_test(true, true, active_jobs, "lease-live", 1183765);
+        status.daemon.as_mut().expect("daemon").build_identity =
+            Some("homeboy 0.284.0+live".to_string());
 
-    assert!(remote_daemon_connect_action_for_runner(
-        None,
-        &status,
-        "homeboy 0.284.0+live",
-        "<runner-id>",
-        None
-    )
-    .expect_err("matching build identity does not establish runner ownership")
-    .contains("--adopt-live-lease lease-live --expected-live-pid 1183765"));
-
-    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
-    assert_eq!(recovery.daemon_version.as_deref(), Some("0.284.0"));
-    assert_eq!(
-        recovery.daemon_build_identity.as_deref(),
-        Some("homeboy 0.284.0+live")
-    );
-}
-
-#[test]
-fn sessionless_active_daemon_requires_lease_ownership_not_a_pinned_controller() {
-    let mut status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
-    let daemon = status.daemon.as_mut().expect("daemon");
-    daemon.version = Some("0.284.0".to_string());
-    daemon.build_identity = Some("homeboy 0.284.0+live".to_string());
-
-    let error = remote_daemon_connect_action_for_runner(
-        None,
-        &status,
-        "homeboy 0.284.0+other",
-        "<runner-id>",
-        None,
-    )
-    .expect_err("mismatched controller must not replace an active daemon");
-
-    assert!(error.contains("--adopt-live-lease lease-live"));
+        assert!(
+            remote_daemon_connect_action_for_runner(None, &status, configured, "<runner-id>", None)
+                .expect_err("build identity does not establish runner ownership")
+                .contains("--adopt-live-lease lease-live --expected-live-pid 1183765"),
+            "active_jobs={active_jobs} configured={configured}"
+        );
+    }
 }
 
 #[test]

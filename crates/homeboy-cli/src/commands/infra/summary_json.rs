@@ -2,10 +2,8 @@
 //!
 //! The `agent_task`, `bench`, and `runs` compact-summary modules all walk a
 //! serialized JSON envelope by dotted segment paths to pull out strings,
-//! counts, and array lengths. These small accessors used to be copy-pasted
-//! into each summary module verbatim, which the audit flagged as duplicate
-//! functions. They live here once so every summary renderer shares a single
-//! implementation.
+//! counts, and array lengths. These accessors live here once so every summary
+//! renderer shares a single implementation.
 
 use serde_json::Value;
 

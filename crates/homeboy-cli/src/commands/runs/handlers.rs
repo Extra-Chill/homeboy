@@ -669,21 +669,6 @@ mod runner_enrichment_tests {
     }
 
     #[test]
-    fn stale_summary_exposes_one_non_mutating_grouped_action() {
-        let summary = stale_run_summary(
-            &[dead_owned_run("stale-run", false)],
-            &HashSet::new(),
-            false,
-        )
-        .expect("stale summary");
-
-        assert_eq!(summary.count, 1);
-        assert_eq!(summary.run_ids, vec!["stale-run"]);
-        assert_eq!(summary.action.command, "homeboy runs reconcile --dry-run");
-        assert!(summary.action.kind.is_some());
-    }
-
-    #[test]
     fn stale_summary_preserves_current_authoritative_runner_job() {
         let mut active = HashSet::new();
         active.insert("current-run".to_string());
@@ -694,7 +679,7 @@ mod runner_enrichment_tests {
     }
 
     #[test]
-    fn stale_summary_bounds_large_displayed_sets() {
+    fn stale_summary_bounds_large_sets_behind_one_non_mutating_action() {
         let runs = (0..100)
             .map(|index| dead_owned_run(&format!("stale-{index}"), false))
             .collect::<Vec<_>>();
@@ -703,6 +688,7 @@ mod runner_enrichment_tests {
         assert_eq!(summary.count, 100);
         assert_eq!(summary.run_ids.len(), STALE_RUN_SAMPLE_LIMIT);
         assert_eq!(summary.omitted_run_count, 90);
+        assert_eq!(summary.action.command, "homeboy runs reconcile --dry-run");
     }
 }
 
@@ -1132,9 +1118,8 @@ fn pull_artifacts_to_local(
 /// targets.
 ///
 /// One implementation, shared with the runner download cache writer
-/// (#10586): this substitution used to exist only here, on the `--pull-dir`
-/// path, while the default cache path joined the remote's name unsanitized.
-/// Two copies is how that gap reopens.
+/// (#10586), so the `--pull-dir` path and the default cache path sanitize
+/// remote names identically.
 fn sanitize_artifact_filename(artifact_id: &str) -> String {
     homeboy::core::runner_download_cache::sanitize_artifact_file_name(artifact_id)
 }
@@ -1696,61 +1681,7 @@ mod pull_tests {
     }
 
     #[test]
-    fn pull_reports_local_file_as_already_local() {
-        let _guard = artifact_root_test_lock();
-        with_isolated_home(|home| {
-            let artifact_root = home.path().join("artifacts");
-            homeboy::core::set_artifact_root_override(Some(artifact_root));
-
-            let store = ObservationStore::open_initialized().expect("store");
-            let run = store
-                .start_run(NewRunRecord::builder("bench").build())
-                .expect("run");
-            let source = home.path().join("finding-packets.json");
-            fs::write(&source, br#"{"findings":[]}"#).expect("source");
-            let artifact = store
-                .record_artifact(&run.id, "finding-packets", &source)
-                .expect("artifact");
-
-            let summary = pull_artifacts_to_local(std::slice::from_ref(&artifact), None)
-                .expect("pull summary");
-
-            assert_eq!(summary.already_local_count, 1);
-            assert_eq!(summary.pulled_count, 0);
-            assert_eq!(summary.failed_count, 0);
-            assert_eq!(summary.entries.len(), 1);
-            assert_eq!(summary.entries[0].status, "already_local");
-            assert_eq!(summary.entries[0].storage, "local_file");
-            assert_eq!(
-                summary.entries[0].output_path.as_deref(),
-                Some(artifact.path.as_str())
-            );
-        });
-    }
-
-    #[test]
-    fn pull_skips_metadata_only_artifacts_with_reason() {
-        let _guard = artifact_root_test_lock();
-        with_isolated_home(|home| {
-            let artifact_root = home.path().join("artifacts");
-            homeboy::core::set_artifact_root_override(Some(artifact_root));
-
-            let record = metadata_only_record("run-1", "finding-packets");
-            let summary = pull_artifacts_to_local(&[record], None).expect("pull summary");
-
-            assert_eq!(summary.skipped_count, 1);
-            assert_eq!(summary.entries[0].status, "skipped");
-            assert_eq!(summary.entries[0].storage, "metadata_only");
-            assert!(summary.entries[0]
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("metadata only"));
-        });
-    }
-
-    #[test]
-    fn pull_records_per_artifact_failure_without_aborting() {
+    fn pull_classifies_each_artifact_and_records_failures_without_aborting() {
         let _guard = artifact_root_test_lock();
         with_isolated_home(|home| {
             let artifact_root = home.path().join("artifacts");
@@ -1784,18 +1715,41 @@ mod pull_tests {
                 .record_artifact(&run.id, "summary", &local_source)
                 .expect("artifact");
 
-            let summary = pull_artifacts_to_local(&[remote, local], None).expect("pull summary");
+            let metadata_only = metadata_only_record("run-1", "finding-packets");
 
-            assert_eq!(summary.entries.len(), 2);
+            let summary = pull_artifacts_to_local(&[remote, local.clone(), metadata_only], None)
+                .expect("pull summary");
+
+            assert_eq!(summary.entries.len(), 3);
             assert_eq!(summary.failed_count, 1);
             assert_eq!(summary.already_local_count, 1);
-            let remote_entry = summary
-                .entries
-                .iter()
-                .find(|entry| entry.artifact_id == "matrix-json")
-                .expect("remote entry");
+            assert_eq!(summary.skipped_count, 1);
+            assert_eq!(summary.pulled_count, 0);
+            let entry = |id: &str| {
+                summary
+                    .entries
+                    .iter()
+                    .find(|entry| entry.artifact_id == id)
+                    .expect("entry")
+            };
+            let remote_entry = entry("matrix-json");
             assert_eq!(remote_entry.status, "failed");
             assert!(remote_entry.error.is_some());
+            let local_entry = entry(&local.id);
+            assert_eq!(local_entry.status, "already_local");
+            assert_eq!(local_entry.storage, "local_file");
+            assert_eq!(
+                local_entry.output_path.as_deref(),
+                Some(local.path.as_str())
+            );
+            let skipped_entry = entry("finding-packets");
+            assert_eq!(skipped_entry.status, "skipped");
+            assert_eq!(skipped_entry.storage, "metadata_only");
+            assert!(skipped_entry
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("metadata only"));
         });
     }
 

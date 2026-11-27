@@ -164,6 +164,12 @@ mod tests {
         )
         .is_err());
         assert!(plan.validate().is_ok());
+        // The plan is persisted, so it must decode back to the same contract.
+        let persisted = serde_json::to_string(&plan).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TestExecutionPlan>(&persisted).unwrap(),
+            plan
+        );
     }
 
     #[test]
@@ -173,24 +179,5 @@ mod tests {
         )
         .expect_err("unsupported scope is not silently ignored");
         assert!(error.to_string().contains("scope"));
-    }
-
-    #[test]
-    fn declared_plan_round_trips_as_a_concrete_durable_contract() {
-        let plan = TestExecutionPlan::declared_homeboy_review_test(
-            vec![
-                "homeboy".to_string(),
-                "review".to_string(),
-                "test".to_string(),
-                "component".to_string(),
-            ],
-            42,
-        )
-        .unwrap();
-        let persisted = serde_json::to_string(&plan).unwrap();
-        assert_eq!(
-            serde_json::from_str::<TestExecutionPlan>(&persisted).unwrap(),
-            plan
-        );
     }
 }

@@ -201,30 +201,6 @@ fn pre_dispatch_failure_reaps_workspace_under_delete_on_terminal_policy() {
 }
 
 #[test]
-fn materialized_workspace_preserves_on_failure_under_explicit_debug_policy() {
-    crate::test_support::with_isolated_home(|_| {
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        let remote_path = sync_local_workspace("lab-local-mat-failure", runner_root.path());
-
-        {
-            let mut handle = MaterializedWorkspace::new(
-                "lab-local-mat-failure".to_string(),
-                remote_path.clone(),
-                None,
-                WorkspaceCleanupPolicy::PreserveOnFailure,
-            );
-            // A failed run is the default outcome (success never recorded).
-            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Failure);
-        } // drop preserves the workspace for post-mortem evidence
-
-        assert!(
-            Path::new(&remote_path).exists(),
-            "failure path must preserve the run-scoped workspace as evidence"
-        );
-    });
-}
-
-#[test]
 fn terminal_evidence_records_retained_outcome_owner_location_and_reclaim_command() {
     crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
@@ -254,6 +230,11 @@ fn terminal_evidence_records_retained_outcome_owner_location_and_reclaim_command
             let metadata: serde_json::Value =
                 serde_json::from_str(&metadata).expect("metadata json");
             let evidence = &metadata["terminal_evidence"];
+            assert!(
+                Path::new(&remote_path).exists(),
+                "{} must retain the workspace under preserve-on-failure",
+                outcome.label()
+            );
             assert_eq!(evidence["policy"], "preserve-on-failure");
             assert_eq!(evidence["final_outcome"], outcome.label());
             assert_eq!(evidence["lifecycle_owner"], expected_owner);
@@ -274,140 +255,86 @@ fn terminal_evidence_records_retained_outcome_owner_location_and_reclaim_command
 }
 
 #[test]
-fn preserve_on_failure_keeps_cancelled_workspace_for_ttl_reclamation() {
+fn unwinding_from_panic_retains_workspace_under_every_policy() {
     crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        let remote_path = sync_local_workspace("lab-local-mat-cancelled", runner_root.path());
-
-        {
-            let mut handle = MaterializedWorkspace::new(
-                "lab-local-mat-cancelled".to_string(),
-                remote_path.clone(),
-                None,
+        for (runner_id, policy) in [
+            (
+                "lab-local-mat-panic",
                 WorkspaceCleanupPolicy::PreserveOnFailure,
-            );
-            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Cancelled);
-        }
-
-        assert!(
-            Path::new(&remote_path).exists(),
-            "cancellation must retain the workspace under preserve-on-failure"
-        );
-        let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
-            .expect("cancelled terminal metadata");
-        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
-        assert_eq!(metadata["terminal_evidence"]["final_outcome"], "cancelled");
-    });
-}
-
-#[test]
-fn preserve_on_failure_keeps_workspace_when_unwinding_from_panic() {
-    crate::test_support::with_isolated_home(|_| {
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        let remote_path = sync_local_workspace("lab-local-mat-panic", runner_root.path());
-
-        let result = std::panic::catch_unwind(|| {
-            let _handle = MaterializedWorkspace::new(
-                "lab-local-mat-panic".to_string(),
-                remote_path.clone(),
-                None,
-                WorkspaceCleanupPolicy::PreserveOnFailure,
-            );
-            panic!("test unwind");
-        });
-
-        assert!(result.is_err());
-        assert!(Path::new(&remote_path).exists());
-        let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
-            .expect("panic terminal metadata");
-        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
-        assert_eq!(metadata["terminal_evidence"]["final_outcome"], "panic");
-        assert_eq!(
-            metadata["terminal_evidence"]["retained_location"],
-            remote_path
-        );
-    });
-}
-
-#[test]
-fn delete_on_terminal_keeps_workspace_when_unwinding_from_panic() {
-    crate::test_support::with_isolated_home(|_| {
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        let remote_path = sync_local_workspace("lab-local-mat-default-panic", runner_root.path());
-
-        let result = std::panic::catch_unwind(|| {
-            let _handle = MaterializedWorkspace::new(
-                "lab-local-mat-default-panic".to_string(),
-                remote_path.clone(),
-                None,
+            ),
+            (
+                "lab-local-mat-default-panic",
                 WorkspaceCleanupPolicy::DeleteAlways,
-            );
-            panic!("test unwind");
-        });
+            ),
+        ] {
+            let remote_path = sync_local_workspace(runner_id, runner_root.path());
 
-        assert!(result.is_err());
-        assert!(Path::new(&remote_path).exists());
-        let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
-            .expect("panic terminal metadata");
-        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
-        assert_eq!(metadata["terminal_evidence"]["final_outcome"], "panic");
-        assert_eq!(metadata["resource_lifecycle"]["status"], "retained");
+            let result = std::panic::catch_unwind(|| {
+                let _handle = MaterializedWorkspace::new(
+                    runner_id.to_string(),
+                    remote_path.clone(),
+                    None,
+                    policy,
+                );
+                panic!("test unwind");
+            });
+
+            assert!(result.is_err());
+            assert!(Path::new(&remote_path).exists(), "{runner_id}");
+            let metadata = fs::read_to_string(workspace_metadata_file(&remote_path))
+                .expect("panic terminal metadata");
+            let metadata: serde_json::Value =
+                serde_json::from_str(&metadata).expect("metadata json");
+            assert_eq!(metadata["terminal_evidence"]["final_outcome"], "panic");
+            assert_eq!(
+                metadata["terminal_evidence"]["retained_location"],
+                remote_path
+            );
+            assert_eq!(metadata["resource_lifecycle"]["status"], "retained");
+        }
     });
 }
 
 #[test]
-fn materialized_workspace_preserve_disarms_reap_even_on_success() {
+fn preserve_disarms_reap_under_every_policy() {
+    // #9469: a retryable pre-acceptance admission failure (and a detached
+    // in-flight job) calls preserve() so the staged workspace survives for a
+    // retry to resume, even under DeleteAlways or after a recorded success.
     crate::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        let remote_path = sync_local_workspace("lab-local-mat-detach", runner_root.path());
-
-        {
-            let mut handle = MaterializedWorkspace::new(
-                "lab-local-mat-detach".to_string(),
-                remote_path.clone(),
-                None,
+        for (runner_id, policy, outcome) in [
+            (
+                "lab-local-mat-detach",
                 WorkspaceCleanupPolicy::default(),
-            );
-            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Success);
-            // A detached/in-flight remote job still owns the workspace.
-            handle.preserve();
-        }
-
-        assert!(
-            Path::new(&remote_path).exists(),
-            "preserve() must hand off ownership without reaping, even on success"
-        );
-    });
-}
-
-#[test]
-fn delete_always_workspace_preserved_on_retryable_admission_failure_is_not_reaped() {
-    // #9469: the Lab offload workspace uses DeleteAlways so genuine terminal
-    // outcomes always release the admitted rig/extension snapshots. But a
-    // retryable pre-acceptance admission failure calls preserve() on it so the
-    // already-staged rig install/sync + snapshots survive for a retry to resume
-    // — even under DeleteAlways. Proves preserve() disarms the reap the offload
-    // path would otherwise perform.
-    crate::test_support::with_isolated_home(|_| {
-        let runner_root = tempfile::tempdir().expect("runner root tempdir");
-        let remote_path = sync_local_workspace("lab-local-mat-retry", runner_root.path());
-
-        {
-            let mut handle = MaterializedWorkspace::new(
-                "lab-local-mat-retry".to_string(),
-                remote_path.clone(),
-                None,
+                Some(WorkspaceTerminalOutcome::Success),
+            ),
+            (
+                "lab-local-mat-retry",
                 WorkspaceCleanupPolicy::DeleteAlways,
-            );
-            // A retryable admission failure preserves the prepared workspace.
-            handle.preserve();
-        } // drop must NOT reap despite DeleteAlways
+                None,
+            ),
+        ] {
+            let remote_path = sync_local_workspace(runner_id, runner_root.path());
 
-        assert!(
-            Path::new(&remote_path).exists(),
-            "a retryable admission failure must preserve the prepared workspace for resume, \
-             even under DeleteAlways"
-        );
+            {
+                let mut handle = MaterializedWorkspace::new(
+                    runner_id.to_string(),
+                    remote_path.clone(),
+                    None,
+                    policy,
+                );
+                if let Some(outcome) = outcome {
+                    handle.set_terminal_outcome(outcome);
+                }
+                handle.preserve();
+            }
+
+            assert!(
+                Path::new(&remote_path).exists(),
+                "{runner_id}: preserve() must hand off ownership without reaping"
+            );
+        }
     });
 }
 

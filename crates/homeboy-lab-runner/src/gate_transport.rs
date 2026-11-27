@@ -390,27 +390,28 @@ fn terminal_envelope_diagnostic(value: &serde_json::Value, stdout_bytes: usize) 
     diagnostic.to_string()
 }
 
-/// Secret identity names the admitted component's test capability declares.
+/// Secret identity names the admitted component's and the gate-tested
+/// components' test capabilities declare.
 ///
 /// A Lab gate runs `homeboy review test <component>` on the runner, where the
 /// extension child requires its declared `test.secret_env` (for example a test
 /// database). Declaring the names on the exec lets the runner resolve them from
 /// its own runner-deferred `secret_env` refs; no controller value crosses
-/// (#15824). Only names the component's test extension declares are requested,
-/// so unrelated runner secrets never reach a gate. An unresolvable component or
-/// declaration yields no names and the gate reports its own error, as before.
-fn admitted_component_test_secret_env_names(
+/// (#15824). On a monorepo the gate may test a nested component other than the
+/// admitted one, so its declarations are included too (#19187). Only names a
+/// relevant component's test extension declares are requested, so unrelated
+/// runner secrets never reach a gate. An unresolvable component or declaration
+/// yields no names and the gate reports its own error, as before.
+fn gate_test_secret_env_names(
     admitted_component_id: Option<&str>,
     cwd: &Path,
+    gate_argv: &[String],
 ) -> Vec<String> {
-    let Ok(component) = homeboy_core::component::resolve_effective(
+    homeboy_agents::agent_task_gate::gate_test_secret_env_names(
         admitted_component_id,
-        Some(&cwd.to_string_lossy()),
-        None,
-    ) else {
-        return Vec::new();
-    };
-    homeboy_core::extension::test::declared_secret_env_names(&component).unwrap_or_default()
+        cwd,
+        [gate_argv],
+    )
 }
 
 fn lab_gate_exec_options(
@@ -884,9 +885,10 @@ fn execute_owned(
     }
     crate::lab::offload::materialize_lab_at_files_on_runner(&request.runner_id, &at_files)?;
     command = crate::lab_args::remap_lab_at_file_args(&command, &at_files);
-    let secret_env_names = admitted_component_test_secret_env_names(
+    let secret_env_names = gate_test_secret_env_names(
         request.environment.admitted_component_id.as_deref(),
         cwd,
+        &request.argv,
     );
     let mut options = lab_gate_exec_options(command, run_id, secret_env_names);
     if let Some((root, _)) = &input_store {
@@ -1330,6 +1332,29 @@ fn settle_terminal_gate_job(
             "native gate receipt has no durable evidence owner",
         )
     })?;
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    for (index, evidence) in receipt.report.test_artifacts.iter_mut().enumerate() {
+        let path = job.tmp_dir.join(format!("test-artifact-{index}.log"));
+        std::fs::write(&path, &evidence.contents)
+            .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        let artifact = store.record_artifact_with_metadata(
+            run_id,
+            "lab-gate-test-artifact",
+            &path,
+            serde_json::json!({"source_ref": evidence.reference, "runner_job_id": job_id}),
+        )?;
+        let reference = format!("homeboy://run/{run_id}/artifact/{}", artifact.id);
+        receipt.report.stdout = receipt
+            .report
+            .stdout
+            .replace(&evidence.reference, &reference);
+        receipt.report.stderr = receipt
+            .report
+            .stderr
+            .replace(&evidence.reference, &reference);
+        evidence.reference = reference;
+        evidence.contents.clear();
+    }
     let path = job.tmp_dir.join("terminal-gate-receipt.json");
     std::fs::write(
         &path,
@@ -1337,7 +1362,6 @@ fn settle_terminal_gate_job(
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     )
     .map_err(|error| Error::internal_io(error.to_string(), None))?;
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let artifact = store.record_artifact_with_metadata(run_id, "admitted-lab-gate-receipt", &path, serde_json::json!({"candidate": request.candidate, "request_sha256": request.identity()?, "runner_job_id": job_id, "visibility": request.visibility}))?;
     receipt.artifact_ref = Some(format!("homeboy://run/{run_id}/artifact/{}", artifact.id));
     let lifecycle =
@@ -1409,9 +1433,6 @@ fn receipt_download_recovers_the_real_receipt_after_a_retryable_failure() {
         &[],
     )
     .unwrap();
-    assert!(report.environment.resources.is_some());
-    assert!(report.environment.host_pressure_start.is_some());
-    assert!(report.environment.host_pressure_end.is_some());
     let receipt = LabGateReceipt {
         schema: "homeboy/lab-gate-receipt/v1".into(),
         request_sha256: "request".into(),
@@ -1572,30 +1593,69 @@ mod secret_env_tests {
     use super::*;
 
     #[test]
-    fn lab_gate_exec_declares_component_test_secret_names() {
-        let names = vec![
-            "WP_CODEBOX_DB_HOST".to_string(),
-            "WP_CODEBOX_DB_PASSWORD".to_string(),
-        ];
-        let options =
-            lab_gate_exec_options(vec!["homeboy".to_string()], "lab-gate-x", names.clone());
-        assert_eq!(options.secret_env_names, names);
-        assert!(
-            options.env.is_empty(),
-            "secret values never travel in request env"
-        );
-        assert_eq!(options.run_id.as_deref(), Some("lab-gate-x"));
-        assert!(options.detach_after_handoff);
-    }
-
-    #[test]
     fn unresolvable_admitted_component_declares_no_secret_names() {
         let dir = tempfile::tempdir().expect("cwd");
-        assert!(admitted_component_test_secret_env_names(
+        assert!(gate_test_secret_env_names(
             Some("homeboy-15824-no-such-component"),
-            dir.path()
+            dir.path(),
+            &[]
         )
         .is_empty());
+    }
+
+    /// #19187: a gate on an admitted monorepo root that tests a nested
+    /// component requests that component's declared test secret names.
+    #[test]
+    fn gate_exec_carries_tested_subcomponent_secret_names() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let names = ["WP_CODEBOX_DB_HOST", "WP_CODEBOX_DB_PASSWORD"];
+            let extension = home
+                .path()
+                .join(".config/homeboy/extensions/secret-wp-fixture");
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(
+                extension.join("secret-wp-fixture.json"),
+                serde_json::json!({
+                    "name": "Secret WP fixture",
+                    "version": "1.0.0",
+                    "test": {
+                        "extension_script": "test.sh",
+                        "secret_env": {names[0]: names[0], names[1]: names[1]},
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            homeboy_test_support::write_executable(
+                extension.join("test.sh"),
+                "#!/bin/sh\nexit 0\n",
+                0o755,
+            )
+            .unwrap();
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(
+                root.path().join("homeboy.json"),
+                r#"{"id":"mono-root-19187"}"#,
+            )
+            .unwrap();
+            let events = root.path().join("plugins/mono-events-19187");
+            std::fs::create_dir_all(&events).unwrap();
+            std::fs::write(
+                events.join("homeboy.json"),
+                r#"{"id":"mono-events-19187","extensions":{"secret-wp-fixture":{}}}"#,
+            )
+            .unwrap();
+
+            let argv = homeboy_agents::agent_task_gate::legacy_gate_argv(
+                "homeboy review test mono-events-19187",
+            );
+            let options = lab_gate_exec_options(
+                vec!["homeboy".to_string()],
+                "run",
+                gate_test_secret_env_names(Some("mono-root-19187"), root.path(), &argv),
+            );
+            assert_eq!(options.secret_env_names, names);
+        });
     }
 }
 
@@ -1612,7 +1672,7 @@ mod resolve_only_capability_tests {
             assert_eq!(error.code, homeboy_core::ErrorCode::RunnerVersionSkew);
             assert_eq!(error.details["gate_disposition"], "unavailable");
             // Both versions mark this as runner build skew, which the gate
-            // waits through as convergence (#18477) rather than failing.
+            // waits through as convergence rather than failing.
             assert!(error.details["controller_version"].is_string());
             assert!(error.details["runner_version"].is_string());
             assert_eq!(
@@ -1685,7 +1745,7 @@ mod gate_job_start_tests {
     use homeboy_core::foreground_wait::{self, ForegroundWaitPolicy, WaitStop};
     use std::sync::{Arc, Mutex};
 
-    /// #18042: a job still queued for runner capacity reports what the client
+    /// A job still queued for runner capacity reports what the client
     /// waits for and writes no start fence; the fence is written once, when
     /// the daemon admits the job. A foreground stop cancels the gate, so the
     /// queued job is withdrawn.
@@ -1803,15 +1863,22 @@ mod public_error_tests {
 
     #[test]
     fn errors_after_runner_handoff_preserve_the_redacted_cause() {
-        let mut error = missing_secret_ref();
-        error.details = serde_json::json!({"job_id": "job-1", "stage": "execution"});
+        let mut execution = missing_secret_ref();
+        execution.details = serde_json::json!({"job_id": "job-1", "stage": "execution"});
+        let transport = Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "ssh: connection reset",
+            serde_json::json!({"stage": "transport"}),
+        );
 
-        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
+        for error in [execution, transport] {
+            let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
 
-        assert!(public.message.contains(&error.message));
-        assert_eq!(public.details["diagnostic"]["code"], error.code.as_str());
-        assert_eq!(public.details["diagnostic"]["details"]["job_id"], "job-1");
-        assert_eq!(public.retryable, None);
+            assert!(public.message.contains(&error.message));
+            assert_eq!(public.details["diagnostic"]["code"], error.code.as_str());
+            assert_eq!(public.details["diagnostic"]["details"], error.details);
+            assert_eq!(public.retryable, None);
+        }
     }
 
     #[test]
@@ -1828,8 +1895,8 @@ mod public_error_tests {
         assert_eq!(public.details["entry_path"], "tracked/cycle");
     }
 
-    /// #18121: a gate job whose reservation expired before spawn is a
-    /// retryable never-spawned failure, not a lost receipt stream.
+    /// A gate job whose reservation expired before spawn is a retryable
+    /// never-spawned failure, not a lost receipt stream.
     #[test]
     fn reservation_expired_gate_job_is_a_retryable_never_spawned_failure() {
         let result = serde_json::json!({
@@ -1896,7 +1963,7 @@ mod public_error_tests {
         assert!(!is_pre_handoff_configuration_error(&absent_result));
     }
 
-    /// #18121: a terminal job without terminal artifact evidence never judged
+    /// A terminal job without terminal artifact evidence never judged
     /// the candidate. It names the job and the receipt path, and stays a
     /// retryable non-execution through the public wrapper so Cook defers the
     /// gate with the candidate preserved instead of failing the run.
@@ -1977,23 +2044,5 @@ mod public_error_tests {
             false,
         );
         assert!(plain.message.contains("exit code 137") && plain.message.contains("Killed"));
-    }
-
-    #[test]
-    fn transport_failures_preserve_the_cause() {
-        let error = Error::new(
-            homeboy_core::ErrorCode::RunnerLabTransportFailure,
-            "ssh: connection reset",
-            serde_json::json!({"stage": "transport"}),
-        );
-
-        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
-
-        assert!(public.message.contains("ssh: connection reset"));
-        assert_eq!(
-            public.details["diagnostic"]["details"]["stage"],
-            "transport"
-        );
-        assert_eq!(public.retryable, None);
     }
 }

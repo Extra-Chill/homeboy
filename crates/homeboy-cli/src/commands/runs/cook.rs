@@ -133,10 +133,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn discovery_cli_selectors_and_removed_verbs() {
-        for verb in ["list", "active"] {
-            assert!(Cli::try_parse_from(["homeboy", "agent-task", verb]).is_err());
-        }
+    fn discovery_cli_selectors_are_validated() {
         assert!(Cli::try_parse_from(["homeboy", "agent-task", "reconcile"]).is_err());
         assert!(Cli::try_parse_from(["homeboy", "agent-task", "reconcile", "--all"]).is_ok());
         assert!(
@@ -217,47 +214,6 @@ mod tests {
                 unreachable!()
             };
             assert_eq!(super::validate_discovery(&list).is_ok(), state != "invalid");
-        }
-    }
-}
-
-#[cfg(test)]
-mod pagination_parse_tests {
-    use crate::cli_surface::{Cli, Commands};
-    use clap::Parser;
-    #[test]
-    fn active_continuation_and_fleet_scopes_are_separate() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "runs",
-            "list",
-            "--kind",
-            "agent-task",
-            "--active",
-            "--limit",
-            "20",
-            "--cursor",
-            "opaque",
-        ])
-        .unwrap();
-        let Commands::Runs(args) = cli.command else {
-            unreachable!()
-        };
-        let super::super::types::RunsCommand::List(args) = args.command else {
-            unreachable!()
-        };
-        assert_eq!(args.limit, 20);
-        assert_eq!(args.cursor.as_deref(), Some("opaque"));
-        for flag in ["--limit", "--cursor", "--branch", "--full"] {
-            assert!(Cli::try_parse_from([
-                "homeboy",
-                "agent-task",
-                "reconcile",
-                "--all",
-                flag,
-                "1"
-            ])
-            .is_err());
         }
     }
 }

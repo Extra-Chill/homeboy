@@ -31,57 +31,6 @@ use serde_json::Value;
 
 use crate::commands::runs::test_support::sample_run;
 #[test]
-fn run_list_filters_kind_component_rig_and_status() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let bench = store
-            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
-            .expect("bench");
-        store
-            .finish_run(&bench.id, RunStatus::Pass, None)
-            .expect("finish bench");
-        let trace = store
-            .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
-            .expect("trace");
-        store
-            .finish_run(&trace.id, RunStatus::Fail, None)
-            .expect("finish trace");
-
-        let (output, _) = list_runs(
-            &test_store(),
-            RunsListArgs {
-                runner: None,
-                kind: Some("bench".to_string()),
-                component_id: Some("homeboy".to_string()),
-                rig: Some("studio".to_string()),
-                scenario_id: None,
-                status: Some("pass".to_string()),
-                running: false,
-                since: None,
-                until: None,
-                id: None,
-                command_contains: None,
-                workspace: None,
-                correlation: None,
-                include_mirrors: false,
-                limit: 20,
-                include_active_runner_jobs: false,
-                ..Default::default()
-            },
-            "runs.list",
-        )
-        .expect("list");
-
-        let RunsOutput::List(output) = output else {
-            panic!("expected list output");
-        };
-        assert_eq!(output.runs.len(), 1);
-        assert_eq!(output.runs[0].id, bench.id);
-    });
-}
-
-#[test]
 fn run_list_reads_durable_record_without_reconciliation() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
@@ -93,23 +42,10 @@ fn run_list_reads_durable_record_without_reconciliation() {
         let (output, _) = list_runs(
             &test_store(),
             RunsListArgs {
-                runner: None,
                 kind: Some("bench".to_string()),
                 component_id: Some("homeboy".to_string()),
                 rig: Some("studio".to_string()),
-                scenario_id: None,
-                status: None,
-                running: false,
-                since: None,
-                until: None,
-                id: None,
-                command_contains: None,
-                workspace: None,
-                correlation: None,
-                include_mirrors: false,
-                limit: 20,
-                include_active_runner_jobs: false,
-                ..Default::default()
+                ..list_args()
             },
             "runs.list",
         )
@@ -177,18 +113,6 @@ fn run_list_does_not_classify_terminal_runs_as_stale() {
 
         assert!(output.stale_runs.is_none());
         assert!(output.actionable.next_actions.is_empty());
-    });
-}
-
-#[test]
-fn ordinary_runs_list_stays_in_its_existing_serialized_variant() {
-    with_isolated_home(|_| {
-        let output = list_runs(&test_store(), list_args(), "runs.list")
-            .expect("ordinary list")
-            .0;
-        let value = serde_json::to_value(output).expect("serialize ordinary list");
-        assert_eq!(value["variant"], "list");
-        assert_eq!(value["payload"]["command"], "runs.list");
     });
 }
 
@@ -278,7 +202,7 @@ fn run_list_collapses_runner_execution_mirrors_by_default() {
 }
 
 #[test]
-fn run_list_applies_command_and_id_filters() {
+fn run_list_applies_kind_component_rig_status_command_and_id_filters() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
@@ -286,6 +210,7 @@ fn run_list_applies_command_and_id_filters() {
             .start_run(
                 NewRunRecord::builder("bench")
                     .component_id("homeboy")
+                    .rig_id("studio")
                     .command("homeboy bench gutenberg --run-id cook-79020")
                     .build(),
             )
@@ -293,10 +218,17 @@ fn run_list_applies_command_and_id_filters() {
         store
             .finish_run(&keep.id, RunStatus::Pass, None)
             .expect("finish keep");
+        let trace = store
+            .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
+            .expect("trace");
+        store
+            .finish_run(&trace.id, RunStatus::Fail, None)
+            .expect("finish trace");
         let other = store
             .start_run(
                 NewRunRecord::builder("bench")
                     .component_id("homeboy")
+                    .rig_id("other-rig")
                     .command("homeboy bench unrelated --run-id cook-00001")
                     .build(),
             )
@@ -305,35 +237,39 @@ fn run_list_applies_command_and_id_filters() {
             .finish_run(&other.id, RunStatus::Pass, None)
             .expect("finish other");
 
-        let (by_command, _) = list_runs(
-            &test_store(),
-            RunsListArgs {
-                command_contains: Some("gutenberg".to_string()),
-                ..list_args()
-            },
-            "runs.list",
-        )
-        .expect("list by command");
-        let RunsOutput::List(by_command) = by_command else {
-            panic!("expected list output");
-        };
-        assert_eq!(by_command.runs.len(), 1);
-        assert_eq!(by_command.runs[0].id, keep.id);
-
-        let (by_id, _) = list_runs(
-            &test_store(),
-            RunsListArgs {
-                id: Some("cook-79020".to_string()),
-                ..list_args()
-            },
-            "runs.list",
-        )
-        .expect("list by id label");
-        let RunsOutput::List(by_id) = by_id else {
-            panic!("expected list output");
-        };
-        assert_eq!(by_id.runs.len(), 1, "id fragment matches the run-id label");
-        assert_eq!(by_id.runs[0].id, keep.id);
+        for (case, args) in [
+            (
+                "kind/component/rig/status",
+                RunsListArgs {
+                    kind: Some("bench".to_string()),
+                    component_id: Some("homeboy".to_string()),
+                    rig: Some("studio".to_string()),
+                    status: Some("pass".to_string()),
+                    ..list_args()
+                },
+            ),
+            (
+                "command",
+                RunsListArgs {
+                    command_contains: Some("gutenberg".to_string()),
+                    ..list_args()
+                },
+            ),
+            (
+                "id label",
+                RunsListArgs {
+                    id: Some("cook-79020".to_string()),
+                    ..list_args()
+                },
+            ),
+        ] {
+            let (output, _) = list_runs(&test_store(), args, "runs.list").expect("list");
+            let RunsOutput::List(output) = output else {
+                panic!("expected list output");
+            };
+            assert_eq!(output.runs.len(), 1, "{case}");
+            assert_eq!(output.runs[0].id, keep.id, "{case}");
+        }
     });
 }
 
@@ -530,7 +466,7 @@ fn run_discovery_uses_named_provenance_and_normalized_workspace_boundaries() {
 }
 
 #[test]
-fn run_discovery_walks_beyond_legacy_prefetch_prefix() {
+fn run_discovery_walks_beyond_the_prefetch_prefix() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
@@ -998,7 +934,7 @@ fn runs_env_refuses_unredacted_env_resolution() {
 }
 
 #[test]
-fn artifacts_command_reports_paths() {
+fn artifacts_command_reports_file_paths_and_url_artifacts() {
     with_isolated_home(|home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
@@ -1010,31 +946,6 @@ fn artifacts_command_reports_paths() {
         store
             .record_artifact(&run.id, "trace_results", &artifact_path)
             .expect("record artifact");
-
-        let (output, _) = artifacts(&run.id).expect("artifacts");
-        let RunsOutput::Artifacts(output) = output else {
-            panic!("expected artifacts output");
-        };
-        assert_eq!(output.artifacts.len(), 1);
-        let reported_path = std::path::PathBuf::from(&output.artifacts[0].path);
-        let expected_file_name = format!("{}-trace-results.json", output.artifacts[0].id);
-        assert_ne!(reported_path, artifact_path);
-        assert!(reported_path.is_file());
-        assert_eq!(
-            reported_path.file_name().and_then(|name| name.to_str()),
-            Some(expected_file_name.as_str())
-        );
-    });
-}
-
-#[test]
-fn artifacts_command_reports_url_artifacts() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
-            .expect("run");
         store
             .record_url_artifact(&run.id, "frontend_url", "https://example.test/")
             .expect("record URL artifact");
@@ -1043,13 +954,27 @@ fn artifacts_command_reports_url_artifacts() {
         let RunsOutput::Artifacts(output) = output else {
             panic!("expected artifacts output");
         };
-        assert_eq!(output.artifacts.len(), 1);
-        assert_eq!(output.artifacts[0].kind, "frontend_url");
-        assert_eq!(output.artifacts[0].artifact_type, "url");
+        assert_eq!(output.artifacts.len(), 2);
+        let file = output
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "trace_results")
+            .expect("file artifact");
+        let reported_path = std::path::PathBuf::from(&file.path);
+        let expected_file_name = format!("{}-trace-results.json", file.id);
+        assert_ne!(reported_path, artifact_path);
+        assert!(reported_path.is_file());
         assert_eq!(
-            output.artifacts[0].url.as_deref(),
-            Some("https://example.test/")
+            reported_path.file_name().and_then(|name| name.to_str()),
+            Some(expected_file_name.as_str())
         );
+        let url = output
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "frontend_url")
+            .expect("URL artifact");
+        assert_eq!(url.artifact_type, "url");
+        assert_eq!(url.url.as_deref(), Some("https://example.test/"));
     });
 }
 
@@ -1263,44 +1188,7 @@ fn bench_artifact_listing_does_not_include_sibling_lab_run_artifacts() {
 }
 
 #[test]
-fn runner_job_show_keeps_local_evidence_when_refresh_runner_is_unavailable() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = RunRecord {
-            id: "runner-exec-missing-lab-job-123".to_string(),
-            kind: "runner-exec".to_string(),
-            component_id: None,
-            started_at: "2026-06-12T00:00:00Z".to_string(),
-            finished_at: None,
-            status: "running".to_string(),
-            command: Some("homeboy bench".to_string()),
-            cwd: Some("/srv/homeboy/project".to_string()),
-            homeboy_version: None,
-            git_sha: None,
-            rig_id: None,
-            metadata_json: serde_json::json!({
-                "lab": {
-                    "runner": { "id": "missing-lab" },
-                    "remote_job": { "id": "job-123" }
-                }
-            }),
-        };
-        store.upsert_imported_run(&run).expect("runner run");
-
-        let (output, exit_code) = show_run_in_store(&store, &run.id).expect("show local evidence");
-
-        assert_eq!(exit_code, 0);
-        let RunsOutput::Show(output) = output else {
-            panic!("expected show output");
-        };
-        assert_eq!(output.run.summary.id, run.id);
-        assert_eq!(output.run.summary.status, "running");
-    });
-}
-
-#[test]
-fn runner_job_artifacts_keep_local_evidence_when_refresh_runner_is_unavailable() {
+fn runner_job_show_and_artifacts_keep_local_evidence_when_refresh_runner_is_unavailable() {
     with_isolated_home(|home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
@@ -1329,6 +1217,14 @@ fn runner_job_artifacts_keep_local_evidence_when_refresh_runner_is_unavailable()
         let artifact = store
             .record_artifact(&run.id, "timeout_note", &local)
             .expect("artifact");
+
+        let (output, exit_code) = show_run_in_store(&store, &run.id).expect("show local evidence");
+        assert_eq!(exit_code, 0);
+        let RunsOutput::Show(output) = output else {
+            panic!("expected show output");
+        };
+        assert_eq!(output.run.summary.id, run.id);
+        assert_eq!(output.run.summary.status, "running");
 
         let (output, exit_code) = artifacts(&run.id).expect("artifacts local evidence");
 
@@ -1604,31 +1500,7 @@ fn artifact_get_status_pointer_retrieves_retained_patch_after_producer_removal()
 }
 
 #[test]
-fn artifact_get_accepts_listed_logical_id_and_name() {
-    artifact_destination_fixture(false);
-}
-
-#[test]
-fn artifact_get_default_destination_is_named_and_absolute() {
-    artifact_destination_fixture(true);
-}
-
-#[test]
-fn artifact_get_to_flag_parses_as_output() {
-    #[derive(clap::Parser)]
-    struct Cli {
-        #[command(flatten)]
-        args: RunsArtifactGetArgs,
-    }
-    use clap::Parser;
-    let parsed = Cli::try_parse_from(["get", "run", "artifact", "--to", "chosen.patch"]).unwrap();
-    assert_eq!(
-        parsed.args.output,
-        Some(std::path::PathBuf::from("chosen.patch"))
-    );
-}
-
-fn artifact_destination_fixture(default_output: bool) {
+fn artifact_get_accepts_listed_tokens_and_names_the_default_destination() {
     with_isolated_home(|home| {
         let store = test_store();
         let run = store
@@ -1640,15 +1512,11 @@ fn artifact_destination_fixture(default_output: bool) {
             .record_artifact(&run.id, "git_bundle", &source)
             .unwrap();
         store.update_artifact_metadata(&artifact.id, serde_json::json!({"name": "candidate.bundle", "agent_task": {"logical_artifact_id": "cook-homeboy-attempt-1-patch"}})).unwrap();
-        for token in if default_output {
-            vec![]
-        } else {
-            vec![
-                artifact.id.as_str(),
-                "cook-homeboy-attempt-1-patch",
-                "git_bundle",
-            ]
-        } {
+        for token in [
+            artifact.id.as_str(),
+            "cook-homeboy-attempt-1-patch",
+            "git_bundle",
+        ] {
             let destination = home.path().join("retrieved.bundle");
             let (output, _) = artifact_get(
                 &store,
@@ -1667,9 +1535,6 @@ fn artifact_destination_fixture(default_output: bool) {
             assert_eq!(std::path::Path::new(&output.output_path), destination);
             assert!(std::path::Path::new(&output.output_path).is_absolute());
             assert_eq!(std::fs::read(destination).unwrap(), b"candidate");
-        }
-        if !default_output {
-            return;
         }
         let (output, _) = artifact_get(
             &store,
@@ -1736,60 +1601,6 @@ fn artifact_get_canonical_pin_outranks_older_friendly_alias() {
             homeboy::core::artifact_metadata::sha256_file(&destination).expect("digest"),
             canonical.sha256.expect("recorded digest")
         );
-    });
-}
-
-#[test]
-fn artifact_get_copies_registered_file_without_raw_path_lookup() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
-            .expect("run");
-        let artifact_path = home.path().join("bench-results.json");
-        std::fs::write(&artifact_path, br#"{"ok":true}"#).expect("artifact");
-        let artifact = store
-            .record_artifact(&run.id, "bench_results", &artifact_path)
-            .expect("record artifact");
-        let output_path = home.path().join("downloaded.json");
-
-        let (output, _) = artifact_get(
-            &store,
-            RunsArtifactGetArgs {
-                run_id: run.id.clone(),
-                artifact_id: artifact.id.clone(),
-                runner: None,
-                output: Some(output_path.clone()),
-                field: Vec::new(),
-            },
-        )
-        .expect("get artifact");
-
-        let RunsOutput::ArtifactGet(output) = output else {
-            panic!("expected artifact get output");
-        };
-        assert_eq!(output.command, "runs.artifact.get");
-        assert_eq!(output.artifact_id, artifact.id);
-        assert_eq!(
-            std::fs::read(&output_path).expect("downloaded"),
-            br#"{"ok":true}"#
-        );
-
-        let err = match artifact_get(
-            &store,
-            RunsArtifactGetArgs {
-                run_id: run.id,
-                artifact_id: artifact_path.display().to_string(),
-                runner: None,
-                output: Some(home.path().join("bad.json")),
-                field: Vec::new(),
-            },
-        ) {
-            Ok(_) => panic!("raw paths are not accepted as artifact ids"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("artifact record not found"));
     });
 }
 
@@ -2292,23 +2103,11 @@ fn bench_history_orders_and_filters_by_scenario() {
         let (output, _) = list_runs(
             &test_store(),
             RunsListArgs {
-                runner: None,
                 kind: Some("bench".to_string()),
                 component_id: Some("homeboy".to_string()),
                 rig: Some("studio".to_string()),
                 scenario_id: Some("cold".to_string()),
-                status: None,
-                running: false,
-                since: None,
-                until: None,
-                id: None,
-                command_contains: None,
-                workspace: None,
-                correlation: None,
-                include_mirrors: false,
-                limit: 20,
-                include_active_runner_jobs: false,
-                ..Default::default()
+                ..list_args()
             },
             "runs.list",
         )

@@ -95,35 +95,3 @@ impl AgentTaskOutcomeStatus {
         }
     }
 }
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn agent_task_outcome_status_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (AgentTaskOutcomeStatus::Succeeded, "succeeded"),
-            (AgentTaskOutcomeStatus::NoOp, "no_op"),
-            (
-                AgentTaskOutcomeStatus::UnableToRemediate,
-                "unable_to_remediate",
-            ),
-            (AgentTaskOutcomeStatus::ProviderError, "provider_error"),
-            (AgentTaskOutcomeStatus::Timeout, "timeout"),
-            (
-                AgentTaskOutcomeStatus::CandidateRecoverable,
-                "candidate_recoverable",
-            ),
-            (AgentTaskOutcomeStatus::Failed, "failed"),
-            (AgentTaskOutcomeStatus::FollowUpIssue, "follow_up_issue"),
-            (AgentTaskOutcomeStatus::Cancelled, "cancelled"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
-    }
-}

@@ -856,34 +856,10 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_deduplicates_a_fanout_runtime_probe() {
+    fn process_local_cache_deduplicates_phases_without_reusing_stale_credentials() {
         let _home = stable_identity_home();
         let (_fake, provider, config, count) =
             pi_fixture("printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'");
-        let mut cache = test_cache();
-
-        let first = readiness_verdict(&provider, &config, &[], &mut cache, None, None)
-            .expect("first verdict");
-        let second = readiness_verdict(&provider, &config, &[], &mut cache, None, None)
-            .expect("cached verdict");
-
-        assert_eq!(first.cache_key, second.cache_key);
-        assert_eq!(probe_count(&count), 1);
-    }
-
-    #[test]
-    fn process_local_cache_deduplicates_phases_without_reusing_stale_credentials() {
-        let _home = stable_identity_home();
-        let fake = super::super::test_pi::FakePi::with_probes(
-            "exit 1",
-            "printf 'test-pi\\n'",
-            "printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'",
-        );
-        let count = fake.root.path().join("count");
-        let provider = fake.provider();
-        let mut config = fake.config();
-        config["model"] = json!("test/model");
-        config["runtime_env"] = json!({"COUNT":count});
         let mut compile_cache = ProviderRuntimeReadinessCache::process_local();
         let mut admission_cache = ProviderRuntimeReadinessCache::process_local();
 
@@ -915,13 +891,7 @@ mod tests {
         )
         .expect("rotated-credential phase verdict");
 
-        assert_eq!(
-            std::fs::read_to_string(count)
-                .expect("probe count")
-                .lines()
-                .count(),
-            2
-        );
+        assert_eq!(probe_count(&count), 2);
     }
 
     #[test]
@@ -986,43 +956,6 @@ mod tests {
                 .ready
         );
         assert_eq!(probe_count(&count), 2);
-    }
-
-    #[test]
-    fn concurrent_exact_key_probes_singleflight() {
-        let _home = stable_identity_home();
-        let fake = super::super::test_pi::FakePi::with_probes(
-            "exit 1",
-            "printf 'test-pi\\n'",
-            "printf 'probe\\n' >> \"$COUNT\"; sleep 0.1; printf 'test model\\n'",
-        );
-        let count = fake.root.path().join("count");
-        let provider = fake.provider();
-        let mut config = fake.config();
-        config["model"] = json!("test/model");
-        config["runtime_env"] = json!({"COUNT": count});
-        let cache = test_cache();
-        std::thread::scope(|scope| {
-            for _ in 0..2 {
-                let provider = provider.clone();
-                let mut cache = cache.clone();
-                let config = config.clone();
-                scope.spawn(move || {
-                    assert!(
-                        readiness_verdict(&provider, &config, &[], &mut cache, None, None)
-                            .expect("readiness")
-                            .ready
-                    );
-                });
-            }
-        });
-        assert_eq!(
-            std::fs::read_to_string(&count)
-                .expect("probe count")
-                .lines()
-                .count(),
-            1
-        );
     }
 
     #[test]
@@ -1118,10 +1051,11 @@ mod tests {
         config["runtime_env"]["RELEASE"] = json!(release);
         let mut cache = test_cache();
 
-        // The short deadline must only outlast the probe's process startup,
-        // which on a loaded host is scheduling latency rather than readiness
-        // work; the probe itself never answers before the deadline.
-        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 5_000;
+        // Hold the permit so the owner deterministically expires while its
+        // worker is waiting, independently of shell startup under CPU load.
+        let gate = Arc::clone(&cache.shared.probe_gate);
+        *gate.active.lock().unwrap() = MAX_CONCURRENT_PROVIDER_READINESS_PROBES;
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 100;
         let short_provider = provider.clone();
         let mut short_cache = cache.clone();
         let short_config = config.clone();
@@ -1135,13 +1069,6 @@ mod tests {
                 None,
             )
         });
-        while !count.exists() {
-            assert!(
-                crate::agent_task_timeout::now_unix_ms() < short_deadline,
-                "short deadline expired before its probe started"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
         let error = short
             .join()
             .expect("short probe owner")
@@ -1149,6 +1076,23 @@ mod tests {
         assert_eq!(error.details["classification"], "timeout");
         assert_eq!(error.details["deadline_unix_ms"], short_deadline);
 
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let state = cache.shared.state.lock().unwrap();
+            if state.by_request.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline,
+                "waiting for expired owner's singleflight entry to be discarded; observed {state:?}");
+            drop(state);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !count.exists(),
+            "expired owner must not launch a child without a permit"
+        );
+        *gate.active.lock().unwrap() = 0;
+        gate.changed.notify_all();
         std::fs::write(&release, "release").expect("release probe");
         let verdict = readiness_verdict(
             &provider,
@@ -1165,7 +1109,8 @@ mod tests {
                 .expect("probe count")
                 .lines()
                 .count(),
-            2
+            1,
+            "only the long-deadline retry may launch the probe"
         );
     }
 

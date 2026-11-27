@@ -30,31 +30,6 @@ mod tests {
 
     #[test]
     fn submit_request_has_a_strict_versioned_wire_shape() {
-        let request = RunnerApiSubmitRequest {
-            schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            submission_key: "agent-task:v1:lab:run-1".to_string(),
-            envelope: RunnerExecutionEnvelope::planned("run-1", "test"),
-            workspace_claim_binding: None,
-            workspace_owner_lease: None,
-        };
-        let value = serde_json::to_value(&request).expect("submit request JSON");
-        assert_eq!(value["schema"], RUNNER_API_SUBMIT_REQUEST_SCHEMA);
-        assert!(serde_json::from_value::<RunnerApiSubmitRequest>(value).is_ok());
-        assert!(
-            serde_json::from_value::<RunnerApiSubmitRequest>(serde_json::json!({
-                "schema": RUNNER_API_SUBMIT_REQUEST_SCHEMA,
-                "api_version": { "major": 1 },
-                "submission_key": "one",
-                "envelope": RunnerExecutionEnvelope::planned("one", "test"),
-                "unexpected": true,
-            }))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn submit_request_authority_sidecars_have_canonical_wire_shapes() {
         let workspace = WorkspaceIdentity::new("managed-workspace", "repo@task").unwrap();
         let request = RunnerApiSubmitRequest {
             schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
@@ -94,6 +69,16 @@ mod tests {
         assert_eq!(
             encoded["workspace_owner_lease"]["protocol"],
             serde_json::json!({ "capability": "workspace-owner-lease", "version": 2 })
+        );
+        assert!(
+            serde_json::from_value::<RunnerApiSubmitRequest>(serde_json::json!({
+                "schema": RUNNER_API_SUBMIT_REQUEST_SCHEMA,
+                "api_version": { "major": 1 },
+                "submission_key": "one",
+                "envelope": RunnerExecutionEnvelope::planned("one", "test"),
+                "unexpected": true,
+            }))
+            .is_err()
         );
     }
 }

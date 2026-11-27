@@ -141,7 +141,7 @@ fn skipped_release_plan(
 
 #[cfg(test)]
 mod tests {
-    use super::{release_skip_plan, superseded_release_plan};
+    use super::release_skip_plan;
     use crate::release::types::{
         ReleaseBumpPolicyOptions, ReleaseOptions, ReleaseSemverRecommendation,
     };
@@ -230,8 +230,9 @@ mod tests {
     }
 
     #[test]
-    fn skip_plan_records_major_requires_flag_reason() {
+    fn skip_plan_records_major_requires_flag_reason_with_echoed_flags() {
         let options = ReleaseOptions {
+            skip_checks: true,
             bump_policy: ReleaseBumpPolicyOptions {
                 require_explicit_major: true,
                 ..Default::default()
@@ -254,38 +255,7 @@ mod tests {
         );
         assert_eq!(
             plan.plan.hints,
-            vec!["Re-run with: homeboy release demo --bump major"]
-        );
-    }
-
-    #[test]
-    fn major_skip_hint_echoes_currently_set_flags() {
-        let options = ReleaseOptions {
-            skip_checks: true,
-            bump_policy: ReleaseBumpPolicyOptions {
-                require_explicit_major: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let recommendation = semver_recommendation("major", "major");
-
-        let plan = release_skip_plan("demo", &options, Some(recommendation), None)
-            .expect("implicit major should skip");
-
-        let hint = plan
-            .plan
-            .hints
-            .first()
-            .expect("major-requires-flag plan should ship one hint")
-            .as_str();
-        assert!(
-            hint.contains("homeboy release demo --bump major"),
-            "major hint should provide a fully-qualified force command: {hint}"
-        );
-        assert!(
-            hint.contains("--skip-checks"),
-            "major hint should echo --skip-checks when set: {hint}"
+            vec!["Re-run with: homeboy release demo --bump major --skip-checks"]
         );
     }
 
@@ -334,22 +304,6 @@ mod tests {
             hint.contains("homeboy release sample-plugin-code --head"),
             "hint should provide an actionable command: {hint}"
         );
-    }
-
-    #[test]
-    fn superseded_release_plan_is_a_neutral_stale_checkout_diagnostic() {
-        let plan = superseded_release_plan("demo", "v1.2.3");
-
-        assert!(!plan.enabled());
-        assert_eq!(
-            plan.plan.steps[0]
-                .inputs
-                .get("reason")
-                .and_then(|value| value.as_str()),
-            Some("release-superseded")
-        );
-        assert!(plan.plan.hints[0].contains("authoritative"));
-        assert!(plan.plan.hints[0].contains("stale workflow deferred"));
     }
 
     fn semver_recommendation(recommended: &str, requested: &str) -> ReleaseSemverRecommendation {

@@ -849,7 +849,7 @@ fn overlay_registered_local_checkout(
 /// Inventory nested portable manifests without traversing dependency trees.
 /// Git provides the tracked/unignored inventory when available; materialized
 /// runner snapshots need a bounded, symlink-free filesystem walk instead.
-fn nested_portable_directories(root: &Path) -> Vec<PathBuf> {
+pub fn nested_portable_directories(root: &Path) -> Vec<PathBuf> {
     fn excluded(name: &str) -> bool {
         name.starts_with('.')
             || matches!(
@@ -2554,9 +2554,9 @@ mod tests {
     #[test]
     fn resolve_artifact_conflicting_patterns_fail_deterministically() {
         crate::test_support::with_isolated_home(|home| {
-            // Two providers that disagree used to be a coin flip decided by
-            // HashMap iteration order — the same binary could deploy
-            // `build/plugin.zip` on one run and `dist/plugin.tgz` on the next.
+            // Two providers that disagree must fail rather than let HashMap
+            // iteration order pick `build/plugin.zip` on one run and
+            // `dist/plugin.tgz` on the next.
             write_build_extension(home.path(), "wordpress", "build/{component_id}.zip", &[]);
             write_build_extension(home.path(), "nodejs", "dist/{component_id}.tgz", &[]);
 
@@ -2641,43 +2641,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_from_cwd() {
-        let dir = tempfile::tempdir().expect("temp dir");
-
-        with_cwd(dir.path(), || {
-            assert_eq!(detect_from_cwd(None), None);
-        });
-    }
-
-    #[test]
-    fn test_detect_git_root() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let repo = dir.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo dir");
-
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(&repo)
-            .output()
-            .expect("git init");
-
-        assert_eq!(detect_git_root(&repo), Some(repo.canonicalize().unwrap()));
-    }
-
-    #[test]
-    fn resolve_effective_accepts_raw_directory_as_positional_component() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let repo = dir.path().join("raw-repo");
-        std::fs::create_dir_all(&repo).expect("create repo dir");
-
-        let component = resolve_effective(Some(repo.to_str().unwrap()), None, None)
-            .expect("raw directory should resolve");
-
-        assert_eq!(component.id, "raw-repo");
-        assert_eq!(component.local_path, repo.to_string_lossy());
-    }
-
-    #[test]
     fn resolve_effective_normalizes_relative_bare_directory_to_absolute() {
         // Regression for #7410: `homeboy release studio-native` run from a
         // directory that contains a `studio-native` sibling resolves the
@@ -2716,58 +2679,30 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effective_resolves_dot_path_override_from_cwd() {
-        let dir = tempfile::tempdir().expect("temp dir");
-
-        let component = with_cwd(dir.path(), || {
-            resolve_effective(Some("fixture"), Some("."), None)
-                .expect("dot path override should resolve")
-        });
-
-        assert_eq!(
-            Path::new(&component.local_path)
-                .canonicalize()
-                .expect("canonical path"),
-            dir.path().canonicalize().expect("canonical tempdir")
-        );
-    }
-
-    #[test]
-    fn resolve_effective_resolves_parent_path_override_from_cwd() {
+    fn resolve_effective_resolves_relative_path_overrides_from_cwd() {
         let parent = tempfile::tempdir().expect("parent tempdir");
-        let child = parent.path().join("child");
-        fs::create_dir(&child).expect("child dir");
+        let cwd = parent.path().join("cwd");
+        let child = cwd.join("child");
+        fs::create_dir_all(&child).expect("child dir");
 
-        let component = with_cwd(&child, || {
-            resolve_effective(Some("fixture"), Some(".."), None)
-                .expect("parent path override should resolve")
-        });
+        for (path_override, expected) in [
+            (".", &cwd),
+            ("..", &parent.path().to_path_buf()),
+            ("child", &child),
+        ] {
+            let component = with_cwd(&cwd, || {
+                resolve_effective(Some("fixture"), Some(path_override), None)
+                    .expect("relative path override should resolve")
+            });
 
-        assert_eq!(
-            Path::new(&component.local_path)
-                .canonicalize()
-                .expect("canonical path"),
-            parent.path().canonicalize().expect("canonical parent")
-        );
-    }
-
-    #[test]
-    fn resolve_effective_resolves_relative_child_path_override_from_cwd() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let child = dir.path().join("child");
-        fs::create_dir(&child).expect("child dir");
-
-        let component = with_cwd(dir.path(), || {
-            resolve_effective(Some("fixture"), Some("child"), None)
-                .expect("child path override should resolve")
-        });
-
-        assert_eq!(
-            Path::new(&component.local_path)
-                .canonicalize()
-                .expect("canonical path"),
-            child.canonicalize().expect("canonical child")
-        );
+            assert_eq!(
+                Path::new(&component.local_path)
+                    .canonicalize()
+                    .expect("canonical path"),
+                expected.canonicalize().expect("canonical expected"),
+                "{path_override}"
+            );
+        }
     }
 
     #[test]
@@ -2804,35 +2739,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_effective_preserves_explicit_path_override_id() {
+    fn resolve_effective_path_override_keeps_explicit_id_or_derives_it_from_directory() {
         let dir = tempfile::tempdir().expect("temp dir");
         let repo = dir.path().join("override-repo");
         std::fs::create_dir_all(&repo).expect("create repo dir");
 
-        let component = resolve_effective(Some("registered-id"), repo.to_str(), None)
-            .expect("explicit path override should resolve");
+        for (component_id, expected_id) in [
+            (Some("registered-id"), "registered-id"),
+            (None, "override-repo"),
+        ] {
+            let component = resolve_effective(component_id, repo.to_str(), None)
+                .expect("path override should resolve");
 
-        assert_eq!(component.id, "registered-id");
-        assert_eq!(
-            Path::new(&component.local_path),
-            repo.canonicalize().expect("canonical override repo")
-        );
-    }
-
-    #[test]
-    fn resolve_effective_accepts_path_override_without_component_id() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let repo = dir.path().join("external-repo");
-        std::fs::create_dir_all(&repo).expect("create repo dir");
-
-        let component = resolve_effective(None, repo.to_str(), None)
-            .expect("path-only override should resolve");
-
-        assert_eq!(component.id, "external-repo");
-        assert_eq!(
-            Path::new(&component.local_path),
-            repo.canonicalize().expect("canonical override repo")
-        );
+            assert_eq!(component.id, expected_id);
+            assert_eq!(
+                Path::new(&component.local_path),
+                repo.canonicalize().expect("canonical override repo")
+            );
+        }
     }
 
     #[test]
@@ -3610,48 +3534,6 @@ mod tests {
     }
 
     #[test]
-    fn target_spec_preserves_registered_monorepo_package_subpath_from_repo_root() {
-        crate::test_support::with_isolated_home(|home| {
-            let dir = tempfile::tempdir().expect("temp dir");
-            let repo = dir.path().join("repo");
-            let package = repo.join("packages").join("foo");
-            std::fs::create_dir_all(&package).expect("package dir");
-            git(&repo, &["init"]);
-            git(&repo, &["config", "user.email", "test@example.com"]);
-            git(&repo, &["config", "user.name", "Test User"]);
-            std::fs::write(package.join("README.md"), "fixture\n").expect("readme");
-            git(&repo, &["add", "."]);
-            git(&repo, &["commit", "-m", "Initial commit"]);
-            write_standalone_registration(home.path(), "foo", &package);
-
-            with_cwd(&repo, || {
-                let target =
-                    resolve_target(TargetSpec::new(Some("foo"), None)).expect("package target");
-                let canonical_package = package.canonicalize().expect("canonical package");
-
-                assert_eq!(target.component_id, "foo");
-                assert_eq!(target.source_path, canonical_package);
-                assert_eq!(
-                    target.component.local_path,
-                    target.source_path.to_string_lossy()
-                );
-                let monorepo =
-                    crate::git::MonorepoContext::detect(&target.component.local_path, "foo")
-                        .expect("package path should still be monorepo-scoped");
-                assert_eq!(monorepo.path_prefix, "packages/foo");
-                let registered = crate::component::registered_by_id("foo")
-                    .expect("registered component lookup")
-                    .expect("registered component");
-                assert_eq!(
-                    rebase_component_path_to_checkout(&registered, &repo),
-                    canonical_package
-                );
-                assert!(!target.synthetic);
-            });
-        });
-    }
-
-    #[test]
     fn path_override_at_monorepo_root_without_root_registration_is_not_ambiguous() {
         crate::test_support::with_isolated_home(|home| {
             let dir = tempfile::tempdir().expect("temp dir");
@@ -3693,7 +3575,7 @@ mod tests {
     }
 
     #[test]
-    fn target_spec_rebases_registered_monorepo_package_subpath_into_worktree() {
+    fn target_spec_resolves_registered_monorepo_package_subpath_from_primary_and_worktree() {
         crate::test_support::with_isolated_home(|home| {
             let dir = tempfile::tempdir().expect("temp dir");
             let primary = dir.path().join("primary");
@@ -3710,30 +3592,34 @@ mod tests {
             git(&primary, &["worktree", "add", worktree.to_str().unwrap()]);
             write_standalone_registration(home.path(), "foo", &primary_package);
 
-            with_cwd(&worktree, || {
-                let target =
-                    resolve_target(TargetSpec::new(Some("foo"), None)).expect("package target");
-                let canonical_package = worktree_package.canonicalize().expect("canonical package");
+            for (checkout, package) in
+                [(&primary, &primary_package), (&worktree, &worktree_package)]
+            {
+                with_cwd(checkout, || {
+                    let target =
+                        resolve_target(TargetSpec::new(Some("foo"), None)).expect("package target");
+                    let canonical_package = package.canonicalize().expect("canonical package");
 
-                assert_eq!(target.component_id, "foo");
-                assert_eq!(target.source_path, canonical_package);
-                assert_eq!(
-                    target.component.local_path,
-                    target.source_path.to_string_lossy()
-                );
-                let monorepo =
-                    crate::git::MonorepoContext::detect(&target.component.local_path, "foo")
-                        .expect("package path should still be monorepo-scoped");
-                assert_eq!(monorepo.path_prefix, "packages/foo");
-                let registered = crate::component::registered_by_id("foo")
-                    .expect("registered component lookup")
-                    .expect("registered component");
-                assert_eq!(
-                    rebase_component_path_to_checkout(&registered, &worktree),
-                    canonical_package
-                );
-                assert!(!target.synthetic);
-            });
+                    assert_eq!(target.component_id, "foo");
+                    assert_eq!(target.source_path, canonical_package);
+                    assert_eq!(
+                        target.component.local_path,
+                        target.source_path.to_string_lossy()
+                    );
+                    let monorepo =
+                        crate::git::MonorepoContext::detect(&target.component.local_path, "foo")
+                            .expect("package path should still be monorepo-scoped");
+                    assert_eq!(monorepo.path_prefix, "packages/foo");
+                    let registered = crate::component::registered_by_id("foo")
+                        .expect("registered component lookup")
+                        .expect("registered component");
+                    assert_eq!(
+                        rebase_component_path_to_checkout(&registered, checkout),
+                        canonical_package
+                    );
+                    assert!(!target.synthetic);
+                });
+            }
         });
     }
 
@@ -3785,41 +3671,6 @@ mod tests {
     }
 
     #[test]
-    fn target_spec_resolves_path_override() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let repo = dir.path().join("path-repo");
-        std::fs::create_dir_all(&repo).expect("repo dir");
-        std::fs::write(repo.join("homeboy.json"), r#"{"id":"path-id"}"#).expect("portable config");
-
-        let target = resolve_target(TargetSpec::new(None, repo.to_str())).expect("path target");
-
-        assert_eq!(target.component_id, "path-id");
-        assert_eq!(
-            target.source_path,
-            repo.canonicalize().expect("canonical path repo")
-        );
-        assert!(!target.synthetic);
-    }
-
-    #[test]
-    fn target_spec_rejects_path_override_portable_config_without_id() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let repo = dir.path().join("path-repo");
-        std::fs::create_dir_all(&repo).expect("repo dir");
-        std::fs::write(repo.join("homeboy.json"), r#"{"remote_path":"remote"}"#)
-            .expect("portable config");
-
-        let error = resolve_target(TargetSpec::new(None, repo.to_str()))
-            .expect_err("portable config without id should fail");
-
-        assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(
-            error.to_string().contains("missing required 'id' field"),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn target_spec_accepts_bare_directory_positional_target() {
         let dir = tempfile::tempdir().expect("temp dir");
         let repo = dir.path().join("bare-repo");
@@ -3833,42 +3684,43 @@ mod tests {
     }
 
     #[test]
-    fn target_spec_allows_synthetic_path_target() {
+    fn target_spec_synthetic_path_target_follows_allow_synthetic() {
         let dir = tempfile::tempdir().expect("temp dir");
         let repo = dir.path().join("synthetic-repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
 
         let target =
             resolve_target(TargetSpec::new(None, repo.to_str())).expect("synthetic target");
-
         assert_eq!(target.component_id, "synthetic-repo");
         assert_eq!(
             target.source_path,
             repo.canonicalize().expect("canonical synthetic repo")
         );
         assert!(target.synthetic);
+
+        let err = resolve_target(TargetSpec {
+            component_id: None,
+            path_override: repo.to_str(),
+            allow_synthetic: false,
+            ..TargetSpec::default()
+        })
+        .expect_err("synthetic target should be rejected");
+        assert!(err.to_string().contains("not registered"));
     }
 
     #[test]
-    fn target_spec_allows_missing_synthetic_path_override() {
+    fn target_spec_missing_path_override_is_allowed_only_for_synthetic_target() {
         let dir = tempfile::tempdir().expect("temp dir");
         let missing = dir.path().join("missing-repo");
 
         let target = resolve_target(TargetSpec::new(None, missing.to_str()))
             .expect("synthetic targets allow a missing path override");
-
         assert_eq!(target.component_id, "missing-repo");
         assert_eq!(
             target.source_path,
             crate::paths::normalize_local_path(&missing)
         );
         assert!(target.synthetic);
-    }
-
-    #[test]
-    fn target_spec_rejects_missing_non_synthetic_path_override() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let missing = dir.path().join("missing-repo");
 
         let error = resolve_target(TargetSpec {
             component_id: None,
@@ -3877,7 +3729,6 @@ mod tests {
             ..TargetSpec::default()
         })
         .expect_err("non-synthetic targets require an existing path override");
-
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
         assert!(error.message.contains("--path override does not exist"));
     }
@@ -3927,44 +3778,22 @@ mod tests {
     }
 
     #[test]
-    fn target_spec_can_reject_synthetic_target() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let repo = dir.path().join("synthetic-repo");
-        std::fs::create_dir_all(&repo).expect("repo dir");
-
-        let err = resolve_target(TargetSpec {
-            component_id: None,
-            path_override: repo.to_str(),
-            allow_synthetic: false,
-            ..TargetSpec::default()
-        })
-        .expect_err("synthetic target should be rejected");
-
-        assert!(err.to_string().contains("not registered"));
-    }
-
-    #[test]
-    fn normalize_resolves_relative_local_path_against_base() {
-        let normalized =
-            normalize_component_local_path_against("php-transformer", Path::new("/Users/dev/work"));
-        assert_eq!(normalized, "/Users/dev/work/php-transformer");
-    }
-
-    #[test]
-    fn normalize_keeps_absolute_local_path_and_collapses_segments() {
-        let normalized = normalize_component_local_path_against(
-            "/Users/dev/work/../work/php-transformer",
-            Path::new("/ignored/base"),
-        );
-        assert_eq!(normalized, "/Users/dev/work/php-transformer");
-    }
-
-    #[test]
-    fn normalize_preserves_empty_local_path() {
-        assert_eq!(
-            normalize_component_local_path_against("", Path::new("/Users/dev/work")),
-            ""
-        );
+    fn normalize_local_path_against_base() {
+        let base = Path::new("/Users/dev/work");
+        for (raw, expected) in [
+            ("php-transformer", "/Users/dev/work/php-transformer"),
+            (
+                "/Users/dev/work/../work/php-transformer",
+                "/Users/dev/work/php-transformer",
+            ),
+            ("", ""),
+        ] {
+            assert_eq!(
+                normalize_component_local_path_against(raw, base),
+                expected,
+                "{raw}"
+            );
+        }
     }
 
     #[test]

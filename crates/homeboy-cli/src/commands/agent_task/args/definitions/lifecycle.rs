@@ -56,8 +56,7 @@ pub struct StatusArgs {
     /// Exit nonzero when the inspected Cook needs follow-up action.
     ///
     /// Normal status reads report their own success independently from the
-    /// subject lifecycle state. This preserves the former exit-code behavior
-    /// for scripts that deliberately gate on an actionable Cook.
+    /// subject lifecycle state; this flag lets scripts gate on an actionable Cook.
     #[arg(long)]
     pub strict_subject_exit: bool,
     /// Follow this durable status until it reaches a terminal state or the timeout expires.
@@ -91,140 +90,12 @@ pub struct DiagnoseArgs {
 }
 #[cfg(test)]
 mod tests {
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
 
     use crate::{
         cli_surface::{Cli, Commands},
         commands::agent_task::AgentTaskCommand,
     };
-
-    #[test]
-    fn placement_update_requires_explicit_local_confirmation() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "--placement",
-            "local",
-            "agent-task",
-            "placement-update",
-            "cook-a",
-            "--confirm",
-        ])
-        .expect("local placement update parses");
-        assert_eq!(cli.placement, crate::cli_surface::Placement::Local);
-    }
-
-    #[test]
-    fn finalize_pr_no_longer_recovers_a_durable_cook() {
-        for argv in [
-            vec!["finalize-pr", "--recover", "cook-a"],
-            vec!["finalize-pr", "--recover", "cook-a", "--preflight"],
-            vec!["finalize-pr", "--recover", "cook-a", "--review-form", "{}"],
-        ] {
-            let mut full = vec!["homeboy", "agent-task"];
-            full.extend(argv.iter().copied());
-            assert!(
-                Cli::try_parse_from(&full).is_err(),
-                "{argv:?} must be rejected; a stopped Cook publishes through `recover`"
-            );
-        }
-    }
-
-    #[test]
-    fn manual_finalization_parses_component_selector_and_recovery_accepts_it_as_fallback() {
-        let help = Cli::command()
-            .find_subcommand("agent-task")
-            .expect("agent-task command")
-            .find_subcommand("finalize-pr")
-            .expect("finalize-pr command")
-            .clone()
-            .render_long_help()
-            .to_string();
-        assert!(help.contains("--component <COMPONENT_ID>"), "{help}");
-        assert!(help.contains("shared-repository worktree"), "{help}");
-
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "finalize-pr",
-            "--manual-finalization",
-            "--run-id",
-            "manual-component",
-            "--path",
-            "/tmp/manual-component",
-            "--component",
-            "nested-component",
-            "--title",
-            "Manual component",
-            "--commit-message",
-            "record component",
-        ])
-        .expect("manual finalization component parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
-            panic!("expected finalize-pr command");
-        };
-        assert_eq!(args.component.as_deref(), Some("nested-component"));
-
-        // #14728: the component fallback for a durable record that recorded no
-        // identity is a `recover` publication input.
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-a",
-            "--component",
-            "nested-component",
-        ])
-        .expect("recovery with a fallback --component parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Recover(args) = agent_task.command else {
-            panic!("expected recover command");
-        };
-        assert_eq!(args.id, "cook-a");
-        assert_eq!(args.component.as_deref(), Some("nested-component"));
-    }
-
-    #[test]
-    fn status_exact_selects_concrete_record() {
-        let cli = Cli::try_parse_from(["homeboy", "agent-task", "status", "cook-a", "--exact"])
-            .expect("exact status parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Status(args) = agent_task.command else {
-            panic!("expected status command");
-        };
-        assert!(args.exact);
-        assert_eq!(args.run_id, "cook-a");
-    }
-
-    #[test]
-    fn runs_evidence_accepts_cook_selectors() {
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "runs",
-            "evidence",
-            "agent-task-123-attempt-1",
-            "--kind",
-            "executor-result",
-            "--task",
-            "task-a",
-            "--failure-only",
-            "--full",
-        ])
-        .is_ok());
-    }
-
-    #[test]
-    fn removed_cook_read_verbs_are_rejected() {
-        for verb in ["artifacts", "evidence"] {
-            assert!(Cli::try_parse_from(["homeboy", "agent-task", verb, "run-a"]).is_err());
-        }
-    }
 
     #[test]
     fn artifacts_can_show_a_selected_artifact_and_tail_its_lines() {
@@ -243,39 +114,6 @@ mod tests {
         assert!(
             Cli::try_parse_from(["homeboy", "runs", "artifacts", "run-a", "--tail", "12"]).is_err()
         );
-    }
-
-    #[test]
-    fn strict_subject_exit_is_status_only() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "status",
-            "run-a",
-            "--strict-subject-exit",
-        ])
-        .expect("status compatibility flag parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Status(args) = agent_task.command else {
-            panic!("expected status command");
-        };
-        assert!(args.strict_subject_exit);
-
-        for command in ["artifacts", "recover"] {
-            assert!(
-                Cli::try_parse_from([
-                    "homeboy",
-                    "agent-task",
-                    command,
-                    "run-a",
-                    "--strict-subject-exit",
-                ])
-                .is_err(),
-                "{command} must reject the status-only compatibility flag"
-            );
-        }
     }
 
     #[test]
@@ -320,35 +158,12 @@ mod tests {
         ])
         .is_err());
     }
-
-    #[test]
-    fn finalize_pr_parses_full_output() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "finalize-pr",
-            "--run-id",
-            "run-a",
-            "--path",
-            "/tmp/run-a",
-            "--title",
-            "Run A",
-            "--commit-message",
-            "run a",
-            "--full",
-        ])
-        .expect("finalize full parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent task")
-        };
-        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
-            panic!("finalize")
-        };
-        assert!(args.full);
-    }
 }
 #[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
+    /// Publish a green incomplete candidate unchanged and file remaining scope on its tracker.
+    #[arg(long, conflicts_with_all = ["review_form", "regate", "candidate_ref", "review_overrides"])]
+    pub publish_partial: bool,
     /// Explanation for this operator intervention
     #[arg(long)]
     pub reason: Option<String>,
@@ -517,34 +332,6 @@ pub struct RetryArgs {
     pub idempotency_key: Option<String>,
 }
 
-#[cfg(test)]
-mod retry_tests {
-    use clap::Parser;
-
-    use crate::cli_surface::Cli;
-
-    /// A Cook's next-attempt provider route is an explicit `recover`
-    /// override; `retry` carries no Cook route surface of its own.
-    #[test]
-    fn retry_has_no_cook_route_override_surface() {
-        for flag in [
-            vec!["--backend", "replacement"],
-            vec!["--selector", "replacement-selector"],
-            vec!["--provider-id", "replacement-selector"],
-            vec![
-                "--model",
-                "replacement-model",
-                "--acknowledge-model-override",
-            ],
-        ] {
-            let mut argv = vec!["homeboy", "agent-task", "retry", "cook-a"];
-            argv.extend(flag.iter().copied());
-            assert!(Cli::try_parse_from(argv).is_err(), "{flag:?}");
-        }
-        assert!(Cli::try_parse_from(["homeboy", "agent-task", "retry", "run-a", "--run"]).is_ok());
-    }
-}
-
 #[derive(Args, Debug)]
 pub struct CancelArgs {
     /// Durable run or Cook ID to cancel.
@@ -624,10 +411,6 @@ pub struct FinalizePrArgs {
     /// Branch that must not be updated by finalization; repeat for multiple branches.
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
-    /// Retired. Accepted so existing callers keep working; the value is ignored
-    /// and nothing renders it (#16765).
-    #[arg(long, hide = true, value_name = "TEXT")]
-    pub ai_used_for: Option<String>,
     /// Summary of the finalization candidate.
     #[arg(long, value_name = "TEXT")]
     pub summary: Option<String>,

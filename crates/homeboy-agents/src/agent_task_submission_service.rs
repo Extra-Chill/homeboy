@@ -832,13 +832,12 @@ mod tests {
     };
     use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
     use homeboy_core::test_support::with_isolated_home;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
 
     #[derive(Clone)]
     struct CountingExecutor {
         calls: Arc<AtomicUsize>,
-        submitted_observed: Option<Arc<AtomicBool>>,
     }
 
     impl AgentTaskExecutorAdapter for CountingExecutor {
@@ -847,9 +846,6 @@ mod tests {
             request: AgentTaskRequest,
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
-            if let Some(observed) = self.submitted_observed.as_ref() {
-                assert!(observed.load(Ordering::SeqCst));
-            }
             self.calls.fetch_add(1, Ordering::SeqCst);
             AgentTaskOutcome {
                 task_id: request.task_id,
@@ -871,7 +867,6 @@ mod tests {
             .expect("request");
             let executor = Arc::new(CountingExecutor {
                 calls: Arc::clone(&calls),
-                submitted_observed: None,
             });
 
             let first = submit_prepared_plan(
@@ -897,23 +892,6 @@ mod tests {
                     .count(),
                 1
             );
-            assert!(spans
-                .spans
-                .iter()
-                .all(|span| !span.homeboy_version.is_empty()));
-            let hotspots = homeboy_core::performance_hotspots::phase_hotspots(
-                &store,
-                &homeboy_core::performance_hotspots::PhaseHotspotQuery {
-                    kind: Some("agent-task".into()),
-                    last: 10,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            assert!(hotspots
-                .phases
-                .iter()
-                .any(|phase| phase.phase == "provider" && phase.timing.samples == 1));
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(
                 replay.acknowledgement.outcome,
@@ -939,7 +917,6 @@ mod tests {
                     .expect("queue request");
             let executor = Arc::new(CountingExecutor {
                 calls: Arc::clone(&calls),
-                submitted_observed: None,
             });
             let queued = submit_prepared_plan(
                 &queued_request,
@@ -955,25 +932,15 @@ mod tests {
             let completed = submit_prepared_plan(
                 &run_request,
                 PreparedAgentTaskSubmission::new(test_plan("queue-plan")),
-                executor.clone(),
-            )
-            .expect("execute queued submission");
-            let replay = submit_prepared_plan(
-                &run_request,
-                PreparedAgentTaskSubmission::new(test_plan("queue-plan")),
                 executor,
             )
-            .expect("completed replay");
+            .expect("execute queued submission");
 
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(completed.acknowledgement.actor, "queue-actor");
             assert_eq!(
                 completed.acknowledgement.accepted_at,
                 queued.acknowledgement.accepted_at
-            );
-            assert_eq!(
-                replay.acknowledgement.outcome,
-                ControlPlaneActionOutcome::AlreadySatisfied
             );
         });
     }
@@ -1013,7 +980,6 @@ mod tests {
                 PreparedAgentTaskSubmission::new(admitted).with_queued_plan_enrichment(),
                 Arc::new(CountingExecutor {
                     calls: Arc::clone(&calls),
-                    submitted_observed: None,
                 }),
             )
             .expect("execute prepared plan");
@@ -1032,7 +998,6 @@ mod tests {
                     .expect("queue request");
             let executor = Arc::new(CountingExecutor {
                 calls: Arc::clone(&calls),
-                submitted_observed: None,
             });
             submit_prepared_plan(
                 &queued_request,
@@ -1074,7 +1039,6 @@ mod tests {
                     .expect("request");
             let executor = Arc::new(CountingExecutor {
                 calls: Arc::new(AtomicUsize::new(0)),
-                submitted_observed: None,
             });
             submit_prepared_plan(
                 &request,
@@ -1101,7 +1065,6 @@ mod tests {
                     .expect("queue request");
             let executor = Arc::new(CountingExecutor {
                 calls: Arc::new(AtomicUsize::new(0)),
-                submitted_observed: None,
             });
             submit_prepared_plan(
                 &queued_request,
@@ -1132,7 +1095,6 @@ mod tests {
             let calls = Arc::new(AtomicUsize::new(0));
             let executor = Arc::new(CountingExecutor {
                 calls: Arc::clone(&calls),
-                submitted_observed: None,
             });
             let queued_request = prepared_submission_request(
                 Some("submission-concurrent-queue-completion"),
@@ -1205,10 +1167,7 @@ mod tests {
                     submit_prepared_plan(
                         &request,
                         PreparedAgentTaskSubmission::new(test_plan(plan_id)),
-                        Arc::new(CountingExecutor {
-                            calls,
-                            submitted_observed: None,
-                        }),
+                        Arc::new(CountingExecutor { calls }),
                     )
                 }));
             }

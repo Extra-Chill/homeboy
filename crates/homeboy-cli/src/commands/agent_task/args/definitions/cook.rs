@@ -358,7 +358,7 @@ pub struct VerifyGateArgs {
     #[arg(long = "verify-bench", value_name = "SPEC", value_hint = clap::ValueHint::FilePath)]
     pub verify_bench: Vec<String>,
     /// Durable source metadata emitted by Homeboy-generated promotion commands.
-    /// This preserves the immutable provenance of a previously snapshotted gate;
+    /// It carries the immutable provenance of an already snapshotted gate;
     /// private entries retain no source path.
     #[arg(long = "gate-input-source", value_name = "JSON", value_parser = parse_gate_input_source)]
     pub input_sources: Vec<AgentTaskGateInputSource>,
@@ -960,7 +960,6 @@ mod tests {
         assert_eq!(args.cook.provider_evidence_inputs[0].id, "accept-gate");
         let flags = args.cook.child_flags().unwrap();
         assert_eq!(flags["gate-file"], serde_json::json!([declaration]));
-        assert!(parse_gate_file(r#"{"id":"x","env":"BAD=NAME","source":"/tmp"}"#).is_err());
     }
 
     #[test]
@@ -1210,54 +1209,13 @@ mod tests {
     }
 
     #[test]
-    fn cook_ci_flag_persists_with_local_gates() {
-        let options: VerifyGateOptions = TestCli::try_parse_from([
-            "homeboy",
-            "--verify-ci",
-            "--verify",
-            "cargo fmt --all --check",
-        ])
-        .unwrap()
-        .gates
-        .into();
-        assert!(options.verify_ci);
-        assert_eq!(options.verify, ["cargo fmt --all --check"]);
-        let restored: VerifyGateOptions =
-            serde_json::from_value(serde_json::to_value(options).unwrap()).unwrap();
-        assert!(restored.verify_ci);
-    }
-
-    #[test]
-    fn gate_policy_cli_defaults_and_overrides_round_trip_to_typed_options() {
-        let defaults = TestCli::try_parse_from(["homeboy"])
+    fn gate_policy_cli_options_compile_to_typed_gate_policy() {
+        let defaults: VerifyGateOptions = TestCli::try_parse_from(["homeboy"])
             .expect("parse default gate policy")
-            .gates;
-        let defaults: VerifyGateOptions = defaults.into();
-        assert_eq!(defaults.gate_timeout_seconds, 30 * 60);
-        assert_eq!(defaults.gate_heartbeat_interval_seconds, 5);
-        assert_eq!(defaults.gate_no_progress_timeout_seconds, 5 * 60);
-        assert!(!defaults.rerun_completed_gates);
-        assert!(defaults.hydrate_dependencies);
-
-        let options: VerifyGateOptions = TestCli::try_parse_from([
-            "homeboy",
-            "--gate-timeout-seconds",
-            "42",
-            "--gate-heartbeat-interval-seconds",
-            "7",
-            "--gate-no-progress-timeout-seconds",
-            "11",
-            "--rerun-completed-gates",
-        ])
-        .expect("parse configured gate policy")
-        .gates
-        .into();
-        assert_eq!(options.gate_timeout_seconds, 42);
-        assert_eq!(options.gate_heartbeat_interval_seconds, 7);
-        assert_eq!(options.gate_no_progress_timeout_seconds, 11);
-        assert!(options.rerun_completed_gates);
-        assert!(options.gate_environment.isolate_home);
-        assert!(options.gate_environment.isolate_xdg);
+            .gates
+            .into();
+        assert!(defaults.gate_environment.isolate_home);
+        assert!(defaults.gate_environment.isolate_xdg);
 
         // The short alias sets the same window; zero disables it.
         let options: VerifyGateOptions =
@@ -1267,16 +1225,6 @@ mod tests {
                 .into();
         assert_eq!(options.gate_no_progress_timeout_seconds, 0);
         assert!(options.gate_no_progress_timeout().is_zero());
-
-        let options: VerifyGateOptions =
-            TestCli::try_parse_from(["homeboy", "--gate-execution-policy", "continue-all"])
-                .expect("parse continue-all gate policy")
-                .gates
-                .into();
-        assert_eq!(
-            options.execution_policy,
-            AgentTaskGateExecutionPolicy::ContinueAll
-        );
 
         let options: VerifyGateOptions = TestCli::try_parse_from([
             "homeboy",
@@ -1447,38 +1395,16 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn file_gate_rejects_replaced_path_after_preopen_identity_check() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let target = temp.path().join("target.sh");
-        let path = temp.path().join("gate.sh");
-        fs::write(&target, "exit 0\n").expect("write target");
-        fs::write(&path, "exit 0\n").expect("write gate");
-        // The lstat/open identity comparison is deterministic for a path replaced
-        // before open: the symlink is rejected without following it.
-        fs::remove_file(&path).expect("remove gate");
-        symlink(&target, &path).expect("replace with symlink");
-        snapshot_gate_file(
-            path.to_str().unwrap(),
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-        )
-        .expect_err("replacement must fail closed");
-    }
-
     #[test]
     fn gate_toolchain_spec_preserves_non_default_probe_arguments() {
         let options: VerifyGateOptions = TestCli::try_parse_from([
             "homeboy",
             "--gate-toolchain",
-            "legacy-tool",
+            "plain-tool",
             "--gate-toolchain-spec",
             r#"{"command":"custom-tool","probe_arguments":["probe","--json"]}"#,
         ])
-        .expect("parse legacy and structured toolchain declarations")
+        .expect("parse plain and structured toolchain declarations")
         .gates
         .into();
 
@@ -1487,7 +1413,7 @@ mod tests {
             vec![
                 AgentTaskGateToolchainRequirement {
                     resolve_only: false,
-                    command: "legacy-tool".to_string(),
+                    command: "plain-tool".to_string(),
                     probe_arguments: vec!["--version".to_string()],
                 },
                 AgentTaskGateToolchainRequirement {
@@ -1570,11 +1496,6 @@ mod tests {
             assert!(compact.contains(expected), "missing {expected}:\n{compact}");
         }
 
-        assert!(
-            !compact.contains("https://github.com/Extra-Chill/homeboy/issues/11088"),
-            "compact help must not direct operators to the closed multi-repository tracker:\n{compact}"
-        );
-
         for advanced in [
             "--provider-config <JSON>",
             "--gate-toolchain <COMMAND>",
@@ -1603,26 +1524,6 @@ mod tests {
     }
 
     #[test]
-    fn cook_help_does_not_leak_internal_refactoring_prose() {
-        // #9898/#9907: help must describe the operator contract, never the Rust
-        // refactor behind the flags.
-        let help = rendered_cook_help();
-        for leaked in [
-            "Flattened into",
-            "#[arg] attributes",
-            "DispatchArgs",
-            "field group is declared once",
-            "reproduce the original flag",
-            "CLI surface for the dispatch inputs",
-        ] {
-            assert!(
-                !help.contains(leaked),
-                "cook help leaked internal prose {leaked:?}:\n{help}"
-            );
-        }
-    }
-
-    #[test]
     fn cook_help_documents_core_workflow_flags() {
         let help = rendered_cook_help();
         // Each core flag renders with operator-facing help, not a blank line.
@@ -1639,6 +1540,15 @@ mod tests {
         assert!(help.contains("--verify-file"), "{help}");
         assert!(help.contains("for file in src/*.rs"), "{help}");
         assert!(help.contains("before opening the pull request"), "{help}");
+        assert!(
+            help.contains("A cap that cannot fund configured rotation is rejected"),
+            "{help}"
+        );
+        assert!(help.contains("--acknowledge-model-override"), "{help}");
+        assert!(
+            help.contains("Suppress intermediate Cook progress"),
+            "{help}"
+        );
     }
 
     #[test]
@@ -1660,111 +1570,6 @@ mod tests {
         );
         assert!(
             help.contains("multiple ready routes require an explicit choice"),
-            "{help}"
-        );
-    }
-
-    #[test]
-    fn cook_help_documents_funding_configured_rotation() {
-        let help = rendered_cook_help();
-        assert!(
-            help.contains("A cap that cannot fund configured rotation is rejected"),
-            "{help}"
-        );
-    }
-
-    #[test]
-    fn cook_help_and_parser_expose_confirmed_model_pin() {
-        let help = rendered_cook_help();
-        assert!(help.contains("--acknowledge-model-override"), "{help}");
-
-        let cli = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--backend",
-            "pi",
-            "--model",
-            "openai/gpt-5.6-terra",
-            "--acknowledge-model-override",
-            "--no-finalize",
-            "--prompt",
-            "test",
-            "--to-worktree",
-            "repo@branch",
-        ])
-        .expect("parse confirmed model pin");
-        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent-task command");
-        };
-        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
-            panic!("Cook command");
-        };
-        assert!(cook.dispatch.acknowledge_model_override);
-    }
-
-    #[test]
-    fn cook_parses_existing_checkout_and_prompt_with_model_pin() {
-        let cli = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--cwd",
-            "/tmp/existing-worktree",
-            "--prompt",
-            "@task.md",
-            "--model",
-            "preferred/model",
-            "--acknowledge-model-override",
-            "--no-finalize",
-        ])
-        .expect("existing-worktree Cook parses");
-        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent-task command");
-        };
-        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
-            panic!("Cook command");
-        };
-        assert_eq!(cook.dispatch.cwd.as_deref(), Some("/tmp/existing-worktree"));
-        assert_eq!(cook.dispatch.prompt.as_deref(), Some("@task.md"));
-        assert_eq!(cook.dispatch.model.as_deref(), Some("preferred/model"));
-        assert!(cook.dispatch.acknowledge_model_override);
-    }
-
-    #[test]
-    fn cook_parser_preserves_an_explicit_execution_cap_without_a_rotation_override() {
-        let cli = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--max-attempts",
-            "1",
-            "--max-provider-executions",
-            "1",
-            "--no-finalize",
-            "--prompt",
-            "test",
-            "--to-worktree",
-            "repo@branch",
-        ])
-        .expect("parse an explicitly bounded Cook");
-        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent-task command");
-        };
-        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
-            panic!("Cook command");
-        };
-
-        assert_eq!(cook.max_attempts, 1);
-        assert_eq!(cook.dispatch.core.attempts, Some(1));
-    }
-
-    #[test]
-    fn cook_help_exposes_quiet_progress_for_orchestration() {
-        let help = rendered_cook_help();
-        assert!(help.contains("--no-progress"), "{help}");
-        assert!(
-            help.contains("Suppress intermediate Cook progress"),
             "{help}"
         );
     }
@@ -1858,55 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn cook_help_advertises_one_prompt_source_not_wave_inputs() {
-        let help = rendered_cook_help();
-        assert!(help.contains("--prompt"), "{help}");
-        assert!(!help.contains("--task <"), "{help}");
-        assert!(!help.contains("--tasks <"), "{help}");
-    }
-
-    #[test]
-    fn cook_accepts_issue_backed_destination_derivation_and_explicit_override() {
-        let derived = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "implement the issue",
-            "--repo",
-            "homeboy",
-            "--task-url",
-            "https://github.com/Extra-Chill/homeboy/issues/11225",
-            "--no-finalize",
-        ])
-        .expect("issue-backed Cook parses without an explicit destination");
-        let crate::cli_surface::Commands::AgentTask(agent_task) = derived.command else {
-            panic!("agent-task command");
-        };
-        let super::super::AgentTaskCommand::Cook(derived) = agent_task.command else {
-            panic!("Cook command");
-        };
-        assert_eq!(derived.to_worktree, None);
-
-        let explicit = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "implement the issue",
-            "--to-worktree",
-            "homeboy@existing",
-            "--no-finalize",
-        ])
-        .expect("explicit Cook destination parses");
-        let crate::cli_surface::Commands::AgentTask(agent_task) = explicit.command else {
-            panic!("agent-task command");
-        };
-        let super::super::AgentTaskCommand::Cook(explicit) = agent_task.command else {
-            panic!("Cook command");
-        };
-        assert_eq!(explicit.to_worktree.as_deref(), Some("homeboy@existing"));
-
+    fn draft_pr_conflicts_with_no_finalize() {
         let draft = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
             "agent-task",

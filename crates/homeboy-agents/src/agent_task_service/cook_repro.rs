@@ -100,7 +100,6 @@ pub(crate) fn run_repro_on_base(
                 &repository_root,
                 &gate_workspace,
                 base_sha,
-                component_id.as_deref(),
                 |base_workspace| {
                     super::cook_baseline::hydrate_base_gate_workspace(
                         base_workspace,

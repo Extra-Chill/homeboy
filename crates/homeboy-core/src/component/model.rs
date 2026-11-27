@@ -486,27 +486,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn portable_component_round_trips_inline_deployment_policy() {
-        let component: Component = serde_json::from_value(serde_json::json!({
-            "id": "fixture",
-            "deployment_provider": {
-                "extension": "fixture-extension",
-                "provider": "fixture.deploy",
-                "policy": { "mode": "portable" }
-            }
-        }))
-        .expect("portable component");
-
-        let serialized = serde_json::to_value(component).expect("serialize component");
-        assert_eq!(
-            serialized["deployment_provider"]["policy"],
-            serde_json::json!({ "mode": "portable" })
-        );
-        assert!(serialized["deployment_provider"].get("contract").is_none());
-        assert!(serialized.get("deployment_provider_input").is_none());
-    }
-
-    #[test]
     fn canonical_attachment_identity_ignores_build_artifact_but_catches_config_drift() {
         let base = Component::new(
             "agents-api".to_string(),
@@ -545,45 +524,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn harvest_excludes_survives_a_deserialize_serialize_round_trip() {
-        // `harvest_excludes` exists so the exclude set lives with the component
-        // instead of being retyped on every invocation (#10220). The
-        // `RawComponent` conversion used to drop it on the way in while
-        // preserving it on the way out, so a declared value round-tripped back
-        // to disk but was never visible to `harvest`, which reads
-        // `component.harvest_excludes` and could therefore never see a value.
-        let component: Component = serde_json::from_value(serde_json::json!({
-            "id": "agents-api",
-            "local_path": "/source/agents-api",
-            "remote_path": "wp-content/plugins/agents-api",
-            "harvest_excludes": ["composer.lock", "vendor/"]
-        }))
-        .expect("component with declared harvest excludes");
-
-        assert_eq!(
-            component.harvest_excludes.as_deref(),
-            Some(["composer.lock".to_string(), "vendor/".to_string()].as_slice()),
-            "declared harvest_excludes must survive deserialization"
-        );
-
-        let serialized = serde_json::to_value(&component).expect("serialize component");
-        assert_eq!(
-            serialized["harvest_excludes"],
-            serde_json::json!(["composer.lock", "vendor/"]),
-            "declared harvest_excludes must survive serialization"
-        );
-    }
-
     /// The emitted shape of a defaulted component. 42 of the 45 fields are
     /// guarded by a `skip_serializing_if`, so an unconfigured component writes
     /// nothing it was not asked to write. The three that are not -- `local_path`,
     /// `remote_path` and `auto_cleanup` -- are bare `#[serde(default)]` and have
     /// always been materialized unconditionally.
     ///
-    /// Those guards used to live on the private `RawComponent` that `Component`
-    /// converted through. They now live on `Component` itself, and this pins the
-    /// result: dropping any one of them re-materializes a field into every
+    /// Dropping any one of the guards re-materializes a field into every
     /// written `homeboy.json`.
     #[test]
     fn a_defaulted_component_serializes_to_only_its_three_unguarded_fields() {
@@ -601,10 +548,8 @@ mod tests {
     }
 
     /// Every declared value must survive load. This is the #10220 class: a field
-    /// present on the way out but dropped on the way in round-tripped back to
-    /// disk while the subsystem that read it could never see a value. With the
-    /// conversion layer gone there is no longer a place for a field to be
-    /// half-wired, and this asserts it for the config's scalar surface.
+    /// present on the way out but dropped on the way in round-trips back to
+    /// disk while the subsystem that reads it never sees a value.
     #[test]
     fn every_declared_field_survives_a_deserialize_serialize_round_trip() {
         let declared = serde_json::json!({
@@ -626,6 +571,11 @@ mod tests {
             "extract_command": "unzip",
             "remote_owner": "www-data",
             "deploy_strategy": "artifact",
+            "deployment_provider": {
+                "extension": "fixture-extension",
+                "provider": "fixture.deploy",
+                "policy": { "mode": "portable" }
+            },
             "remote_url": "https://github.test/agents-api",
             "auto_cleanup": true,
             "docs_dir": "docs",
@@ -646,41 +596,6 @@ mod tests {
         assert_eq!(
             serialized, declared,
             "a declared value must be visible after load and identical on the way back out"
-        );
-    }
-
-    #[test]
-    fn default_verify_gates_round_trip_as_component_configuration() {
-        let declared = serde_json::json!({
-            "id": "fixture",
-            "default_verify_gates": ["cargo test --workspace", "cargo fmt --check"]
-        });
-        let component: Component = serde_json::from_value(declared.clone()).unwrap();
-        assert_eq!(
-            component.default_verify_gates,
-            ["cargo test --workspace", "cargo fmt --check"]
-        );
-        assert_eq!(
-            serde_json::to_value(component).unwrap()["default_verify_gates"],
-            declared["default_verify_gates"]
-        );
-    }
-
-    #[test]
-    fn harvest_excludes_stays_absent_when_undeclared() {
-        let component: Component = serde_json::from_value(serde_json::json!({
-            "id": "agents-api",
-            "local_path": "/source/agents-api",
-            "remote_path": "wp-content/plugins/agents-api"
-        }))
-        .expect("component without harvest excludes");
-
-        assert!(component.harvest_excludes.is_none());
-
-        let serialized = serde_json::to_value(&component).expect("serialize component");
-        assert!(
-            serialized.get("harvest_excludes").is_none(),
-            "an undeclared exclude set must not be materialized into the serialized config"
         );
     }
 

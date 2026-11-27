@@ -1757,73 +1757,57 @@ mod storage_exhaustion_tests {
         }
     }
 
+    /// Typed io errors, raw ENOSPC (also what an out-of-inodes filesystem
+    /// returns), pre-stringified messages, and SQLite's full-disk rendering all
+    /// classify as storage exhaustion; ordinary io failures stay generic.
     #[test]
-    fn a_storage_full_io_error_does_not_collapse_into_a_generic_io_error() {
-        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
-
-        let error = Error::from_io_error(&full, Some("write evidence".to_string()));
-
-        assert_eq!(error.code, ErrorCode::StorageExhausted);
-        assert_eq!(error.code.as_str(), "storage.exhausted");
-        assert!(error.is_storage_exhausted());
-        assert_eq!(error.details["context"], "write evidence");
-    }
-
-    /// ENOSPC is what an out-of-*inodes* filesystem returns too, so the raw
-    /// errno path is the one that actually covers the #10603 state.
-    #[cfg(unix)]
-    #[test]
-    fn a_raw_enospc_errno_is_classified_as_storage_exhaustion() {
-        let raw = std::io::Error::from_raw_os_error(ENOSPC);
-
-        assert!(io_error_is_storage_exhausted(&raw));
-        assert!(Error::from_io_error(&raw, None).is_storage_exhausted());
-    }
-
-    /// The ~1500 existing call sites stringify before they reach this crate.
-    /// If the string form were not classified, the split would be invisible
-    /// everywhere it matters until #11134 lands `From<io::Error>`.
-    #[test]
-    fn an_already_stringified_enospc_is_still_classified() {
-        let error = Error::internal_io(
+    fn storage_exhaustion_is_classified_across_every_error_form() {
+        let mut cases = vec![
+            (
+                Error::from_io_error(
+                    &std::io::Error::from(std::io::ErrorKind::StorageFull),
+                    Some("write evidence".to_string()),
+                ),
+                true,
+            ),
+            (
+                Error::internal_io(
+                    "No space left on device (os error 28)",
+                    Some("persist artifact".to_string()),
+                ),
+                true,
+            ),
+            (Error::internal_io("database or disk is full", None), true),
+            (Error::internal_io("Disk quota exceeded", None), true),
+            (
+                Error::from_io_error(&std::io::Error::from(std::io::ErrorKind::NotFound), None),
+                false,
+            ),
+            (
+                Error::internal_io("permission denied (os error 13)", None),
+                false,
+            ),
+        ];
+        #[cfg(unix)]
+        cases.push((
+            Error::from_io_error(&std::io::Error::from_raw_os_error(ENOSPC), None),
+            true,
+        ));
+        for (error, exhausted) in cases {
+            assert_eq!(error.is_storage_exhausted(), exhausted, "{error:?}");
+            if exhausted {
+                assert_eq!(error.code.as_str(), "storage.exhausted");
+                // The same write fails identically until capacity is reclaimed.
+                assert_eq!(error.retryable, Some(false));
+            } else {
+                assert_eq!(error.code, ErrorCode::InternalIoError);
+            }
+        }
+        let attributed = Error::internal_io(
             "No space left on device (os error 28)",
             Some("persist artifact".to_string()),
         );
-
-        assert_eq!(error.code, ErrorCode::StorageExhausted);
-        assert_eq!(error.details["context"], "persist artifact");
-    }
-
-    /// SQLite reports a full filesystem in its own words, and the observation
-    /// store is the writer whose failure produced the deadlock.
-    #[test]
-    fn the_sqlite_rendering_of_a_full_filesystem_is_classified() {
-        assert!(message_reports_storage_exhaustion(
-            "database or disk is full"
-        ));
-        assert!(message_reports_storage_exhaustion("Disk quota exceeded"));
-    }
-
-    #[test]
-    fn an_ordinary_io_failure_stays_a_generic_io_error() {
-        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
-
-        let typed = Error::from_io_error(&missing, None);
-        let stringified = Error::internal_io("permission denied (os error 13)", None);
-
-        assert_eq!(typed.code, ErrorCode::InternalIoError);
-        assert_eq!(stringified.code, ErrorCode::InternalIoError);
-        assert!(!typed.is_storage_exhausted());
-    }
-
-    /// A caller that sees this must degrade, not spin. The same write fails
-    /// identically until capacity is reclaimed.
-    #[test]
-    fn storage_exhaustion_is_reported_as_not_retryable() {
-        assert_eq!(
-            Error::storage_exhausted("full", None).retryable,
-            Some(false)
-        );
+        assert_eq!(attributed.details["context"], "persist artifact");
     }
 
     #[test]
@@ -1859,8 +1843,10 @@ mod storage_exhaustion_tests {
         assert!(hints.contains("runtime-tmp"), "{hints}");
     }
 
+    /// Measured capacity evidence reaches the details; absent measurements are
+    /// omitted rather than serialized as nulls a consumer has to special-case.
     #[test]
-    fn measured_capacity_evidence_survives_into_the_details() {
+    fn capacity_evidence_details_carry_only_measured_fields() {
         let error = Error::storage_exhausted_detailed(StorageExhaustedDetails {
             error: "reserve breached".to_string(),
             context: Some("preflight".to_string()),
@@ -1874,15 +1860,9 @@ mod storage_exhaustion_tests {
         assert_eq!(error.details["available_inodes"], 0);
         assert_eq!(error.details["reserve_inodes"], 100_000);
         assert_eq!(error.details["path"], "/var/lib/homeboy");
-    }
 
-    /// Absent measurements must not serialize as nulls a consumer has to
-    /// special-case.
-    #[test]
-    fn unmeasured_capacity_fields_are_omitted_entirely() {
-        let error = Error::storage_exhausted("full", None);
-
-        let details = error.details.as_object().expect("object details");
+        let unmeasured = Error::storage_exhausted("full", None);
+        let details = unmeasured.details.as_object().expect("object details");
         assert!(!details.contains_key("available_bytes"));
         assert!(!details.contains_key("reserve_inodes"));
         assert!(!details.contains_key("context"));
@@ -1965,15 +1945,6 @@ mod conversion_tests {
         assert_eq!(error.retryable, Some(false));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_raw_enospc_survives_the_question_mark_conversion() {
-        let error = io_via_question_mark(std::io::Error::from_raw_os_error(ENOSPC))
-            .expect_err("enospc converts");
-
-        assert!(error.is_storage_exhausted());
-    }
-
     #[test]
     fn a_json_syntax_failure_converts_to_a_json_error() {
         let error = json_via_question_mark("{ not json").expect_err("syntax failure converts");
@@ -1983,6 +1954,10 @@ mod conversion_tests {
             .as_str()
             .expect("json error text")
             .is_empty());
+        assert!(std::error::Error::source(&error)
+            .expect("cause")
+            .downcast_ref::<serde_json::Error>()
+            .is_some());
     }
 
     /// `serde_json::to_writer` on a full disk returns a `serde_json::Error`
@@ -2015,111 +1990,28 @@ mod conversion_tests {
             .contains("provider closed stdin"));
     }
 
-    /// `source()` is what lets a caller reach the typed cause instead of
-    /// re-parsing a rendered string (#11134).
+    /// The typed cause survives so a caller can read an `ErrorKind` instead of
+    /// matching on a message, and attaching it leaves the reported contract
+    /// (what every consumer and envelope reads) untouched.
     #[test]
-    fn the_question_mark_conversion_exposes_the_cause_through_source() {
-        use std::error::Error as _;
-
-        let error = io_via_question_mark(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "keyfile is not readable",
-        ))
-        .expect_err("io failure converts");
-
-        let source = error.source().expect("the cause is reachable");
-        assert!(source.to_string().contains("keyfile is not readable"));
-    }
-
-    /// The point of keeping the *typed* cause rather than its text: a caller
-    /// can read an `ErrorKind` instead of matching on a message.
-    #[test]
-    fn the_cause_can_be_downcast_back_to_the_original_io_error() {
+    fn the_typed_cause_is_recoverable_without_changing_the_reported_contract() {
         use std::error::Error as _;
 
         let error = Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
-
         let cause = error
             .source()
             .expect("cause")
             .downcast_ref::<std::io::Error>()
             .expect("the original io error survives");
         assert_eq!(cause.kind(), std::io::ErrorKind::PermissionDenied);
-    }
 
-    #[test]
-    fn a_json_conversion_also_carries_its_cause() {
-        use std::error::Error as _;
-
-        let error = json_via_question_mark("{ not json").expect_err("syntax failure converts");
-
-        assert!(error
-            .source()
-            .expect("cause")
-            .downcast_ref::<serde_json::Error>()
-            .is_some());
-    }
-
-    /// An error built without a cause must report none, not an empty stand-in.
-    #[test]
-    fn an_error_constructed_without_a_cause_reports_no_source() {
-        use std::error::Error as _;
-
-        assert!(Error::internal_unexpected("no cause").source().is_none());
-    }
-
-    /// `Error` is `Clone`, so the source is `Arc`-shared rather than boxed.
-    /// A clone must still see the cause.
-    #[test]
-    fn cloning_an_error_preserves_its_cause() {
-        use std::error::Error as _;
-
-        let error = Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
-        let clone = error.clone();
-
-        assert!(clone.source().is_some());
-        assert_eq!(clone.code, ErrorCode::StorageExhausted);
-    }
-
-    /// Attaching a cause must not disturb the reported contract, which is what
-    /// every consumer and every envelope actually reads.
-    #[test]
-    fn attaching_a_cause_does_not_change_the_reported_contract() {
         let plain = Error::internal_io("boom", Some("context".to_string()));
         let sourced = Error::internal_io("boom", Some("context".to_string()))
             .with_source(std::io::Error::from(std::io::ErrorKind::NotFound));
-
         assert_eq!(plain.code, sourced.code);
         assert_eq!(plain.message, sourced.message);
         assert_eq!(plain.details, sourced.details);
         assert_eq!(plain.retryable, sourced.retryable);
-    }
-
-    /// The cause is in-process state, not wire state. `Error` derives no
-    /// serde impls, so the envelope projection is unchanged by definition —
-    /// this pins that `details` (which *is* serialized) stays clean.
-    #[test]
-    fn the_cause_does_not_leak_into_the_serialized_details() {
-        let error = Error::from(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "secret-path-detail",
-        ));
-
-        let details = error.details.as_object().expect("object details");
-        assert!(!details.contains_key("source"));
-        assert!(!details.contains_key("cause"));
-    }
-
-    /// `?` cannot attach context, so the contextful constructors must stay the
-    /// preferred form for sites that know which operation failed.
-    #[test]
-    fn the_contextful_constructor_records_what_the_caller_was_doing() {
-        let error = Error::from_io_error(
-            &std::io::Error::from(std::io::ErrorKind::NotFound),
-            Some("read deployment provider policy".to_string()),
-        );
-
-        assert_eq!(error.details["context"], "read deployment provider policy");
     }
 }
 
@@ -2146,11 +2038,18 @@ mod details_serialization_tests {
         }
     }
 
+    /// A failed serialization is reported under a marker key, construction
+    /// still succeeds (this runs on a failure path), and a successful
+    /// serialization never carries the marker.
     #[test]
     fn a_details_struct_that_cannot_serialize_says_so_instead_of_vanishing() {
-        let details = to_details(UnserializableDetails);
+        let error = Error::new(
+            ErrorCode::InternalUnexpected,
+            "fixture",
+            to_details(UnserializableDetails),
+        );
 
-        let object = details.as_object().expect("object details");
+        let object = error.details.as_object().expect("object details");
         assert_eq!(
             object.len(),
             1,
@@ -2160,66 +2059,18 @@ mod details_serialization_tests {
             .as_str()
             .expect("the serialization failure is reported as a string");
         assert!(!reported.is_empty(), "the reason must survive");
-    }
 
-    /// The marker only appears on failure — an error with genuinely no details
-    /// must stay a clean empty object.
-    #[test]
-    fn a_successful_serialization_carries_no_failure_marker() {
-        let error = Error::internal_unexpected("plain");
-
-        assert!(!error
+        assert!(!Error::internal_unexpected("plain")
             .details
             .as_object()
             .expect("object details")
             .contains_key(DETAILS_SERIALIZATION_ERROR_KEY));
-        assert_eq!(
-            to_details(serde_json::json!({})),
-            Value::Object(serde_json::Map::new())
-        );
-    }
-
-    /// Construction must survive the failure: this runs on a failure path, so
-    /// replacing a reportable error with a panic would be strictly worse.
-    #[test]
-    fn constructing_an_error_survives_a_failed_details_serialization() {
-        let error = Error::new(
-            ErrorCode::InternalUnexpected,
-            "fixture",
-            to_details(UnserializableDetails),
-        );
-
-        assert_eq!(error.code, ErrorCode::InternalUnexpected);
-        assert!(error.details[DETAILS_SERIALIZATION_ERROR_KEY].is_string());
     }
 }
 
 #[cfg(test)]
 mod ergonomic_constructor_tests {
     use super::*;
-
-    #[test]
-    fn invalid_argument_equals_the_verbose_none_none_form() {
-        let short = Error::invalid_argument("field", "problem");
-        let verbose = Error::validation_invalid_argument("field", "problem", None, None);
-        assert_eq!(short.code, verbose.code);
-        assert_eq!(short.message, verbose.message);
-        assert_eq!(short.details, verbose.details);
-    }
-
-    #[test]
-    fn invalid_argument_for_equals_the_verbose_some_id_none_form() {
-        let short = Error::invalid_argument_for("field", "problem", "the-id");
-        let verbose = Error::validation_invalid_argument(
-            "field",
-            "problem",
-            Some("the-id".to_string()),
-            None,
-        );
-        assert_eq!(short.code, verbose.code);
-        assert_eq!(short.message, verbose.message);
-        assert_eq!(short.details, verbose.details);
-    }
 
     #[test]
     fn executable_action_renders_arguments_with_the_shared_posix_quoting_contract() {

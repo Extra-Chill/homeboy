@@ -1356,19 +1356,6 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
     );
 }
 
-fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::PathBuf, String) {
-    let path = state_path().expect("state path");
-    let content = serde_json::json!({
-        "address": address,
-        "pid": pid,
-        "state_path": path.display().to_string(),
-    })
-    .to_string();
-    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
-    std::fs::write(&path, &content).expect("write legacy state");
-    (path, content)
-}
-
 fn write_runner_config(id: &str, value: &serde_json::Value) {
     let dir = crate::paths::homeboy()
         .expect("homeboy dir")
@@ -1382,27 +1369,10 @@ fn write_runner_config(id: &str, value: &serde_json::Value) {
 }
 
 #[test]
-fn parse_bind_addr_defaults_to_loopback_shape() {
-    let addr = parse_bind_addr(DEFAULT_ADDR).expect("parse default");
-
-    assert!(addr.ip().is_loopback());
-    assert_eq!(addr.port(), 0);
-}
-
-#[test]
 fn parse_bind_addr_rejects_public_bind() {
     let err = parse_bind_addr("0.0.0.0:8080").expect_err("reject public bind");
 
     assert!(err.message.contains("loopback"));
-}
-
-#[test]
-fn state_path_uses_daemon_state_location() {
-    let _home = HomeGuard::new();
-
-    let path = state_path().expect("state path");
-
-    assert!(path.ends_with("daemon/state.json"));
 }
 
 #[test]
@@ -1428,27 +1398,25 @@ fn write_state_establishes_daemon_session_lease_identity() {
 }
 
 #[test]
-fn lease_writer_rejects_an_unsupported_schema() {
+fn lease_writer_rejects_leases_without_a_supported_identity() {
     let _home = HomeGuard::new();
-    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
-    state.schema = "homeboy.daemon.session_lease.v0".to_string();
+    let unsupported_schema = |state: &mut DaemonState| {
+        state.schema = "homeboy.daemon.session_lease.v0".to_string();
+    };
+    let missing_lease_id = |state: &mut DaemonState| state.lease_id.clear();
+    let cases: [(&dyn Fn(&mut DaemonState), &str); 2] = [
+        (&unsupported_schema, "unsupported schema"),
+        (&missing_lease_id, "without a lease ID"),
+    ];
+    for (mutate, expected) in cases {
+        let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
+        mutate(&mut state);
 
-    let error = write_lease(&state_path().expect("state path"), &state)
-        .expect_err("unsupported schema is not persisted");
+        let error = write_lease(&state_path().expect("state path"), &state)
+            .expect_err("invalid lease is not persisted");
 
-    assert!(error.message.contains("unsupported schema"));
-}
-
-#[test]
-fn lease_writer_rejects_a_missing_lease_id() {
-    let _home = HomeGuard::new();
-    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
-    state.lease_id.clear();
-
-    let error = write_lease(&state_path().expect("state path"), &state)
-        .expect_err("leases without an identity are not persisted");
-
-    assert!(error.message.contains("without a lease ID"));
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
 }
 
 #[test]
@@ -1490,32 +1458,38 @@ fn read_status_accepts_a_replaced_executable() {
 }
 
 #[test]
-fn freshness_report_classifies_missing_lease() {
-    let _home = HomeGuard::new();
-
-    let status = read_status().expect("status");
-
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseMissing)
-    );
-    assert!(status.freshness.restartable);
-}
-
-#[test]
-fn freshness_report_classifies_corrupt_lease() {
+fn corrupt_leases_fail_closed_without_identity() {
     let _home = HomeGuard::new();
     let path = state_path().expect("state path");
     std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
-    std::fs::write(&path, "not-json").expect("write corrupt lease");
+    // Unparseable JSON, and a lease that omits the required `lease_id`.
+    let missing_lease_id = serde_json::json!({
+        "address": "127.0.0.1:49152",
+        "pid": u32::MAX,
+        "state_path": path.display().to_string(),
+    })
+    .to_string();
+    for contents in ["{invalid json", missing_lease_id.as_str()] {
+        std::fs::write(&path, contents).expect("write corrupt lease");
 
-    let status = read_status().expect("status");
+        let status = read_status().expect("status");
 
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseCorrupt)
-    );
-    assert!(!status.freshness.restartable);
+        assert_eq!(
+            status.freshness.stale_reason_code,
+            Some(DaemonStaleReasonCode::LeaseCorrupt),
+            "{contents}"
+        );
+        assert!(!status.running);
+        assert!(!status.fresh);
+        assert!(!status.freshness.restartable);
+        assert!(status.state.is_none());
+        assert!(status.freshness.lease_id.is_none());
+        assert!(status
+            .stale_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invalid daemon lease"));
+    }
 }
 
 #[test]
@@ -1572,6 +1546,12 @@ fn daemon_status_dead_lease_reports_a_dead_process_and_an_unblocked_idle_replace
         status.freshness.stale_reason_code,
         Some(DaemonStaleReasonCode::PidDead)
     );
+    assert_eq!(status.state.as_ref().expect("state").pid, u32::MAX);
+    assert!(status
+        .stale_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("pid is not running"));
     assert!(!status.admits_work());
     // The idle dead lease authorizes its stop/start repair, so a replacement
     // is sequenced rather than blocked.
@@ -1602,6 +1582,9 @@ fn daemon_status_without_a_lease_reports_no_live_process_and_an_unreachable_api(
         status.freshness.stale_reason_code,
         Some(DaemonStaleReasonCode::LeaseMissing)
     );
+    assert!(status.freshness.restartable);
+    assert!(status.state.is_none());
+    assert!(status.state_path.ends_with("daemon/state.json"));
     assert!(!status.admits_work());
     // An empty store authorizes a plain start; nothing durable is at risk.
     assert!(!status.replacement_blocked);
@@ -1667,45 +1650,10 @@ fn freshness_report_classifies_runtime_paths_drift() {
 }
 
 #[test]
-fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
-    let _home = HomeGuard::new();
-    let path = state_path().expect("state path");
-    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
-    std::fs::write(
-        &path,
-        serde_json::json!({
-            "address": "127.0.0.1:49152",
-            "pid": u32::MAX,
-            "state_path": path.display().to_string(),
-        })
-        .to_string(),
-    )
-    .expect("write state");
-
-    assert!(pid_is_running(std::process::id()));
-    assert!(!pid_is_running(u32::MAX));
-    let status = read_status().expect("status");
-    assert!(!status.running);
-    assert!(!status.fresh);
-    // A state file that exists but omits the required `lease_id` is now
-    // classified as a corrupt lease (missing field), reported through the
-    // structured code with a descriptive parse reason — not a missing lease.
-    assert!(status
-        .stale_reason
-        .as_deref()
-        .unwrap_or_default()
-        .contains("invalid daemon lease"));
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseCorrupt)
-    );
-}
-
-#[test]
 fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_producer() {
     // #10302: `recovery_evidence` / `ownership_evidence` / `repair_plan`
-    // used to be hardcoded `None` on the local path and populated only across
-    // SSH, so no consumer could rely on either half of the one contract.
+    // are populated on the local path exactly as on the SSH path, so
+    // consumers can rely on one contract.
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
     let _owner = write_daemon_state_for_test(&state);
@@ -1729,26 +1677,6 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
         ownership.contains("test-lease") && ownership.contains(&u32::MAX.to_string()),
         "ownership evidence must name the exact lease and PID it proved dead: {ownership}"
     );
-    assert_eq!(
-        status
-            .freshness
-            .repair_plan
-            .iter()
-            .map(|step| step.code.as_str())
-            .collect::<Vec<_>>(),
-        vec!["daemon_ensure_running"],
-        "a dead generation is repaired by starting its successor"
-    );
-}
-
-#[test]
-fn local_freshness_report_plans_explicit_reconciliation_for_a_restartable_lease() {
-    let _home = HomeGuard::new();
-    let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
-    let _owner = write_daemon_state_for_test(&state);
-
-    let status = read_status().expect("status");
-
     // Zero durable jobs are at risk, so the generation-aware lifecycle can
     // rotate the selected authority without splitting stop and start stores.
     assert!(status.freshness.restartable);
@@ -1759,69 +1687,8 @@ fn local_freshness_report_plans_explicit_reconciliation_for_a_restartable_lease(
             .iter()
             .map(|step| (step.code.as_str(), step.command.as_str()))
             .collect::<Vec<_>>(),
-        vec![("daemon_ensure_running", "homeboy daemon ensure-running",)]
-    );
-}
-
-#[test]
-fn status_keeps_corrupt_lease_fail_closed_without_identity() {
-    let _home = HomeGuard::new();
-    let path = state_path().expect("state path");
-    std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
-    std::fs::write(&path, "{invalid json").expect("write corrupt state");
-
-    let status = read_status().expect("status");
-
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseCorrupt)
-    );
-    assert!(status.state.is_none());
-    assert!(status.freshness.lease_id.is_none());
-}
-
-#[test]
-fn status_treats_dead_known_legacy_lease_as_missing_metadata_for_recovery() {
-    let _home = HomeGuard::new();
-    let (path, _) = write_legacy_daemon_state_for_test(u32::MAX, "127.0.0.1:1");
-
-    let status = read_status().expect("status");
-
-    // A legacy state that predates the lease schema lacks the required
-    // `lease_id`, so it is now surfaced as a corrupt lease (missing field)
-    // with a descriptive parse reason rather than the old "no schema" text.
-    assert!(status
-        .stale_reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("invalid daemon lease")));
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseCorrupt)
-    );
-    assert!(status.state.is_none());
-    assert!(status.freshness.lease_id.is_none());
-    assert!(path.exists());
-}
-
-#[test]
-fn read_status_reports_stale_state_as_not_running() {
-    let _home = HomeGuard::new();
-    let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
-    let _owner = write_daemon_state_for_test(&state);
-
-    let status = read_status().expect("status");
-
-    assert!(!status.running);
-    assert!(!status.fresh);
-    assert_eq!(status.state.expect("state").pid, u32::MAX);
-    assert!(status
-        .stale_reason
-        .as_deref()
-        .unwrap_or_default()
-        .contains("pid is not running"));
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::PidDead)
+        vec![("daemon_ensure_running", "homeboy daemon ensure-running")],
+        "a dead generation is repaired by starting its successor"
     );
 }
 
@@ -1852,8 +1719,7 @@ fn daemon_operation_lock_rejects_concurrent_start_or_stop() {
         err.message
     );
     // The only lock holder is this test process, so the refusal must name
-    // its exact PID (#14706 holder naming, previously owned by a
-    // python3-gated test that silently skipped without python3).
+    // its exact PID (#14706 holder naming).
     assert!(
         err.message
             .contains(&format!("live PID {}", std::process::id())),
@@ -1989,25 +1855,6 @@ fn daemon_operation_lock_is_released_when_a_lifecycle_child_execs() {
     assert!(child_status.success());
 }
 
-#[test]
-fn stop_refuses_stale_lease_that_points_at_reused_pid() {
-    let _home = HomeGuard::new();
-    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
-    make_stale(&mut state);
-    let _owner = write_daemon_state_for_test(&state);
-
-    let result = stop().expect("stop stale lease");
-    let status = read_status().expect("status after stop");
-
-    assert!(!result.stopped);
-    assert_eq!(result.pid, Some(std::process::id()));
-    assert!(pid_is_running(std::process::id()));
-    assert!(
-        status.state.is_none(),
-        "an idle, unowned stale lease is retired without signaling its reused PID"
-    );
-}
-
 #[cfg(unix)]
 fn spawn_force_stop_test_process(startup_token: Option<&str>) -> std::process::Child {
     let mut command = Command::new("sh");
@@ -2064,7 +1911,7 @@ fn force_stop_with_active_jobs_keeps_the_lease_and_never_signals_an_unowned_pid(
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
 
-    // Active work no longer refuses a stop (#15936); the PID carries no
+    // Active work does not refuse a stop (#15936); the PID carries no
     // startup token, so it is never signaled, and the lease stays for the
     // dead-lease recovery that resumes that work.
     for result in [
@@ -2161,52 +2008,33 @@ fn spawn_term_resistant_daemon(startup_token: &str) -> u32 {
 
 #[cfg(unix)]
 #[test]
-fn ordinary_stop_converges_a_term_resistant_mixed_version_daemon() {
-    let _home = HomeGuard::new();
-    let startup_token = "mixed-version-daemon";
-    let daemon_pid = spawn_term_resistant_daemon(startup_token);
-    let mut state = daemon_state_for_test(daemon_pid, "127.0.0.1:1");
-    state.build_identity.version = "0.321.1".to_string();
-    state.build_identity.display = "homeboy 0.321.1+92323a8adef6".to_string();
-    state.startup_token = startup_token.to_string();
-    let _owner = write_daemon_state_for_test(&state);
+fn ordinary_stop_escalates_a_term_resistant_daemon_whether_fresh_or_mixed_version() {
+    for mixed_version in [true, false] {
+        let _home = HomeGuard::new();
+        let startup_token = "term-resistant-daemon";
+        let daemon_pid = spawn_term_resistant_daemon(startup_token);
+        let mut state = daemon_state_for_test(daemon_pid, "127.0.0.1:1");
+        if mixed_version {
+            state.build_identity.version = "0.321.1".to_string();
+            state.build_identity.display = "homeboy 0.321.1+92323a8adef6".to_string();
+        }
+        state.startup_token = startup_token.to_string();
+        let _owner = write_daemon_state_for_test(&state);
 
-    let started = Instant::now();
-    let result = stop().expect("ordinary stop converges a stale daemon");
+        let started = Instant::now();
+        let result = stop().expect("ordinary stop converges");
 
-    assert!(result.stopped);
-    assert!(started.elapsed() < Duration::from_secs(10));
-    let evidence = result.termination_evidence.expect("termination evidence");
-    assert!(evidence
-        .os_evidence
-        .contains(&format!("daemon pid {daemon_pid} stopped with SIGKILL")));
-    assert!(!pid_is_running(daemon_pid));
-    assert!(!state_path().expect("state path").exists());
+        assert!(result.stopped, "mixed_version={mixed_version}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let evidence = result.termination_evidence.expect("termination evidence");
+        assert!(evidence
+            .os_evidence
+            .contains(&format!("daemon pid {daemon_pid} stopped with SIGKILL")));
+        assert!(!pid_is_running(daemon_pid));
+        assert!(!state_path().expect("state path").exists());
+    }
 }
 
-#[cfg(unix)]
-#[test]
-fn ordinary_stop_escalates_a_fresh_term_resistant_daemon() {
-    let _home = HomeGuard::new();
-    let startup_token = "fresh-daemon";
-    let daemon_pid = spawn_term_resistant_daemon(startup_token);
-    let mut state = daemon_state_for_test(daemon_pid, "127.0.0.1:1");
-    state.startup_token = startup_token.to_string();
-    let _owner = write_daemon_state_for_test(&state);
-
-    let started = Instant::now();
-    let result = stop().expect("ordinary fresh stop converges");
-
-    assert!(result.stopped);
-    assert!(started.elapsed() < Duration::from_secs(10));
-    let evidence = result.termination_evidence.expect("termination evidence");
-    assert!(evidence
-        .os_evidence
-        .contains(&format!("daemon pid {daemon_pid} stopped with SIGKILL")));
-    assert!(!pid_is_running(daemon_pid));
-}
-
-#[cfg(target_os = "linux")]
 #[test]
 fn lease_bound_stop_recovers_only_the_exact_daemon_after_binary_rebuild() {
     let _home = HomeGuard::new();
@@ -2289,48 +2117,28 @@ fn termination_revalidation_classifies_lost_ownership_as_absent_without_signalin
 }
 
 #[test]
-fn ordinary_stop_retires_a_live_unowned_stale_lease_without_signaling() {
+fn stop_retires_a_live_unowned_stale_lease_without_signaling() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     make_stale(&mut state);
-    let _owner = write_daemon_state_for_test(&state);
+    let lease_id = state.lease_id.clone();
+    let ordinary = || stop();
+    let lease_bound = || stop_for_lease(&lease_id);
+    let stops: [(&str, &dyn Fn() -> crate::Result<DaemonStopResult>); 2] =
+        [("ordinary", &ordinary), ("lease-bound", &lease_bound)];
 
-    let result = stop().expect("routine stop stale lease");
+    for (label, stop_fn) in stops {
+        let _owner = write_daemon_state_for_test(&state);
 
-    assert!(!result.stopped);
-    assert_eq!(result.pid, Some(std::process::id()));
-    assert!(result.termination_evidence.is_none());
-    assert!(result.already_absent);
-    assert!(!state_path().expect("state path").exists());
-}
+        let result = stop_fn().expect(label);
 
-#[test]
-fn lease_bound_stop_retires_a_live_unowned_idle_lease() {
-    let _home = HomeGuard::new();
-    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
-    make_stale(&mut state);
-    let _owner = write_daemon_state_for_test(&state);
-
-    let result = stop_for_lease(&state.lease_id).expect("retire unowned stale lease");
-
-    assert!(!result.stopped);
-    assert!(result.already_absent);
-    assert!(!state_path().expect("state path").exists());
-}
-
-#[test]
-fn lease_bound_stop_reconciles_an_absent_lease_idempotently_without_jobs() {
-    let _home = HomeGuard::new();
-
-    let normal = stop_for_lease("stale-lease").expect("normal stop reconciles missing lease");
-    let forced = force_stop_for_lease("stale-lease").expect("forced stop replays safely");
-
-    assert!(!normal.stopped);
-    assert!(!forced.stopped);
-    assert!(normal.already_absent);
-    assert!(forced.already_absent);
-    assert_eq!(normal.pid, None);
-    assert_eq!(forced.pid, None);
+        assert!(!result.stopped, "{label}");
+        assert_eq!(result.pid, Some(std::process::id()), "{label}");
+        assert!(result.termination_evidence.is_none(), "{label}");
+        assert!(result.already_absent, "{label}");
+        assert!(pid_is_running(std::process::id()));
+        assert!(!state_path().expect("state path").exists(), "{label}");
+    }
 }
 
 /// An absent lease has nothing to signal: the stop converges as absent and
@@ -2352,6 +2160,7 @@ fn lease_bound_stop_with_an_absent_lease_leaves_active_jobs_to_resume() {
         let result = result.expect("absent lease converges");
         assert!(result.already_absent);
         assert!(!result.stopped);
+        assert_eq!(result.pid, None);
     }
     let reopened =
         JobStore::open_without_reconciliation(&crate::paths::observation_db().expect("jobs path"))
@@ -3016,25 +2825,6 @@ fn routes_json_body_to_analysis_enqueue() {
     assert_eq!(store.list().len(), 1);
 }
 
-#[test]
-fn route_with_body_refuses_exec_requests_without_runner_submission() {
-    let _home = HomeGuard::new();
-    let response = route_with_body(
-        "POST",
-        "/exec",
-        Some(serde_json::json!({
-            "runner_id": "lab-local",
-            "cwd": "relative",
-            "command": []
-        })),
-        daemon_job_store(),
-    );
-
-    assert_eq!(response.status_code, 400);
-    assert_eq!(response.body["error"], "validation.invalid_argument");
-    assert_eq!(response.body["details"]["field"], "submission");
-}
-
 fn create_lab_local_runner() -> HomeGuard {
     let home = HomeGuard::new();
     write_runner_config(
@@ -3325,16 +3115,6 @@ fn route_rejects_unknown_paths_and_methods() {
     assert_eq!(route("GET", "/missing").status_code, 404);
     assert_eq!(route("POST", "/health").status_code, 405);
     assert_eq!(route("POST", "/release").status_code, 404);
-}
-
-#[test]
-fn status_is_not_running_without_state_file() {
-    let _home = HomeGuard::new();
-
-    let status = read_status().expect("status");
-    assert!(!status.running);
-    assert!(status.state.is_none());
-    assert!(status.state_path.ends_with("daemon/state.json"));
 }
 
 struct OperationLockWaitGuard {

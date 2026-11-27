@@ -24,13 +24,12 @@ mod tests {
     use super::memory_timeline::attach_memory_timeline_artifacts;
     use super::results::{parse_execution_results_file, workload_status_failures};
     use super::run_main_bench_workflow;
-    use super::runner::instance_results_filename;
     use super::scenario::{
         filter_extra_workloads_by_scenario_ids, normalize_workload_json_scenario_ids,
     };
-    use super::types::{BenchListWorkflowArgs, BenchListWorkflowResult, BenchRunWorkflowArgs};
+    use super::types::{BenchListWorkflowArgs, BenchRunWorkflowArgs};
     use super::workflow::bench_component_script_env;
-    use crate::extension::bench::parsing::{self, BenchResults, BenchRunExecution, BenchScenario};
+    use crate::extension::bench::parsing::{self, BenchRunExecution};
     use crate::extension::bench::responsiveness::BenchResponsivenessSummary;
     use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
     use crate::extension::resolve::path_list_env_value;
@@ -43,16 +42,8 @@ mod tests {
     use homeboy_core::engine::run_dir::{self, RunDir};
     use homeboy_engine_primitives::baseline::BaselineFlags;
     use homeboy_extension_contract::{RigPackageEvidence, RigPackageFreshness};
-    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
-
-    #[test]
-    fn instance_results_filename_is_distinct_per_instance() {
-        assert_eq!(instance_results_filename(0), "bench-results-i0.json");
-        assert_eq!(instance_results_filename(7), "bench-results-i7.json");
-        assert_ne!(instance_results_filename(0), instance_results_filename(1));
-    }
 
     #[test]
     fn extra_workloads_env_value_joins_paths_for_runner_contract() {
@@ -125,43 +116,13 @@ mod tests {
     #[test]
     fn component_script_bench_env_includes_typed_settings_json() {
         let run_dir = RunDir::create().expect("run dir");
-        let env = bench_component_script_env(
-            &BenchRunWorkflowArgs {
-                component_label: "studio-web".to_string(),
-                component_id: "studio-web".to_string(),
-                path_override: None,
-                settings: vec![("workflow_bench_env.FOO".to_string(), "bar".to_string())],
-                settings_json: vec![(
-                    "workflow_bench_env".to_string(),
-                    serde_json::json!({ "WORKFLOW_BENCH_RUN_ID": "component-script-run" }),
-                )],
-                iterations: 10,
-                warmup_iterations: None,
-                run_id: None,
-                execution: BenchRunExecution {
-                    runs: 1,
-                    concurrency: 1,
-                },
-                baseline_flags: BaselineFlags {
-                    baseline: false,
-                    ignore_baseline: true,
-                    ratchet: false,
-                },
-                regression_threshold_percent: 5.0,
-                json_summary: false,
-                ci_env: Vec::new(),
-                passthrough_args: Vec::new(),
-                scenario_ids: Vec::new(),
-                rig_id: None,
-                shared_state: None,
-                extra_workloads: Vec::new(),
-                env_provider_extensions: Vec::new(),
-                rig_package: None,
-                invocation_requirements: InvocationRequirements::default(),
-            },
-            &run_dir,
-        )
-        .expect("component-script env");
+        let mut args = bench_run_workflow_args_fixture();
+        args.settings = vec![("workflow_bench_env.FOO".to_string(), "bar".to_string())];
+        args.settings_json = vec![(
+            "workflow_bench_env".to_string(),
+            serde_json::json!({ "WORKFLOW_BENCH_RUN_ID": "component-script-run" }),
+        )];
+        let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
 
         assert_eq!(
             env.iter()
@@ -187,23 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn component_script_bench_env_forwards_run_id_proof_label() {
-        let run_dir = RunDir::create().expect("run dir");
-        let mut args = bench_run_workflow_args_fixture();
-        args.run_id = Some("proof-2026-06".to_string());
-
-        let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
-
-        assert_eq!(
-            env.iter()
-                .find_map(|(key, value)| (key == "HOMEBOY_BENCH_RUN_ID").then_some(value)),
-            Some(&"proof-2026-06".to_string()),
-            "run-id proof label should forward to HOMEBOY_BENCH_RUN_ID"
-        );
-        run_dir.cleanup();
-    }
-
-    #[test]
     fn component_script_bench_env_forwards_rig_package_root() {
         let run_dir = RunDir::create().expect("run dir");
         let mut args = bench_run_workflow_args_fixture();
@@ -223,56 +167,51 @@ mod tests {
     #[test]
     fn component_script_bench_env_serializes_passthrough_args() {
         let run_dir = RunDir::create().expect("run dir");
-        let mut args = bench_run_workflow_args_fixture();
-        args.passthrough_args = vec![
-            "--workload-option".to_string(),
-            "value with spaces".to_string(),
-        ];
+        for (passthrough_args, expected) in [
+            (Vec::new(), "[]"),
+            (
+                vec![
+                    "--workload-option".to_string(),
+                    "value with spaces".to_string(),
+                ],
+                r#"["--workload-option","value with spaces"]"#,
+            ),
+        ] {
+            let mut args = bench_run_workflow_args_fixture();
+            args.passthrough_args = passthrough_args;
 
-        let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
+            let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
 
-        assert_eq!(
-            env.iter()
-                .find_map(|(key, value)| (key == "HOMEBOY_BENCH_ARGS_JSON").then_some(value)),
-            Some(&r#"["--workload-option","value with spaces"]"#.to_string())
-        );
+            assert_eq!(
+                env.iter()
+                    .find_map(|(key, value)| (key == "HOMEBOY_BENCH_ARGS_JSON").then_some(value)),
+                Some(&expected.to_string())
+            );
+        }
         run_dir.cleanup();
     }
 
     #[test]
-    fn component_script_bench_env_serializes_empty_passthrough_args() {
+    fn component_script_bench_env_forwards_only_nonblank_run_id() {
         let run_dir = RunDir::create().expect("run dir");
-        let args = bench_run_workflow_args_fixture();
+        for (run_id, expected) in [
+            (Some("proof-2026-06"), Some("proof-2026-06")),
+            (None, None),
+            (Some("   "), None),
+        ] {
+            let mut args = bench_run_workflow_args_fixture();
+            args.run_id = run_id.map(str::to_string);
 
-        let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
+            let env = bench_component_script_env(&args, &run_dir).expect("component-script env");
 
-        assert_eq!(
-            env.iter()
-                .find_map(|(key, value)| (key == "HOMEBOY_BENCH_ARGS_JSON").then_some(value)),
-            Some(&"[]".to_string())
-        );
-        run_dir.cleanup();
-    }
-
-    #[test]
-    fn component_script_bench_env_omits_run_id_when_absent_or_blank() {
-        let run_dir = RunDir::create().expect("run dir");
-
-        let mut absent = bench_run_workflow_args_fixture();
-        absent.run_id = None;
-        let env = bench_component_script_env(&absent, &run_dir).expect("component-script env");
-        assert!(
-            !env.iter().any(|(key, _)| key == "HOMEBOY_BENCH_RUN_ID"),
-            "no --run-id should leave HOMEBOY_BENCH_RUN_ID unset"
-        );
-
-        let mut blank = bench_run_workflow_args_fixture();
-        blank.run_id = Some("   ".to_string());
-        let env = bench_component_script_env(&blank, &run_dir).expect("component-script env");
-        assert!(
-            !env.iter().any(|(key, _)| key == "HOMEBOY_BENCH_RUN_ID"),
-            "whitespace-only --run-id should be ignored, not forwarded blank"
-        );
+            assert_eq!(
+                env.iter()
+                    .find_map(|(key, value)| (key == "HOMEBOY_BENCH_RUN_ID").then_some(value))
+                    .map(String::as_str),
+                expected,
+                "run_id: {run_id:?}"
+            );
+        }
         run_dir.cleanup();
     }
 
@@ -332,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn component_script_bench_list_env_includes_typed_settings_json() {
+    fn component_script_bench_list_env_projects_list_contract() {
         let env = bench_component_script_list_env(&BenchListWorkflowArgs {
             component_label: "studio-web".to_string(),
             component_id: "studio-web".to_string(),
@@ -342,60 +281,6 @@ mod tests {
                 "workflow_bench_env".to_string(),
                 serde_json::json!({ "WORKFLOW_BENCH_SCENARIO": "plain-site-sample-plugin" }),
             )],
-            passthrough_args: Vec::new(),
-            scenario_ids: Vec::new(),
-            extra_workloads: Vec::new(),
-            env_provider_extensions: Vec::new(),
-            rig_package: None,
-            profiles: Vec::new(),
-        })
-        .expect("component-script list env");
-
-        assert!(env
-            .iter()
-            .any(|(key, value)| key == "HOMEBOY_BENCH_LIST_ONLY" && value == "1"));
-        let settings = env
-            .iter()
-            .find_map(|(key, value)| (key == "HOMEBOY_SETTINGS_JSON").then_some(value))
-            .expect("settings json env");
-        let parsed: serde_json::Value = serde_json::from_str(settings).expect("settings json");
-        assert_eq!(
-            parsed["workflow_bench_env"]["WORKFLOW_BENCH_SCENARIO"],
-            "plain-site-sample-plugin"
-        );
-    }
-
-    #[test]
-    fn component_script_bench_list_env_omits_rig_package_root_without_rig() {
-        let args = BenchListWorkflowArgs {
-            component_label: "studio-web".to_string(),
-            component_id: "studio-web".to_string(),
-            path_override: None,
-            settings: Vec::new(),
-            settings_json: Vec::new(),
-            passthrough_args: Vec::new(),
-            scenario_ids: Vec::new(),
-            extra_workloads: Vec::new(),
-            env_provider_extensions: Vec::new(),
-            rig_package: None,
-            profiles: Vec::new(),
-        };
-
-        let env = bench_component_script_list_env(&args).expect("component-script list env");
-
-        assert!(!env
-            .iter()
-            .any(|(key, _)| key == "HOMEBOY_BENCH_RIG_PACKAGE_ROOT"));
-    }
-
-    #[test]
-    fn component_script_bench_list_env_serializes_passthrough_args() {
-        let env = bench_component_script_list_env(&BenchListWorkflowArgs {
-            component_label: "studio-web".to_string(),
-            component_id: "studio-web".to_string(),
-            path_override: None,
-            settings: Vec::new(),
-            settings_json: Vec::new(),
             passthrough_args: vec!["--scenario-filter".to_string(), "plain".to_string()],
             scenario_ids: Vec::new(),
             extra_workloads: Vec::new(),
@@ -404,11 +289,23 @@ mod tests {
             profiles: Vec::new(),
         })
         .expect("component-script list env");
-
-        assert_eq!(
+        let value_of = |name: &str| {
             env.iter()
-                .find_map(|(key, value)| (key == "HOMEBOY_BENCH_ARGS_JSON").then_some(value)),
-            Some(&r#"["--scenario-filter","plain"]"#.to_string())
+                .find_map(|(key, value)| (key == name).then_some(value.as_str()))
+        };
+
+        assert_eq!(value_of("HOMEBOY_BENCH_LIST_ONLY"), Some("1"));
+        assert_eq!(
+            value_of("HOMEBOY_BENCH_ARGS_JSON"),
+            Some(r#"["--scenario-filter","plain"]"#)
+        );
+        assert_eq!(value_of("HOMEBOY_BENCH_RIG_PACKAGE_ROOT"), None);
+        let parsed: serde_json::Value =
+            serde_json::from_str(value_of("HOMEBOY_SETTINGS_JSON").expect("settings json env"))
+                .expect("settings json");
+        assert_eq!(
+            parsed["workflow_bench_env"]["WORKFLOW_BENCH_SCENARIO"],
+            "plain-site-sample-plugin"
         );
     }
 
@@ -542,116 +439,56 @@ mod tests {
     }
 
     #[test]
-    fn workload_status_failures_catches_failed_and_unsupported_children() {
-        let results = parsing::parse_bench_results_str(
-            r#"{
-                "component_id": "studio-web",
-                "iterations": 1,
-                "scenarios": [{
-                    "id": "workflow-bench",
+    fn workload_status_failures_flag_unhealthy_child_counters() {
+        let cases: [(&str, &str, &[&str]); 4] = [
+            (
+                r#""adapter_count": 2, "passed_count": 0, "failed_count": 1, "unsupported_count": 1"#,
+                "{}",
+                &["failed_count=1", "unsupported_count=1"],
+            ),
+            (
+                r#""adapter_count": 1, "passed_count": 0, "failed_count": 0, "unsupported_count": 0, "warning_count": 1"#,
+                "{}",
+                &["warning_count=1", "passed_count=0"],
+            ),
+            (
+                r#""adapter_count": 1, "passed_count": 0, "failed_count": 0, "unsupported_count": 0"#,
+                r#"{ "result_counts": { "warning": 1 } }"#,
+                &["warning_count=1", "passed_count=0"],
+            ),
+            (
+                r#""adapter_count": 2, "passed_count": 2, "failed_count": 0, "unsupported_count": 0"#,
+                "{}",
+                &[],
+            ),
+        ];
+        for (metrics, metadata, expected) in cases {
+            let results = parsing::parse_bench_results_str(&format!(
+                r#"{{
+                    "component_id": "studio-web",
                     "iterations": 1,
-                    "metrics": {
-                        "adapter_count": 2,
-                        "passed_count": 0,
-                        "failed_count": 1,
-                        "unsupported_count": 1
-                    }
-                }]
-            }"#,
-        )
-        .expect("parse bench results");
+                    "scenarios": [{{
+                        "id": "workflow-bench",
+                        "iterations": 1,
+                        "metrics": {{ {metrics} }},
+                        "metadata": {metadata}
+                    }}]
+                }}"#
+            ))
+            .expect("parse bench results");
 
-        let failures = workload_status_failures(&results);
+            let failures = workload_status_failures(&results);
 
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("workflow-bench"));
-        assert!(failures[0].contains("failed_count=1"));
-        assert!(failures[0].contains("unsupported_count=1"));
-    }
-
-    #[test]
-    fn workload_status_failures_catches_warning_children() {
-        let results = parsing::parse_bench_results_str(
-            r#"{
-                "component_id": "studio-web",
-                "iterations": 1,
-                "scenarios": [{
-                    "id": "workflow-bench",
-                    "iterations": 1,
-                    "metrics": {
-                        "adapter_count": 1,
-                        "passed_count": 0,
-                        "failed_count": 0,
-                        "unsupported_count": 0,
-                        "warning_count": 1
-                    }
-                }]
-            }"#,
-        )
-        .expect("parse bench results");
-
-        let failures = workload_status_failures(&results);
-
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("workflow-bench"));
-        assert!(failures[0].contains("warning_count=1"));
-        assert!(failures[0].contains("passed_count=0"));
-    }
-
-    #[test]
-    fn workload_status_failures_catches_metadata_warning_result_counts() {
-        let results = parsing::parse_bench_results_str(
-            r#"{
-                "component_id": "studio-web",
-                "iterations": 1,
-                "scenarios": [{
-                    "id": "workflow-bench",
-                    "iterations": 1,
-                    "metrics": {
-                        "adapter_count": 1,
-                        "passed_count": 0,
-                        "failed_count": 0,
-                        "unsupported_count": 0
-                    },
-                    "metadata": {
-                        "result_counts": {
-                            "warning": 1
-                        }
-                    }
-                }]
-            }"#,
-        )
-        .expect("parse bench results");
-
-        let failures = workload_status_failures(&results);
-
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("workflow-bench"));
-        assert!(failures[0].contains("warning_count=1"));
-        assert!(failures[0].contains("passed_count=0"));
-    }
-
-    #[test]
-    fn workload_status_failures_allows_clean_child_counters() {
-        let results = parsing::parse_bench_results_str(
-            r#"{
-                "component_id": "studio-web",
-                "iterations": 1,
-                "scenarios": [{
-                    "id": "workflow-bench",
-                    "iterations": 1,
-                    "metrics": {
-                        "adapter_count": 2,
-                        "passed_count": 2,
-                        "failed_count": 0,
-                        "unsupported_count": 0
-                    }
-                }]
-            }"#,
-        )
-        .expect("parse bench results");
-
-        assert!(workload_status_failures(&results).is_empty());
+            if expected.is_empty() {
+                assert!(failures.is_empty(), "metrics: {metrics}: {failures:?}");
+                continue;
+            }
+            assert_eq!(failures.len(), 1, "metrics: {metrics}");
+            assert!(failures[0].contains("workflow-bench"));
+            for fragment in expected {
+                assert!(failures[0].contains(fragment), "{}", failures[0]);
+            }
+        }
     }
 
     #[test]
@@ -709,32 +546,8 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
                 BenchRunWorkflowArgs {
                     component_label: "Workflow Bench Fixture".to_string(),
                     component_id: "workflow-bench-fixture".to_string(),
-                    path_override: None,
-                    settings: Vec::new(),
-                    settings_json: Vec::new(),
                     iterations: 1,
-                    warmup_iterations: None,
-                    run_id: None,
-                    execution: BenchRunExecution {
-                        runs: 1,
-                        concurrency: 1,
-                    },
-                    baseline_flags: BaselineFlags {
-                        baseline: false,
-                        ignore_baseline: true,
-                        ratchet: false,
-                    },
-                    regression_threshold_percent: 5.0,
-                    json_summary: false,
-                    ci_env: Vec::new(),
-                    passthrough_args: Vec::new(),
-                    scenario_ids: Vec::new(),
-                    rig_id: None,
-                    shared_state: None,
-                    extra_workloads: Vec::new(),
-                    env_provider_extensions: Vec::new(),
-                    rig_package: None,
-                    invocation_requirements: InvocationRequirements::default(),
+                    ..bench_run_workflow_args_fixture()
                 },
                 &run_dir,
             )
@@ -756,48 +569,11 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
     #[test]
     fn attach_memory_timeline_adds_metrics_and_artifacts() {
         let run_dir = RunDir::create().expect("run dir");
-        let mut results = BenchResults {
-            component_id: "homeboy".to_string(),
-            iterations: 1,
-            provenance: Default::default(),
-            run_metadata: None,
-            metadata: BTreeMap::new(),
-            metric_groups: BTreeMap::new(),
-            timeline: Vec::new(),
-            span_definitions: BTreeMap::new(),
-            diagnostics: Vec::new(),
-            child_command_failures: Vec::new(),
-            phase_events: Vec::new(),
-            phase_summaries: Vec::new(),
-            failure_classification: None,
-            responsiveness: None,
-            budget_findings: Vec::new(),
-            scenarios: vec![BenchScenario {
-                id: "cold-start".to_string(),
-                file: None,
-                source: None,
-                default_iterations: None,
-                tags: Vec::new(),
-                iterations: 1,
-                metrics: parsing::BenchMetrics::default(),
-                metric_groups: BTreeMap::new(),
-                timeline: Vec::new(),
-                span_definitions: Vec::new(),
-                span_results: Vec::new(),
-                gates: Vec::new(),
-                gate_results: Vec::new(),
-                metadata: BTreeMap::new(),
-                provenance: Default::default(),
-                passed: true,
-                memory: None,
-                artifacts: BTreeMap::new(),
-                diagnostics: Vec::new(),
-                runs: None,
-                runs_summary: None,
-            }],
-            metric_policies: BTreeMap::new(),
-            metric_policy_presets: BTreeMap::new(),
-        };
+        let mut results = results_with_scenarios(
+            "homeboy",
+            1,
+            vec![scenario_with_iterations("cold-start", &[], 1)],
+        );
         let child = ExtensionChildResourceSummary {
             child: ChildProcessIdentity {
                 root_pid: 42,
@@ -918,83 +694,18 @@ printf '{}' > "$(dirname "$HOMEBOY_BENCH_RESULTS_FILE")/bench-report.json"
     }
 
     #[test]
-    fn test_run_bench_list_workflow() {
-        let result = BenchListWorkflowResult {
-            component: "homeboy".to_string(),
-            component_id: "homeboy".to_string(),
-            count: 1,
-            profiles: Vec::new(),
-            hints: Vec::new(),
-            rig_package: None,
-            scenarios: vec![BenchScenario {
-                id: "audit-self".to_string(),
-                file: Some("src/bin/bench-audit-self.rs".to_string()),
-                source: Some("in_tree".to_string()),
-                default_iterations: Some(10),
-                tags: Vec::new(),
-                iterations: 0,
-                metrics: parsing::BenchMetrics {
-                    values: BTreeMap::new(),
-                    distributions: BTreeMap::new(),
-                },
-                metric_groups: BTreeMap::new(),
-                timeline: Vec::new(),
-                span_definitions: Vec::new(),
-                span_results: Vec::new(),
-                gates: Vec::new(),
-                gate_results: Vec::new(),
-                metadata: BTreeMap::new(),
-                provenance: Default::default(),
-                passed: true,
-                memory: None,
-                artifacts: BTreeMap::new(),
-                diagnostics: Vec::new(),
-                runs: None,
-                runs_summary: None,
-            }],
-        };
-
-        assert_eq!(result.count, result.scenarios.len());
-        assert_eq!(result.scenarios[0].iterations, 0);
-        assert!(result.scenarios[0].metrics.values.is_empty());
-        assert_eq!(result.scenarios[0].default_iterations, Some(10));
-    }
-
-    #[test]
-    fn test_run_main_bench_workflow() {
+    fn main_bench_workflow_rejects_zero_concurrency() {
         let run_dir = RunDir::create().expect("run dir");
         let err = run_main_bench_workflow(
             &Component::default(),
             &PathBuf::from("/tmp/homeboy"),
             BenchRunWorkflowArgs {
-                component_label: "homeboy".to_string(),
-                component_id: "homeboy".to_string(),
-                path_override: None,
-                settings: Vec::new(),
-                settings_json: Vec::new(),
                 iterations: 1,
-                warmup_iterations: None,
-                run_id: None,
                 execution: BenchRunExecution {
                     runs: 1,
                     concurrency: 0,
                 },
-                baseline_flags: BaselineFlags {
-                    baseline: false,
-                    ignore_baseline: true,
-                    ratchet: false,
-                },
-                regression_threshold_percent: 5.0,
-                json_summary: false,
-                ci_env: Vec::new(),
-                passthrough_args: Vec::new(),
-                scenario_ids: Vec::new(),
-                rig_id: None,
-                shared_state: None,
-                extra_workloads: Vec::new(),
-                env_provider_extensions: Vec::new(),
-                rig_package: None,
-                invocation_requirements: InvocationRequirements::default(),
+                ..bench_run_workflow_args_fixture()
             },
             &run_dir,
         )

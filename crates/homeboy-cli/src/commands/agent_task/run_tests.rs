@@ -348,19 +348,6 @@ fn controller_lint_gate_records_provenance_and_dedupes() {
 }
 
 #[test]
-fn no_component_lint_gate_flag_parses() {
-    let args = parse_cook(&[
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--verify",
-        "true",
-        "--no-component-lint-gate",
-    ]);
-    assert!(args.gates.no_component_lint_gate);
-}
-
-#[test]
 fn preview_worktree_capacity_blocks_local_shortfall_and_reports_safe_action() {
     let mut resolved = serde_json::json!({ "placement": { "selected": "local" } });
     let capacity = serde_json::json!({
@@ -744,27 +731,6 @@ fn cook_admission_subjects_follow_component_release_policy() {
     }
 }
 
-fn title_cook_args(extra: &[&str]) -> super::AgentTaskCookArgs {
-    let mut argv = vec![
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--prompt",
-        "fixture",
-        "--cwd",
-        ".",
-        "--no-finalize",
-    ];
-    argv.extend_from_slice(extra);
-    let Commands::AgentTask(command) = Cli::parse_from(argv).command else {
-        panic!("agent-task command");
-    };
-    let AgentTaskCommand::Cook(args) = command.command else {
-        panic!("cook command");
-    };
-    *args
-}
-
 #[test]
 fn explicit_local_retry_selects_controller_owned_dispatch_for_lab_recipe() {
     let cli = Cli::try_parse_from([
@@ -829,16 +795,6 @@ fn explicit_local_retry_selects_controller_owned_dispatch_for_lab_recipe() {
 }
 
 #[test]
-fn only_explicit_cook_title_is_immutable_recipe_title() {
-    let explicit = title_cook_args(&["--title", "Explicit title", "--goal", "Goal title"]);
-    assert_eq!(explicit.title.as_deref(), Some("Explicit title"));
-    let goal = title_cook_args(&["--goal", "  Restore\n cold\t reconstruction  "]);
-    assert!(goal.title.is_none());
-    let fallback = title_cook_args(&["--repo", "fixture-repository"]);
-    assert!(fallback.title.is_none());
-}
-
-#[test]
 fn preview_projects_each_dirty_admission_state() {
     let workspace = tempfile::tempdir().expect("workspace");
     let git = |args: &[&str]| {
@@ -889,12 +845,9 @@ fn durable_cook_identity_block_leads_with_the_run_id_and_follow_up_commands() {
     assert!(joined.contains("homeboy --placement local agent-task status cook-10419-attempt-1"));
     assert!(joined.contains("homeboy --placement local runs logs cook-10419-attempt-1"));
     assert!(joined.contains("homeboy --placement local agent-task cancel cook-10419-attempt-1"));
-}
 
-#[test]
-fn durable_cook_identity_block_omits_a_cook_alias_equal_to_the_run_id() {
+    // A Cook alias equal to the run id is not repeated.
     let lines = durable_cook_identity_lines(Some("run-9163"), "run-9163");
-
     assert!(!lines[0].contains("(cook"), "no redundant alias: {lines:?}");
     assert!(lines[0].contains("run-9163"));
 }

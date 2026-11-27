@@ -13,7 +13,7 @@ use tempfile::TempDir;
 ///
 /// The `prefix` keeps fixture directories human-recognizable on disk while a
 /// debug session is paused; the underlying [`TempDir`] is removed when the
-/// returned value is dropped, so tests no longer need an explicit
+/// returned value is dropped, so tests need no explicit
 /// `fs::remove_dir_all` at the end.
 pub fn temp_dir(prefix: &str) -> TempDir {
     tempfile::Builder::new()

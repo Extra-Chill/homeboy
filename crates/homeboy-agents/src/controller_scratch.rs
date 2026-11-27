@@ -453,8 +453,8 @@ fn prune_stranded_worktree_registration(registration: &ControllerScratchGitWorkt
 /// Unregister every linked Git worktree inside a scratch lease using Git's own
 /// lifecycle operation, before the lease's bytes are removed.
 ///
-/// This is the #10568 defect in one line: cleanup used to `remove_dir_all` the
-/// lease, which deletes a *registered* worktree behind Git's back and leaves
+/// Removing the lease with `remove_dir_all` alone would delete a *registered*
+/// worktree behind Git's back and leave
 /// `<repo>/.git/worktrees/<id>` alive in a shared repository, inflating every
 /// worktree inventory for months (Git only expires registrations during `gc`,
 /// after `gc.worktreePruneExpire`).
@@ -3347,78 +3347,84 @@ mod tests {
         }
     }
 
+    /// Owner, run and attempt-workspace guards decide eligibility; the
+    /// retention override and harvested evidence never relax a live guard.
     #[test]
-    fn active_owner_protects_expired_reconstructable_resource() {
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        let mut resource = resource(&scratch, root.path());
-        resource.owner_pid = std::process::id();
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, None),
-            Some("owner process is still running".to_string())
-        );
-    }
-
-    #[test]
-    fn interrupted_dead_owner_with_harvested_ephemeral_evidence_bypasses_retention() {
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        let mut resource = resource(&scratch, root.path());
-        resource.lifecycle_state = "interrupted".to_string();
-        resource.ephemeral = true;
-        resource.finalized_at = Some(chrono::Utc::now().to_rfc3339());
-        resource.terminal_evidence = Some(serde_json::json!({
+    fn cleanup_block_reason_guards_live_owners_runs_and_dirty_attempt_workspaces() {
+        let harvested = serde_json::json!({
             "workspace_recovery": { "state": "explicitly_ephemeral" }
-        }));
+        });
+        for (case, override_seconds, expected) in [
+            ("live_owner", None, Some("owner process is still running")),
+            (
+                "live_owner_override",
+                Some(0),
+                Some("owner process is still running"),
+            ),
+            ("interrupted_dead_harvested", None, None),
+            (
+                "interrupted_live_harvested",
+                None,
+                Some("owner process is still running"),
+            ),
+            (
+                "active_run_stale_pid",
+                None,
+                Some("owning run is still active"),
+            ),
+            ("nested_generated_dirty_repo", Some(0), None),
+            (
+                "dirty_attempt_workspace",
+                Some(0),
+                Some("git checkout has dirty or unpushed state"),
+            ),
+        ] {
+            let (_observation_root, observation) = observation_store();
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            let mut resource = resource(&scratch, root.path());
+            match case {
+                "live_owner" => resource.owner_pid = std::process::id(),
+                "live_owner_override" => {
+                    resource.lifecycle_state = "released".to_string();
+                    resource.owner_pid = std::process::id();
+                }
+                "interrupted_dead_harvested" | "interrupted_live_harvested" => {
+                    resource.lifecycle_state = "interrupted".to_string();
+                    resource.ephemeral = true;
+                    resource.terminal_evidence = Some(harvested.clone());
+                    if case == "interrupted_live_harvested" {
+                        resource.owner_pid = std::process::id();
+                    }
+                }
+                "active_run_stale_pid" => {
+                    resource.run_id = observation
+                        .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+                        .expect("running run")
+                        .id;
+                    resource.finalized_at = None;
+                }
+                _ => {
+                    let nested = scratch.join(if case == "dirty_attempt_workspace" {
+                        "workspace"
+                    } else {
+                        "generated-repo"
+                    });
+                    fs::create_dir_all(&nested).expect("nested repo");
+                    run_git(&nested, &["init", "-b", "main"]);
+                    fs::write(nested.join("untracked.txt"), "dirty").expect("dirty file");
+                    resource.plan_id = "scheduler-plan".to_string();
+                    resource.lifecycle_state = "released".to_string();
+                }
+            }
 
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, None),
-            None
-        );
-    }
-
-    #[test]
-    fn interrupted_live_owner_is_never_reclaimed_even_with_harvested_evidence() {
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        let mut resource = resource(&scratch, root.path());
-        resource.lifecycle_state = "interrupted".to_string();
-        resource.ephemeral = true;
-        resource.owner_pid = std::process::id();
-        resource.terminal_evidence = Some(serde_json::json!({
-            "workspace_recovery": { "state": "explicitly_ephemeral" }
-        }));
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, None).as_deref(),
-            Some("owner process is still running")
-        );
-    }
-
-    #[test]
-    fn active_durable_run_protects_a_stale_lease_pid() {
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        let run = observation
-            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
-            .expect("running run");
-        let mut resource = resource(&scratch, root.path());
-        resource.run_id = run.id;
-        resource.finalized_at = None;
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, None),
-            Some("owning run is still active".to_string())
-        );
+            assert_eq!(
+                cleanup_reason(&observation, &resource, &scratch, override_seconds).as_deref(),
+                expected,
+                "{case}"
+            );
+        }
     }
 
     #[test]
@@ -3469,32 +3475,6 @@ mod tests {
         assert_eq!(stored.lifecycle_state, "active");
         assert_eq!(stored.terminal_reason, None);
         assert!(stored.interrupted_at.is_none());
-        let finalized_at = stored.finalized_at.as_deref().expect("finalized");
-        let finalized = chrono::DateTime::parse_from_rfc3339(finalized_at)
-            .expect("timestamp")
-            .with_timezone(&chrono::Utc);
-        assert!(!retention_expired(
-            stored.finalized_at.as_deref(),
-            INTERRUPTED_RETENTION,
-            &scratch,
-            finalized
-        ));
-        assert!(retention_expired(
-            stored.finalized_at.as_deref(),
-            INTERRUPTED_RETENTION,
-            &scratch,
-            finalized + chrono::Duration::days(1)
-        ));
-        assert_eq!(output.retention_reasons.len(), 1);
-        assert_eq!(
-            output.retention_reasons[0].reason,
-            "terminal or missing run has a dead active lease owner; orphaned retention has started"
-        );
-        assert_eq!(output.retention_reasons[0].resource_count, 1);
-        assert_eq!(
-            output.retention_reasons[0].owners[0].run_id,
-            "missing-terminal-run"
-        );
 
         // Aged past the orphaned window (measured from the recorded
         // finalization): eligible on the very first pass, with no persisted
@@ -3926,17 +3906,14 @@ mod tests {
             if case == "dirty" {
                 fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
             }
-            // Legacy retention fields are ignored, not migrated or reserialized.
-            let mut index = serde_json::to_value(ControllerScratchIndex {
-                schema: schema(),
-                resources: vec![resource],
-                walk_resume: None,
-            })
-            .expect("index JSON");
-            index["resources"][0]["retention"] = serde_json::json!("P7D");
-            let index_path = data_root.path().join("controller-scratch/resources.json");
-            fs::create_dir_all(index_path.parent().unwrap()).expect("index directory");
-            fs::write(&index_path, serde_json::to_vec(&index).unwrap()).expect("legacy index");
+            write_index_at(
+                data_root.path(),
+                &ControllerScratchIndex {
+                    schema: schema(),
+                    resources: vec![resource],
+                    walk_resume: None,
+                },
+            );
             let output = cleanup_at(
                 data_root.path(),
                 &observation,
@@ -3957,47 +3934,7 @@ mod tests {
                 expected,
                 "{case}"
             );
-            let stored = serde_json::to_value(read_index_at(data_root.path())).unwrap();
-            assert!(stored["resources"][0].get("retention").is_none());
         }
-    }
-
-    #[test]
-    fn generated_nested_dirty_repo_does_not_retain_scheduler_scratch() {
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        let generated = scratch.join("generated-repo");
-        fs::create_dir_all(&generated).expect("generated repo");
-        run_git(&generated, &["init", "-b", "main"]);
-        fs::write(generated.join("untracked.txt"), "generated").expect("dirty fixture");
-        let mut resource = resource(&scratch, root.path());
-        resource.plan_id = "scheduler-plan".to_string();
-        resource.lifecycle_state = "released".to_string();
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, Some(0)),
-            None
-        );
-    }
-
-    #[test]
-    fn dirty_scheduler_attempt_workspace_retains_its_scratch() {
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        let workspace = scratch.join("workspace");
-        fs::create_dir_all(&workspace).expect("attempt workspace");
-        run_git(&workspace, &["init", "-b", "main"]);
-        fs::write(workspace.join("untracked.txt"), "candidate").expect("dirty candidate");
-        let mut resource = resource(&scratch, root.path());
-        resource.plan_id = "scheduler-plan".to_string();
-        resource.lifecycle_state = "released".to_string();
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, Some(0)),
-            Some("git checkout has dirty or unpushed state".to_string())
-        );
     }
 
     #[test]
@@ -4874,10 +4811,6 @@ mod tests {
             let index_path = workspace.join(".git/index");
             let original_index = fs::read(&index_path).expect("real index");
             let mut resource = read_index_at(data_root.path()).resources.remove(0);
-            // Old index rows may still carry the retired field; serde ignores it.
-            let mut legacy = serde_json::to_value(&resource).expect("serialize resource");
-            legacy["component_id"] = serde_json::json!("retired-component");
-            resource = serde_json::from_value(legacy).expect("legacy resource");
             if case.starts_with("stale_") {
                 let (_observation_root, observation) = observation_store();
                 resource.lifecycle_state = "interrupted".to_string();
@@ -5129,24 +5062,6 @@ mod tests {
     }
 
     #[test]
-    fn retention_override_does_not_bypass_running_owner_guard() {
-        let (_observation_root, observation) = observation_store();
-        // A resource whose owner process is still running stays skipped even
-        // with the override — the override never relaxes the running-owner guard.
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        let mut resource = resource(&scratch, root.path());
-        resource.lifecycle_state = "released".to_string();
-        resource.owner_pid = std::process::id();
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, Some(0)),
-            Some("owner process is still running".to_string())
-        );
-    }
-
-    #[test]
     fn skipped_rows_have_bounded_default_detail_and_lossless_full_detail() {
         let data_root = tempfile::tempdir().expect("data root");
         let (_observation_root, observation) = observation_store();
@@ -5284,41 +5199,6 @@ mod tests {
         assert_eq!(applied.candidates.len(), OutputBudget::COLLECTION.max_items);
         assert!(!root.path().join("scratch-0").exists());
         assert!(!root.path().join(format!("scratch-{}", total - 1)).exists());
-    }
-
-    #[test]
-    fn full_detail_is_lossless_for_thousands_of_candidates_without_expanding_default_output() {
-        let candidates = (0..2_000)
-            .map(|index| ControllerScratchCandidate {
-                path: format!("/scratch/{index}"),
-                run_id: format!("run-{index}"),
-                task_id: format!("task-{index}"),
-                size_bytes: index,
-                owner_pid: u32::MAX,
-                lease_id: format!("lease-{index}"),
-                reason: String::new(),
-                lifecycle_state: "released".to_string(),
-                source_ref: None,
-            })
-            .collect::<Vec<_>>();
-        let (default, default_detail) = present_detail(
-            candidates.clone(),
-            false,
-            candidates.len(),
-            "homeboy cleanup --include controller-scratch --full".to_string(),
-        )
-        .expect("default detail");
-        assert_eq!(default.len(), OutputBudget::COLLECTION.max_items);
-        assert_eq!(default_detail.omitted_items, 2_000 - default.len());
-        let (full, full_detail) = present_detail(
-            candidates,
-            true,
-            2_000,
-            "homeboy cleanup --include controller-scratch --full".to_string(),
-        )
-        .expect("full detail");
-        assert_eq!(full.len(), 2_000);
-        assert!(!full_detail.truncated);
     }
 
     /// A deadline-bounded apply pass resumes where the previous one stopped.

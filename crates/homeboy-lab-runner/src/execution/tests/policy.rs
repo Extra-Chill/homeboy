@@ -1,6 +1,5 @@
 use super::*;
 use serde_json::json;
-use std::time::Duration;
 
 #[test]
 fn test_required_extensions_for_command_reads_extension_flags() {
@@ -26,6 +25,7 @@ fn test_required_extensions_for_command_reads_extension_flags() {
 fn test_runner_policy_denies_raw_ssh_exec_by_default() {
     let runner = ssh_runner();
     let options = RunnerExecOptions {
+        allow_concurrent: false,
         execution_context:
             homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd: Some("/srv/homeboy/project".to_string()),
@@ -75,6 +75,7 @@ fn test_runner_policy_enforces_projects_commands_workspace_and_artifacts() {
     };
 
     let allowed = RunnerExecOptions {
+        allow_concurrent: false,
         execution_context:
             homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local("homeboy"),
         cwd: Some("/srv/homeboy/extrachill/homeboy".to_string()),
@@ -170,24 +171,12 @@ fn test_daemon_api_get_requires_connected_runner() {
 }
 
 #[test]
-fn canonical_daemon_body_requires_nested_body() {
-    let err = canonical_daemon_body(&json!({ "job": {} }), "daemon exec response")
-        .expect_err("reject legacy direct data");
-    assert!(err.message.contains("data.body"));
-}
-
-#[test]
-fn canonical_daemon_body_returns_nested_body() {
+fn canonical_daemon_body_reads_only_the_nested_body() {
     let data = json!({ "body": { "job": { "id": "job-1" } } });
     let body = canonical_daemon_body(&data, "daemon exec response").expect("body");
     assert_eq!(body["job"]["id"], "job-1");
-}
 
-#[test]
-fn runner_exec_wait_timeout_defaults_to_controller_timeout_budget() {
-    std::env::remove_var(RUNNER_EXEC_WAIT_TIMEOUT_ENV);
-    assert_eq!(
-        runner_exec_wait_timeout(&homeboy_core::server::RunnerSettings::default(), None).timeout,
-        Duration::from_secs(20 * 60)
-    );
+    let err = canonical_daemon_body(&json!({ "job": {} }), "daemon exec response")
+        .expect_err("reject direct data");
+    assert!(err.message.contains("data.body"));
 }

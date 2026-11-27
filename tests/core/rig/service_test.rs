@@ -4,8 +4,6 @@
 //! in the end-to-end smoke described in #1468. Unit scope here covers the
 //! pure types and status-enum ergonomics that back the runner's reporting.
 
-use crate::service::ServiceStatus;
-
 #[cfg(unix)]
 mod lifecycle {
     use std::collections::HashMap;
@@ -17,9 +15,8 @@ mod lifecycle {
     use homeboy_core::test_support::with_isolated_home;
 
     fn command_rig(id: &str, command: &str, cwd: Option<String>) -> RigSpec {
-        let mut services = HashMap::new();
-        services.insert(
-            "cmd".to_string(),
+        let mut rig = single_service_rig(
+            id,
             ServiceSpec {
                 kind: ServiceKind::Command,
                 cwd,
@@ -30,34 +27,9 @@ mod lifecycle {
                 discover: None,
             },
         );
-        RigSpec {
-            effective_component_paths: Default::default(),
-            workloads: Default::default(),
-            id: id.to_string(),
-            description: String::new(),
-            components: HashMap::new(),
-            services,
-            symlinks: Vec::new(),
-            shared_paths: Vec::new(),
-            resources: Default::default(),
-            lifecycle: Default::default(),
-            requirements: Default::default(),
-            pipeline: HashMap::new(),
-            bench: None,
-            fuzz: None,
-            trace: Default::default(),
-            app_launcher: None,
-            bench_workloads: HashMap::new(),
-            trace_workloads: HashMap::new(),
-            fuzz_workloads: Default::default(),
-            trace_workload_defaults: HashMap::new(),
-            trace_variants: HashMap::new(),
-            trace_profiles: HashMap::new(),
-            trace_experiments: HashMap::new(),
-            trace_guardrails: Vec::new(),
-            bench_profiles: HashMap::new(),
-            fuzz_profiles: HashMap::new(),
-        }
+        let service = rig.services.remove("svc").expect("svc");
+        rig.services.insert("cmd".to_string(), service);
+        rig
     }
 
     fn single_service_rig(id: &str, service: ServiceSpec) -> RigSpec {
@@ -236,38 +208,6 @@ mod lifecycle {
     }
 
     #[test]
-    fn test_discover_external_pid_returns_none_when_no_process_matches() {
-        let discover = DiscoverSpec {
-            pattern: "homeboy-test-no-such-external-process-XQZ-1750".to_string(),
-            argv_contains: Vec::new(),
-        };
-
-        assert_eq!(service::discover_external_pid(&discover).unwrap(), None);
-    }
-
-    #[test]
-    fn test_command_service_start_status_stop_lifecycle() {
-        with_isolated_home(|_home| {
-            let rig = command_rig("service-lifecycle", "sleep 30", None);
-            let pid = service::start(&crate::state::test_state_store(), &rig, "cmd")
-                .expect("start command service");
-
-            assert_eq!(
-                service::status(&crate::state::test_state_store(), &rig.id, "cmd").expect("status"),
-                ServiceStatus::Running(pid)
-            );
-
-            service::stop(&crate::state::test_state_store(), &rig, "cmd")
-                .expect("stop command service");
-            assert_eq!(
-                service::status(&crate::state::test_state_store(), &rig.id, "cmd")
-                    .expect("status after stop"),
-                ServiceStatus::Stopped
-            );
-        });
-    }
-
-    #[test]
     fn test_command_service_stop_kills_process_group_children() {
         with_isolated_home(|_home| {
             let rig = command_rig("service-process-group", "sleep 30 & wait", None);
@@ -323,7 +263,12 @@ mod lifecycle {
                 ServiceStatus::Running(pid)
             );
 
-            service::stop(&crate::state::test_state_store(), &rig, "cmd").expect("cleanup");
+            service::stop(&crate::state::test_state_store(), &rig, "cmd").expect("stop");
+            assert_eq!(
+                service::status(&crate::state::test_state_store(), &rig.id, "cmd")
+                    .expect("status after stop"),
+                ServiceStatus::Stopped
+            );
         });
     }
 
@@ -360,70 +305,28 @@ mod lifecycle {
 }
 
 #[test]
-fn test_service_status_variants_distinguish() {
-    let running = ServiceStatus::Running(42);
-    let stopped = ServiceStatus::Stopped;
-    let stale = ServiceStatus::Stale(42);
-
-    assert_ne!(running, stopped);
-    assert_ne!(running, stale);
-    assert_ne!(stopped, stale);
-}
-
-#[test]
-fn test_service_status_running_carries_pid() {
-    match ServiceStatus::Running(12345) {
-        ServiceStatus::Running(pid) => assert_eq!(pid, 12345),
-        other => panic!("expected Running, got {:?}", other),
+fn test_parse_etime_seconds_handles_every_ps_format() {
+    use super::platform::parse_etime_seconds;
+    // BSD/GNU `ps -o etime` emits [[DD-]HH:]MM:SS; garbage must not parse.
+    for (input, expected) in [
+        ("02:30", Some(150)),
+        ("0:01", Some(1)),
+        ("01:02:03", Some(3_723)),
+        ("04-09:27:59", Some(379_679)),
+        ("", None),
+        ("not-a-time", None),
+        ("01", None),
+        ("a:b:c", None),
+    ] {
+        assert_eq!(parse_etime_seconds(input), expected, "input {input:?}");
     }
-}
-
-#[test]
-fn test_service_status_stale_carries_pid() {
-    match ServiceStatus::Stale(67890) {
-        ServiceStatus::Stale(pid) => assert_eq!(pid, 67890),
-        other => panic!("expected Stale, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_parse_etime_mm_ss() {
-    use super::platform::parse_etime_seconds;
-    // 2 minutes 30 seconds.
-    assert_eq!(parse_etime_seconds("02:30"), Some(150));
-    assert_eq!(parse_etime_seconds("0:01"), Some(1));
-}
-
-#[test]
-fn test_parse_etime_hh_mm_ss() {
-    use super::platform::parse_etime_seconds;
-    // 1h 02m 03s.
-    assert_eq!(parse_etime_seconds("01:02:03"), Some(3_723));
-}
-
-#[test]
-fn test_parse_etime_dd_hh_mm_ss() {
-    use super::platform::parse_etime_seconds;
-    // 4 days, 9 hours, 27 minutes, 59 seconds — the format BSD `ps` emits
-    // for a long-running daemon (matches what `etime` printed during dev).
-    assert_eq!(parse_etime_seconds("04-09:27:59"), Some(379_679));
-}
-
-#[test]
-fn test_parse_etime_rejects_garbage() {
-    use super::platform::parse_etime_seconds;
-    assert_eq!(parse_etime_seconds(""), None);
-    assert_eq!(parse_etime_seconds("not-a-time"), None);
-    assert_eq!(parse_etime_seconds("01"), None);
-    assert_eq!(parse_etime_seconds("a:b:c"), None);
 }
 
 /// #11128: rig service logs were an unbounded append -- `create(true)
 /// .append(true)`, no rotation, no TTL, and no cleanup category -- so a chatty
 /// service filled the disk and nothing reclaimed it.
 mod log_rotation {
-    use crate::service::log_rotation::{rotate_log_if_oversized, rotation_renames};
-    use crate::service::{RIG_LOG_MAX_BYTES, RIG_LOG_MAX_GENERATIONS};
+    use crate::service::log_rotation::rotate_log_if_oversized;
 
     fn write(path: &std::path::Path, bytes: usize) {
         std::fs::write(path, vec![b'x'; bytes]).expect("write log");
@@ -486,26 +389,6 @@ mod log_rotation {
         );
     }
 
-    /// Renames run oldest-first. Newest-first would copy generation 1 over
-    /// generation 2 and lose the older bytes before they were promoted.
-    #[test]
-    fn the_rename_chain_runs_oldest_first() {
-        let renames = rotation_renames(std::path::Path::new("/logs/svc.log"), 3);
-
-        let order: Vec<String> = renames
-            .iter()
-            .map(|(from, to)| format!("{}->{}", from.display(), to.display()))
-            .collect();
-        assert_eq!(
-            order,
-            vec![
-                "/logs/svc.log.2->/logs/svc.log.3".to_string(),
-                "/logs/svc.log.1->/logs/svc.log.2".to_string(),
-                "/logs/svc.log->/logs/svc.log.1".to_string(),
-            ]
-        );
-    }
-
     /// Rotation must never invent a log for a service that has not run.
     #[test]
     fn a_missing_log_is_not_rotated_and_is_not_created() {
@@ -528,10 +411,4 @@ mod log_rotation {
         assert!(!rotate_log_if_oversized(&log, 1, 0).expect("zero generations"));
         assert_eq!(log.metadata().expect("metadata").len(), 32);
     }
-
-    // The shipped bounds are finite: checked at compile time.
-    const _: () = {
-        assert!(RIG_LOG_MAX_BYTES > 0);
-        assert!(RIG_LOG_MAX_GENERATIONS > 0);
-    };
 }

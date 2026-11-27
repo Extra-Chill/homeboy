@@ -2630,10 +2630,8 @@ fn live_replacement_gate_execution_error(run_id: &str) -> Error {
     error
 }
 
-/// Older applied reports lost the post-apply baseline when the final gate
-/// report replaced its checkpoint. Recover it only from one controller-owned
-/// checkpoint for this exact promotion; any conflicting or incomplete evidence
-/// leaves the destination unavailable for dirty-worktree reuse.
+/// Whether the attempt's run record is still non-terminal (or unreadable), so
+/// its provider execution has not settled yet.
 pub(crate) fn attempt_needs_execution_with_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -3137,6 +3135,12 @@ fn terminal_form_title(
     form.validate(title_policy)?;
     Ok(form.pr_title)
 }
+
+#[path = "cook_partial_publication.rs"]
+mod partial_publication;
+pub(super) use partial_publication::publish_partial_cook;
+#[cfg(test)]
+pub(super) use partial_publication::publish_partial_cook_with;
 
 /// Recover publication from the durable Cook recipe and applied promotion.
 pub fn recover_cook_pr(
@@ -3868,6 +3872,20 @@ fn cook_review_dossier_with_stores_and_review_form(
             url: None,
         });
     }
+    let partial = lifecycle_store
+        .read_record(successful_run_id)?
+        .metadata
+        .get("partial_delivery")
+        .cloned();
+    if let Some(partial) = &partial {
+        evidence.push(AgentTaskReviewEvidence {
+            summary: format!(
+                "Partial delivery. Remaining scope: {}",
+                terminal_form.incomplete_reason
+            ),
+            url: partial["follow_up_url"].as_str().map(str::to_string),
+        });
+    }
     // Form-only continuations may substitute the implementation promotion for
     // candidate metadata; the persisted terminal record remains recovery proof.
     if let Some(replacement) = lifecycle_store
@@ -4022,7 +4040,17 @@ fn cook_review_dossier_with_stores_and_review_form(
                 .first()
                 .map(crate::agent_task_review_dossier::delivery_checklist::request_delivery_items)
                 .unwrap_or_default(),
-            &terminal_form.delivery,
+            &if partial.is_some() {
+                let mut delivery = terminal_form.delivery.clone();
+                delivery.push(serde_json::from_value(json!({
+                    "item": "Remaining scope",
+                    "status": "not_delivered",
+                    "reason": terminal_form.incomplete_reason,
+                }))?);
+                delivery
+            } else {
+                terminal_form.delivery.clone()
+            },
         ),
         completion,
     })
@@ -4640,12 +4668,14 @@ fn review_form_for_finalization_in_store(
                 )
             })?;
             form.validate(title_policy)?;
-            form.ensure_publishable()?;
+            if lifecycle_store.read_record(run_id)?.metadata.get("partial_delivery").is_none() {
+                form.ensure_publishable()?;
+            }
             Ok(form)
         })
         .map_err(|mut error| {
             error.message = format!(
-                "{} Supply a complete replacement with `homeboy agent-task recover {run_id} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`.",
+                "{} For a green incomplete candidate, publish its remaining scope with `homeboy agent-task recover {run_id} --publish-partial`. A missing or invalid form can instead be supplied with `--review-form` and authorship inputs.",
                 error.message
             );
             error
@@ -5215,7 +5245,21 @@ pub(crate) fn cook_failure_context_with_probe_policy(
                         .flat_map(|outcome| &outcome.diagnostics),
                 )
             });
-    let (phase, reason_code, diagnostic) = if status == "no_candidate" {
+    let stranded_job = record
+        .as_ref()
+        .and_then(|record| super::cook_recipe::stranded_continuation_job(lifecycle_store, record));
+    let (phase, reason_code, diagnostic) = if let Some(job_id) = stranded_job.as_ref() {
+        (
+            "terminal_continuation".to_string(),
+            "stranded_continuation".to_string(),
+            Some(serde_json::json!({
+                "class": "agent_task.stranded_continuation",
+                "message": "Terminal Cook continuation is pending and unclaimed but its scheduled job is terminal",
+                "job_id": job_id,
+                "repair_command": format!("homeboy agent-task recover {cook_id}"),
+            })),
+        )
+    } else if status == "no_candidate" {
         (
             "candidate_selection".to_string(),
             "no_candidate".to_string(),
@@ -5431,7 +5475,7 @@ pub(crate) fn cook_failure_context_with_probe_policy(
                             !wait.live_driver && wait.liveness.is_reconcilable()
                         }) || agent_task_lifecycle::disconnected_runner_recovery_available(&record)
                     }),
-                live_driver,
+                live_driver && stranded_job.is_none(),
                 recovery_legal,
                 blocking_claim.is_some(),
                 pending_operator_feedback,
@@ -6419,6 +6463,18 @@ mod recovery_action_tests {
             actions(&recovery.next_actions),
             actions(&recovery.legal_actions)
         );
+
+        // Only the typed `fork_replacement` recovery names a mismatch.
+        assert!(exact_checkpoint_candidate_mismatch(&Some(
+            serde_json::json!({
+                "details": { "recovery": { "action": "fork_replacement" } },
+            })
+        )));
+        assert!(!exact_checkpoint_candidate_mismatch(&Some(
+            serde_json::json!({
+                "details": { "recovery": { "action": "resume" } },
+            })
+        )));
     }
 
     #[test]
@@ -6475,20 +6531,6 @@ mod recovery_action_tests {
     }
 
     #[test]
-    fn exact_checkpoint_mismatch_matches_only_the_typed_recovery_action() {
-        assert!(exact_checkpoint_candidate_mismatch(&Some(
-            serde_json::json!({
-                "details": { "recovery": { "action": "fork_replacement" } },
-            })
-        )));
-        assert!(!exact_checkpoint_candidate_mismatch(&Some(
-            serde_json::json!({
-                "details": { "recovery": { "action": "resume" } },
-            })
-        )));
-    }
-
-    #[test]
     fn patch_evidence_does_not_select_a_recovery_candidate() {
         let recovery = cook_recovery_actions(
             "promotion_failed",
@@ -6512,30 +6554,6 @@ mod recovery_action_tests {
                 "homeboy agent-task recover ambiguous-attempt-1",
             ]
         );
-    }
-
-    #[test]
-    fn ambiguous_selector_actions_do_not_advertise_mime_shaped_or_invalid_artifacts() {
-        let recovery = cook_recovery_actions(
-            "promotion_failed",
-            "ambiguous-attempt-1",
-            true,
-            false,
-            false,
-            false,
-            None,
-        );
-        assert_eq!(
-            recovery
-                .legal_actions
-                .last()
-                .map(|action| action.command.as_str()),
-            Some("homeboy agent-task recover ambiguous-attempt-1")
-        );
-        assert!(!recovery
-            .legal_actions
-            .iter()
-            .any(|action| action.command.contains("mime-shaped")));
     }
 }
 

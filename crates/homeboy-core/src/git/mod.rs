@@ -499,31 +499,24 @@ mod identity_tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
-    fn bot_shorthand() {
-        let id = parse_git_identity(Some("bot"));
-        assert_eq!(id.name, BOT_NAME);
-        assert_eq!(id.email, BOT_EMAIL);
-    }
-
-    #[test]
-    fn none_defaults_to_bot() {
-        let id = parse_git_identity(None);
-        assert_eq!(id.name, BOT_NAME);
-        assert_eq!(id.email, BOT_EMAIL);
-    }
-
-    #[test]
-    fn custom_name_and_email() {
-        let id = parse_git_identity(Some("Deploy Bot <deploy@example.com>"));
-        assert_eq!(id.name, "Deploy Bot");
-        assert_eq!(id.email, "deploy@example.com");
-    }
-
-    #[test]
-    fn name_only_uses_bot_email() {
-        let id = parse_git_identity(Some("My Service"));
-        assert_eq!(id.name, "My Service");
-        assert_eq!(id.email, BOT_EMAIL);
+    fn parse_git_identity_resolves_bot_custom_and_name_only_specs() {
+        for (spec, name, email) in [
+            (Some("bot"), BOT_NAME, BOT_EMAIL),
+            (None, BOT_NAME, BOT_EMAIL),
+            (
+                Some("Deploy Bot <deploy@example.com>"),
+                "Deploy Bot",
+                "deploy@example.com",
+            ),
+            (Some("My Service"), "My Service", BOT_EMAIL),
+        ] {
+            let id = parse_git_identity(spec);
+            assert_eq!(
+                (id.name.as_str(), id.email.as_str()),
+                (name, email),
+                "{spec:?}"
+            );
+        }
     }
 
     #[test]
@@ -562,124 +555,80 @@ mod identity_tests {
         });
     }
 
+    /// A configured host pins the publication identity: repository config and
+    /// `GIT_AUTHOR_*`/`GIT_COMMITTER_*` overrides are both checked, and the
+    /// author and committer must each match.
     #[test]
-    fn publication_identity_configured_host_requires_complete_effective_identity() {
-        with_isolated_home(|_| {
-            let temp = identity_test_repo();
-            save_identity_policy();
-
-            let error = with_identity_environment(("", ""), ("", ""), || {
-                validate_publication_identity(temp.path().to_str().expect("path"))
-                    .expect_err("effective identity is required")
+    fn publication_identity_configured_host_enforces_the_expected_identity() {
+        const EXPECTED: (&str, &str) = ("Expected Author", "expected@example.test");
+        const WRONG: (&str, &str) = ("Wrong Author", "wrong@example.test");
+        type Env = Option<((&'static str, &'static str), (&'static str, &'static str))>;
+        let cases: [(&str, Option<(&str, &str)>, Env, Option<(&str, &str)>); 6] = [
+            (
+                "incomplete identity",
+                None,
+                Some((("", ""), ("", ""))),
+                Some(("", "")),
+            ),
+            (
+                "wrong repository identity",
+                Some(WRONG),
+                None,
+                Some(("/actual/author/name", "Wrong Author")),
+            ),
+            ("correct repository identity", Some(EXPECTED), None, None),
+            (
+                "allowed environment override",
+                Some(WRONG),
+                Some((EXPECTED, EXPECTED)),
+                None,
+            ),
+            (
+                "rejected environment override",
+                Some(EXPECTED),
+                Some((("Override Author", "override@example.test"), EXPECTED)),
+                Some(("/actual/author/email", "override@example.test")),
+            ),
+            (
+                "different committer",
+                None,
+                Some((EXPECTED, ("Other Committer", "other@example.test"))),
+                Some(("/actual/committer/name", "Other Committer")),
+            ),
+        ];
+        for (case, config, env, rejection) in cases {
+            with_isolated_home(|_| {
+                let temp = identity_test_repo();
+                save_identity_policy();
+                if let Some((name, email)) = config {
+                    run_identity_git(temp.path(), &["config", "user.name", name]);
+                    run_identity_git(temp.path(), &["config", "user.email", email]);
+                }
+                let validate =
+                    || validate_publication_identity(temp.path().to_str().expect("path"));
+                let result = match env {
+                    Some((author, committer)) => {
+                        with_identity_environment(author, committer, validate)
+                    }
+                    None => validate(),
+                };
+                match (result, rejection) {
+                    (Ok(proof), None) => {
+                        assert_eq!(proof.name, EXPECTED.0, "{case}");
+                        assert_eq!(proof.email, EXPECTED.1, "{case}");
+                        assert_eq!(proof.committer_name, EXPECTED.0, "{case}");
+                    }
+                    (Err(error), Some(("", ""))) => {
+                        assert!(error.message.contains("prospective identity"), "{case}");
+                    }
+                    (Err(error), Some((pointer, actual))) => {
+                        assert_eq!(error.details.pointer(pointer).unwrap(), actual, "{case}");
+                        assert_eq!(error.details["expected"]["name"], EXPECTED.0, "{case}");
+                    }
+                    (result, _) => panic!("{case}: unexpected outcome {result:?}"),
+                }
             });
-
-            assert!(error.message.contains("prospective identity"));
-        });
-    }
-
-    #[test]
-    fn publication_identity_configured_host_rejects_incorrect_identity() {
-        with_isolated_home(|_| {
-            let temp = identity_test_repo();
-            save_identity_policy();
-            run_identity_git(temp.path(), &["config", "user.name", "Wrong Author"]);
-            run_identity_git(temp.path(), &["config", "user.email", "wrong@example.test"]);
-
-            let error = validate_publication_identity(temp.path().to_str().expect("path"))
-                .expect_err("incorrect identity");
-
-            assert_eq!(error.details["actual"]["author"]["name"], "Wrong Author");
-            assert_eq!(error.details["expected"]["name"], "Expected Author");
-        });
-    }
-
-    #[test]
-    fn publication_identity_configured_host_accepts_correct_identity() {
-        with_isolated_home(|_| {
-            let temp = identity_test_repo();
-            save_identity_policy();
-            run_identity_git(temp.path(), &["config", "user.name", "Expected Author"]);
-            run_identity_git(
-                temp.path(),
-                &["config", "user.email", "expected@example.test"],
-            );
-
-            let proof = validate_publication_identity(temp.path().to_str().expect("path"))
-                .expect("correct identity");
-
-            assert_eq!(proof.name, "Expected Author");
-            assert_eq!(proof.email, "expected@example.test");
-            assert_eq!(proof.committer_name, "Expected Author");
-            assert_eq!(proof.scope, "repository_local");
-        });
-    }
-
-    #[test]
-    fn publication_identity_accepts_allowed_environment_overrides() {
-        with_isolated_home(|_| {
-            let temp = identity_test_repo();
-            save_identity_policy();
-            run_identity_git(temp.path(), &["config", "user.name", "Wrong Author"]);
-            run_identity_git(temp.path(), &["config", "user.email", "wrong@example.test"]);
-
-            with_identity_environment(
-                ("Expected Author", "expected@example.test"),
-                ("Expected Author", "expected@example.test"),
-                || {
-                    let proof = validate_publication_identity(temp.path().to_str().expect("path"))
-                        .expect("allowed environment identity");
-                    assert_eq!(proof.name, "Expected Author");
-                    assert_eq!(proof.committer_name, "Expected Author");
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn publication_identity_rejects_environment_override() {
-        with_isolated_home(|_| {
-            let temp = identity_test_repo();
-            save_identity_policy();
-            run_identity_git(temp.path(), &["config", "user.name", "Expected Author"]);
-            run_identity_git(
-                temp.path(),
-                &["config", "user.email", "expected@example.test"],
-            );
-
-            with_identity_environment(
-                ("Override Author", "override@example.test"),
-                ("Expected Author", "expected@example.test"),
-                || {
-                    let error = validate_publication_identity(temp.path().to_str().expect("path"))
-                        .expect_err("rejected environment identity");
-                    assert_eq!(
-                        error.details["actual"]["author"]["email"],
-                        "override@example.test"
-                    );
-                },
-            );
-        });
-    }
-
-    #[test]
-    fn publication_identity_rejects_different_author_and_committer() {
-        with_isolated_home(|_| {
-            let temp = identity_test_repo();
-            save_identity_policy();
-
-            with_identity_environment(
-                ("Expected Author", "expected@example.test"),
-                ("Other Committer", "other@example.test"),
-                || {
-                    let error = validate_publication_identity(temp.path().to_str().expect("path"))
-                        .expect_err("different committer");
-                    assert_eq!(
-                        error.details["actual"]["committer"]["name"],
-                        "Other Committer"
-                    );
-                },
-            );
-        });
+        }
     }
 
     #[test]
@@ -872,61 +821,25 @@ mod resolve_target_tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// Returns (TempDir, repo_path) where repo_path has a homeboy.json with
-    /// the given component id.
-    fn make_portable_repo(id: &str) -> (TempDir, std::path::PathBuf) {
-        let dir = TempDir::new().expect("Failed to create temp dir");
-        let repo = dir.path().join(id);
-        fs::create_dir_all(&repo).expect("Failed to create repo dir");
-
-        let portable = serde_json::json!({ "id": id });
-        fs::write(
-            repo.join("homeboy.json"),
-            serde_json::to_string_pretty(&portable).unwrap(),
-        )
-        .expect("Failed to write homeboy.json");
-
-        // Capture path before moving dir.
-        let path = repo.clone();
-        (dir, path)
-    }
-
     #[test]
-    fn path_only_discovers_id_from_portable_config() {
-        let (_dir, repo) = make_portable_repo("my-plugin");
-
-        let (id, path) = resolve_target(None, Some(repo.to_str().unwrap()))
-            .expect("resolve_target should succeed with --path pointing at portable config");
-
-        assert_eq!(id, "my-plugin");
-        assert_eq!(path, repo.to_string_lossy());
-    }
-
-    #[test]
-    fn path_only_falls_back_to_basename_when_no_portable_config() {
+    fn path_resolves_explicit_id_portable_config_or_basename() {
         let dir = TempDir::new().unwrap();
-        let repo = dir.path().join("bare-checkout");
-        fs::create_dir_all(&repo).unwrap();
+        let portable = dir.path().join("portable-checkout");
+        fs::create_dir_all(&portable).unwrap();
+        fs::write(portable.join("homeboy.json"), r#"{"id":"my-plugin"}"#).unwrap();
+        let bare = dir.path().join("bare-checkout");
+        fs::create_dir_all(&bare).unwrap();
 
-        let (id, path) = resolve_target(None, Some(repo.to_str().unwrap()))
-            .expect("resolve_target should succeed with --path even without portable config");
-
-        assert_eq!(id, "bare-checkout");
-        assert_eq!(path, repo.to_string_lossy());
-    }
-
-    #[test]
-    fn path_and_id_both_provided_skips_discovery() {
-        let dir = TempDir::new().unwrap();
-        let repo = dir.path().join("anywhere");
-        fs::create_dir_all(&repo).unwrap();
-
-        let (id, path) = resolve_target(Some("explicit-id"), Some(repo.to_str().unwrap()))
-            .expect("resolve_target should succeed with both args");
-
-        // Trusts both inputs verbatim — no registry lookup, no discovery.
-        assert_eq!(id, "explicit-id");
-        assert_eq!(path, repo.to_string_lossy());
+        for (component_id, repo, expected_id) in [
+            (Some("explicit-id"), &bare, "explicit-id"),
+            (None, &portable, "my-plugin"),
+            (None, &bare, "bare-checkout"),
+        ] {
+            let (id, path) = resolve_target(component_id, Some(repo.to_str().unwrap()))
+                .expect("resolve_target with --path");
+            assert_eq!(id, expected_id);
+            assert_eq!(path, repo.to_string_lossy());
+        }
     }
 
     #[test]

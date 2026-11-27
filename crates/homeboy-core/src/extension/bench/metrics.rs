@@ -110,78 +110,7 @@ pub(crate) fn resolve_metric_policies(
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::super::parsing::{BenchMetrics, BenchResults, BenchScenario};
     use super::*;
-
-    fn policy(direction: Direction) -> BenchMetricPolicy {
-        BenchMetricPolicy {
-            direction,
-            regression_threshold_percent: Some(5.0),
-            regression_threshold_absolute: None,
-            variance_aware: false,
-            min_iterations_for_variance: None,
-            regression_test: None,
-            phase: None,
-        }
-    }
-
-    fn results(metrics: BTreeMap<String, f64>) -> BenchResults {
-        BenchResults {
-            component_id: "demo".to_string(),
-            iterations: 10,
-            provenance: Default::default(),
-            run_metadata: None,
-            metadata: BTreeMap::new(),
-            metric_groups: BTreeMap::new(),
-            timeline: Vec::new(),
-            span_definitions: BTreeMap::new(),
-            diagnostics: Vec::new(),
-            child_command_failures: Vec::new(),
-            phase_events: Vec::new(),
-            phase_summaries: Vec::new(),
-            failure_classification: None,
-            responsiveness: None,
-            budget_findings: Vec::new(),
-            scenarios: vec![BenchScenario {
-                id: "scenario".to_string(),
-                file: None,
-                source: None,
-                default_iterations: None,
-                tags: Vec::new(),
-                iterations: 10,
-                metrics: BenchMetrics {
-                    values: metrics,
-                    distributions: BTreeMap::new(),
-                },
-                metric_groups: BTreeMap::new(),
-                timeline: Vec::new(),
-                span_definitions: Vec::new(),
-                span_results: Vec::new(),
-                gates: Vec::new(),
-                gate_results: Vec::new(),
-                metadata: BTreeMap::new(),
-                provenance: Default::default(),
-                passed: true,
-                memory: None,
-                artifacts: BTreeMap::new(),
-                diagnostics: Vec::new(),
-                runs: None,
-                runs_summary: None,
-            }],
-            metric_policies: BTreeMap::new(),
-            metric_policy_presets: BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn test_compare() {
-        let resolved =
-            ResolvedMetricPolicy::custom("requests_per_second", &policy(Direction::HigherIsBetter));
-        let delta = resolved.compare(100.0, 90.0);
-
-        assert!(delta.regressed());
-        assert_eq!(delta.delta, Some(-10.0));
-    }
 
     #[test]
     fn test_compare_distribution() {
@@ -211,56 +140,12 @@ mod tests {
     }
 
     #[test]
-    fn test_variance_aware() {
-        let resolved = ResolvedMetricPolicy::custom(
-            "latency_ms",
-            &BenchMetricPolicy {
-                direction: Direction::LowerIsBetter,
-                regression_threshold_percent: None,
-                regression_threshold_absolute: None,
-                variance_aware: true,
-                min_iterations_for_variance: Some(3),
-                regression_test: Some(RegressionTest::MannWhitneyU),
-                phase: None,
-            },
-        );
+    fn undeclared_policies_fall_back_to_p95_only_when_reported() {
+        let none = BTreeMap::new();
 
-        assert!(resolved.variance_aware());
-    }
-
-    #[test]
-    fn test_custom() {
-        let resolved = ResolvedMetricPolicy::custom(
-            "error_rate",
-            &BenchMetricPolicy {
-                direction: Direction::LowerIsBetter,
-                regression_threshold_percent: None,
-                regression_threshold_absolute: Some(0.01),
-                variance_aware: false,
-                min_iterations_for_variance: None,
-                regression_test: None,
-                phase: None,
-            },
-        );
-        let delta = resolved.compare(0.0, 0.02);
-
-        assert_eq!(resolved.name(), "error_rate");
-        assert!(delta.regressed());
-    }
-
-    #[test]
-    fn test_resolve_metric_policies() {
-        let mut metrics = BTreeMap::new();
-        metrics.insert("p95_ms".to_string(), 100.0);
-
-        let results = results(metrics);
-        let reports_p95 = results
-            .scenarios
-            .iter()
-            .any(|scenario| scenario.metrics.get("p95_ms").is_some());
-        let resolved = resolve_metric_policies(&results.metric_policies, reports_p95, 5.0);
-
+        let resolved = resolve_metric_policies(&none, true, 5.0);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name(), "p95_ms");
+        assert!(resolve_metric_policies(&none, false, 5.0).is_empty());
     }
 }

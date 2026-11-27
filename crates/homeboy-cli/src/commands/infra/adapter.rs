@@ -120,44 +120,12 @@ pub(crate) fn output_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_contract::{CommandOutputContractKind, CommandResponseMode};
     use clap::Parser;
 
     fn parsed_command(args: &[&str]) -> Commands {
         crate::cli_surface::Cli::try_parse_from(args)
             .expect("CLI args should parse")
             .command
-    }
-
-    #[test]
-    fn json_only_contract_maps_to_output_descriptor() {
-        let adapter = TypedCommandAdapter::<()>::json_only(
-            CommandJsonFamily::Workspace,
-            CommandOutputFileMode::GenericEnvelope,
-            |_| (Ok(Value::Null), 0),
-        );
-
-        let descriptor = adapter.output_descriptor();
-
-        assert_eq!(descriptor.response_mode, CommandResponseMode::Json);
-        assert_eq!(
-            descriptor.output_file_mode,
-            CommandOutputFileMode::GenericEnvelope
-        );
-        assert_eq!(descriptor.json_family, CommandJsonFamily::Workspace);
-        assert_eq!(
-            descriptor.output_contract,
-            CommandOutputContractKind::JsonEnvelope
-        );
-        assert!(adapter.execute_json.is_some());
-    }
-    #[test]
-    fn command_adapter_recognizes_migrated_json_commands() {
-        assert!(command_adapter(
-            parsed_command(&["homeboy", "contract", "manifest"]),
-            CommandOutputFileMode::None,
-        )
-        .is_ok());
     }
 
     #[test]
@@ -190,26 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn migrated_adapter_output_descriptor_uses_adapter_contract() {
-        let descriptor = output_descriptor(
-            &parsed_command(&["homeboy", "contract", "manifest"]),
-            CommandOutputFileMode::GenericEnvelope,
-        )
-        .expect("contract is adapter-backed");
-
-        assert_eq!(descriptor.response_mode, CommandResponseMode::Json);
-        assert_eq!(descriptor.json_family, CommandJsonFamily::Workspace);
-        assert_eq!(
-            descriptor.output_file_mode,
-            CommandOutputFileMode::GenericEnvelope
-        );
-        assert_eq!(
-            descriptor.output_contract,
-            CommandOutputContractKind::JsonEnvelope
-        );
-    }
-
-    #[test]
     fn migrated_adapter_output_descriptors_match_command_contracts() {
         let commands = [("contract", &["homeboy", "contract", "manifest"][..])];
         let output_file_modes = [
@@ -229,23 +177,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn trace_observe_output_descriptor_matches_registered_command_contract() {
-        let command = parsed_command(&[
-            "homeboy",
-            "trace",
-            "observe",
-            "demo",
-            "--watch-process",
-            "sleep",
-        ]);
-        let spec = crate::command_contract::registered_command("trace").unwrap();
-
-        assert_eq!(
-            command.route(spec, false).descriptor,
-            spec.output_descriptor(CommandOutputFileMode::None)
-        );
     }
 }

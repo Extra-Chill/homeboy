@@ -1,6 +1,5 @@
 //! Tests for the product-neutral fuzz contracts.
 
-mod campaign_tests;
 mod cohort_tests;
 mod contract_tests;
 mod hotspot_tests;

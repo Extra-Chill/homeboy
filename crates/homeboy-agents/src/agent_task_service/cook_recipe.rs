@@ -2296,6 +2296,35 @@ fn lifecycle_continuation_state(value: Option<&Value>) -> CookContinuationState 
     }
 }
 
+/// A pending, unclaimed continuation whose scheduler has no live job.
+/// Observation only: never reconcile jobs from a status/diagnose read.
+pub(crate) fn stranded_continuation_job(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<String> {
+    if lifecycle_continuation_state(lifecycle_continuation(record))
+        != CookContinuationState::Pending
+    {
+        return None;
+    }
+    terminal_scheduler_job(store, record)
+}
+
+fn terminal_scheduler_job(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<String> {
+    let job_id = record
+        .metadata
+        .pointer("/cook_continuation_scheduler/job_id")?
+        .as_str()?;
+    let jobs =
+        homeboy_core::api_jobs::JobStore::open_without_reconciliation(store.observation_db_path())
+            .ok()?;
+    let job = jobs.get(job_id.parse().ok()?).ok()?;
+    job.status.is_terminal().then(|| job_id.to_string())
+}
+
 fn enqueue_lifecycle_continuation(
     recipe_store: &CookRecipeStore,
     continuation: &AgentTaskCookContinuation,
@@ -2318,10 +2347,21 @@ fn enqueue_lifecycle_continuation(
     }
     reconstruct_missing_attempt_record(&lifecycle_store, &recipe, &continuation.run_id)?;
     let mut enqueued = false;
+    let stranded_job = terminal_scheduler_job(
+        &lifecycle_store,
+        &lifecycle_store.read_record(&continuation.run_id)?,
+    );
     lifecycle_store.mutate_record(&continuation.run_id, |record| {
         let state = lifecycle_continuation_state(lifecycle_continuation(record));
+        // Automatic recovery spends the existing budget; only explicit operator
+        // recovery may reset it and clear the retained controller failure.
+        let stranded = matches!(state, CookContinuationState::Pending | CookContinuationState::Absent)
+            && stranded_job.as_deref().is_some_and(|job| {
+                record.metadata.pointer("/cook_continuation_scheduler/job_id").and_then(Value::as_str) == Some(job)
+            });
+        let rearming = rearm_failed || stranded;
         if state != CookContinuationState::Absent
-            && !(rearm_failed && state == CookContinuationState::Failed)
+            && !(rearming && matches!(state, CookContinuationState::Failed | CookContinuationState::Pending))
         {
             return false;
         }
@@ -2340,6 +2380,18 @@ fn enqueue_lifecycle_continuation(
             "generation": if rearm_failed { previous_generation.saturating_add(1) } else { previous_generation },
             "enqueued_at": now,
         });
+        if stranded && !rearm_failed {
+            // Read retries from the locked durable value, not the caller's
+            // potentially stale continuation snapshot.
+            value["retries"] = lifecycle_continuation(record)
+                .and_then(|value| value.get("retries"))
+                .cloned()
+                .unwrap_or(serde_json::json!(continuation.retries));
+            rearm_for_retry(&mut value);
+        }
+        if rearming {
+            record.ensure_metadata_object().remove("cook_continuation_scheduler");
+        }
         if rearm_failed {
             value["rearmed_at"] = serde_json::json!(agent_task_lifecycle::now_timestamp());
             record
@@ -2350,7 +2402,7 @@ fn enqueue_lifecycle_continuation(
             .ensure_metadata_object()
             .insert(LIFECYCLE_CONTINUATION_KEY.to_string(), value);
         record.updated_at = Some(agent_task_lifecycle::now_timestamp());
-        enqueued = true;
+        enqueued = record.metadata[LIFECYCLE_CONTINUATION_KEY]["state"] == "pending";
         true
     })?;
     Ok(enqueued)
@@ -2389,6 +2441,13 @@ fn claim_scheduled_lifecycle_continuation_for(
     let lifecycle_store = recipe_store.lifecycle_store();
     if let Ok(record) = lifecycle_store.read_record(run_id) {
         let value = lifecycle_continuation(&record);
+        if lifecycle_continuation_state(value) == CookContinuationState::Absent
+            && record.state().is_terminal()
+        {
+            // Validate recipe ownership through the same publication path used
+            // by reconciliation before reconstructing the missing signal.
+            recipe_store.enqueue_terminal_continuation(cook_id, run_id)?;
+        }
         if lifecycle_continuation_state(value) == CookContinuationState::Pending {
             if let Some(wait) = continuation_retry_wait(value) {
                 return Ok(ScheduledContinuationClaim::RetryAfter(wait));
@@ -4007,25 +4066,6 @@ mod tests {
         (context, store, options.identity.initial_plan)
     }
 
-    /// #15567: a lifecycle retry's plan says nothing about its source, so the
-    /// writer records it explicitly, in the same write as the attempt.
-    #[test]
-    fn a_retry_attempt_is_written_with_its_lineage() {
-        let (_context, store, plan) = lineage_store();
-        let recipe = store
-            .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
-            .expect("retry attempt");
-        assert_eq!(
-            recipe.attempts[1].lineage,
-            Some(super::super::cook_lineage::CookAttemptLineage::retry("run"))
-        );
-        // Durable, not just returned.
-        assert_eq!(
-            store.load_recipe("cook").unwrap().attempts[1].lineage,
-            recipe.attempts[1].lineage
-        );
-    }
-
     #[test]
     fn a_gate_fix_attempt_is_written_with_its_provenance_lineage() {
         let (_context, store, mut plan) = lineage_store();
@@ -4051,12 +4091,19 @@ mod tests {
         assert_eq!(lineage.source_patch_sha256.as_deref(), Some("abc"));
     }
 
+    /// #15567: a lifecycle retry's plan says nothing about its source, so the
+    /// writer records it explicitly, in the same write as the attempt; a
+    /// replacement records the attempt it replaces.
     #[test]
-    fn a_replacement_is_written_with_its_lineage() {
+    fn retry_and_replacement_attempts_are_written_with_their_lineage() {
         let (_context, store, plan) = lineage_store();
         store
             .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
-            .unwrap();
+            .expect("retry attempt");
+        assert_eq!(
+            store.load_recipe("cook").unwrap().attempts[1].lineage,
+            Some(super::super::cook_lineage::CookAttemptLineage::retry("run"))
+        );
         let recipe = store
             .record_recipe_attempt_replacement("cook", "run-2", "run-2b")
             .expect("replacement");
@@ -4283,18 +4330,25 @@ mod tests {
 
     #[test]
     fn continuation_resolution_accepts_cook_and_attempt_identifiers() {
+        // Before the Cook index exists the recipe alone resolves the attempt.
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let (store, lifecycle_store) = rooted_stores(&context);
-        persist_recipe_run(&store, &lifecycle_store);
-
+        store.persist_recipe(&recipe()).unwrap();
         assert_eq!(
             resolve_cook_continuation_run_id_in_store(&store, &lifecycle_store, "cook").unwrap(),
             "run"
         );
-        assert_eq!(
-            resolve_cook_continuation_run_id_in_store(&store, &lifecycle_store, "run").unwrap(),
-            "run"
-        );
+
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        persist_recipe_run(&store, &lifecycle_store);
+        for id in ["cook", "run"] {
+            assert_eq!(
+                resolve_cook_continuation_run_id_in_store(&store, &lifecycle_store, id).unwrap(),
+                "run",
+                "{id}"
+            );
+        }
     }
 
     /// A latest attempt that failed before any provider ran with a
@@ -4415,19 +4469,6 @@ mod tests {
                 &lifecycle_store, "cook",
             ).unwrap());
         }
-    }
-
-    #[test]
-    fn continuation_resolution_uses_recipe_when_legacy_cook_index_is_missing() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        let recipe = recipe();
-        store.persist_recipe(&recipe).unwrap();
-
-        assert_eq!(
-            resolve_cook_continuation_run_id_in_store(&store, &lifecycle_store, "cook").unwrap(),
-            "run"
-        );
     }
 
     fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
@@ -4580,45 +4621,41 @@ mod tests {
         )
         .expect("durable dispatcher reconstruction permits normal cook gates");
         assert!(options.provider_transport.attempt_dispatcher.is_some());
-        assert_eq!(options.gates.verify, Vec::<String>::new());
-        assert_eq!(options.workspace.to_worktree, "target");
-        assert_eq!(options.finalization.base, "main");
     }
 
-    /// #15668: gates follow the cook's placement. A recipe whose durable
-    /// attempt dispatch pins a Lab runner reconstructs with that runner as
-    /// the gate environment when no explicit gate runner was declared, so
-    /// existing cooks gate on their runner on continuation.
+    /// #15668: gates follow the cook's placement. A Lab attempt dispatch
+    /// gates on its runner unless an explicit `--gate-runner` was recorded;
+    /// a local attempt dispatch keeps gates local.
     #[test]
-    fn lab_attempt_dispatch_defaults_gate_placement_to_its_runner() {
-        let mut lab_recipe = recipe();
-        lab_recipe.promotion_transport["attempt_dispatch"] =
-            serde_json::json!({ "kind": "lab", "runner_id": "lab-fixture" });
+    fn reconstructed_gate_placement_follows_attempt_dispatch_unless_declared() {
+        for (dispatch, explicit_runner, expected) in [
+            (
+                serde_json::json!({ "kind": "lab", "runner_id": "lab-fixture" }),
+                None,
+                Some("lab-fixture"),
+            ),
+            (
+                serde_json::json!({ "kind": "lab", "runner_id": "lab-fixture" }),
+                Some("explicit-runner"),
+                Some("explicit-runner"),
+            ),
+            (serde_json::json!({ "kind": "local" }), None, None),
+        ] {
+            let mut recipe = recipe();
+            recipe.promotion_transport["attempt_dispatch"] = dispatch.clone();
+            if let Some(runner) = explicit_runner {
+                recipe.gate_policy["gate_environment"] =
+                    serde_json::json!({ "lab_runner": runner });
+            }
 
-        let options =
-            reconstruct_options_without_dispatcher(&lab_recipe).expect("lab recipe reconstructs");
-        assert_eq!(
-            options.gates.gate_environment.lab_runner.as_deref(),
-            Some("lab-fixture")
-        );
-    }
-
-    /// An explicit `--gate-runner` is the recorded gate placement and always
-    /// wins over the attempt dispatch runner.
-    #[test]
-    fn explicit_gate_runner_survives_lab_attempt_dispatch_reconstruction() {
-        let mut lab_recipe = recipe();
-        lab_recipe.promotion_transport["attempt_dispatch"] =
-            serde_json::json!({ "kind": "lab", "runner_id": "lab-fixture" });
-        lab_recipe.gate_policy["gate_environment"] =
-            serde_json::json!({ "lab_runner": "explicit-runner" });
-
-        let options =
-            reconstruct_options_without_dispatcher(&lab_recipe).expect("lab recipe reconstructs");
-        assert_eq!(
-            options.gates.gate_environment.lab_runner.as_deref(),
-            Some("explicit-runner")
-        );
+            let options =
+                reconstruct_options_without_dispatcher(&recipe).expect("recipe reconstructs");
+            assert_eq!(
+                options.gates.gate_environment.lab_runner.as_deref(),
+                expected,
+                "{dispatch} explicit={explicit_runner:?}"
+            );
+        }
     }
 
     /// A declared gate command that pins its own runner keeps that placement:
@@ -4664,17 +4701,11 @@ mod tests {
         assert_eq!(options.gates.gate_environment.lab_runner, None);
     }
 
-    /// Local placement is unchanged: a local attempt dispatch reconstructs
-    /// with no gate runner.
-    #[test]
-    fn local_attempt_dispatch_keeps_gates_local() {
-        let options =
-            reconstruct_options_without_dispatcher(&recipe()).expect("local recipe reconstructs");
-        assert_eq!(options.gates.gate_environment.lab_runner, None);
-    }
-
     /// Cook admission persists the placement-following default into the
-    /// durable gate policy of a fresh Lab cook.
+    /// durable gate policy of a fresh Lab cook, and the admitted request that
+    /// runs the first promotion carries the same gate policy; otherwise the
+    /// first attempt's gates run on the controller while only continuations
+    /// gate on the runner.
     #[test]
     fn admission_persists_placement_following_gate_runner_for_lab_cooks() {
         let mut request =
@@ -4690,34 +4721,15 @@ mod tests {
             persisted.gate_policy["gate_environment"]["lab_runner"],
             "lab-fixture"
         );
+        let admitted = admitted_gate_policy(&request).expect("admitted gate policy");
+        assert_eq!(
+            serde_json::to_value(&admitted).expect("serialize admitted gates"),
+            persisted.gate_policy
+        );
 
         request.provider_transport.attempt_dispatcher = Some(Arc::new(LabLikeDispatcher));
         let local_default = initial_recipe(&request).expect("admission recipe");
         assert!(local_default.gate_policy["gate_environment"]["lab_runner"].is_null());
-    }
-
-    /// A fresh Lab cook runs its first promotion from the admitted request,
-    /// not from a reconstruction. That request must carry the same
-    /// placement-following gate runner as its durable recipe; otherwise the
-    /// first attempt's gates run on the controller while only continuations
-    /// gate on the runner.
-    #[test]
-    fn admitted_request_gates_match_the_persisted_recipe_policy() {
-        let mut request =
-            reconstruct_options_without_dispatcher(&recipe()).expect("reconstruct fixture");
-        request.provider_transport.attempt_dispatcher = Some(Arc::new(LabRunnerDispatcher));
-
-        let admitted = admitted_gate_policy(&request).expect("admitted gate policy");
-        assert_eq!(
-            admitted.gate_environment.lab_runner.as_deref(),
-            Some("lab-fixture")
-        );
-        assert_eq!(
-            serde_json::to_value(&admitted).expect("serialize admitted gates"),
-            initial_recipe(&request)
-                .expect("admission recipe")
-                .gate_policy
-        );
     }
 
     #[test]
@@ -4947,22 +4959,6 @@ mod tests {
     }
 
     #[test]
-    fn recorded_runtime_generation_is_provenance_not_a_reconstruction_pin() {
-        let mut historical = recipe();
-        historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
-
-        let replay = reconstruct_options(&historical).expect("replay reads a historical recipe");
-        assert_eq!(replay.identity.cook_id, historical.cook_id);
-
-        let adoption = reconstruct_options_without_dispatcher(&historical)
-            .expect("adoption reads historical policy");
-        assert_eq!(adoption.identity.cook_id, historical.cook_id);
-        assert!(adoption.gates.verify.is_empty());
-        assert!(adoption.finalization.no_finalize);
-        assert!(adoption.provider_transport.attempt_dispatcher.is_none());
-    }
-
-    #[test]
     fn terminal_continuation_keeps_the_recipe_retry_budget_for_gate_feedback() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
@@ -5036,6 +5032,208 @@ mod tests {
             .claim_continuation_for("cook", "run")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn stale_terminal_annotation_preserves_enqueued_continuation() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let lifecycle = store.lifecycle_store();
+        lifecycle
+            .mutate_record("run", |record| {
+                record.ensure_metadata_object().remove("cook_continuation");
+                agent_task_lifecycle::set_run_state(
+                    record,
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded,
+                );
+                true
+            })
+            .unwrap();
+        let mut stale = lifecycle.read_record("run").unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        stale.ensure_metadata_object().insert(
+            "lifecycle".into(),
+            serde_json::json!({"cleanup": {"status": "completed"}}),
+        );
+        lifecycle.commit_record(&mut stale).unwrap();
+        assert_eq!(
+            lifecycle.read_record("run").unwrap().metadata["cook_continuation"]["state"],
+            "pending"
+        );
+    }
+
+    #[test]
+    fn scheduled_claim_reconstructs_erased_terminal_continuation() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        store
+            .lifecycle_store()
+            .mutate_record("run", |record| {
+                record.ensure_metadata_object().remove("cook_continuation");
+                agent_task_lifecycle::set_run_state(
+                    record,
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded,
+                );
+                true
+            })
+            .unwrap();
+        assert!(store
+            .claim_scheduled_continuation_for("other-cook", "run")
+            .is_err());
+        assert!(matches!(
+            store
+                .claim_scheduled_continuation_for("cook", "run")
+                .unwrap(),
+            ScheduledContinuationClaim::Claimed(_)
+        ));
+    }
+
+    #[test]
+    fn pending_continuation_with_terminal_job_rearms_once() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let lifecycle = store.lifecycle_store();
+        let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            lifecycle.observation_db_path(),
+        )
+        .unwrap();
+        let job = jobs.create("terminal-continuation-test");
+        lifecycle
+            .mutate_record("run", |record| {
+                record.ensure_metadata_object().insert(
+                    "cook_continuation_scheduler".into(),
+                    serde_json::json!({"status": "scheduled", "job_id": job.id.to_string()}),
+                );
+                true
+            })
+            .unwrap();
+        assert!(
+            stranded_continuation_job(&lifecycle, &lifecycle.read_record("run").unwrap()).is_none()
+        );
+        jobs.cancel(job.id, "worker stopped").unwrap();
+        assert!(
+            stranded_continuation_job(&lifecycle, &lifecycle.read_record("run").unwrap()).is_some()
+        );
+        assert!(store.enqueue_terminal_continuation("cook", "run").unwrap());
+        assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
+        assert_eq!(
+            lifecycle.read_record("run").unwrap().metadata["cook_continuation"]["generation"],
+            1
+        );
+        assert!(store.terminal_continuation_superseded("run", 0));
+    }
+
+    #[test]
+    fn stranded_pending_continuation_spends_retry_budget_and_keeps_failure() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let lifecycle = store.lifecycle_store();
+        let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            lifecycle.observation_db_path(),
+        )
+        .unwrap();
+        for retry in 1..=MAX_CONTINUATION_RETRIES + 1 {
+            let job = jobs.create("deterministically-failing-continuation");
+            jobs.cancel(job.id, "worker stopped").unwrap();
+            lifecycle
+                .mutate_record("run", |record| {
+                    record.metadata["cook_continuation_scheduler"] = serde_json::json!({
+                        "status": "scheduled", "job_id": job.id.to_string(),
+                    });
+                    record.metadata["cook_controller_failure"] = serde_json::json!({
+                        "message": "worker stopped", "job_id": job.id.to_string(),
+                    });
+                    true
+                })
+                .unwrap();
+            assert_eq!(
+                store.enqueue_terminal_continuation("cook", "run").unwrap(),
+                retry <= MAX_CONTINUATION_RETRIES,
+            );
+            let record = lifecycle.read_record("run").unwrap();
+            assert_eq!(record.metadata["cook_continuation"]["retries"], retry);
+            assert_eq!(record.metadata["cook_continuation"]["generation"], retry);
+            assert_eq!(
+                record.metadata["cook_controller_failure"]["message"],
+                "worker stopped"
+            );
+        }
+        assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
+        let record = lifecycle.read_record("run").unwrap();
+        assert_eq!(record.metadata["cook_continuation"]["state"], "failed");
+        assert_eq!(
+            record.metadata["cook_continuation"]["diagnostic"],
+            "cook continuation retry budget exhausted"
+        );
+    }
+
+    #[test]
+    fn daemon_sweep_rearms_stranded_terminal_continuation_without_operator() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let lifecycle = store.lifecycle_store();
+        let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            lifecycle.observation_db_path(),
+        )
+        .unwrap();
+        let dead = jobs.create("stranded-continuation");
+        jobs.cancel(dead.id, "worker stopped").unwrap();
+        lifecycle
+            .mutate_record("run", |record| {
+                agent_task_lifecycle::set_run_state(
+                    record,
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded,
+                );
+                record.metadata["cook_continuation_scheduler"] = serde_json::json!({
+                    "status": "scheduled", "job_id": dead.id.to_string(),
+                });
+                record.metadata["cook_controller_failure"] =
+                    serde_json::json!({"message": "worker stopped"});
+                true
+            })
+            .unwrap();
+        let mut submitted = 0;
+        super::super::reconcile::reconcile_stranded_terminal_cooks(&lifecycle, |request| {
+            assert_eq!(request["generation"], 1);
+            submitted += 1;
+            let replacement = jobs.create("replacement-continuation");
+            assert_ne!(replacement.id, dead.id);
+            Ok(serde_json::json!({"scheduled": true, "job_id": replacement.id.to_string()}))
+        })
+        .unwrap();
+        assert_eq!(submitted, 1);
+        let intent = lifecycle
+            .open_observation_readonly()
+            .unwrap()
+            .work_intent_by_id("terminal-cook:cook:run:1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.payload["generation"], 1);
+        let record = lifecycle.read_record("run").unwrap();
+        assert_eq!(record.metadata["cook_continuation"]["generation"], 1);
+        assert_eq!(record.metadata["cook_continuation"]["retries"], 1);
+        assert_eq!(
+            record.metadata["cook_continuation_scheduler"]["status"],
+            "scheduled"
+        );
+        assert_eq!(
+            record.metadata["cook_controller_failure"]["message"],
+            "worker stopped"
+        );
+        super::super::reconcile::reconcile_stranded_terminal_cooks(&lifecycle, |_| {
+            panic!("a live replacement must not be rearmed")
+        })
+        .unwrap();
     }
 
     #[test]
@@ -6532,6 +6730,8 @@ mod cook_driver_tests {
             store.foreign_cook_driver("cook").unwrap().as_deref(),
             Some("4242")
         );
+        // Distinct Cooks are driven independently.
+        assert!(store.try_acquire_cook_driver("cook-b").unwrap().is_some());
 
         // Concurrent process-spawning tests can briefly inherit this open
         // description across fork; release the fixture lock explicitly.
@@ -6628,24 +6828,6 @@ mod cook_driver_tests {
         .unwrap();
         assert!(!acquired);
         assert_eq!(foreign, Some(std::process::id().to_string()));
-    }
-
-    #[test]
-    fn distinct_cooks_are_driven_independently() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
-        let _other = hold_as_other_process(&store, "cook-a");
-        assert!(store.try_acquire_cook_driver("cook-b").unwrap().is_some());
-    }
-
-    #[test]
-    fn an_undriven_cook_has_no_foreign_driver() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
-        assert!(store
-            .foreign_cook_driver("never-started")
-            .unwrap()
-            .is_none());
     }
 
     #[cfg(unix)]

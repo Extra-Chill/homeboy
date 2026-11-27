@@ -17,7 +17,7 @@ pub(super) enum WorkspaceMaterializationOperation {
     /// Clone the transfer. A thin transfer borrows its prerequisites from the
     /// object cache, then
     /// copy every object reachable from `HEAD` and `retain` into the workspace
-    /// so it no longer depends on the cache. Bundled refs that are not branches
+    /// so it does not depend on the cache. Bundled refs that are not branches
     /// (a pinned base, an extra fetch ref) are not refs in the clone, so they
     /// are retained by commit for the copy.
     CloneBundleToTemp {

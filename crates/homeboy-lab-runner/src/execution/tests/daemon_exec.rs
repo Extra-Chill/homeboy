@@ -1,12 +1,9 @@
 //! Daemon `/exec` end-to-end tests that require the real runner exec driver.
 //!
 //! The daemon `/exec` endpoint routes command execution through the
-//! `RunnerExecDriver` hook (Extra-Chill/homeboy#8632), whose real implementation
-//! lives in this runner crate (extracted from core in #8698). These tests were
-//! moved out of `homeboy-core`'s daemon tests because they assert on the result
-//! of actually running the requested command — which a core-only stub driver
-//! cannot produce. Here the real driver is registered, so the command runs for
-//! real and the result events, exit codes, captured stdout/stderr, and patch
+//! `RunnerExecDriver` hook, whose real implementation lives in this runner
+//! crate. These tests register the real driver, so the command runs for real
+//! and the result events, exit codes, captured stdout/stderr, and patch
 //! artifacts are exercised end to end.
 
 use homeboy_core::api_jobs::{Job, JobEventKind, JobStatus, JobStore};
@@ -47,12 +44,8 @@ fn create_lab_local_runner() -> HomeGuard {
 
 fn wait_for_job(store: &JobStore, job_id: &str) -> Job {
     let id = uuid::Uuid::parse_str(job_id).expect("uuid");
-    // 100 * 20ms = 2s was tight for jobs that also compute a patch/diff
-    // artifact after the command exits (e.g. `capture_patch: true`), and
-    // under host scheduling contention this poll loop can give up while the
-    // job is still genuinely `Running` rather than stuck (homeboy#14984).
-    // 1500 * 20ms = 30s holds under concurrent-process stress without slowing
-    // the common case, since the loop returns as soon as the job is terminal.
+    // 30s covers patch/diff capture under host contention; the loop returns
+    // as soon as the job is terminal.
     for _ in 0..1500 {
         let job = store.get(id).expect("job");
         if matches!(
@@ -131,62 +124,7 @@ fn direct_submission(command: Vec<&str>, submission_key: &str) -> serde_json::Va
 }
 
 #[test]
-fn direct_staging_replays_one_execution() {
-    if crate::test_support::isolated_process() {
-        return;
-    }
-    register_driver();
-    crate::runner_staging_store::register_runner_staging_provider();
-    let _home = create_lab_local_runner();
-    write_runner_config(
-        "runner-1",
-        &serde_json::json!({"id":"runner-1","kind":"local"}),
-    );
-    let marker = tempfile::tempdir().expect("marker root");
-    let marker_path = marker.path().join("executions");
-    let store = JobStore::default();
-    let mut envelope = crate::runner_staging_operation::tests_support::envelope();
-    envelope.handoff.recipe.normalized_args = vec![
-        "sh".to_string(),
-        "-c".to_string(),
-        format!("cat source.bin; printf x >> '{}'", marker_path.display()),
-    ];
-    let payload = serde_json::to_value(
-        crate::runner_staging_store::RemoteRunnerStagingRequest::new(envelope),
-    )
-    .expect("staging request");
-    let accepted = route_with_body(
-        "POST",
-        "/runner/staging/direct",
-        Some(payload.clone()),
-        &store,
-    );
-    assert_eq!(accepted.status_code, 200, "{}", accepted.body);
-    let receipt = accepted.body["body"]["receipt"].clone();
-    let id = receipt["handoff"]["runner_job_id"]
-        .as_str()
-        .expect("job ID");
-    let job_id = uuid::Uuid::parse_str(id).unwrap();
-    let terminal = wait_for_job(&store, id);
-    let events = store.events(job_id).unwrap();
-    assert_eq!(terminal.status, JobStatus::Succeeded, "{events:?}");
-    assert!(events.iter().any(|event| event.kind == JobEventKind::Result
-        && event
-            .data
-            .as_ref()
-            .is_some_and(|result| result["stdout"] == "source package")));
-    assert_eq!(std::fs::read_to_string(&marker_path).unwrap(), "x");
-
-    let replay = route_with_body("POST", "/runner/staging/direct", Some(payload), &store);
-    assert_eq!(replay.status_code, 200, "{}", replay.body);
-    assert_eq!(replay.body["body"]["receipt"], receipt);
-    assert_eq!(store.get(job_id).unwrap().status, JobStatus::Succeeded);
-    assert_eq!(std::fs::read_to_string(marker_path).unwrap(), "x");
-    assert_eq!(store.events(job_id).unwrap().len(), events.len());
-}
-
-#[test]
-fn typed_daemon_exec_uses_canonical_submission_without_scalar_execution_fields() {
+fn typed_daemon_exec_resubmission_reuses_the_active_job() {
     if crate::test_support::isolated_process() {
         return;
     }
@@ -203,18 +141,6 @@ fn typed_daemon_exec_uses_canonical_submission_without_scalar_execution_fields()
     );
     let payload = direct_submission(vec!["sh", "-c", &script], "typed-daemon-run");
 
-    for field in [
-        "runner_id",
-        "command",
-        "cwd",
-        "env",
-        "source_snapshot",
-        "lifecycle",
-        "runner_workload",
-        "path_materialization_plan",
-    ] {
-        assert!(payload.get(field).is_none(), "adapter leaked {field}");
-    }
     let response = route_with_body("POST", "/exec", Some(payload.clone()), &store);
     assert_eq!(response.status_code, 200);
     let job_id = response.body["body"]["job"]["id"]

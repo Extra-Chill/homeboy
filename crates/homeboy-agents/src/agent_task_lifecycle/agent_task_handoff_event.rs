@@ -239,9 +239,6 @@ pub fn agent_task_dispatch_handoff_event_from_job_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::lab_contract::{
-        LabRunnerWorkloadAgentTaskDispatchKind, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
-    };
     use serde_json::json;
 
     fn workload(agent_task: Option<serde_json::Value>) -> LabRunnerWorkload {
@@ -312,67 +309,48 @@ mod tests {
     }
 
     #[test]
-    fn handoff_is_recovered_from_stderr_and_from_log_noise() {
+    fn handoff_and_dispatch_envelope_are_recovered_from_any_output_stream() {
         let noisy = format!(
             "HOMEBOY_RUNNER_PROGRESS {{\"phase\":\"finished\"}}\n{}\ntrailing log line\n",
             handoff_document()
         );
-        let result = json!({ "exit_code": 1, "stdout": "", "stderr": noisy });
-
-        let event = agent_task_dispatch_handoff_event_from_workload_result(
-            Some(&cook_workload()),
-            "homeboy-lab",
-            "runner-job-1",
-            &result,
-        )
-        .expect("handoff embedded in stderr log noise");
-
-        assert_eq!(event.handoff["schema"], AGENT_TASK_LAB_HANDOFF_SCHEMA);
-    }
-
-    #[test]
-    fn legacy_dispatch_envelope_is_still_recognized() {
         let envelope = json!({
             "schema": AGENT_TASK_DISPATCH_ENVELOPE_SCHEMA,
             "run_id": "cook-7530"
         });
-        let result = json!({ "data": { "stdout": envelope.to_string() } });
+        for (result, schema) in [
+            (
+                json!({ "exit_code": 1, "stdout": "", "stderr": noisy }),
+                AGENT_TASK_LAB_HANDOFF_SCHEMA,
+            ),
+            (
+                json!({ "data": { "stdout": envelope.to_string() } }),
+                AGENT_TASK_DISPATCH_ENVELOPE_SCHEMA,
+            ),
+        ] {
+            let event = agent_task_dispatch_handoff_event_from_workload_result(
+                Some(&cook_workload()),
+                "homeboy-lab",
+                "runner-job-1",
+                &result,
+            )
+            .expect("handoff event");
 
-        let event = agent_task_dispatch_handoff_event_from_workload_result(
-            Some(&cook_workload()),
-            "homeboy-lab",
-            "runner-job-1",
-            &result,
-        )
-        .expect("legacy dispatch envelope");
-
-        assert_eq!(event.handoff["schema"], AGENT_TASK_DISPATCH_ENVELOPE_SCHEMA);
+            assert_eq!(event.handoff["schema"], schema);
+        }
     }
 
-    /// An absent policy does not request a typed handoff event.
+    /// An absent handoff policy does not request a typed event, a run-plan
+    /// declares `none`, and a generic exec has no `agent_task` section at
+    /// all. None may produce a handoff event, no matter what its stdout
+    /// happens to contain (the #9459 failure mode, one seam over).
     #[test]
-    fn absent_handoff_policy_emits_no_event() {
-        let pre_typed = workload(Some(json!({
+    fn workloads_without_a_handoff_policy_emit_no_event() {
+        let absent_policy = workload(Some(json!({
             "run_id": "cook-7530",
             "dispatch_kind": "cook",
             "lifecycle_mirror_policy": "none"
         })));
-        let result = json!({ "stdout": handoff_document().to_string() });
-
-        assert!(agent_task_dispatch_handoff_event_from_workload_result(
-            Some(&pre_typed),
-            "homeboy-lab",
-            "runner-job-1",
-            &result,
-        )
-        .is_none());
-    }
-
-    /// A run-plan declares `none`, and a generic exec has no `agent_task`
-    /// section at all. Neither may produce a handoff event, no matter what its
-    /// stdout happens to contain (the #9459 failure mode, one seam over).
-    #[test]
-    fn run_plan_and_generic_exec_emit_no_event() {
         let run_plan = workload(Some(json!({
             "run_id": "run-plan-7530",
             "plan_ref": "@plan.json",
@@ -382,7 +360,12 @@ mod tests {
         })));
         let result = json!({ "stdout": handoff_document().to_string() });
 
-        for candidate in [Some(run_plan), Some(workload(None)), None] {
+        for candidate in [
+            Some(absent_policy),
+            Some(run_plan),
+            Some(workload(None)),
+            None,
+        ] {
             assert!(agent_task_dispatch_handoff_event_from_workload_result(
                 candidate.as_ref(),
                 "homeboy-lab",
@@ -439,33 +422,5 @@ mod tests {
             .expect("typed event recovered from job events");
         assert_eq!(recovered.run_id, "cook-7530");
         assert_eq!(recovered.handoff["schema"], AGENT_TASK_LAB_HANDOFF_SCHEMA);
-    }
-
-    #[test]
-    fn typed_helper_agrees_with_the_contract_spellings() {
-        let agent_task = LabRunnerWorkloadAgentTask {
-            run_id: "cook-7530".to_string(),
-            plan_ref: None,
-            resolved_provider_policy: None,
-            dispatch_kind: LabRunnerWorkloadAgentTaskDispatchKind::Cook,
-            lifecycle_mirror_policy: LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy::None,
-            handoff_mirror_policy: Some(
-                LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff,
-            ),
-            wait_budget_ms: None,
-        };
-        assert!(agent_task_mirrors_dispatch_handoff(&agent_task));
-
-        let no_handoff = LabRunnerWorkloadAgentTask {
-            handoff_mirror_policy: Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::None),
-            ..agent_task.clone()
-        };
-        assert!(!agent_task_mirrors_dispatch_handoff(&no_handoff));
-
-        let pre_typed = LabRunnerWorkloadAgentTask {
-            handoff_mirror_policy: None,
-            ..agent_task
-        };
-        assert!(!agent_task_mirrors_dispatch_handoff(&pre_typed));
     }
 }

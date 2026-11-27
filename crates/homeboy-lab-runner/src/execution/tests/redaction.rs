@@ -3,42 +3,31 @@ use crate::{RunnerResourceGuardViolation, RunnerResourceMetrics};
 use serde_json::json;
 
 #[test]
-fn runner_exec_redacts_env_diagnostic_assignments() {
-    let env = HashMap::from([(
-        "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
-        "preview-token-secret".to_string(),
-    )]);
+fn runner_exec_redacts_secret_assignments_and_bare_values_in_streams() {
+    let env = HashMap::from([
+        (
+            "HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string(),
+            "preview-token-secret".to_string(),
+        ),
+        (
+            "OPENAI_API_KEY".to_string(),
+            "sk-test-secret-value".to_string(),
+        ),
+    ]);
 
     let (stdout, stderr) = redact_runner_exec_streams(
-        "HOMEBOY_PREVIEW_TUNNEL_TOKEN=preview-token-secret\nSAFE=value\n".to_string(),
-        "token=preview-token-secret\n".to_string(),
+        "HOMEBOY_PREVIEW_TUNNEL_TOKEN=preview-token-secret\nSAFE=value\nsk-test-secret-value\n"
+            .to_string(),
+        "token=preview-token-secret\nfailed with sk-test-secret-value".to_string(),
         &env,
         &[],
     );
 
     assert_eq!(
         stdout,
-        "HOMEBOY_PREVIEW_TUNNEL_TOKEN=[REDACTED]\nSAFE=value\n"
+        "HOMEBOY_PREVIEW_TUNNEL_TOKEN=[REDACTED]\nSAFE=value\n[REDACTED]\n"
     );
-    assert_eq!(stderr, "token=[REDACTED]\n");
-}
-
-#[test]
-fn runner_exec_redacts_bare_secret_values() {
-    let env = HashMap::from([(
-        "OPENAI_API_KEY".to_string(),
-        "sk-test-secret-value".to_string(),
-    )]);
-
-    let (stdout, stderr) = redact_runner_exec_streams(
-        "sk-test-secret-value\n".to_string(),
-        "failed with sk-test-secret-value".to_string(),
-        &env,
-        &[],
-    );
-
-    assert_eq!(stdout, "[REDACTED]\n");
-    assert_eq!(stderr, "failed with [REDACTED]");
+    assert_eq!(stderr, "token=[REDACTED]\nfailed with [REDACTED]");
 }
 
 #[test]
@@ -259,54 +248,52 @@ fn runner_exec_failure_error_keeps_rig_not_found_without_contract_field() {
 }
 
 #[test]
-fn runner_exec_failure_error_omits_unknown_contract_field_sentinel() {
-    let output = failed_runner_exec_output(
-        "",
-        r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Invalid argument 'unknown contract field': file does not exist: /home/chubes/Developer/static-site-importer/static-site-importer.php","details":{"field":"unknown contract field","problem":"file does not exist: /home/chubes/Developer/static-site-importer/static-site-importer.php"}}}"#,
-    );
+fn runner_exec_failure_error_never_reports_the_unknown_contract_field_sentinel() {
+    let cases = [
+        (
+            "file does not exist: /home/chubes/Developer/static-site-importer/static-site-importer.php",
+            None,
+        ),
+        (
+            "unknown field `failure_context`, expected `schema` or `status`",
+            Some("failure_context"),
+        ),
+    ];
+    for (problem, contract_field) in cases {
+        let stderr = json!({
+            "success": false,
+            "error": {
+                "code": "validation.invalid_argument",
+                "message": format!("Invalid argument 'unknown contract field': {problem}"),
+                "details": { "field": "unknown contract field", "problem": problem }
+            }
+        })
+        .to_string();
+        let output = failed_runner_exec_output("", &stderr);
 
-    let err = runner_exec_failure_error(&output).expect("runner failure error");
+        let err = runner_exec_failure_error(&output).expect("runner failure error");
 
-    assert!(err.details["failure_context"]
-        .get("contract_field")
-        .is_none());
-    let hints = err
-        .hints
-        .iter()
-        .map(|hint| hint.message.as_str())
-        .collect::<Vec<_>>();
-    assert!(hints.iter().any(|hint| hint.contains(
-        "file does not exist: /home/chubes/Developer/static-site-importer/static-site-importer.php"
-    )));
-    assert!(!hints
-        .iter()
-        .any(|hint| hint.contains("unknown contract field")));
-}
-
-#[test]
-fn runner_exec_failure_error_names_specific_unknown_contract_field() {
-    let output = failed_runner_exec_output(
-        "",
-        r#"{"success":false,"error":{"code":"validation.invalid_argument","message":"Invalid argument 'unknown contract field': unknown field `failure_context`, expected `schema` or `status`","details":{"field":"unknown contract field","problem":"unknown field `failure_context`, expected `schema` or `status`"}}}"#,
-    );
-
-    let err = runner_exec_failure_error(&output).expect("runner failure error");
-
-    assert_eq!(
-        err.details["failure_context"]["contract_field"].as_str(),
-        Some("failure_context")
-    );
-    let hints = err
-        .hints
-        .iter()
-        .map(|hint| hint.message.as_str())
-        .collect::<Vec<_>>();
-    assert!(hints
-        .iter()
-        .any(|hint| hint.contains("contract field: `failure_context`")));
-    assert!(!hints
-        .iter()
-        .any(|hint| hint.contains("contract field: `unknown contract field`")));
+        assert_eq!(
+            err.details["failure_context"]
+                .get("contract_field")
+                .and_then(|field| field.as_str()),
+            contract_field
+        );
+        let hints = err
+            .hints
+            .iter()
+            .map(|hint| hint.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(hints.iter().any(|hint| hint.contains(problem)), "{hints:?}");
+        assert!(!hints
+            .iter()
+            .any(|hint| hint.contains("contract field: `unknown contract field`")));
+        if let Some(field) = contract_field {
+            assert!(hints
+                .iter()
+                .any(|hint| hint.contains(&format!("contract field: `{field}`"))));
+        }
+    }
 }
 
 #[test]

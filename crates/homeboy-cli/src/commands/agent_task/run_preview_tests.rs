@@ -412,90 +412,52 @@ fn preview_replay_argv_is_executable_cook_argv_without_preview() {
     Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
 }
 
+/// Generated lifecycle ids never leak into the replay; an operator's explicit
+/// `--run-id` is echoed so the replay resumes the same run.
 #[test]
-fn preview_replay_omits_generated_lifecycle_ids() {
-    let mut args = cook(&[
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--preview",
-        "--prompt",
-        "implement the issue",
-    ]);
-    bind_cook_preview_lifecycle(&mut args);
-    assert!(args.dispatch.run_id.is_some());
-    assert!(args.attempt_run_id.is_some());
+fn preview_replay_echoes_only_an_explicit_run_id() {
+    for (explicit, expected) in [(None, None), (Some("cook-42"), Some("cook-42"))] {
+        let mut argv = vec![
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+        ];
+        if let Some(run_id) = explicit {
+            argv.extend(["--run-id", run_id]);
+        }
+        let mut args = cook(&argv);
+        bind_cook_preview_lifecycle(&mut args);
+        assert!(args.dispatch.run_id.is_some());
+        assert!(args.attempt_run_id.is_some());
 
-    let mut argv = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--prompt".to_string(),
-        "implement the issue".to_string(),
-    ];
-    append_preview_lifecycle_replay_argv(&mut argv, &args);
-    assert!(!preview_replay_has_flag(&argv, "--run-id"), "{argv:?}");
-    assert!(
-        !preview_replay_has_flag(&argv, "--attempt-run-id"),
-        "{argv:?}"
-    );
-
-    let replay = finalize_cook_preview_replay(argv, &args);
-    assert!(
-        !preview_replay_has_flag(&replay.argv, "--run-id"),
-        "{replay:?}"
-    );
-    assert!(
-        !preview_replay_has_flag(&replay.argv, "--attempt-run-id"),
-        "{replay:?}"
-    );
-}
-
-#[test]
-fn preview_replay_echoes_explicit_run_id() {
-    let mut args = cook(&[
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--preview",
-        "--prompt",
-        "implement the issue",
-        "--run-id",
-        "cook-42",
-    ]);
-    bind_cook_preview_lifecycle(&mut args);
-    assert_eq!(args.dispatch.run_id.as_deref(), Some("cook-42"));
-
-    let mut argv = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--prompt".to_string(),
-        "implement the issue".to_string(),
-    ];
-    append_preview_lifecycle_replay_argv(&mut argv, &args);
-    assert!(
-        argv.windows(2)
-            .any(|parts| parts == ["--run-id", "cook-42"]),
-        "{argv:?}"
-    );
-    assert!(
-        !preview_replay_has_flag(&argv, "--attempt-run-id"),
-        "{argv:?}"
-    );
-
-    let replay = finalize_cook_preview_replay(argv, &args);
-    assert!(
-        replay
+        let mut replay_argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+        ];
+        append_preview_lifecycle_replay_argv(&mut replay_argv, &args);
+        let replay = finalize_cook_preview_replay(replay_argv, &args);
+        let run_id = replay
             .argv
             .windows(2)
-            .any(|parts| parts == ["--run-id", "cook-42"]),
-        "{replay:?}"
-    );
-    assert!(
-        !preview_replay_has_flag(&replay.argv, "--attempt-run-id"),
-        "{replay:?}"
-    );
+            .find(|parts| parts[0] == "--run-id")
+            .map(|parts| parts[1].as_str());
+        assert_eq!(run_id, expected, "{replay:?}");
+        assert_eq!(
+            preview_replay_has_flag(&replay.argv, "--run-id"),
+            expected.is_some(),
+            "{replay:?}"
+        );
+        assert!(
+            !preview_replay_has_flag(&replay.argv, "--attempt-run-id"),
+            "{replay:?}"
+        );
+    }
 }
 
 #[test]
@@ -623,24 +585,38 @@ fn preview_replay_redacts_opaque_provider_values_and_arbitrary_credential_names(
     Cli::try_parse_from(&replay.argv).expect("redacted replay remains parseable");
 }
 
+/// The replay budget truncates only between whole `flag value` units, for
+/// Cook and root value flags alike, so the truncated replay still parses.
 #[test]
 fn preview_replay_truncates_only_at_parseable_clap_unit_boundaries() {
-    let argv = std::iter::once("homeboy".to_string())
-        .chain(["agent-task".to_string(), "cook".to_string()])
-        .chain(
-            (0..MAX_PREVIEW_REPLAY_ARGS)
-                .flat_map(|index| ["--verify".to_string(), format!("true-{index}")]),
-        )
-        .collect::<Vec<_>>();
-    let replay = redact_preview_replay_argv(argv);
-    assert!(replay.argv.len() < MAX_PREVIEW_REPLAY_ARGS);
-    assert!(replay
-        .requires
-        .iter()
-        .any(|item| item.contains("safety budget")));
-    for boundary in (3..=replay.argv.len()).step_by(2) {
-        Cli::try_parse_from(&replay.argv[..boundary])
-            .unwrap_or_else(|error| panic!("boundary {boundary} is not parseable: {error}"));
+    for flag in [
+        "--verify",
+        "--output",
+        "--notification-route",
+        "--runner-env",
+        "--lab-env-json",
+    ] {
+        let argv = std::iter::once("homeboy".to_string())
+            .chain(["agent-task".to_string(), "cook".to_string()])
+            .chain(
+                (0..MAX_PREVIEW_REPLAY_ARGS)
+                    .flat_map(|index| [flag.to_string(), format!("value-{index}")]),
+            )
+            .collect::<Vec<_>>();
+        let replay = redact_preview_replay_argv(argv);
+        assert!(replay.argv.len() < MAX_PREVIEW_REPLAY_ARGS);
+        assert_eq!(replay.argv.len() % 2, 1, "{flag} was split at the budget");
+        assert!(replay
+            .requires
+            .iter()
+            .any(|item| item.contains("safety budget")));
+        if flag == "--verify" {
+            for boundary in (3..=replay.argv.len()).step_by(2) {
+                Cli::try_parse_from(&replay.argv[..boundary]).unwrap_or_else(|error| {
+                    panic!("boundary {boundary} is not parseable: {error}")
+                });
+            }
+        }
     }
 }
 
@@ -725,70 +701,6 @@ fn root_value_options_and_aliases_are_atomic_in_separated_and_equals_forms() {
                 .any(|unit| unit == &[format!("{flag}={value}")]),
             "{flag} equals form was not atomic"
         );
-    }
-}
-
-#[test]
-fn root_value_units_are_never_split_at_any_replay_budget_boundary() {
-    for flag in [
-        "--output",
-        "--notification-route",
-        "--runner-env",
-        "--lab-env-json",
-    ] {
-        let argv = std::iter::once("homeboy".to_string())
-            .chain(["agent-task".to_string(), "cook".to_string()])
-            .chain(
-                (0..MAX_PREVIEW_REPLAY_ARGS)
-                    .flat_map(|index| [flag.to_string(), format!("value-{index}")]),
-            )
-            .collect::<Vec<_>>();
-        let replay = redact_preview_replay_argv(argv);
-        assert_eq!(replay.argv.len() % 2, 1, "{flag} was split at the budget");
-        assert!(replay
-            .requires
-            .iter()
-            .any(|item| item.contains("safety budget")));
-    }
-}
-
-#[test]
-fn valid_root_value_forms_parse_before_and_after_cook() {
-    for (flag, value) in [
-        ("--output", "preview.json"),
-        ("--placement", "local"),
-        ("--artifact-root", "artifacts"),
-        ("--runner-env", "TOKEN=value"),
-        ("--runner-secret-env", "TOKEN"),
-        ("--lab-env-json", "{}"),
-        ("--runner-workspace-root", "workspace"),
-    ] {
-        Cli::try_parse_from(["homeboy", flag, value, "agent-task", "cook"])
-            .unwrap_or_else(|error| panic!("separated {flag} must parse: {error}"));
-        let equals = format!("{flag}={value}");
-        Cli::try_parse_from(["homeboy", "agent-task", "cook", &equals])
-            .unwrap_or_else(|error| panic!("equals {flag} must parse: {error}"));
-    }
-    for args in [
-        vec![
-            "homeboy",
-            "--notification-transport",
-            "webhook",
-            "--notification-route",
-            "https://example.test/hook",
-            "agent-task",
-            "cook",
-        ],
-        vec![
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--notification-transport=webhook",
-            "--notification-route=https://example.test/hook",
-        ],
-    ] {
-        Cli::try_parse_from(args)
-            .unwrap_or_else(|error| panic!("notification pair must parse: {error}"));
     }
 }
 

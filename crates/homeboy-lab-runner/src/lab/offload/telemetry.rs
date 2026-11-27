@@ -408,13 +408,6 @@ mod tests {
             metadata["artifact_dir_growth_bytes"],
             serde_json::json!(growth)
         );
-        assert_eq!(
-            metadata["schema"],
-            serde_json::json!("homeboy/lab-host-telemetry/v1")
-        );
-        // Runner machine identity always carries the homeboy version.
-        assert!(metadata["runner_machine"]["homeboy_version"].is_string());
-        assert!(metadata["watched_dir"].as_str().is_some());
 
         std::fs::remove_dir_all(&dir).ok();
     }

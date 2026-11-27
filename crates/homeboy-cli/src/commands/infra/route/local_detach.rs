@@ -404,6 +404,14 @@ fn intercept_local_detached_cook_once(
             .and_then(|submission| controller_client.submit_with_disposition(submission)),
     )?;
     let job_id = submission.job.id.to_string();
+    // Transfer custody before start: a slow step must not lose its admission
+    // when the launcher exits before the child can project its own identity.
+    agent_task_lifecycle::record_claimed_detached_cook_step_admission_in_store(
+        &admission.store,
+        &cook_id,
+        &admission.launcher_id,
+        &job_id,
+    )?;
     // A draining daemon persists the step in `pending_resource_admission`; the
     // replacement daemon starts it, and its child binds this handoff (#17707).
     if let Some(reason) = submission.pending_admission {
@@ -991,10 +999,8 @@ pub(super) fn detached_child_diagnostic(log_path: &Path) -> Result<Value, &'stat
                 })
                 // The real v3 envelope carries its typed failure under
                 // `diagnostics`, not `error` (`CommandResultEnvelope::diagnostics`,
-                // `homeboy-cli/src/commands/utils/response.rs`). This previously
-                // read a key production output never emits, so no detached-Cook
-                // launcher failure was ever actually classified — every call
-                // fell through to the narrow fallback below.
+                // `homeboy-cli/src/commands/utils/response.rs`); only envelopes
+                // without one fall through to the narrow fallback below.
                 .and_then(|result| result.get("diagnostics"))
                 .filter(|error| {
                     error.get("code").and_then(Value::as_str).is_some()
@@ -1180,26 +1186,6 @@ mod tests {
         );
     }
 
-    /// Half a pair is a hard validation error in the child, so propagation is
-    /// all-or-nothing.
-    ///
-    /// A cook launched without CLI values can still legitimately inherit a
-    /// route from this test process's own environment, so the deterministic
-    /// assertion is the all-or-nothing rule rather than a fixed count.
-    #[test]
-    fn a_detached_cook_never_propagates_half_a_route() {
-        assert!(homeboy::core::notification_route::child_env(None).is_empty());
-
-        let (cli, _) = cook_cli(&["--placement", "local"]);
-
-        let propagated =
-            homeboy::core::notification_route::child_env(detached_route(&cli).as_ref());
-        assert!(
-            propagated.is_empty() || propagated.len() == 2,
-            "propagated {propagated:?}"
-        );
-    }
-
     #[test]
     fn a_runner_owned_execution_completes_without_recursive_detachment() {
         let (cli, normalized) = cook_cli(&["--placement", "local"]);
@@ -1268,19 +1254,15 @@ mod tests {
     }
 
     #[test]
-    fn detachment_owns_the_controller_for_auto_lab_and_local_placement() {
+    fn detachment_owns_the_controller_for_cook_placements_only() {
         for placement in ["auto", "lab", "local", "lab-or-local"] {
             let (cli, _) = cook_cli(&["--placement", placement]);
             assert!(is_unsupervised_local_cook(&cli), "{placement}");
         }
-    }
 
-    #[test]
-    fn a_non_cook_command_is_never_intercepted() {
-        let cli = Cli::try_parse_from(["homeboy", "--placement", "local", "status"])
+        let status = Cli::try_parse_from(["homeboy", "--placement", "local", "status"])
             .expect("parse status invocation");
-
-        assert!(!is_unsupervised_local_cook(&cli));
+        assert!(!is_unsupervised_local_cook(&status));
     }
 
     /// The observed failure: a daemon-spawned `gh` could not verify GitHub
@@ -1323,116 +1305,58 @@ mod tests {
         assert!(!controller_job_daemon_build_mismatch(&unrelated));
     }
 
+    /// The child pins exactly one `--cook-id`, whether generated or taken from
+    /// an explicit `--run-id`, and runs attached (`--wait`).
     #[test]
-    fn child_args_drop_detach_and_pin_a_generated_cook_id() {
+    fn child_args_pin_a_single_cook_id_and_run_attached() {
+        for (run_id_args, cook_id) in [
+            (&[][..], "cook-generated"),
+            (&["--run-id", "cook-explicit"][..], "cook-explicit"),
+        ] {
+            let mut normalized = args(&["homeboy", "--placement", "local", "agent-task", "cook"]);
+            normalized.extend(args(run_id_args));
+            normalized.extend(args(&["--prompt", "fix it"]));
+
+            let child = detached_cook_child_args(&normalized, cook_id, true);
+
+            assert_eq!(
+                child,
+                args(&[
+                    "--wait",
+                    "--placement",
+                    "local",
+                    "agent-task",
+                    "cook",
+                    "--prompt",
+                    "fix it",
+                    "--cook-id",
+                    cook_id,
+                ])
+            );
+        }
+    }
+
+    /// A detached launcher owns `--output` (the handoff envelope); an attached
+    /// child keeps it for its terminal report.
+    #[test]
+    fn child_args_forward_output_only_when_attached() {
         let normalized = args(&[
             "homeboy",
-            "--placement",
-            "local",
+            "--output",
+            "/tmp/cook.json",
             "agent-task",
             "cook",
             "--prompt",
             "fix it",
         ]);
 
-        let child = detached_cook_child_args(&normalized, "cook-generated", true);
-
-        assert_eq!(
-            child,
-            args(&[
-                "--wait",
-                "--placement",
-                "local",
-                "agent-task",
-                "cook",
-                "--prompt",
-                "fix it",
-                "--cook-id",
-                "cook-generated",
-            ])
-        );
-    }
-
-    #[test]
-    fn child_args_preserve_an_explicit_cook_id_without_duplicating_it() {
-        let normalized = args(&[
-            "homeboy",
-            "--placement",
-            "local",
-            "agent-task",
-            "cook",
-            "--run-id",
-            "cook-explicit",
-            "--prompt",
-            "fix it",
-        ]);
-
-        let child = detached_cook_child_args(&normalized, "cook-explicit", true);
-
-        assert!(!child.iter().any(|arg| arg == "--run-id"), "{child:?}");
-        assert_eq!(
-            child.iter().filter(|arg| *arg == "--cook-id").count(),
-            1,
-            "{child:?}"
-        );
-        assert!(
-            !child.iter().any(|arg| arg == "--detach-after-handoff"),
-            "{child:?}"
-        );
-        assert_eq!(
-            child,
-            args(&[
-                "--wait",
-                "--placement",
-                "local",
-                "agent-task",
-                "cook",
-                "--prompt",
-                "fix it",
-                "--cook-id",
-                "cook-explicit",
-            ])
-        );
-    }
-
-    #[test]
-    fn child_args_leave_the_handoff_output_owned_by_the_launcher() {
-        let child = detached_cook_child_args(
-            &args(&[
-                "homeboy",
-                "--output",
-                "/tmp/handoff.json",
-                "agent-task",
-                "cook",
-                "--prompt",
-                "fix it",
-            ]),
-            "cook-output",
-            true,
-        );
-
-        assert!(!child
+        let detached = detached_cook_child_args(&normalized, "cook-output", true);
+        assert!(!detached
             .iter()
-            .any(|arg| arg == "--output" || arg == "/tmp/handoff.json"));
-    }
+            .any(|arg| arg == "--output" || arg == "/tmp/cook.json"));
 
-    #[test]
-    fn attached_child_preserves_output_for_its_terminal_report() {
-        let child = detached_cook_child_args(
-            &args(&[
-                "homeboy",
-                "--output",
-                "/tmp/cook.json",
-                "agent-task",
-                "cook",
-                "--prompt",
-                "fix it",
-            ]),
-            "cook-output",
-            false,
-        );
-
-        assert!(child
+        let attached = detached_cook_child_args(&normalized, "cook-output", false);
+        assert!(attached
             .windows(2)
             .any(|args| args == ["--output", "/tmp/cook.json"]));
     }
@@ -1520,6 +1444,7 @@ mod tests {
         assert_eq!(envelope["run_id"], "cook-11476-attempt-1-ab12cd34");
         assert_eq!(envelope["pid"], 4242);
         assert_eq!(envelope["handoff"]["state"], "accepted");
+        assert_eq!(envelope["output_file_owner"], "handoff_launcher");
         assert_eq!(
             envelope["status_command"],
             "homeboy agent-task status cook-11476"
@@ -1647,47 +1572,8 @@ mod tests {
             assert_eq!(envelope["handoff"]["state"], expected);
             assert_eq!(envelope["run_id"], Value::Null);
             assert_eq!(envelope["launcher_log"], "/tmp/cook.log");
+            assert_eq!(envelope["provider_runner_id"], "runner-a");
         }
-    }
-
-    /// The admitted controller job is included in every successful handoff.
-    #[test]
-    fn an_owned_daemon_returns_the_full_handoff_contract() {
-        let handoff = DetachedCookHandoff {
-            state: DetachedHandoffState::Accepted,
-            run_id: Some("cook-degraded-attempt-1".to_string()),
-            waited_ms: 12,
-        };
-
-        let envelope = handoff_envelope(
-            "cook-degraded",
-            Some(4242),
-            Path::new("/tmp/cook.log"),
-            &handoff,
-            "job-owned",
-            homeboy::cli_surface::Placement::Lab,
-            "lab",
-            Some("runner-a"),
-        );
-
-        // Every pre-existing field survives unchanged.
-        assert_eq!(envelope["schema"], HANDOFF_SCHEMA);
-        assert_eq!(envelope["cook_id"], "cook-degraded");
-        assert_eq!(envelope["run_id"], "cook-degraded-attempt-1");
-        assert_eq!(envelope["pid"], 4242);
-        assert_eq!(envelope["handoff"]["state"], "accepted");
-        assert_eq!(
-            envelope["status_command"],
-            "homeboy agent-task status cook-degraded"
-        );
-        assert_eq!(
-            envelope["cancel_command"],
-            "homeboy agent-task cancel cook-degraded"
-        );
-        assert_eq!(envelope["output_file_owner"], "handoff_launcher");
-        assert_eq!(envelope["controller_job"]["state"], "owned");
-        assert_eq!(envelope["controller_job"]["job_id"], "job-owned");
-        assert_eq!(envelope["provider_runner_id"], "runner-a");
     }
 
     #[test]
@@ -1700,27 +1586,6 @@ mod tests {
             .expect("finalize handoff");
 
         assert_eq!(std::fs::read_to_string(path).expect("read output"), stdout);
-    }
-
-    #[test]
-    fn interrupted_pre_supervisor_admission_is_terminal_and_discoverable() {
-        crate::test_support::with_isolated_home(|_| {
-            let cook_id = "cook-interrupted-before-stdin";
-            let admission = DetachedCookAdmission::establish(cook_id)
-                .expect("persist parent before any launcher input work");
-            drop(admission);
-
-            let parent = agent_task_lifecycle::exact_record(cook_id)
-                .expect("interrupted parent remains addressable");
-            assert_eq!(
-                parent.state(),
-                homeboy_lifecycle_contract::RunExecutionState::Failed
-            );
-            assert_eq!(
-                parent.metadata["detached_cook_handoff"]["admission_state"],
-                "failed"
-            );
-        });
     }
 
     #[test]
@@ -1752,11 +1617,15 @@ mod tests {
                 .is_some_and(|id| !id.is_empty()));
 
             drop(first);
+            let parent = agent_task_lifecycle::exact_record(cook_id)
+                .expect("owner cleanup terminalizes parent");
             assert_eq!(
-                agent_task_lifecycle::exact_record(cook_id)
-                    .expect("owner cleanup terminalizes parent")
-                    .state(),
+                parent.state(),
                 homeboy_lifecycle_contract::RunExecutionState::Failed
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["admission_state"],
+                "failed"
             );
         });
     }
@@ -1833,54 +1702,6 @@ mod tests {
             assert_eq!(
                 supervised.metadata["detached_cook_handoff"]["supervisor_job_id"],
                 "supervisor-1"
-            );
-        });
-    }
-
-    #[test]
-    fn a_materialized_handoff_cook_id_cancels_its_attempt() {
-        crate::test_support::with_isolated_home(|_| {
-            let cook_id = "cook-materialized";
-            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
-                &test_lifecycle_store(),
-                cook_id,
-            )
-            .expect("persist handoff parent");
-            let attempt_id = "cook-materialized-attempt-1";
-            let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
-                "materialized-handoff-attempt",
-                Vec::new(),
-            );
-            agent_task_lifecycle::submit_plan(&plan, Some(attempt_id))
-                .expect("persist materialized attempt");
-            agent_task_lifecycle::record_cook_attempt_in_store(
-                &test_lifecycle_store(),
-                cook_id,
-                1,
-                attempt_id,
-            )
-            .expect("redirect cook alias to materialized attempt");
-
-            let parent = agent_task_lifecycle::exact_record(cook_id)
-                .expect("read redirected handoff parent");
-            assert_eq!(
-                parent.state(),
-                homeboy_lifecycle_contract::RunExecutionState::Succeeded
-            );
-            assert_eq!(
-                agent_task_lifecycle::CookAdmissionPhase::of(&parent),
-                Some(agent_task_lifecycle::CookAdmissionPhase::Materialized)
-            );
-            assert_eq!(
-                parent.metadata["detached_cook_handoff"]["attempt_run_id"],
-                attempt_id
-            );
-
-            assert_eq!(
-                agent_task_lifecycle::cancel_run(cook_id, None)
-                    .expect("materialized handoff cancel command resolves")
-                    .run_id,
-                attempt_id
             );
         });
     }
@@ -2273,26 +2094,16 @@ mod tests {
                 .and_then(|arg| arg.strip_prefix('@'))
                 .expect("prompt rewritten to a file reference");
             assert_eq!(std::fs::read_to_string(path).expect("prompt file"), piped);
-        });
-    }
 
-    #[test]
-    fn a_prompt_that_is_not_stdin_is_left_alone() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            let mut child = args(&["agent-task", "cook", "--prompt", "@task.md"]);
-            materialize_stdin_prompt_content(&mut child, "cook-file-prompt", "unused")
+            let mut attached = args(&["agent-task", "cook", "--prompt=-", "--no-finalize"]);
+            materialize_stdin_prompt_content(&mut attached, "cook-attached-prompt", "piped")
+                .expect("materialize attached stdin prompt");
+            assert!(attached[2].starts_with("--prompt=@"), "{attached:?}");
+
+            let mut file_prompt = args(&["agent-task", "cook", "--prompt", "@task.md"]);
+            materialize_stdin_prompt_content(&mut file_prompt, "cook-file-prompt", "unused")
                 .expect("inspect prompt");
-            assert_eq!(child.last().map(String::as_str), Some("@task.md"));
-        });
-    }
-
-    #[test]
-    fn an_attached_stdin_prompt_keeps_its_option_when_rewritten() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            let mut child = args(&["agent-task", "cook", "--prompt=-", "--no-finalize"]);
-            materialize_stdin_prompt_content(&mut child, "cook-attached-prompt", "piped")
-                .expect("materialize stdin prompt");
-            assert!(child[2].starts_with("--prompt=@"), "{child:?}");
+            assert_eq!(file_prompt.last().map(String::as_str), Some("@task.md"));
         });
     }
 

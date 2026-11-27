@@ -63,10 +63,6 @@ fn capacity_walks_the_rotation_dedupes_routes_and_probes_capacity_only() {
     });
 }
 
-// Known pools, exhausted-account reset instants, and failing extension
-// capacity invocations were extension readiness JSON features. Pi does not
-// publish that protocol; those fixture-only cases are retired.
-
 #[test]
 fn capacity_never_reports_a_mode_ignoring_runtime_as_publishing_capacity() {
     crate::test_support::with_isolated_home(|_home| {
@@ -194,19 +190,15 @@ fn capacity_summary_renders_one_block_per_pool_and_line_per_account() {
         ]
         .join("\n")
     );
-}
 
-#[test]
-fn capacity_summary_names_an_empty_rotation() {
-    let payload = json!({
+    let empty = json!({
         "schema": "homeboy/agent-task-capacity/v1",
         "generated_at": "2026-09-24T20:00:00+00:00",
         "routes": [],
         "next_reset": Value::Null,
     });
-
     assert_eq!(
-        render_agent_task_summary(AgentTaskSummaryKind::Capacity, &payload).as_deref(),
+        render_agent_task_summary(AgentTaskSummaryKind::Capacity, &empty).as_deref(),
         Some("Agent task capacity: no configured provider routes"),
     );
 }
@@ -240,7 +232,7 @@ fn lab_route_free_slots_follow_the_effective_admission_budget() {
         reasons: Vec::new(),
         pressure: Value::Null,
     };
-    // High self-load must not turn a legacy reduced observation into a cap.
+    // High self-load must not turn a reduced observation into a cap.
     let route = lab_route_value("homeboy-lab", Some(24), Some(1), Some(&idle));
     assert_eq!(route["effective_budget"], 24);
     assert_eq!(route["free_slots"], 14);

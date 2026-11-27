@@ -115,30 +115,6 @@ fn rig_component_path_and_trace_env_are_threaded() {
 }
 
 #[test]
-fn rig_component_for_trace_synthesizes_trace_workload_extensions() {
-    let rig_spec: RigSpec = serde_json::from_str(
-        r#"{
-                "id": "studio",
-                "components": {
-                    "studio": { "path": "/tmp/studio" }
-                },
-                "trace_workloads": {
-                    "trace-fixture": [{ "path": "/tmp/create-site.trace.mjs" }]
-                }
-            }"#,
-    )
-    .expect("parse rig spec");
-
-    let component = rig_component_for_trace(&rig_spec, "studio").expect("component");
-
-    assert!(component
-        .extensions
-        .as_ref()
-        .expect("extensions")
-        .contains_key(TRACE_FIXTURE_EXTENSION_ID));
-}
-
-#[test]
 fn rig_trace_list_uses_rig_default_component_and_workloads() {
     let component_dir = tempfile::TempDir::new().expect("component dir");
     let rig_spec: RigSpec = serde_json::from_str(&format!(

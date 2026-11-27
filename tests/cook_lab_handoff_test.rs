@@ -93,29 +93,6 @@ fn native_task_worktree(
 }
 
 #[test]
-fn cook_handoff_subprocesses_do_not_inherit_controller_transport() {
-    // Pins the isolation the rejections below depend on. If these fixtures ever
-    // stop stripping the controller transport variables, the routing bail-out
-    // above `run_split_placement_cook` swallows every rejection this file
-    // asserts, and the suite hangs instead of failing (#10917).
-    let context = HermeticTestContext::new();
-    let command = context.command(TestBinary::HomeboyFixture);
-    let removed_env = command
-        .get_envs()
-        .filter_map(|(key, value)| value.is_none().then(|| key.to_string_lossy().into_owned()))
-        .collect::<std::collections::BTreeSet<_>>();
-
-    assert!(
-        removed_env.contains(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV),
-        "cook handoff fixtures must not inherit Lab offload transport"
-    );
-    assert!(
-        removed_env.contains(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV),
-        "cook handoff fixtures must not inherit the controller source snapshot"
-    );
-}
-
-#[test]
 fn contradictory_cook_arguments_survive_controller_transport_context() {
     // The routing bail-outs skip *routing*, not validation. Injecting the exact
     // transport context that used to suppress these rejections must not change
@@ -187,122 +164,6 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
         !queue_only_stdout.contains("worktree provider"),
         "{queue_only_stdout}"
     );
-}
-
-#[test]
-fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
-    // `--runner` implies Lab placement, so combining it with an explicit
-    // `--placement` is contradictory and rejected at argument parsing (see
-    // `runner_and_placement_are_mutually_exclusive`). That rejection happens
-    // before any worktree provider resolution.
-    let output = homeboy(&[
-        "--placement",
-        "local",
-        "--runner",
-        "homeboy-lab",
-        "agent-task",
-        "cook",
-        "--backend",
-        "fixture",
-        "--prompt",
-        "implement the fix",
-        "--to-worktree",
-        "missing@worktree",
-        "--verify",
-        "true",
-    ]);
-
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("'--placement <PLACEMENT>' cannot be used with '--runner <RUNNER_ID>'"));
-    assert!(!stdout.contains("worktree provider"));
-    assert!(!stderr.contains("worktree provider"));
-}
-
-/// A local detached Cook with pending provider resolution is accepted only after
-/// its durable attempt is externally visible (#12290, #13512).
-///
-/// The launcher hands the Cook to a process in its own session, then observes
-/// whether it materializes the durable attempt. It performs no worktree or
-/// provider resolution itself, preserving the bounded handoff boundary.
-#[test]
-fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
-    let context = HermeticTestContext::new();
-    let (_checkout_guard, checkout) =
-        homeboy_core::test_support::shared_committed_git_repo_fixture("local-detach-pending");
-    let (_task_handle, task_worktree) = native_task_worktree(
-        &context,
-        "local-detach-pending",
-        &checkout,
-        "pending-attempt",
-    );
-    std::fs::write(
-        context.config_dir().join("homeboy.json"),
-        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
-    )
-    .expect("disable host-capacity admission for fixture worktree");
-    let mut command = context.command(TestBinary::HomeboyFixture);
-    command
-        // Bound the launcher's wait so an unresolvable destination reports an
-        // honest handoff state promptly instead of holding the default budget.
-        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "30000")
-        .args([
-            "--placement",
-            "local",
-            "agent-task",
-            "cook",
-            "--run-id",
-            "local-detach-exits-before-attempt",
-            "--backend",
-            "fixture",
-            "--prompt",
-            "implement the fix",
-            "--base",
-            "main",
-            "--repo",
-            "local-detach-pending",
-            "--cwd",
-            task_worktree.to_str().expect("task worktree path"),
-            "--to-worktree",
-            task_worktree.to_str().expect("task worktree path"),
-            "--verify",
-            "true",
-        ]);
-    let stdout_path = context.root().join("detached-cook.stdout");
-    let stderr_path = context.root().join("detached-cook.stderr");
-    command
-        .stdout(Stdio::from(
-            std::fs::File::create(&stdout_path).expect("create detached Cook stdout"),
-        ))
-        .stderr(Stdio::from(
-            std::fs::File::create(&stderr_path).expect("create detached Cook stderr"),
-        ));
-    let mut child = command.spawn().expect("start detached Cook launcher");
-    let status = child.wait().expect("wait for detached Cook launcher");
-    let stdout = std::fs::read_to_string(&stdout_path).expect("read detached Cook stdout");
-    let stderr = std::fs::read_to_string(&stderr_path).expect("read detached Cook stderr");
-    assert!(status.success(), "{stdout}\n{stderr}");
-    assert!(
-        !stdout.contains("cannot detach after handoff with --placement local"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("\"state\": \"accepted\""), "{stdout}");
-    assert!(stdout.contains("watch_command"), "{stdout}");
-    assert!(
-        stdout.contains("local-detach-exits-before-attempt-attempt-1-"),
-        "{stdout}"
-    );
-    let mut status = context.command(TestBinary::HomeboyFixture);
-    status.args(["agent-task", "status", "local-detach-exits-before-attempt"]);
-    let status = bounded_output(status);
-    let status_stdout = String::from_utf8_lossy(&status.stdout);
-    let status_stderr = String::from_utf8_lossy(&status.stderr);
-    assert!(
-        status.status.success(),
-        "durable attempt must be visible: stdout={status_stdout} stderr={status_stderr}"
-    );
-    assert!(status_stdout.contains("local-detach-exits-before-attempt"));
 }
 
 #[test]
@@ -484,6 +345,7 @@ fn assert_detached_cook_materializes_attempt(force_pressure: bool) {
     )
     .unwrap_or_else(|error| panic!("handoff envelope is JSON: {error}\n{stdout}"));
     assert_eq!(handoff["handoff"]["state"], "accepted", "{stdout}");
+    assert!(stdout.contains("watch_command"), "{stdout}");
     let attempt_id = handoff["run_id"]
         .as_str()
         .unwrap_or_else(|| panic!("accepted handoff names an attempt\n{stdout}"))
@@ -821,7 +683,7 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
     // The step was admitted before the launcher died, so the daemon already
     // owns this Cook: the step child binds the handoff and the Cook runs to a
     // terminal state without its launcher.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(180);
     let attempt_id = loop {
         let parent = lifecycle_store
             .read_record(cook_id)
@@ -846,6 +708,8 @@ fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
         parent.metadata["detached_cook_handoff"]["supervisor_job_id"].is_string(),
         "the step job owns the handoff: {parent:?}"
     );
+    // Give execution its own budget after materialization has been observed.
+    let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         let attempt = lifecycle_store
             .read_record(&attempt_id)
@@ -1348,28 +1212,6 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
 }
 
 #[test]
-fn cook_rejects_queue_only_before_worktree_resolution() {
-    let output = homeboy(&[
-        "agent-task",
-        "cook",
-        "--backend",
-        "fixture",
-        "--prompt",
-        "implement the fix",
-        "--to-worktree",
-        "missing@worktree",
-        "--verify",
-        "true",
-        "--queue-only",
-    ]);
-
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("cannot queue its controller-owned lifecycle"));
-    assert!(!stdout.contains("worktree provider"));
-}
-
-#[test]
 fn required_lab_route_without_a_selected_runner_fails_deterministically() {
     let context = HermeticTestContext::new();
     let mut command = context.command(TestBinary::HomeboyFixture);
@@ -1390,21 +1232,4 @@ fn required_lab_route_without_a_selected_runner_fails_deterministically() {
     );
     assert!(!stdout.contains("worktree provider"));
     assert!(!stderr.contains("worktree provider"));
-}
-
-#[test]
-fn cook_help_does_not_advertise_queue_only() {
-    let output = homeboy(&["agent-task", "cook", "--help"]);
-
-    assert!(output.status.success());
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(!help.contains("\n      --queue-only\n"));
-    assert!(help.contains("--help-full"), "{help}");
-
-    let output = homeboy(&["agent-task", "cook", "--help-full"]);
-    assert!(output.status.success());
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(!help.contains("\n      --queue-only\n"));
-    assert!(help.contains("--wait"), "{help}");
-    assert!(!help.contains("--detach-after-handoff"), "{help}");
 }

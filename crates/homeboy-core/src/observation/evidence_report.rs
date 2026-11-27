@@ -1581,20 +1581,6 @@ mod tests {
         assert_eq!(manifest.source, Some(EvidenceManifestSource::Derived));
         assert_eq!(manifest.status.state, EvidenceManifestState::Passed);
         assert!(report.evidence_manifest_errors.is_empty());
-    }
-
-    #[test]
-    fn original_report_inputs_caller_remains_compatible_without_descendants() {
-        let run = sample_run();
-        let report = build_run_evidence_report(RunEvidenceReportInputs {
-            command: "runs.evidence",
-            run: run.clone(),
-            run_summary: serde_json::json!({ "id": run.id }),
-            artifacts: Vec::new(),
-            artifact_root: PathBuf::from("/tmp/artifacts"),
-            disk_budget: sample_disk_budget(),
-        });
-
         assert!(report.descendant_evidence.is_empty());
     }
 
@@ -1657,34 +1643,10 @@ mod tests {
 
     /// A derived manifest must be self-describing: it always validates against
     /// its own contract, so it can be lifted out of the report and handed to any
-    /// consumer of `homeboy/evidence-manifest/v1`.
+    /// consumer of `homeboy/evidence-manifest/v1`, and each owned status maps
+    /// to one state.
     #[test]
-    fn derived_manifest_satisfies_the_contract_for_every_status_label() {
-        for status in [
-            "running",
-            "pass",
-            "fail",
-            "error",
-            "skipped",
-            "stale",
-            "handed_off",
-            "?",
-        ] {
-            let mut run = sample_run();
-            run.status = status.to_string();
-            let manifest = derived_manifest(&run, &[url_artifact()]);
-
-            manifest
-                .validate()
-                .unwrap_or_else(|err| panic!("{status}: {err}"));
-            assert_eq!(manifest.source, Some(EvidenceManifestSource::Derived));
-            assert_eq!(manifest.id.as_deref(), Some("run-1"));
-            assert_eq!(manifest.run_refs[0].id, "run-1");
-        }
-    }
-
-    #[test]
-    fn derived_manifest_maps_each_owned_status_to_a_state() {
+    fn derived_manifest_validates_and_maps_every_status_label() {
         let cases = [
             ("running", EvidenceManifestState::Pending),
             ("pass", EvidenceManifestState::Passed),
@@ -1693,16 +1655,21 @@ mod tests {
             ("stale", EvidenceManifestState::Blocked),
             ("skipped", EvidenceManifestState::Unknown),
             ("handed_off", EvidenceManifestState::Unknown),
+            ("?", EvidenceManifestState::Unknown),
         ];
 
         for (status, expected) in cases {
             let mut run = sample_run();
             run.status = status.to_string();
-            assert_eq!(
-                derived_manifest(&run, &[url_artifact()]).status.state,
-                expected,
-                "{status}"
-            );
+            let manifest = derived_manifest(&run, &[url_artifact()]);
+
+            manifest
+                .validate()
+                .unwrap_or_else(|err| panic!("{status}: {err}"));
+            assert_eq!(manifest.status.state, expected, "{status}");
+            assert_eq!(manifest.source, Some(EvidenceManifestSource::Derived));
+            assert_eq!(manifest.id.as_deref(), Some("run-1"));
+            assert_eq!(manifest.run_refs[0].id, "run-1");
         }
     }
 

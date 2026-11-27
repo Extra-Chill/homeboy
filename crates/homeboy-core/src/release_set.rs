@@ -188,31 +188,29 @@ mod tests {
     }
 
     #[test]
-    // 2. Identity is independent of caller component ordering.
-    fn identity_is_stable_across_component_order() {
-        let first = ReleaseSetManifest::parse_json(&manifest(serde_json::json!([
-            {"id":"b", "ref":"two"}, {"id":"a", "ref":"one"}
-        ])))
-        .expect("first manifest");
-        let second = ReleaseSetManifest::parse_json(&manifest(serde_json::json!([
+    // 2. Identity ignores caller ordering but changes with membership policy.
+    fn identity_is_order_independent_and_tracks_membership_policy() {
+        let identity = |components| {
+            ReleaseSetManifest::parse_json(&manifest(components))
+                .expect("manifest")
+                .identity
+        };
+        let ordered = identity(serde_json::json!([
             {"id":"a", "ref":"one"}, {"id":"b", "ref":"two"}
-        ])))
-        .expect("second manifest");
-        assert_eq!(first.identity, second.identity);
-    }
+        ]));
 
-    #[test]
-    fn identity_changes_when_membership_policy_changes() {
-        let required = ReleaseSetManifest::parse_json(&manifest(serde_json::json!([
-            {"id":"a", "ref":"one"}
-        ])))
-        .expect("required manifest");
-        let optional = ReleaseSetManifest::parse_json(&manifest(serde_json::json!([
-            {"id":"a", "ref":"one", "required":false}
-        ])))
-        .expect("optional manifest");
-
-        assert_ne!(required.identity, optional.identity);
+        assert_eq!(
+            identity(serde_json::json!([
+                {"id":"b", "ref":"two"}, {"id":"a", "ref":"one"}
+            ])),
+            ordered
+        );
+        assert_ne!(
+            identity(serde_json::json!([
+                {"id":"a", "ref":"one", "required":false}, {"id":"b", "ref":"two"}
+            ])),
+            ordered
+        );
     }
 
     #[test]

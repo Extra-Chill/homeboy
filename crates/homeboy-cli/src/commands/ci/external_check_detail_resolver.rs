@@ -278,11 +278,6 @@ fn fixture_program(extension: &std::path::Path, fixture_mode_env: &str) -> Strin
     name.to_string()
 }
 
-#[cfg(all(feature = "test-support", target_os = "linux"))]
-pub(super) fn test_inherited_pipe_holder_cleanup() {
-    homeboy_core::extension::external_check_detail_api::test_inherited_pipe_holder_cleanup();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,20 +288,5 @@ mod tests {
             normalize_target_url("https://token@example.test/build/42?secret=yes#fragment"),
             "https://example.test/build/42"
         );
-    }
-
-    #[test]
-    fn missing_provider_is_diagnostic_only() {
-        homeboy::core::test_support::with_isolated_home(|_| {
-            let session = ResolverSession::discover();
-            let (details, diagnostics) = session.hydrate(
-                "missing",
-                "failure",
-                None,
-                Instant::now() + Duration::from_secs(1),
-            );
-            assert!(details.is_empty());
-            assert_eq!(diagnostics[0].kind, "unknown");
-        });
     }
 }

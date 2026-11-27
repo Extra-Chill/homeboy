@@ -1829,81 +1829,56 @@ mod tests {
         });
     }
 
+    /// Any acquisition failure after the local claim is taken (runner
+    /// enumeration, malformed or duplicate runner ids, a later remote claim)
+    /// rolls back the local claim and every remote claim already acquired.
     #[test]
-    fn enumeration_failure_after_local_acquisition_releases_the_local_claim() {
-        with_isolated_home(|_| {
-            let (provider, live) = provider(Err(Error::internal_unexpected(
+    fn acquisition_failure_releases_local_and_prior_remote_claims() {
+        let cases: [(Result<Vec<String>>, Option<&str>, &str); 4] = [
+            (
+                Err(Error::internal_unexpected("injected enumeration failure")),
+                None,
                 "injected enumeration failure",
-            )));
-            let _provider = install_claim_provider(provider);
-            let workspace = workspace();
-
-            let failure = acquire_composite_workspace_claim_until(
-                workspace.clone(),
-                1,
-                CompositeClaimAuthorities::ConfiguredRunners,
-                std::time::Instant::now() + std::time::Duration::from_secs(30),
-            )
-            .expect_err("enumeration must fail");
-
-            assert_eq!(failure.primary.message, "injected enumeration failure");
-            assert!(failure.rollback_failures.is_empty());
-            assert!(failure.cleanup.is_none());
-            assert!(live.lock().expect("live claims").is_empty());
-            let claim = acquire_local_workspace_claim(workspace, 1).expect("local claim released");
-            release_local_workspace_claim(&claim).expect("release verification claim");
-        });
-    }
-
-    #[test]
-    fn malformed_and_duplicate_runner_ids_release_the_local_claim() {
-        for runner_ids in [vec![" ".into()], vec!["runner-a".into(), "runner-a".into()]] {
+            ),
+            (Ok(vec![" ".into()]), None, "runner id"),
+            (
+                Ok(vec!["runner-a".into(), "runner-a".into()]),
+                None,
+                "runner id",
+            ),
+            (
+                Ok(vec!["runner-a".into(), "runner-b".into()]),
+                Some("runner-b"),
+                "injected acquisition failure for runner-b",
+            ),
+        ];
+        for (runner_ids, fail_acquire_for, message) in cases {
             with_isolated_home(|_| {
-                let (provider, live) = provider(Ok(runner_ids));
+                let (mut provider, live) = provider(runner_ids);
+                provider.fail_acquire_for = fail_acquire_for.map(str::to_string);
                 let _provider = install_claim_provider(provider);
+
                 let failure = acquire_composite_workspace_claim_until(
                     workspace(),
                     1,
                     CompositeClaimAuthorities::ConfiguredRunners,
                     std::time::Instant::now() + std::time::Duration::from_secs(30),
                 )
-                .expect_err("invalid runner IDs must fail");
-                assert!(failure.primary.message.contains("runner id"));
-                assert!(failure.cleanup.is_none());
-                assert!(live.lock().expect("live claims").is_empty());
+                .expect_err("acquisition must fail");
+
+                assert!(
+                    failure.primary.message.contains(message),
+                    "{}",
+                    failure.primary.message
+                );
+                assert!(failure.rollback_failures.is_empty(), "{message}");
+                assert!(failure.cleanup.is_none(), "{message}");
+                assert!(live.lock().expect("live claims").is_empty(), "{message}");
                 let claim =
                     acquire_local_workspace_claim(workspace(), 1).expect("local claim released");
                 release_local_workspace_claim(&claim).expect("release verification claim");
             });
         }
-    }
-
-    #[test]
-    fn later_remote_failure_releases_local_and_prior_remote_claims() {
-        with_isolated_home(|_| {
-            let (mut provider, live) = provider(Ok(vec!["runner-a".into(), "runner-b".into()]));
-            provider.fail_acquire_for = Some("runner-b".into());
-            let _provider = install_claim_provider(provider);
-
-            let failure = acquire_composite_workspace_claim_until(
-                workspace(),
-                1,
-                CompositeClaimAuthorities::ConfiguredRunners,
-                std::time::Instant::now() + std::time::Duration::from_secs(30),
-            )
-            .expect_err("second remote acquisition must fail");
-
-            assert_eq!(
-                failure.primary.message,
-                "injected acquisition failure for runner-b"
-            );
-            assert!(failure.rollback_failures.is_empty());
-            assert!(failure.cleanup.is_none());
-            assert!(live.lock().expect("live claims").is_empty());
-            let claim =
-                acquire_local_workspace_claim(workspace(), 1).expect("local claim released");
-            release_local_workspace_claim(&claim).expect("release verification claim");
-        });
     }
 
     #[test]

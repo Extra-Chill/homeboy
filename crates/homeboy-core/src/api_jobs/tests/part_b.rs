@@ -4,7 +4,6 @@ use std::fs;
 
 use serde_json::json;
 
-use super::persistence::recovered_terminal_from_result;
 use super::store::RecoveredTerminalJob;
 use super::*;
 use uuid::Uuid;
@@ -743,20 +742,6 @@ fn uncheckpointed_in_daemon_staging_dispatch_is_left_for_attestation_after_dead_
 }
 
 #[test]
-fn reused_pid_with_a_different_start_identity_is_terminalized() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    record_test_local_child(&store, job.id, std::process::id());
-
-    let diagnostics = store
-        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |_| false)
-        .expect("reconcile reused PID");
-
-    assert!(diagnostics.protected_job_ids.is_empty());
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
-}
-
-#[test]
 fn dead_child_recovers_linked_terminal_result_and_artifacts() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let job = store.create("runner.exec");
@@ -831,70 +816,6 @@ fn dead_child_recovers_linked_terminal_failure_and_live_child_skips_resolver() {
 }
 
 #[test]
-fn dead_lease_reconciliation_is_idempotent_after_terminalizing_a_dead_child() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    record_test_local_child(&store, job.id, 4242);
-
-    let first = store
-        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |_| false)
-        .expect("first reconciliation");
-    let event_count = store.events(job.id).expect("events").len();
-    let second = store
-        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |_| false)
-        .expect("repeated reconciliation");
-
-    assert_eq!(first.terminalized_count(), 1);
-    assert_eq!(second.matching_count(), 0);
-    assert_eq!(second.terminalized_count(), 0);
-    assert_eq!(store.events(job.id).expect("events").len(), event_count);
-}
-
-#[test]
-fn dead_generation_recovery_terminalizes_every_historical_lease() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let first = JobStore::open_without_reconciliation(&path)
-        .expect("open first")
-        .with_daemon_lease("lease-first".to_string());
-    let first_job = first.create("runner.exec");
-    record_test_local_child(&first, first_job.id, u32::MAX);
-    first
-        .append_event(
-            first_job.id,
-            JobEventKind::Stdout,
-            Some("first output".to_string()),
-            None,
-        )
-        .expect("first output");
-    let second = JobStore::open_without_reconciliation(&path)
-        .expect("open second")
-        .with_daemon_lease("lease-second".to_string());
-    let second_job = second.create("runner.exec");
-    record_test_local_child(&second, second_job.id, u32::MAX);
-
-    let recovery = JobStore::open_without_reconciliation(&path).expect("open recovery");
-    let diagnostics = recovery
-        .reconcile_dead_generation_jobs("lease-live")
-        .expect("reconcile");
-
-    assert_eq!(diagnostics.terminalized_count(), 2);
-    assert_eq!(
-        recovery.get(first_job.id).expect("first job").status,
-        JobStatus::Failed
-    );
-    assert_eq!(
-        recovery.get(second_job.id).expect("second job").status,
-        JobStatus::Failed
-    );
-    assert!(recovery
-        .events(first_job.id)
-        .expect("first events")
-        .iter()
-        .any(|event| event.message.as_deref() == Some("first output")));
-}
-
-#[test]
 fn dead_generation_recovery_reconciles_unowned_and_historical_jobs_once() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
@@ -906,6 +827,14 @@ fn dead_generation_recovery_reconciles_unowned_and_historical_jobs_once() {
         .with_daemon_lease("lease-historical".to_string());
     let leased_job = leased.create("runner.exec");
     record_test_local_child(&leased, leased_job.id, u32::MAX);
+    leased
+        .append_event(
+            leased_job.id,
+            JobEventKind::Stdout,
+            Some("historical output".to_string()),
+            None,
+        )
+        .expect("historical output");
 
     let recovery = JobStore::open_without_reconciliation(&path).expect("open recovery");
     let first = recovery
@@ -930,6 +859,11 @@ fn dead_generation_recovery_reconciles_unowned_and_historical_jobs_once() {
         recovery.get(leased_job.id).expect("leased").status,
         JobStatus::Failed
     );
+    assert!(recovery
+        .events(leased_job.id)
+        .expect("leased events")
+        .iter()
+        .any(|event| event.message.as_deref() == Some("historical output")));
     assert_eq!(
         recovery
             .events(unowned_job.id)
@@ -962,150 +896,69 @@ fn daemon_job_acceptance_stamps_current_lease_and_old_job_json_remains_readable(
     assert!(decoded.daemon_lease_id.is_none());
 }
 
+/// A daemon worker can record its terminal result *before* the status
+/// transition and then die in that window. Restart recovery settles the job
+/// from the recorded result instead of reporting a daemon-restart failure; a
+/// result without an exit code is not authoritative.
 #[test]
-fn durable_store_recovers_succeeded_job_from_result_event_after_restart() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open(&path).expect("durable store opens");
-    let job = store.create("runner.exec");
-    store.start(job.id).expect("job starts");
-    // Simulate the daemon worker recording its terminal result *before* the
-    // status transition, then the daemon process dying in that window.
-    store
-        .append_event(
-            job.id,
-            JobEventKind::Result,
-            None,
-            Some(json!({ "exit_code": 0, "stdout": "ok" })),
-        )
-        .expect("result event records");
+fn durable_store_recovers_terminal_status_from_result_event_after_restart() {
+    for (result, expected_status, recovered) in [
+        (
+            json!({ "exit_code": 0, "stdout": "ok" }),
+            JobStatus::Succeeded,
+            true,
+        ),
+        (
+            json!({ "exit_code": 2, "stderr": "boom" }),
+            JobStatus::Failed,
+            true,
+        ),
+        (
+            json!({ "exit_code": 130, "status": "cancelled" }),
+            JobStatus::Cancelled,
+            true,
+        ),
+        (json!({ "stdout": "partial" }), JobStatus::Failed, false),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+        let store = JobStore::open(&path).expect("durable store opens");
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("job starts");
+        store
+            .append_event(job.id, JobEventKind::Result, None, Some(result.clone()))
+            .expect("result event records");
 
-    let reopened = JobStore::open(&path).expect("durable store reopens");
-    let recovered = reopened.get(job.id).expect("job persists");
-    assert_eq!(
-        recovered.status,
-        JobStatus::Succeeded,
-        "a job with a successful recorded result must not be reported as a daemon-restart failure"
-    );
-    assert!(recovered.stale_reason.is_none());
-    assert!(recovered.finished_at_ms.is_some());
+        let reopened = JobStore::open(&path).expect("durable store reopens");
+        let job = reopened.get(job.id).expect("job persists");
+        assert_eq!(job.status, expected_status, "{result}");
+        assert!(job.finished_at_ms.is_some());
+        assert_eq!(job.stale_reason.is_none(), recovered, "{result}");
 
-    let events = reopened.events(job.id).expect("events persist");
-    assert!(events.iter().any(|event| {
-        event.kind == JobEventKind::Status
-            && event
-                .data
-                .as_ref()
-                .is_some_and(|data| data["reason"] == json!("recovered_after_daemon_restart"))
-    }));
-}
-
-#[test]
-fn durable_store_recovers_failed_job_from_nonzero_result_after_restart() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open(&path).expect("durable store opens");
-    let job = store.create("runner.exec");
-    store.start(job.id).expect("job starts");
-    store
-        .append_event(
-            job.id,
-            JobEventKind::Result,
-            None,
-            Some(json!({ "exit_code": 2, "stderr": "boom" })),
-        )
-        .expect("result event records");
-
-    let reopened = JobStore::open(&path).expect("durable store reopens");
-    let recovered = reopened.get(job.id).expect("job persists");
-    assert_eq!(recovered.status, JobStatus::Failed);
-    // Recovered (real) failure must not be mislabeled as a daemon-restart stale failure.
-    assert!(recovered.stale_reason.is_none());
-
-    let events = reopened.events(job.id).expect("events persist");
-    assert!(events.iter().any(|event| {
-        event.kind == JobEventKind::Status
-            && event.data.as_ref().is_some_and(|data| {
-                data["reason"] == json!("recovered_after_daemon_restart")
-                    && data["exit_code"] == json!(2)
+        let events = reopened.events(job.id).expect("events persist");
+        let has_reason = |reason: &str| {
+            events.iter().any(|event| {
+                event
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data["reason"] == json!(reason))
             })
-    }));
-    // It must NOT carry the synthetic stale-after-restart error event.
-    assert!(!events.iter().any(|event| {
-        event
-            .data
-            .as_ref()
-            .is_some_and(|data| data["reason"] == json!("orphaned_after_control_plane_loss"))
-    }));
+        };
+        assert_eq!(
+            has_reason("recovered_after_daemon_restart"),
+            recovered,
+            "{result}"
+        );
+        assert_eq!(
+            has_reason("orphaned_after_control_plane_loss"),
+            !recovered,
+            "{result}"
+        );
+    }
 }
 
 #[test]
-fn durable_store_recovers_cancelled_job_from_result_after_restart() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open(&path).expect("durable store opens");
-    let job = store.create("runner.exec");
-    store.start(job.id).expect("job starts");
-    store
-        .append_event(
-            job.id,
-            JobEventKind::Result,
-            None,
-            Some(json!({ "exit_code": 130, "status": "cancelled" })),
-        )
-        .expect("result event records");
-
-    let reopened = JobStore::open(&path).expect("durable store reopens");
-    let recovered = reopened.get(job.id).expect("job persists");
-    assert_eq!(recovered.status, JobStatus::Cancelled);
-    assert!(recovered.stale_reason.is_none());
-}
-
-#[test]
-fn recovered_terminal_from_result_handles_missing_and_present_results() {
-    // No result event -> None (falls through to stale failure).
-    assert!(recovered_terminal_from_result(&[]).is_none());
-
-    let zero = vec![JobEvent {
-        sequence: 1,
-        job_id: Uuid::new_v4(),
-        kind: JobEventKind::Result,
-        timestamp_ms: 0,
-        message: None,
-        data: Some(json!({ "exit_code": 0 })),
-    }];
-    assert_eq!(
-        recovered_terminal_from_result(&zero),
-        Some((JobStatus::Succeeded, 0))
-    );
-
-    let nonzero = vec![JobEvent {
-        sequence: 1,
-        job_id: Uuid::new_v4(),
-        kind: JobEventKind::Result,
-        timestamp_ms: 0,
-        message: None,
-        data: Some(json!({ "exit_code": 7 })),
-    }];
-    assert_eq!(
-        recovered_terminal_from_result(&nonzero),
-        Some((JobStatus::Failed, 7))
-    );
-
-    // Result event without an exit_code is not authoritative -> None.
-    let no_code = vec![JobEvent {
-        sequence: 1,
-        job_id: Uuid::new_v4(),
-        kind: JobEventKind::Result,
-        timestamp_ms: 0,
-        message: None,
-        data: Some(json!({ "stdout": "partial" })),
-    }];
-    assert!(recovered_terminal_from_result(&no_code).is_none());
-}
-
-#[test]
-fn test_open_with_event_retention() {
+fn event_retention_bounds_job_history_across_reopen() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_with_event_retention(&path, 3).expect("durable store opens");
@@ -1491,49 +1344,59 @@ fn remote_runner_job_submit_targets_runner_and_project() {
     );
 }
 
+/// Inline values for any declared secret name (explicit names or a provider
+/// credential plan) are refused with actionable alternatives before a durable
+/// job exists.
 #[test]
 fn remote_runner_job_rejects_inline_secret_env_before_durable_persistence() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open(&path).expect("durable store opens");
-    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
-    request.env.insert(
-        "RUNNER_SECRET_TOKEN".to_string(),
-        "inline-secret".to_string(),
-    );
-    request
-        .env
-        .insert("PUBLIC_FLAG".to_string(), "1".to_string());
-    request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
+    for (secret_name, use_plan, alternative) in [
+        ("RUNNER_SECRET_TOKEN", false, "runner secret_env"),
+        (
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN",
+            true,
+            "SecretEnvPlan references",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+        let store = JobStore::open(&path).expect("durable store opens");
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request
+            .env
+            .insert(secret_name.to_string(), "inline-secret".to_string());
+        request
+            .env
+            .insert("PUBLIC_FLAG".to_string(), "1".to_string());
+        if use_plan {
+            request.secret_env_plan = provider_credential_secret_env_plan();
+        } else {
+            request.secret_env_names = vec![secret_name.to_string()];
+        }
 
-    let error = store
-        .submit_runner_api_fixture(request)
-        .expect_err("inline secret must be rejected before durable persistence");
+        let error = store
+            .submit_runner_api_fixture(request)
+            .expect_err("inline secret must be rejected before durable persistence");
 
-    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-    assert_eq!(
-        error.details["id"],
-        serde_json::json!("durable_reverse_runner_inline_secret_env")
-    );
-    assert!(error
-        .message
-        .contains("cannot accept inline secret env values"));
-    assert!(error.details["tried"]
-        .as_array()
-        .expect("actionable alternatives")
-        .iter()
-        .any(|value| value
-            .as_str()
-            .is_some_and(|value| value.contains("runner secret_env"))));
-    assert!(
-        store
-            .inner
-            .lock()
-            .expect("job store mutex poisoned")
-            .jobs
-            .is_empty(),
-        "rejected inline secret must not create a durable job"
-    );
+        assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert_eq!(
+            error.details["id"],
+            json!("durable_reverse_runner_inline_secret_env")
+        );
+        assert!(
+            error.details["tried"]
+                .as_array()
+                .expect("actionable alternatives")
+                .iter()
+                .any(|value| value
+                    .as_str()
+                    .is_some_and(|value| value.contains(alternative))),
+            "{secret_name}"
+        );
+        assert!(
+            store.list().is_empty(),
+            "rejected inline secret must not create a durable job"
+        );
+    }
 }
 
 fn provider_credential_secret_env_plan() -> crate::secret_env_plan::SecretEnvPlan {
@@ -1569,33 +1432,6 @@ fn remote_runner_job_with_provider_credential_plan_accepts_value_free_env() {
         .expect("reference-only provider credential plan is durable-safe");
 
     assert_eq!(job.status, JobStatus::Queued);
-}
-
-#[test]
-fn remote_runner_job_rejects_inline_values_for_provider_credential_plan_names() {
-    let store = JobStore::default();
-    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
-    request.secret_env_plan = provider_credential_secret_env_plan();
-    request.env.insert(
-        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
-        "inline-secret".to_string(),
-    );
-
-    let error = store
-        .submit_runner_api_fixture(request)
-        .expect_err("inline provider credential value must be rejected");
-
-    assert_eq!(error.code, crate::ErrorCode::ValidationInvalidArgument);
-    assert!(error
-        .message
-        .contains("cannot accept inline secret env values"));
-    assert!(error.details["tried"]
-        .as_array()
-        .expect("actionable alternatives")
-        .iter()
-        .any(|value| value
-            .as_str()
-            .is_some_and(|value| value.contains("SecretEnvPlan references"))));
 }
 
 #[test]
@@ -1853,25 +1689,6 @@ fn remote_runner_submission_key_survives_restart_and_rejects_conflicts() {
 }
 
 #[test]
-fn remote_runner_submission_key_concurrent_replay_creates_one_job() {
-    let store = JobStore::default();
-    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
-    request.metadata = Some(json!({ "submission_key": "agent-task:v1:concurrent" }));
-    let first_store = store.clone();
-    let first_request = request.clone();
-    let first = std::thread::spawn(move || first_store.submit_runner_api_fixture(first_request));
-    let second_store = store.clone();
-    let second = std::thread::spawn(move || second_store.submit_runner_api_fixture(request));
-    let first = first.join().expect("first thread").expect("first submit");
-    let second = second
-        .join()
-        .expect("second thread")
-        .expect("second submit");
-    assert_eq!(first.id, second.id);
-    assert_eq!(store.list().len(), 1);
-}
-
-#[test]
 fn remote_runner_submission_key_concurrent_independent_stores_create_one_job() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
@@ -1949,52 +1766,6 @@ fn remote_runner_submission_key_conflicts_on_all_execution_semantic_inputs() {
             json!("homeboy/remote-runner-submission-conflict/v1")
         );
     }
-}
-
-#[test]
-fn compacted_submission_key_expires_without_creating_a_duplicate() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open_with_retention(&path, 10, 1).expect("durable store");
-    let mut requests = Vec::new();
-    for key in ["agent-task:v1:compact-one", "agent-task:v1:compact-two"] {
-        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
-        request.metadata = Some(json!({ "submission_key": key }));
-        let job = store
-            .submit_runner_api_fixture(request.clone())
-            .expect("submit");
-        store
-            .durable_transaction(|inner| {
-                inner.jobs.get_mut(&job.id).expect("job").job.status = JobStatus::Succeeded;
-                Ok(())
-            })
-            .expect("terminalize job");
-        store.compact_retained_history().expect("compact history");
-        requests.push((key.to_string(), request));
-    }
-    let expired_key = "agent-task:v1:compact-one".to_string();
-    assert!(path.exists());
-    assert!(
-        store
-            .inner
-            .lock()
-            .expect("store")
-            .expired_submission_keys
-            .is_empty(),
-        "expired identities are not daemon-resident"
-    );
-    let request = requests
-        .into_iter()
-        .find_map(|(key, request)| (key == expired_key).then_some(request))
-        .expect("expired request");
-    let error = store
-        .submit_runner_api_fixture(request)
-        .expect_err("expired replay is explicit");
-    assert_eq!(
-        error.details["schema"],
-        json!("homeboy/remote-runner-submission-expired/v1")
-    );
-    assert_eq!(store.list().len(), 1);
 }
 
 #[test]

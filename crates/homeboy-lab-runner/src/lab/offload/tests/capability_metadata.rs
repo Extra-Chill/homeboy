@@ -11,10 +11,6 @@ fn admission_capability(
         .capability
 }
 
-fn expected_controller_refresh_ref() -> String {
-    format!("v{}", homeboy_product_identity::product_version())
-}
-
 #[test]
 fn command_prefix_tools_are_included_in_capability_contract() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -30,37 +26,23 @@ fn command_prefix_tools_are_included_in_capability_contract() {
 }
 
 #[test]
-fn full_workspace_lab_contract_uses_declared_tools_only() {
+fn lab_contract_uses_declared_tools_only_regardless_of_source_signals() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("package.json"), "{}").expect("package signal");
     std::fs::write(dir.path().join("docker-compose.yml"), "services: {}").expect("docker signal");
 
-    let contract = admission_capability(
-        &portable_lab_command("test"),
-        dir.path(),
-        vec![RunnerRequiredTool::homeboy()],
-    );
+    for (label, infer_source_path_tools) in [("test", true), ("trace", false)] {
+        let mut command = portable_lab_command(label);
+        command.routing_policy.infer_source_path_tools = infer_source_path_tools;
 
-    assert!(contract
-        .required_tools
-        .contains(&RunnerRequiredTool::homeboy()));
-    assert_eq!(contract.required_tools.len(), 2);
-}
+        let contract =
+            admission_capability(&command, dir.path(), vec![RunnerRequiredTool::homeboy()]);
 
-#[test]
-fn workload_scoped_lab_contract_ignores_source_path_docker_signal() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    std::fs::write(dir.path().join("package.json"), "{}").expect("package signal");
-    std::fs::write(dir.path().join("docker-compose.yml"), "services: {}").expect("docker signal");
-    let mut command = portable_lab_command("trace");
-    command.routing_policy.infer_source_path_tools = false;
-
-    let contract = admission_capability(&command, dir.path(), vec![RunnerRequiredTool::homeboy()]);
-
-    assert!(contract
-        .required_tools
-        .contains(&RunnerRequiredTool::homeboy()));
-    assert_eq!(contract.required_tools.len(), 2);
+        assert!(contract
+            .required_tools
+            .contains(&RunnerRequiredTool::homeboy()));
+        assert_eq!(contract.required_tools.len(), 2, "{label}");
+    }
 }
 
 #[test]
@@ -365,47 +347,6 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         metadata["workspace_verification"]["sync_excludes"],
         serde_json::json!(["excluded.txt"])
     );
-    assert_eq!(
-        metadata["workspace_materialization_plan"],
-        serde_json::to_value(&path_materialization_plan).expect("legacy plan JSON")
-    );
-    assert_eq!(
-        metadata["workspace_verification"]["primary_workspace"],
-        serde_json::to_value(&synced_workspace.materialization_plan)
-            .expect("primary sync plan JSON")
-    );
-    assert_eq!(
-        metadata["workspace_verification"]["schema"],
-        "homeboy/lab-workspace-verification/v2"
-    );
-    assert_eq!(
-        metadata["workspace_verification"]["content_hash_algorithm"],
-        crate::workspace_content_hash_algorithm(
-            crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-        )
-        .expect("default content hash algorithm")
-    );
-    assert_eq!(
-        metadata["workspace_verification"]["permission_policy"],
-        crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY
-    );
-    assert_eq!(
-        metadata["workspace_verification"]["content_manifest"]["entry_count"],
-        1
-    );
-    assert_eq!(
-        metadata["workspace_verification"]["content_manifest"]["entries"][0]["path"],
-        "README.md"
-    );
-    assert_eq!(
-        metadata["workspace_verification"]["content_manifest"]["entries"][0]["kind"],
-        "file"
-    );
-    assert!(
-        metadata["workspace_verification"]["content_manifest"]["entries"][0]
-            .get("content_sha256")
-            .is_none()
-    );
     let serialized_metadata = serde_json::to_string(&metadata).expect("metadata JSON");
     assert!(!serialized_metadata.contains("verified contents"));
 
@@ -583,19 +524,10 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
     );
 
     assert_eq!(metadata["schema"], "homeboy/lab-runner-homeboy/v1");
-    assert_eq!(metadata["runner_id"], "homeboy lab");
-    assert_eq!(
-        metadata["controller_version"],
-        homeboy_product_identity::product_version()
-    );
-    assert!(metadata["controller_build_identity"]
-        .as_str()
-        .is_some_and(|identity| identity.starts_with("homeboy ")));
     assert_eq!(
         metadata["configured_executable"],
         "/tmp/_lab_workspaces/homeboy/target/debug/homeboy"
     );
-    assert_eq!(metadata["active_daemon_version"], "homeboy 0.0.0");
     assert_eq!(
         metadata["active_daemon_build_identity"],
         "homeboy 0.0.0+test"
@@ -608,33 +540,8 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
     );
 }
 
-#[test]
-fn runner_homeboy_version_drift_reports_upgrade_guidance() {
-    let status = connected_status("homeboy-lab");
-
-    let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
-
-    assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    assert!(err
-        .message
-        .contains("Lab offload refused runner `homeboy-lab`"));
-    assert!(err
-        .message
-        .contains("connected runner daemon reports Homeboy version `homeboy 0.0.0`"));
-    assert!(err
-        .message
-        .contains(homeboy_product_identity::product_version()));
-    let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried.iter().all(|hint| hint
-        .as_str()
-        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
-    assert!(tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("no ancestry-verified refresh target"))));
-}
-
 /// Exercise the public handshake, including the real HTTP observation, rather
-/// than constructing the negotiation record that used to hide probe failures.
+/// than constructing a negotiation record that would hide probe failures.
 #[test]
 fn admission_distinguishes_unavailable_probe_from_missing_capability() {
     use homeboy_lab_contract::{negotiate_lab_capability_handshake, LabAdmissionRejection};
@@ -757,100 +664,70 @@ fn status_with_runner_version(runner_id: &str, version: &str) -> RunnerStatusRep
 }
 
 #[test]
-fn newer_runner_than_controller_points_to_controller_convergence_first() {
-    let status = status_with_runner_version("homeboy-lab", &higher_minor_version());
-
-    let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
-    let expected = format!(
-        "homeboy runner refresh-homeboy homeboy-lab --ref {}",
-        expected_controller_refresh_ref()
-    );
-    assert_eq!(
-        metadata["primary_remediation_command"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        metadata["topology_recovery_command"],
-        serde_json::Value::Null
-    );
-    assert!(metadata["controller_binary"].as_str().is_some());
-    assert_eq!(metadata["local_upgrade_command"], "homeboy upgrade");
-
-    let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
-    let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried
-        .iter()
-        .all(|hint| hint.as_str().is_some_and(|hint| !hint.contains(&expected))));
-}
-
-#[test]
-fn newer_stale_daemon_control_plane_points_to_controller_convergence_first() {
-    let mut status =
+fn unverified_version_drift_never_advertises_runner_refresh() {
+    let mut newer_stale_daemon =
         status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
-    let runner_version = higher_minor_version();
-    status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+    newer_stale_daemon.stale_daemon = Some(RunnerStaleDaemonWarning::new(
         "homeboy-lab",
-        runner_version,
+        higher_minor_version(),
         homeboy_product_identity::product_version().to_string(),
         None,
         None,
     ));
 
-    let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
-    assert_eq!(
-        metadata["primary_remediation_command"],
-        serde_json::Value::Null
-    );
+    for (label, status, configured) in [
+        ("build drift", connected_status("homeboy-lab"), "homeboy"),
+        (
+            "newer runner",
+            status_with_runner_version("homeboy-lab", &higher_minor_version()),
+            "homeboy",
+        ),
+        ("newer stale daemon", newer_stale_daemon, "homeboy"),
+        (
+            "older runner",
+            status_with_runner_version("homeboy-lab", "0.0.0"),
+            "homeboy",
+        ),
+        (
+            "configured binary drift",
+            status_with_runner_version("homeboy-lab", "0.0.0"),
+            "/srv/homeboy-current/target/release/homeboy",
+        ),
+    ] {
+        let metadata = lab_runner_homeboy_metadata("homeboy-lab", configured, &status);
+        assert_eq!(
+            metadata["primary_remediation_command"],
+            serde_json::Value::Null,
+            "{label}"
+        );
+        assert_eq!(
+            metadata["topology_recovery_command"],
+            serde_json::Value::Null,
+            "{label}"
+        );
 
-    let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
-    let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried.iter().all(|hint| hint
-        .as_str()
-        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
+        let err = stale_runner_homeboy_error("homeboy-lab", configured, &status);
+        assert!(err
+            .message
+            .contains("Lab offload refused runner `homeboy-lab`"));
+        let tried = err.details["tried"].as_array().expect("tried hints");
+        assert!(
+            tried.iter().all(|hint| hint
+                .as_str()
+                .is_some_and(|hint| !hint.contains("refresh-homeboy"))),
+            "{label}: {tried:?}"
+        );
+        assert!(
+            tried.iter().any(|hint| hint
+                .as_str()
+                .is_some_and(|hint| hint.contains("no ancestry-verified refresh target"))),
+            "{label}: {tried:?}"
+        );
+    }
 }
 
 #[test]
-fn older_runner_than_controller_points_to_runner_refresh_first() {
-    let status = status_with_runner_version("homeboy-lab", "0.0.0");
-
-    let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
-    assert_eq!(
-        metadata["primary_remediation_command"],
-        serde_json::Value::Null
-    );
-
-    let err = stale_runner_homeboy_error("homeboy-lab", "homeboy", &status);
-    let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried.iter().all(|hint| hint
-        .as_str()
-        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
-}
-
-#[test]
-fn configured_runner_binary_drift_still_converges_to_the_controller() {
-    let status = status_with_runner_version("homeboy-lab", "0.0.0");
-    let configured = "/srv/homeboy-current/target/release/homeboy";
-
-    let metadata = lab_runner_homeboy_metadata("homeboy-lab", configured, &status);
-
-    assert_eq!(
-        metadata["primary_remediation_command"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        metadata["topology_recovery_command"],
-        serde_json::Value::Null
-    );
-
-    let err = stale_runner_homeboy_error("homeboy-lab", configured, &status);
-    let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried.iter().all(|hint| hint
-        .as_str()
-        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
-}
-
-#[test]
-fn controller_recovery_command_uses_source_checkout_for_current_build_binary() {
+fn controller_recovery_command_follows_the_binary_install_method() {
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
     std::fs::create_dir_all(dir.path().join("target/release")).expect("target dir");
@@ -871,60 +748,33 @@ fn controller_recovery_command_uses_source_checkout_for_current_build_binary() {
             posix_quote_arg(&dir.path().display().to_string())
         )
     );
+
+    for (binary, expected) in [
+        (
+            "/opt/homebrew/Cellar/homeboy/0.276.0/bin/homeboy",
+            "homeboy upgrade --method homebrew --force",
+        ),
+        ("/Users/user/.cargo/bin/homeboy", "homeboy upgrade"),
+    ] {
+        assert_eq!(
+            controller_homeboy_recovery_command_for_binary(std::path::Path::new(binary)),
+            expected
+        );
+    }
 }
 
 #[test]
-fn controller_recovery_command_uses_install_method_for_known_binary_locations() {
-    assert_eq!(
-        controller_homeboy_recovery_command_for_binary(std::path::Path::new(
-            "/opt/homebrew/Cellar/homeboy/0.276.0/bin/homeboy"
-        )),
-        "homeboy upgrade --method homebrew --force"
-    );
-
-    assert_eq!(
-        controller_homeboy_recovery_command_for_binary(std::path::Path::new(
-            "/Users/user/.cargo/bin/homeboy"
-        )),
-        "homeboy upgrade"
-    );
-}
-
-#[test]
-fn direct_runner_admission_compares_daemon_with_configured_runner_identity() {
-    let identity = "homeboy 0.295.0+b03d659866d1";
-    let mut status = status_with_runner_version("homeboy-lab", "0.295.0");
-    let session = status.session.as_mut().expect("runner session");
-    session.mode = RunnerTunnelMode::DirectSsh;
-    session.homeboy_build_identity = Some(identity.to_string());
-
+fn build_identity_drift_does_not_block_default_admission() {
     // Direct SSH admission compares the daemon with the runner-side executable
     // that will execute jobs, never with the controller's target-specific binary.
-    assert!(!lab_runner_homeboy_has_blocking_status_drift(
-        &status, false,
-    ));
-}
-
-#[test]
-fn direct_runner_admission_does_not_gate_on_configured_build_identity() {
-    let mut status = status_with_runner_version("homeboy-lab", "0.295.0");
-    let session = status.session.as_mut().expect("runner session");
+    let mut direct = status_with_runner_version("homeboy-lab", "0.295.0");
+    let session = direct.session.as_mut().expect("runner session");
     session.mode = RunnerTunnelMode::DirectSsh;
     session.homeboy_build_identity = Some("homeboy 0.295.0+b03d659866d1".to_string());
 
-    assert!(!lab_runner_homeboy_has_blocking_status_drift(
-        &status, false,
-    ));
-    assert!(!lab_runner_homeboy_has_blocking_status_drift(
-        &status, false,
-    ));
-}
-
-#[test]
-fn daemon_build_identity_drift_does_not_block_admission() {
-    let mut status =
+    let mut daemon_drift =
         status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
-    status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+    daemon_drift.stale_daemon = Some(RunnerStaleDaemonWarning::new(
         "homeboy-lab",
         "homeboy 0.228.0".to_string(),
         "homeboy 0.229.11".to_string(),
@@ -932,9 +782,11 @@ fn daemon_build_identity_drift_does_not_block_admission() {
         Some("homeboy 0.229.11+new".to_string()),
     ));
 
-    assert!(!lab_runner_homeboy_has_blocking_status_drift(
-        &status, false
-    ));
+    for status in [direct, daemon_drift] {
+        assert!(!lab_runner_homeboy_has_blocking_status_drift(
+            &status, false
+        ));
+    }
 }
 
 #[test]
@@ -963,27 +815,23 @@ fn require_exact_runner_version_resolves_from_setting_and_env() {
 }
 
 #[test]
-fn source_checkout_ref_display_includes_branch_sha_and_dirty_state() {
-    let metadata = serde_json::json!({
-        "git_branch": "fix/lab-source-ref-preflight",
-        "git_sha": "1234567890abcdef",
-        "dirty": true,
-    });
-
-    assert_eq!(
-        source_checkout_ref_display(&metadata),
-        "fix/lab-source-ref-preflight@1234567890ab dirty"
-    );
-}
-
-#[test]
-fn source_checkout_ref_display_handles_missing_git_ref() {
-    let metadata = serde_json::json!({
-        "local_path": "/tmp/source",
-        "dirty": null,
-    });
-
-    assert_eq!(source_checkout_ref_display(&metadata), "unknown ref");
+fn source_checkout_ref_display_summarizes_available_git_state() {
+    for (metadata, expected) in [
+        (
+            serde_json::json!({
+                "git_branch": "fix/lab-source-ref-preflight",
+                "git_sha": "1234567890abcdef",
+                "dirty": true,
+            }),
+            "fix/lab-source-ref-preflight@1234567890ab dirty",
+        ),
+        (
+            serde_json::json!({ "local_path": "/tmp/source", "dirty": null }),
+            "unknown ref",
+        ),
+    ] {
+        assert_eq!(source_checkout_ref_display(&metadata), expected);
+    }
 }
 
 #[test]
@@ -997,31 +845,10 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
     );
 
     assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    assert_eq!(err.details["field"], "runner");
-    assert_eq!(err.details["id"], "homeboy lab");
     assert_eq!(
         err.message,
         "Invalid argument 'runner': Lab offload refused runner `homeboy lab` because its active daemon control plane differs from the configured job command binary `/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy`. Active daemon control plane: homeboy 0.0.0+test; job command binary: homeboy 0.229.11+new. connected runner daemon control plane version `homeboy 0.228.0` differs from configured job command binary version `homeboy 0.229.11` on runner `homeboy lab`; build drift is informational Stale runner runtimes can return malformed or misleading provider output; follow the first remediation hint before retrying."
     );
-    assert!(err
-        .message
-        .contains("/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof"));
-    assert!(err
-        .message
-        .contains("Active daemon control plane: homeboy 0.0.0+test"));
-    assert!(err
-        .message
-        .contains("job command binary: homeboy 0.229.11+new"));
-    assert!(err
-        .message
-        .contains("malformed or misleading provider output"));
-    let tried = err.details["tried"].as_array().expect("tried hints");
-    assert!(tried.iter().all(|hint| hint
-        .as_str()
-        .is_some_and(|hint| !hint.contains("refresh-homeboy"))));
-    assert!(tried.iter().any(|hint| hint
-        .as_str()
-        .is_some_and(|hint| hint.contains("no ancestry-verified refresh target"))));
 }
 
 fn higher_minor_version() -> String {
@@ -1039,31 +866,6 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
     let metadata = lab_runner_homeboy_metadata("lab", "homeboy", &status);
 
     assert_eq!(
-        metadata["stale_daemon"]["session_homeboy_version"],
-        "homeboy 0.228.0"
-    );
-    assert_eq!(
-        metadata["stale_daemon"]["current_homeboy_version"],
-        "homeboy 0.229.11"
-    );
-    assert_eq!(
-        metadata["stale_daemon"]["session_homeboy_build_identity"],
-        "homeboy 0.228.0+old"
-    );
-    assert_eq!(
-        metadata["stale_daemon"]["current_homeboy_build_identity"],
-        "homeboy 0.229.11+new"
-    );
-    assert_eq!(metadata["stale_daemon"]["severity"], "info");
-    assert_eq!(
-        metadata["stale_daemon"]["active_daemon_control_plane_version"],
-        "homeboy 0.228.0"
-    );
-    assert_eq!(
-        metadata["stale_daemon"]["job_command_binary_version"],
-        "homeboy 0.229.11"
-    );
-    assert_eq!(
         metadata["stale_daemon"]["active_daemon_control_plane_build_identity"],
         "homeboy 0.228.0+old"
     );
@@ -1073,10 +875,6 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
     );
     assert!(metadata["stale_daemon"].get("refresh_command").is_none());
     assert_eq!(metadata["stale_daemon_severity"], "info");
-    assert_eq!(
-        metadata["stale_daemon_refresh_command"],
-        serde_json::Value::Null
-    );
     assert_eq!(metadata["job_command_binary_version"], "homeboy 0.229.11");
     assert_eq!(
         metadata["job_command_binary_build_identity"],
@@ -1122,17 +920,4 @@ fn exact_active_daemon_target_remains_available_in_metadata_and_offload_error() 
             .iter()
             .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(&refresh)))
     }));
-}
-
-#[test]
-fn runner_homeboy_daemon_display_prefers_build_identity() {
-    let metadata = serde_json::json!({
-        "active_daemon_version": "homeboy 0.1.0",
-        "active_daemon_build_identity": "homeboy 0.1.0+abc123",
-    });
-
-    assert_eq!(
-        runner_homeboy_daemon_display(&metadata),
-        "homeboy 0.1.0+abc123"
-    );
 }

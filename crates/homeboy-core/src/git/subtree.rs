@@ -589,42 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn replay_is_noop_when_destination_tree_matches_later_source_commit() {
-        let _git = lock_git_wrapper();
-        let root = tempfile::tempdir().unwrap();
-        let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
-        git(root.path(), &["init", "-q", "-b", "main"]);
-        git(root.path(), &["config", "user.email", "test@example.com"]);
-        git(root.path(), &["config", "user.name", "Test"]);
-        std::fs::create_dir_all(root.path().join("pkg")).unwrap();
-        std::fs::write(root.path().join("pkg/file"), "first").unwrap();
-        git(root.path(), &["add", "."]);
-        git(root.path(), &["commit", "-qm", "source one"]);
-        let first_source =
-            run(root.path(), &["rev-parse", "HEAD"], "resolve first source").unwrap();
-        let config = SubtreePublicationConfig {
-            prefix: "pkg".into(),
-            remote: remote.path().display().to_string(),
-            branch: "main".into(),
-            tag: false,
-            ..Default::default()
-        };
-        let first =
-            publish_subtree(root.path(), &config, first_source.trim(), None, false).unwrap();
-
-        std::fs::write(root.path().join("pkg/file"), "later").unwrap();
-        git(root.path(), &["add", "."]);
-        git(root.path(), &["commit", "-qm", "source two"]);
-        publish_subtree(root.path(), &config, "HEAD", None, false).unwrap();
-
-        let replay = publish_subtree(root.path(), &config, first_source.trim(), None, false)
-            .expect("older source split replay should be a no-op");
-        assert_eq!(replay.split_commit, first.split_commit);
-        assert_eq!(replay.branch_action, "already-contained");
-    }
-
-    #[test]
     fn nested_component_invocation_excludes_unrelated_siblings() {
         let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();

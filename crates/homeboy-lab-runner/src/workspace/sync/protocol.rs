@@ -392,9 +392,10 @@ pub(super) fn materialization_commit_controlled(
                 if root.source_evidence.is_none() {
                     return Err(io("existing materialization has different content"));
                 }
-                // Legacy dependency siblings are mutable prepared views, not
-                // job-owned source roots. Retire the old complete view only
-                // after its replacement has passed verification.
+                // Dependency siblings without source evidence are mutable
+                // prepared views, not job-owned source roots. Retire the old
+                // complete view only after its replacement has passed
+                // verification.
                 let retired = input.join(format!("retired-{index}"));
                 fs::rename(destination, retired).materialization(
                     "rename",

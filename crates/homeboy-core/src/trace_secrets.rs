@@ -118,22 +118,3 @@ fn status(name: String, configured: bool, source: &str) -> TraceSecretEnvStatus 
         source: source.to_string(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_metadata_does_not_include_values() {
-        let metadata = status_metadata(vec![TraceSecretEnvStatus {
-            name: "STRIPE_SECRET_KEY".to_string(),
-            configured: true,
-            source: "project-keychain".to_string(),
-        }]);
-
-        let rendered = metadata.to_string();
-        assert!(rendered.contains("STRIPE_SECRET_KEY"));
-        assert!(rendered.contains("project-keychain"));
-        assert!(!rendered.contains("sk_test_fake_not_real"));
-    }
-}

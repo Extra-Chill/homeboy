@@ -584,249 +584,186 @@ fn push_subsection_item(out: &mut String, target_header: &str, bullet: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
-    #[test]
-    fn finalize_moves_body_to_new_version_and_omits_empty_next_section() {
-        let content = "# Changelog\n\n## Unreleased\n\n- First\n- Second\n\n## 0.1.0\n\n- Old\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", false).unwrap();
-        assert!(changed);
-        assert!(!out.contains("## Unreleased\n\n## [0.2.0]"));
-        // Check for Keep a Changelog format: ## [X.Y.Z] - YYYY-MM-DD
-        assert!(out.contains("## [0.2.0] - "));
-        assert!(out.contains("- First\n- Second"));
-        assert!(out.contains("## 0.1.0"));
+    fn aliases(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    /// Assert every fragment appears in `out`, in the given order.
+    fn assert_in_order(out: &str, fragments: &[&str]) {
+        let mut cursor = 0;
+        for fragment in fragments {
+            let found = out[cursor..]
+                .find(fragment)
+                .unwrap_or_else(|| panic!("missing {fragment:?} after byte {cursor} in:\n{out}"));
+            cursor += found + fragment.len();
+        }
     }
 
     #[test]
-    fn finalize_errors_on_empty_next_section_by_default() {
-        let content = "# Changelog\n\n## Unreleased\n\n\n## 0.1.0\n\n- Old\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let err = finalize_next_section(content, &aliases, "0.2.0", false).unwrap_err();
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("Invalid"));
-    }
-
-    #[test]
-    fn get_latest_finalized_version_finds_first_semver() {
-        let content = "# Changelog\n\n## Unreleased\n\n## 0.2.16\n\n- Item\n\n## 0.2.15\n";
-        assert_eq!(
-            get_latest_finalized_version(content),
-            Some("0.2.16".to_string())
-        );
-    }
-
-    #[test]
-    fn get_latest_finalized_version_parses_bracketed_format() {
-        let content = "# Changelog\n\n## Unreleased\n\n## [1.0.0]\n\n## 0.2.16\n";
-        // [1.0.0] is now parsed as 1.0.0 (Keep a Changelog format)
-        assert_eq!(
-            get_latest_finalized_version(content),
-            Some("1.0.0".to_string())
-        );
-    }
-
-    #[test]
-    fn get_latest_finalized_version_parses_dated_format() {
-        let content = "# Changelog\n\n## Unreleased\n\n## [1.0.0] - 2025-01-14\n\n## 0.2.16\n";
-        // Full Keep a Changelog format with date
-        assert_eq!(
-            get_latest_finalized_version(content),
-            Some("1.0.0".to_string())
-        );
-    }
-
-    #[test]
-    fn get_latest_finalized_version_returns_none_when_no_versions() {
-        let content = "# Changelog\n\n## Unreleased\n\n- Item\n";
-        assert_eq!(get_latest_finalized_version(content), None);
-    }
-
-    // === Keep a Changelog Subsection Tests ===
-
-    #[test]
-    fn validate_section_content_with_direct_bullets() {
-        let lines = vec!["- Item one", "- Item two"];
-        assert_eq!(
-            validate_section_content(&lines),
-            SectionContentStatus::Valid
-        );
-    }
-
-    #[test]
-    fn validate_section_content_with_subsection_bullets() {
-        let lines = vec![
-            "### Added",
-            "",
-            "- New feature",
-            "",
-            "### Fixed",
-            "",
-            "- Bug fix",
-        ];
-        assert_eq!(
-            validate_section_content(&lines),
-            SectionContentStatus::Valid
-        );
-    }
-
-    #[test]
-    fn validate_section_content_subsections_only() {
-        let lines = vec!["### Added", "", "### Changed", ""];
-        assert_eq!(
-            validate_section_content(&lines),
-            SectionContentStatus::SubsectionsOnly
-        );
-    }
-
-    #[test]
-    fn validate_section_content_empty() {
-        let lines = vec!["", ""];
-        assert_eq!(
-            validate_section_content(&lines),
-            SectionContentStatus::Empty
-        );
-    }
-
-    #[test]
-    fn finalize_preserves_subsection_structure() {
-        let content =
-            "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature\n\n### Fixed\n\n- Bug\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) = finalize_next_section(content, &aliases, "0.2.0", false).unwrap();
-
-        assert!(changed);
-        assert!(out.contains("## [0.2.0]"));
-        assert!(out.contains("### Added"));
-        assert!(out.contains("### Fixed"));
-        assert!(out.contains("- Feature"));
-        assert!(out.contains("- Bug"));
-    }
-
-    #[test]
-    fn finalize_errors_on_empty_subsections() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let result = finalize_next_section(content, &aliases, "0.2.0", false);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // Error details contain "problem" field with the specific message
-        let problem = err
-            .details
-            .get("problem")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert!(
-            problem.contains("subsection"),
-            "Error should mention subsection headers: {}",
-            problem
-        );
-    }
-
-    #[test]
-    fn find_next_section_matches_next_alias() {
-        let lines: Vec<&str> = "# Changelog\n\n## [Next]\n\n- Item\n\n## 0.1.0\n"
-            .lines()
-            .collect();
-        let aliases = vec![
-            "Unreleased".to_string(),
-            "[Unreleased]".to_string(),
-            "Next".to_string(),
-            "[Next]".to_string(),
+    fn finalize_next_section_renames_next_heading_to_dated_version() {
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            (
+                "# Changelog\n\n## Unreleased\n\n- First\n- Second\n\n## 0.1.0\n\n- Old\n",
+                &["Unreleased", "[Unreleased]"],
+                &["## [0.2.0] - ", "- First\n- Second", "## 0.1.0", "- Old"],
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature\n\n### Fixed\n\n- Bug\n\n## 0.1.0\n",
+                &["Unreleased"],
+                &["## [0.2.0] - ", "### Added", "- Feature", "### Fixed", "- Bug", "## 0.1.0"],
+            ),
+            (
+                "# Changelog\n\n## [Next]\n\n- Item\n\n## 0.1.0\n",
+                &["Unreleased", "[Unreleased]", "Next", "[Next]"],
+                &["## [0.2.0] - ", "- Item", "## 0.1.0"],
+            ),
         ];
 
-        let start = find_next_section_start(&lines, &aliases);
-        assert_eq!(start, Some(2));
-    }
-
-    // === Typed Subsection Tests (--type flag) ===
-
-    #[test]
-    fn append_item_to_subsection_adds_to_existing() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- Existing fix\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) =
-            append_item_to_subsection(content, &aliases, "New bug fix", "fixed").unwrap();
-
-        assert!(changed);
-        assert!(out.contains("- Existing fix"));
-        assert!(out.contains("- New bug fix"));
-        // New item should be after existing
-        assert!(out.contains("- Existing fix\n- New bug fix"));
+        for (content, aliases_in, expected) in cases {
+            let (out, changed) =
+                finalize_next_section(content, &aliases(aliases_in), "0.2.0", false).unwrap();
+            assert!(changed);
+            assert!(
+                !out.contains("Unreleased") && !out.contains("[Next]"),
+                "{out}"
+            );
+            assert_in_order(&out, expected);
+        }
     }
 
     #[test]
-    fn append_item_to_subsection_creates_new_subsection() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) =
-            append_item_to_subsection(content, &aliases, "Bug fix", "fixed").unwrap();
+    fn finalize_next_section_rejects_sections_without_bullets() {
+        let cases = [
+            (
+                "# Changelog\n\n## Unreleased\n\n\n## 0.1.0\n\n- Old\n",
+                "no items",
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n",
+                "subsection",
+            ),
+        ];
 
-        assert!(changed);
-        assert!(out.contains("### Fixed"));
-        assert!(out.contains("- Bug fix"));
-        // Should preserve existing subsection
-        assert!(out.contains("### Added"));
-        assert!(out.contains("- Feature"));
+        for (content, problem) in cases {
+            let err = finalize_next_section(content, &aliases(&["Unreleased"]), "0.2.0", false)
+                .unwrap_err();
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            let detail = err
+                .details
+                .get("problem")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            assert!(detail.contains(problem), "{content}: {detail}");
+
+            let (unchanged, changed) =
+                finalize_next_section(content, &aliases(&["Unreleased"]), "0.2.0", true).unwrap();
+            assert!(!changed);
+            assert_eq!(unchanged, content);
+        }
     }
 
     #[test]
-    fn append_item_to_subsection_creates_first_subsection() {
-        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) =
-            append_item_to_subsection(content, &aliases, "New feature", "added").unwrap();
-
-        assert!(changed);
-        assert!(out.contains("### Added"));
-        assert!(out.contains("- New feature"));
+    fn get_latest_finalized_version_reads_plain_bracketed_and_dated_headings() {
+        for (content, expected) in [
+            (
+                "# Changelog\n\n## Unreleased\n\n## 0.2.16\n\n- Item\n\n## 0.2.15\n",
+                Some("0.2.16"),
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n## [1.0.0]\n\n## 0.2.16\n",
+                Some("1.0.0"),
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n## [1.0.0] - 2025-01-14\n\n## 0.2.16\n",
+                Some("1.0.0"),
+            ),
+            ("# Changelog\n\n## Unreleased\n\n- Item\n", None),
+        ] {
+            assert_eq!(
+                get_latest_finalized_version(content).as_deref(),
+                expected,
+                "{content}"
+            );
+        }
     }
 
     #[test]
-    fn append_item_to_subsection_maintains_canonical_order() {
-        // Fixed comes after Added in canonical order
-        let content = "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- Bug fix\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) =
-            append_item_to_subsection(content, &aliases, "New feature", "added").unwrap();
+    fn append_item_to_subsection_places_items_in_canonical_typed_subsections() {
+        // (content, message, type, changed, expected fragments in order)
+        let cases: &[(&str, &str, &str, bool, &[&str])] = &[
+            // Appends after existing bullets in the matching subsection.
+            (
+                "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- Existing fix\n\n## 0.1.0\n",
+                "New bug fix",
+                "fixed",
+                true,
+                &["### Fixed", "- Existing fix\n- New bug fix", "## 0.1.0"],
+            ),
+            // Creates a missing subsection after earlier canonical ones.
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature\n\n## 0.1.0\n",
+                "Bug fix",
+                "fixed",
+                true,
+                &["### Added", "- Feature", "### Fixed\n- Bug fix", "## 0.1.0"],
+            ),
+            // Creates a missing subsection before later canonical ones.
+            (
+                "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- Bug fix\n\n## 0.1.0\n",
+                "New feature",
+                "added",
+                true,
+                &[
+                    "### Added\n- New feature",
+                    "### Fixed",
+                    "- Bug fix",
+                    "## 0.1.0",
+                ],
+            ),
+            // Creates the first subsection in an empty section.
+            (
+                "# Changelog\n\n## Unreleased\n\n## 0.1.0\n",
+                "New feature",
+                "added",
+                true,
+                &["## Unreleased", "### Added\n- New feature", "## 0.1.0"],
+            ),
+            // Dedupes an existing bullet.
+            (
+                "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- Bug fix\n\n## 0.1.0\n",
+                "Bug fix",
+                "fixed",
+                false,
+                &["### Fixed", "- Bug fix", "## 0.1.0"],
+            ),
+        ];
 
-        assert!(changed);
-        assert!(out.contains("### Added"));
-        assert!(out.contains("- New feature"));
-        // Added should appear before Fixed (canonical order)
-        let added_pos = out.find("### Added").unwrap();
-        let fixed_pos = out.find("### Fixed").unwrap();
-        assert!(
-            added_pos < fixed_pos,
-            "Added should come before Fixed in canonical order"
-        );
-    }
-
-    #[test]
-    fn append_item_to_subsection_dedupes_existing() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- Bug fix\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let (out, changed) =
-            append_item_to_subsection(content, &aliases, "Bug fix", "fixed").unwrap();
-
-        assert!(!changed);
-        assert_eq!(out.matches("- Bug fix").count(), 1);
+        for (content, message, entry_type, expect_changed, expected) in cases {
+            let (out, changed) =
+                append_item_to_subsection(content, &aliases(&["Unreleased"]), message, entry_type)
+                    .unwrap();
+            assert_eq!(changed, *expect_changed, "{content}");
+            assert_eq!(out.matches(&format!("- {message}\n")).count(), 1, "{out}");
+            assert_in_order(&out, expected);
+        }
     }
 
     #[test]
     fn append_to_finalized_section_adds_entries_and_keeps_heading() {
         let content = "# Changelog\n\n## [1.24.4] - 2026-10-02\n\n### Fixed\n\n- preserve mapping plan shell type\n\n## [1.24.3] - 2026-10-01\n\n### Fixed\n\n- older fix\n";
-        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
-        let mut entries = std::collections::HashMap::new();
-        entries.insert(
-            "added",
-            vec!["hand off validated ICO branding through native media".to_string()],
-        );
-        entries.insert(
-            "fixed",
-            vec!["preserve mapping plan shell type".to_string()],
-        );
+        let aliases = aliases(&["Unreleased", "[Unreleased]"]);
+        let entries = HashMap::from([
+            (
+                "added",
+                vec!["hand off validated ICO branding through native media".to_string()],
+            ),
+            (
+                "fixed",
+                vec!["preserve mapping plan shell type".to_string()],
+            ),
+        ]);
 
         let (out, changed) =
             append_to_finalized_section(content, &aliases, "1.24.4", &entries).unwrap();
@@ -852,141 +789,92 @@ mod tests {
     }
 
     #[test]
-    fn append_to_finalized_section_is_a_noop_when_entries_are_covered() {
+    fn append_to_finalized_section_skips_covered_entries_and_requires_the_section() {
         let content = "# Changelog\n\n## [0.2.0] - 2026-10-02\n\n### Fixed\n\n- existing fix\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let mut entries = std::collections::HashMap::new();
-        entries.insert("fixed", vec!["existing fix".to_string()]);
+        let aliases = aliases(&["Unreleased"]);
 
+        let covered = HashMap::from([("fixed", vec!["existing fix".to_string()])]);
         let (out, changed) =
-            append_to_finalized_section(content, &aliases, "0.2.0", &entries).unwrap();
-
+            append_to_finalized_section(content, &aliases, "0.2.0", &covered).unwrap();
         assert!(!changed);
         assert_eq!(out, content);
+
+        let late = HashMap::from([("fixed", vec!["late fix".to_string()])]);
+        assert!(append_to_finalized_section(content, &aliases, "0.3.0", &late).is_err());
     }
 
     #[test]
-    fn append_to_finalized_section_requires_the_version_section() {
-        let content = "# Changelog\n\n## [0.1.0] - 2026-10-01\n\n- first\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let mut entries = std::collections::HashMap::new();
-        entries.insert("fixed", vec!["late fix".to_string()]);
+    fn finalize_with_generated_entries_dedupes_against_existing_unreleased_prose() {
+        // (content, kept entry, dropped entry)
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            // Semantic match: hand-written prose wins over the generated entry.
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n- Codex CLI runtime support\n\n## 0.1.0\n",
+                "- Codex CLI runtime support",
+                Some("- add Codex runtime support"),
+            ),
+            // Normalized exact match (case, punctuation).
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n- Add Codex runtime support.\n\n## 0.1.0\n",
+                "- Add Codex runtime support.",
+                Some("- add Codex runtime support"),
+            ),
+            // Nothing to dedupe against: the generated entry populates the section.
+            (
+                "# Changelog\n\n## Unreleased\n\n## 0.1.0\n",
+                "### Added\n- add Codex runtime support",
+                None,
+            ),
+        ];
+        let entries = HashMap::from([("added", vec!["add Codex runtime support".to_string()])]);
 
-        assert!(append_to_finalized_section(content, &aliases, "0.2.0", &entries).is_err());
+        for (content, kept, dropped) in cases {
+            let (out, changed) = finalize_with_generated_entries(
+                content,
+                &aliases(&["Unreleased"]),
+                &entries,
+                "0.2.0",
+            )
+            .unwrap();
+            assert!(changed);
+            assert_in_order(&out, &["## [0.2.0] - ", kept, "## 0.1.0"]);
+            if let Some(dropped) = dropped {
+                assert!(!out.contains(dropped), "{out}");
+            }
+        }
     }
 
     #[test]
-    fn finalize_generated_entries_prefers_existing_unreleased_prose() {
-        let content =
-            "# Changelog\n\n## Unreleased\n\n### Added\n\n- Codex CLI runtime support\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let entries = std::collections::HashMap::from([(
-            "added",
-            vec!["add Codex runtime support".to_string()],
-        )]);
+    fn unreleased_entries_count_and_extract_dash_and_asterisk_bullets_only() {
+        let aliases = aliases(&["Unreleased"]);
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "# Changelog\n\n## Unreleased\n\n- Item one\n- Item two\n- Item three\n\n## 0.1.0\n- Old\n",
+                &["Item one", "Item two", "Item three"],
+            ),
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature one\n\n### Fixed\n\n- Dash item\n* Asterisk item\n\n## 0.1.0\n",
+                &["Feature one", "Dash item", "Asterisk item"],
+            ),
+            ("# Changelog\n\n## Unreleased\n\n## 0.1.0\n", &[]),
+            ("# Changelog\n\n## 0.1.0\n- Initial release\n", &[]),
+            (
+                "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n",
+                &[],
+            ),
+        ];
 
-        let (out, changed) =
-            finalize_with_generated_entries(content, &aliases, &entries, "0.2.0").unwrap();
-
-        assert!(changed);
-        assert!(out.contains("## [0.2.0]"));
-        assert!(out.contains("- Codex CLI runtime support"));
-        assert!(!out.contains("- add Codex runtime support"));
-    }
-
-    #[test]
-    fn finalize_generated_entries_dedupes_normalized_exact_existing_entries() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n- Add Codex runtime support.\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let entries = std::collections::HashMap::from([(
-            "added",
-            vec!["add codex runtime support".to_string()],
-        )]);
-
-        let (out, changed) =
-            finalize_with_generated_entries(content, &aliases, &entries, "0.2.0").unwrap();
-
-        assert!(changed);
-        assert_eq!(out.matches("Codex runtime support").count(), 1);
-    }
-
-    #[test]
-    fn finalize_generated_entries_still_populates_empty_unreleased_section() {
-        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        let entries = std::collections::HashMap::from([(
-            "added",
-            vec!["add Codex runtime support".to_string()],
-        )]);
-
-        let (out, changed) =
-            finalize_with_generated_entries(content, &aliases, &entries, "0.2.0").unwrap();
-
-        assert!(changed);
-        assert!(out.contains("## [0.2.0]"));
-        assert!(out.contains("### Added"));
-        assert!(out.contains("- add Codex runtime support"));
-    }
-
-    // === count_unreleased_entries Tests ===
-
-    #[test]
-    fn count_unreleased_entries_with_direct_bullets() {
-        let content =
-            "# Changelog\n\n## Unreleased\n\n- Item one\n- Item two\n- Item three\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 3);
-    }
-
-    #[test]
-    fn count_unreleased_entries_with_subsection_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n- Feature one\n- Feature two\n\n### Fixed\n\n- Bug fix\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 3);
-    }
-
-    #[test]
-    fn count_unreleased_entries_empty_section() {
-        let content = "# Changelog\n\n## Unreleased\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 0);
-    }
-
-    #[test]
-    fn count_unreleased_entries_no_section() {
-        let content = "# Changelog\n\n## 0.1.0\n- Initial release\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 0);
-    }
-
-    #[test]
-    fn count_unreleased_entries_subsections_only_no_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Added\n\n### Changed\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 0);
-    }
-
-    #[test]
-    fn count_unreleased_entries_with_asterisk_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n* Item one\n* Item two\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 2);
-    }
-
-    #[test]
-    fn count_unreleased_entries_mixed_bullets() {
-        let content = "# Changelog\n\n## Unreleased\n\n- Dash item\n* Asterisk item\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(count_unreleased_entries(content, &aliases), 2);
-    }
-
-    #[test]
-    fn get_unreleased_entries_extracts_bullet_text() {
-        let content = "# Changelog\n\n## Unreleased\n\n### Fixed\n\n- Dash item\n* Asterisk item\n\n## 0.1.0\n";
-        let aliases = vec!["Unreleased".to_string()];
-        assert_eq!(
-            get_unreleased_entries(content, &aliases),
-            vec!["Dash item".to_string(), "Asterisk item".to_string()]
-        );
+        for (content, expected) in cases {
+            assert_eq!(
+                count_unreleased_entries(content, &aliases),
+                expected.len(),
+                "{content}"
+            );
+            assert_eq!(
+                get_unreleased_entries(content, &aliases),
+                *expected,
+                "{content}"
+            );
+        }
     }
 }

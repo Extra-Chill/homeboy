@@ -159,8 +159,8 @@ pub fn promote_with_checkpoint(
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
+    // resolves once here and is passed down; the interior never re-resolves
+    // the environment (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let mut report = promote_with_checkpoint_in_observation_store(
         options.clone(),
@@ -214,8 +214,8 @@ pub fn resume_promoted_patch(
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
     // One promotion is one unit of work, so the store it records against
-    // resolves once here and is passed down. The interior used to receive
-    // `None` and re-resolve the environment partway through (#7505).
+    // resolves once here and is passed down; the interior never re-resolves
+    // the environment (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let mut report = resume_promoted_patch_in_observation_store(
         options.clone(),
@@ -1342,12 +1342,10 @@ mod declared_base_tests {
         assert!(!error.message.contains("resolveing"));
     }
 
-    /// A resolver outage outlasts a sub-second retry burst. The preflight keeps
-    /// retrying within its window, so the Cook resolves its base once DNS is
-    /// back instead of failing the terminal continuation.
+    /// An origin with one commit, a repo whose `origin` points at it, and the
+    /// real git binary a wrapper fixture can delegate to.
     #[cfg(unix)]
-    #[test]
-    fn declared_base_rides_out_a_resolver_outage() {
+    fn origin_with_clone_and_real_git() -> (tempfile::TempDir, tempfile::TempDir, String) {
         let origin = tempfile::tempdir().expect("origin");
         git(origin.path(), &["init", "-b", "main"]);
         git(
@@ -1377,6 +1375,16 @@ mod declared_base_tests {
                 .stdout,
         )
         .unwrap();
+        (origin, repo, real_git)
+    }
+
+    /// A resolver outage outlasts a sub-second retry burst. The preflight keeps
+    /// retrying within its window, so the Cook resolves its base once DNS is
+    /// back instead of failing the terminal continuation.
+    #[cfg(unix)]
+    #[test]
+    fn declared_base_rides_out_a_resolver_outage() {
+        let (origin, repo, real_git) = origin_with_clone_and_real_git();
         let fixture_dir = tempfile::tempdir().expect("fixture directory");
         let failures = fixture_dir.path().join("failures");
         let git_bin = write_git_fixture(
@@ -1400,13 +1408,7 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
         .expect("declared base");
 
         assert_eq!(std::fs::read_to_string(&failures).unwrap(), "xxx");
-        let head = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(origin.path())
-            .output()
-            .unwrap()
-            .stdout;
-        assert_eq!(base.sha, String::from_utf8(head).unwrap().trim());
+        assert_eq!(base.sha, git_output(origin.path(), &["rev-parse", "HEAD"]));
     }
 
     /// A single `ls-remote` that exceeds its deadline is retried in place, so
@@ -1414,35 +1416,7 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
     #[cfg(unix)]
     #[test]
     fn declared_base_ls_remote_deadline_is_retried_in_place() {
-        let origin = tempfile::tempdir().expect("origin");
-        git(origin.path(), &["init", "-b", "main"]);
-        git(
-            origin.path(),
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "base",
-            ],
-        );
-        let repo = tempfile::tempdir().expect("repo");
-        git(repo.path(), &["init", "-b", "main"]);
-        git(
-            repo.path(),
-            &["remote", "add", "origin", origin.path().to_str().unwrap()],
-        );
-        let real_git = String::from_utf8(
-            Command::new("sh")
-                .args(["-c", "command -v git"])
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap();
+        let (origin, repo, real_git) = origin_with_clone_and_real_git();
         let fixture_dir = tempfile::tempdir().expect("fixture directory");
         let stalled = fixture_dir.path().join("stalled");
         let git_bin = write_git_fixture(
@@ -1465,13 +1439,7 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
         .expect("declared base");
 
         assert!(stalled.exists(), "the first ls-remote must have stalled");
-        let head = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(origin.path())
-            .output()
-            .unwrap()
-            .stdout;
-        assert_eq!(base.sha, String::from_utf8(head).unwrap().trim());
+        assert_eq!(base.sha, git_output(origin.path(), &["rev-parse", "HEAD"]));
     }
 
     #[cfg(unix)]
@@ -1564,7 +1532,8 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
             git_bin.to_str().expect("utf8 fixture path"),
             &[],
             // Generous enough for three forked fixtures under a loaded parallel
-            // suite; `declared_base_configured_deadline_still_fires` owns expiry.
+            // suite; `declared_base_timeout_surfaces_subphase_stderr_and_budget`
+            // owns expiry.
             Duration::from_secs(10),
         )
         .expect("healthy resolve within configured budget")
@@ -1572,28 +1541,6 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
 
         assert_eq!(captured.base, "main");
         assert_eq!(captured.sha, "0123456789abcdef0123456789abcdef01234567");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn declared_base_configured_deadline_still_fires() {
-        let fixture_dir = tempfile::tempdir().expect("fixture directory");
-        let git = write_git_fixture(fixture_dir.path(), "#!/bin/sh\nsleep 2\n");
-
-        let started = Instant::now();
-        let error = capture_declared_base_with_git_and_timeout(
-            fixture_dir.path(),
-            Some("main"),
-            git.to_str().expect("utf8 fixture path"),
-            &[],
-            Duration::from_millis(100),
-        )
-        .expect_err("bounded transport timeout");
-
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert_eq!(error.retryable, Some(true));
-        assert_eq!(error.details["git_base_preflight"]["timeout_ms"], 100);
-        assert_eq!(error.details["git_base_preflight"]["subphase"], "ls-remote");
     }
 
     #[test]
@@ -1666,11 +1613,6 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
             )
             .expect_err("proxy-aware transport failure");
 
-            assert_eq!(error.retryable, Some(true));
-            assert_eq!(
-                error.details["git_base_preflight"]["retry_disposition"],
-                "retryable_transport_failure"
-            );
             assert_eq!(error.details["git_base_preflight"]["proxy_detected"], true);
             assert_eq!(error.details["git_base_preflight"]["proxy_forwarded"], true);
             assert_ne!(
@@ -1680,28 +1622,28 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
         });
     }
 
-    /// An SSH credential failure is transport evidence in its own right. It
-    /// used to be classified only because the remote host string contained
-    /// `proxy`, so the same failure to any other host was misreported as an
-    /// invalid base ref.
+    /// SSH credential failures are transport evidence whatever the remote is
+    /// called; a hostname alone is not, so an invalid ref on a host named
+    /// `proxy.example.test` stays a validation failure.
     #[test]
-    fn ssh_credential_failure_is_transport_without_a_proxy_hostname() {
-        assert!(is_git_transport_failure(
-            "git@github.example: Permission denied (publickey).\nfatal: Could not read from remote repository."
-        ));
-        assert!(is_git_transport_failure(
-            "sign_and_send_pubkey: signing failed for ECDSA from agent: agent refused operation"
-        ));
-        assert!(is_git_transport_failure("Host key verification failed."));
-    }
-
-    /// A hostname is not evidence. A genuinely invalid ref must stay a
-    /// validation failure even when the remote is named `proxy.example.test`.
-    #[test]
-    fn a_proxy_hostname_alone_is_not_transport_evidence() {
-        assert!(!is_git_transport_failure(
-            "fatal: couldn't find remote ref refs/heads/nope on proxy.example.test"
-        ));
+    fn git_transport_failure_is_classified_by_evidence_not_hostname() {
+        for (stderr, transport) in [
+            (
+                "git@github.example: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+                true,
+            ),
+            (
+                "sign_and_send_pubkey: signing failed for ECDSA from agent: agent refused operation",
+                true,
+            ),
+            ("Host key verification failed.", true),
+            (
+                "fatal: couldn't find remote ref refs/heads/nope on proxy.example.test",
+                false,
+            ),
+        ] {
+            assert_eq!(is_git_transport_failure(stderr), transport, "{stderr}");
+        }
     }
 
     #[test]
@@ -2926,34 +2868,6 @@ mod lab_gate_binding_tests {
         });
     }
 
-    #[test]
-    fn mismatching_harvested_candidate_tree_fails_with_typed_error() {
-        with_git_candidate(|repo, store| {
-            std::fs::write(repo.join("candidate.txt"), "changed\n").unwrap();
-            let candidate = harvested_candidate(repo);
-            std::fs::write(repo.join("candidate.txt"), "diverged\n").unwrap();
-
-            let error = CandidateGateCheckout::materialize(
-                repo,
-                "candidate-fixture",
-                None,
-                Some(&candidate),
-                store,
-            )
-            .err()
-            .expect("a diverged destination tree must not be gated");
-
-            let mismatch = std::error::Error::source(&error)
-                .and_then(|source| source.downcast_ref::<CandidateTreeMismatch>())
-                .expect("typed candidate tree mismatch");
-            assert_eq!(mismatch.candidate_sha, candidate.candidate_sha);
-            assert_eq!(mismatch.candidate_tree, candidate.tree_sha);
-            assert_ne!(mismatch.destination_tree, candidate.tree_sha);
-            assert!(error.message.contains(&candidate.tree_sha));
-            assert!(error.message.contains(&mismatch.destination_tree));
-        });
-    }
-
     /// The operator commits the staged candidate by hand: HEAD leaves the
     /// base, but the tree is still the candidate's (#16441).
     fn hand_commit_candidate(repo: &Path) -> crate::agent_task::AgentTaskCandidate {
@@ -3008,28 +2922,41 @@ mod lab_gate_binding_tests {
         });
     }
 
+    /// A destination tree that diverged from the recorded candidate is never
+    /// gated, whether the candidate is still staged on the base or was
+    /// committed by hand.
     #[test]
-    fn hand_committed_destination_with_a_different_tree_is_a_tree_mismatch() {
-        with_git_candidate(|repo, store| {
-            let candidate = hand_commit_candidate(repo);
-            std::fs::write(repo.join("candidate.txt"), "diverged\n").unwrap();
+    fn diverged_destination_tree_is_a_typed_candidate_tree_mismatch() {
+        for hand_committed in [false, true] {
+            with_git_candidate(|repo, store| {
+                let candidate = if hand_committed {
+                    hand_commit_candidate(repo)
+                } else {
+                    std::fs::write(repo.join("candidate.txt"), "changed\n").unwrap();
+                    harvested_candidate(repo)
+                };
+                std::fs::write(repo.join("candidate.txt"), "diverged\n").unwrap();
 
-            let error = CandidateGateCheckout::materialize(
-                repo,
-                "candidate-fixture",
-                None,
-                Some(&candidate),
-                store,
-            )
-            .err()
-            .expect("a diverged destination tree must not be gated");
+                let error = CandidateGateCheckout::materialize(
+                    repo,
+                    "candidate-fixture",
+                    None,
+                    Some(&candidate),
+                    store,
+                )
+                .err()
+                .expect("a diverged destination tree must not be gated");
 
-            let mismatch = std::error::Error::source(&error)
-                .and_then(|source| source.downcast_ref::<CandidateTreeMismatch>())
-                .expect("typed candidate tree mismatch");
-            assert_eq!(mismatch.candidate_sha, candidate.candidate_sha);
-            assert_ne!(mismatch.destination_tree, candidate.tree_sha);
-        });
+                let mismatch = std::error::Error::source(&error)
+                    .and_then(|source| source.downcast_ref::<CandidateTreeMismatch>())
+                    .expect("typed candidate tree mismatch");
+                assert_eq!(mismatch.candidate_sha, candidate.candidate_sha);
+                assert_eq!(mismatch.candidate_tree, candidate.tree_sha);
+                assert_ne!(mismatch.destination_tree, candidate.tree_sha);
+                assert!(error.message.contains(&candidate.tree_sha));
+                assert!(error.message.contains(&mismatch.destination_tree));
+            });
+        }
     }
 
     #[test]
@@ -4927,32 +4854,6 @@ mod gate_setup_message_tests {
     }
 
     #[test]
-    fn explicit_component_gate_workspace_is_preserved_for_remote_execution() {
-        let options = AgentTaskPromotionRequest {
-            source: String::new(),
-            source_run_id: None,
-            source_path: None,
-            source_worktree_path: None,
-            to_worktree: String::new(),
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            task_id: None,
-            artifact_id: None,
-            dry_run: false,
-            gates: Default::default(),
-            provider_invocation: None,
-            repository_integrity_evidence: None,
-        };
-        let candidate = Path::new("/workspace");
-        let component = Path::new("/workspace/packages/api");
-        assert_eq!(
-            promotion_gate_workspace(&options, candidate, Some(component)),
-            component
-        );
-    }
-
-    #[test]
     fn resume_to_another_worktree_names_where_the_candidate_is_applied() {
         let options = AgentTaskPromotionRequest {
             source: String::new(),
@@ -5026,50 +4927,47 @@ mod gate_setup_message_tests {
 mod gate_setup_failure_retry_tests {
     use super::*;
 
+    /// A non-retryable validation cause asks for a configuration fix; an
+    /// environmental cause keeps the dependency hydration retry.
     #[test]
-    fn non_retryable_validation_cause_is_a_configuration_fix_not_a_hydration_retry() {
-        let mut cause = Error::validation_invalid_argument(
+    fn gate_setup_failure_retry_action_follows_the_cause() {
+        let mut configuration = Error::validation_invalid_argument(
             "secret_env",
             "missing runner secret env ref for WP_CODEBOX_DB_HOST",
             None,
             None,
         );
-        cause.retryable = Some(false);
-
-        let failure = gate_setup_failure(
-            "destination_gate_toolchain",
-            "destination_gate_workspace",
-            cause,
-        );
-
-        assert_eq!(failure.retryable, Some(false));
-        assert_eq!(
-            failure.details["cause"]["retry_action"],
-            GATE_SETUP_FIX_CONFIGURATION
-        );
-        assert!(failure.details["cause"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("WP_CODEBOX_DB_HOST")));
-    }
-
-    #[test]
-    fn environmental_causes_keep_the_hydration_retry() {
-        let cause = Error::new(
+        configuration.retryable = Some(false);
+        let environmental = Error::new(
             homeboy_core::ErrorCode::RunnerLabTransportFailure,
             "ssh: connection reset",
             serde_json::json!({}),
         );
 
-        let failure = gate_setup_failure(
-            "destination_gate_toolchain",
-            "destination_gate_workspace",
-            cause,
-        );
-
-        assert_ne!(failure.retryable, Some(false));
-        assert_eq!(
-            failure.details["cause"]["retry_action"],
-            "retry_dependency_hydration"
-        );
+        for (cause, retryable, retry_action, message) in [
+            (
+                configuration,
+                Some(false),
+                GATE_SETUP_FIX_CONFIGURATION,
+                "WP_CODEBOX_DB_HOST",
+            ),
+            (
+                environmental,
+                None,
+                "retry_dependency_hydration",
+                "connection reset",
+            ),
+        ] {
+            let failure = gate_setup_failure(
+                "destination_gate_toolchain",
+                "destination_gate_workspace",
+                cause,
+            );
+            assert_eq!(failure.retryable == Some(false), retryable == Some(false));
+            assert_eq!(failure.details["cause"]["retry_action"], retry_action);
+            assert!(failure.details["cause"]["message"]
+                .as_str()
+                .is_some_and(|text| text.contains(message)));
+        }
     }
 }

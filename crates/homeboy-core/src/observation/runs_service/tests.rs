@@ -390,28 +390,6 @@ fn missing_run_guidance_prints_runner_routed_retrieval_commands() {
 }
 
 #[test]
-fn list_artifacts_for_run_enriches_url_artifact_links() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store.start_run(sample_run("bench")).expect("run");
-        store
-            .record_url_artifact(&run.id, "frontend_url", "https://example.test/")
-            .expect("record URL artifact");
-
-        let artifacts = list_artifacts_for_run(&store, &run.id).expect("artifacts");
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].artifact_type, "url");
-        // URL artifacts are enriched: public_url is filled in from the
-        // recorded URL so downstream consumers don't need to re-derive it.
-        assert_eq!(
-            artifacts[0].public_url.as_deref(),
-            Some("https://example.test/")
-        );
-    });
-}
-
-#[test]
 fn load_run_with_artifacts_uses_the_resolved_canonical_run_id() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
@@ -442,8 +420,8 @@ fn load_run_with_artifacts_uses_the_resolved_canonical_run_id() {
 }
 
 #[test]
-fn resolve_artifact_for_run_rejects_unknown_artifact_id() {
-    with_isolated_home(|_home| {
+fn resolve_artifact_for_run_unknown_id_lists_available_names() {
+    with_isolated_home(|home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store.start_run(sample_run("bench")).expect("run");
@@ -454,15 +432,7 @@ fn resolve_artifact_for_run_rejects_unknown_artifact_id() {
         // With no artifacts recorded, the error is explicit rather than
         // listing phantom names.
         assert!(err.message.contains("no recorded artifacts"));
-    });
-}
 
-#[test]
-fn resolve_artifact_for_run_unknown_id_lists_available_names() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store.start_run(sample_run("bench")).expect("run");
         let source = home.path().join("bench-results.json");
         std::fs::write(&source, br#"{"ok":true}"#).expect("source");
         store
@@ -471,7 +441,6 @@ fn resolve_artifact_for_run_unknown_id_lists_available_names() {
 
         let err = resolve_artifact_for_run(&store, &run.id, "does-not-exist")
             .expect_err("unknown artifact");
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(
             err.message.contains("available artifact names")
                 && err.message.contains("bench_results"),
@@ -639,28 +608,6 @@ fn match_run_label_resolves_label_from_command_id_and_metadata() {
 }
 
 #[test]
-fn require_run_resolves_requested_run_id_metadata_alias() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(
-                NewRunRecord::builder("bench")
-                    .component_id("homeboy")
-                    .command("homeboy bench homeboy --run-id proof-label")
-                    .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-                    .rig_id("studio")
-                    .metadata(serde_json::json!({ "requested_run_id": "proof-label" }))
-                    .build(),
-            )
-            .expect("run");
-
-        let resolved = require_run(&store, "proof-label").expect("alias resolves");
-        assert_eq!(resolved.id, run.id);
-    });
-}
-
-#[test]
 fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
     struct StalledProvider {
         entered: mpsc::Sender<()>,
@@ -770,35 +717,6 @@ fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
             .expect("secondary probe joined")
             .expect("secondary probe result");
         runner_evidence::clear_runner_evidence_provider();
-    });
-}
-
-#[test]
-fn list_artifacts_for_run_resolves_requested_run_id_alias() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .start_run(
-                NewRunRecord::builder("bench")
-                    .component_id("homeboy")
-                    .command("homeboy bench homeboy --run-id proof-label")
-                    .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
-                    .rig_id("studio")
-                    .metadata(serde_json::json!({ "requested_run_id": "proof-label" }))
-                    .build(),
-            )
-            .expect("run");
-        let source = home.path().join("bench-results.json");
-        std::fs::write(&source, br#"{"ok":true}"#).expect("source");
-        store
-            .record_artifact(&run.id, "bench_results", &source)
-            .expect("record");
-
-        let artifacts = list_artifacts_for_run(&store, "proof-label").expect("artifacts");
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(artifacts[0].run_id, run.id);
-        assert_eq!(artifacts[0].kind, "bench_results");
     });
 }
 

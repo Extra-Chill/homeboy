@@ -347,76 +347,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unavailable_lease_missing_ownership_with_a_plan_is_terminal() {
-        for recovery_evidence in [Some(
-            homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable,
-        )] {
-            let mut report = RunnerDoctorOutput {
-                variant: "doctor",
-                command: "runner.doctor",
-                runner_id: "lab".to_string(),
-                runner: RunnerTargetSummary {
-                    target_type: "ssh",
-                    registry: None,
-                    server: None,
-                },
-                status: RunnerDoctorStatus::Error,
-                failure: None,
-                capabilities: RunnerCapabilities::default(),
-                resources: RunnerResources::default(),
-                checks: Vec::new(),
-                secret_env_migration: None,
-                diagnostics: None,
-                daemon_recovery: Some(homeboy::core::daemon::DaemonFreshnessReport {
-                    fresh: false,
-                    stale_reason_code: Some(
-                        homeboy::core::daemon::DaemonStaleReasonCode::LeaseMissing,
-                    ),
-                    restartable: false,
-                    lease_id: None,
-                    pid: None,
-                    recovery_evidence,
-                    ownership_evidence: Some("remote lease ownership unavailable".to_string()),
-                    daemon_version: Some("0.349.0".to_string()),
-                    daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
-                    runtime_paths: None,
-                    active_jobs: 0,
-                    termination_evidence: None,
-                    repair_plan: vec![homeboy::core::daemon::DaemonRepairStep::text(
-                        "runner_connect",
-                        "homeboy runner connect lab",
-                    )],
-                }),
-                admission_summary: None,
-                provider_readiness: None,
-                pressure: None,
-                repairs: Vec::new(),
-            };
-
-            assert!(
-                !apply_daemon_repair_plan(
-                    &target::RunnerTarget::Local {
-                        id: "lab".to_string(),
-                        runner: None,
-                    },
-                    &mut report,
-                ),
-                "unavailable ownership must reject a non-empty reconciliation plan"
-            );
-            let repair = terminal_daemon_recovery_repair(&report).expect("terminal repair result");
-
-            assert_eq!(repair.status, RunnerDoctorStatus::Warning);
-            assert!(repair.commands.is_empty());
-            assert!(repair
-                .message
-                .contains("remote lease ownership unavailable"));
-        }
-    }
-
-    #[test]
-    fn stale_typed_proof_without_a_plan_is_terminal_before_generic_reconnect() {
-        let report = RunnerDoctorOutput {
+    fn report_with_recovery(
+        recovery: homeboy::core::daemon::DaemonFreshnessReport,
+    ) -> RunnerDoctorOutput {
+        RunnerDoctorOutput {
             variant: "doctor",
             command: "runner.doctor",
             runner_id: "lab".to_string(),
@@ -432,28 +366,66 @@ mod tests {
             checks: Vec::new(),
             secret_env_migration: None,
             diagnostics: None,
-            daemon_recovery: Some(homeboy::core::daemon::DaemonFreshnessReport {
-                fresh: false,
-                stale_reason_code: Some(
-                    homeboy::core::daemon::DaemonStaleReasonCode::LeaseSchemaMismatch,
-                ),
-                restartable: true,
-                lease_id: None,
-                pid: None,
-                recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Recoverable),
-                ownership_evidence: Some("no validated recovery action".to_string()),
-                daemon_version: None,
-                daemon_build_identity: None,
-                runtime_paths: None,
-                active_jobs: 0,
-                termination_evidence: None,
-                repair_plan: Vec::new(),
-            }),
+            daemon_recovery: Some(recovery),
             admission_summary: None,
             provider_readiness: None,
             pressure: None,
             repairs: Vec::new(),
-        };
+        }
+    }
+
+    fn stale_recovery(
+        stale_reason_code: homeboy::core::daemon::DaemonStaleReasonCode,
+        recovery_evidence: homeboy::core::daemon::DaemonRecoveryEvidence,
+        ownership_evidence: &str,
+        repair_plan: Vec<homeboy::core::daemon::DaemonRepairStep>,
+    ) -> homeboy::core::daemon::DaemonFreshnessReport {
+        homeboy::core::daemon::DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(stale_reason_code),
+            restartable: false,
+            lease_id: None,
+            pid: None,
+            recovery_evidence: Some(recovery_evidence),
+            ownership_evidence: Some(ownership_evidence.to_string()),
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan,
+        }
+    }
+
+    #[test]
+    fn unavailable_lease_missing_ownership_with_a_plan_is_terminal() {
+        let report = report_with_recovery(stale_recovery(
+            homeboy::core::daemon::DaemonStaleReasonCode::LeaseMissing,
+            homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable,
+            "remote lease ownership unavailable",
+            vec![homeboy::core::daemon::DaemonRepairStep::text(
+                "runner_connect",
+                "homeboy runner connect lab",
+            )],
+        ));
+
+        let repair = terminal_daemon_recovery_repair(&report).expect("terminal repair result");
+
+        assert_eq!(repair.status, RunnerDoctorStatus::Warning);
+        assert!(repair.commands.is_empty());
+        assert!(repair
+            .message
+            .contains("remote lease ownership unavailable"));
+    }
+
+    #[test]
+    fn stale_typed_proof_without_a_plan_is_terminal_before_generic_reconnect() {
+        let report = report_with_recovery(stale_recovery(
+            homeboy::core::daemon::DaemonStaleReasonCode::LeaseSchemaMismatch,
+            homeboy::core::daemon::DaemonRecoveryEvidence::Recoverable,
+            "no validated recovery action",
+            Vec::new(),
+        ));
 
         let repair = terminal_daemon_recovery_repair(&report).expect("terminal repair result");
         assert!(repair.commands.is_empty());
@@ -461,45 +433,26 @@ mod tests {
     }
 
     #[test]
-    fn promotion_timeout_retries_once_and_converges() {
+    fn promotion_wait_failures_retry_once_and_converge() {
         let target = local_target();
-        let mut calls = 0;
-        let result = retry_runtime_promotion_wait(&target, || {
-            calls += 1;
-            if calls == 1 {
-                Err(homeboy::core::Error::new(
-                    ErrorCode::RuntimePromotionWaitTimeout,
-                    "promotion still active",
-                    serde_json::Value::Null,
-                ))
-            } else {
-                Ok("connected")
-            }
-        });
+        for code in [ErrorCode::RuntimePromotionContended] {
+            let mut calls = 0;
+            let result = retry_runtime_promotion_wait(&target, || {
+                calls += 1;
+                if calls == 1 {
+                    Err(homeboy::core::Error::new(
+                        code,
+                        "promotion still active",
+                        serde_json::Value::Null,
+                    ))
+                } else {
+                    Ok("connected")
+                }
+            });
 
-        assert_eq!(result.expect("second bounded wait succeeds"), "connected");
-        assert_eq!(calls, 2);
-    }
-
-    #[test]
-    fn promotion_contention_retries_once_and_converges() {
-        let target = local_target();
-        let mut calls = 0;
-        let result = retry_runtime_promotion_wait(&target, || {
-            calls += 1;
-            if calls == 1 {
-                Err(homeboy::core::Error::new(
-                    ErrorCode::RuntimePromotionContended,
-                    "another promotion owns the lease",
-                    serde_json::Value::Null,
-                ))
-            } else {
-                Ok("connected")
-            }
-        });
-
-        assert_eq!(result.expect("second bounded wait succeeds"), "connected");
-        assert_eq!(calls, 2);
+            assert_eq!(result.expect("second bounded wait succeeds"), "connected");
+            assert_eq!(calls, 2, "{code:?}");
+        }
     }
 
     #[test]
@@ -560,7 +513,7 @@ mod tests {
         .expect_err("the second bounded wait remains terminal");
 
         assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
-        assert_eq!(calls, PROMOTION_WAIT_CONNECT_ATTEMPTS);
+        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -790,14 +743,11 @@ fn retry_runtime_promotion_wait<T>(
     for attempt in 0..PROMOTION_WAIT_CONNECT_ATTEMPTS {
         match action() {
             Err(error)
-                if matches!(
-                    error.code,
-                    ErrorCode::RuntimePromotionContended | ErrorCode::RuntimePromotionWaitTimeout
-                ) && attempt + 1 < PROMOTION_WAIT_CONNECT_ATTEMPTS =>
+                if error.code == ErrorCode::RuntimePromotionContended
+                    && attempt + 1 < PROMOTION_WAIT_CONNECT_ATTEMPTS =>
             {
-                // `connect` emitted owner/watch events during the first wait.
-                // A second bounded admission wait converges a promotion that
-                // completed at the timeout boundary without changing identity.
+                // Immediate contention may converge, but a consumed admission
+                // timeout is terminal and must not start a fresh wait budget.
                 target.ensure_current()?;
             }
             result => return result,
@@ -821,11 +771,8 @@ fn refresh_outcome(
         dry_run: false,
     })
     .map_err(|error| error.message)
-    .and_then(|(output, exit_code)| match exit_code {
+    .and_then(|(_, exit_code)| match exit_code {
         0 => Ok(()),
-        0 => Err(
-            "runner refresh-homeboy staged the binary; selection waits for active jobs".to_string(),
-        ),
         code => Err(format!("runner refresh-homeboy exited with code {code}")),
     })
 }

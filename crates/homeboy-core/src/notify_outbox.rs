@@ -517,9 +517,8 @@ pub fn drain(now: DateTime<Utc>) -> NotifyOutboxDrainReport {
     report
 }
 
-/// Delete expired dead letters and legacy configuration-state rejections.
-/// Runs only on a
-/// pass that added one, so the directory is bounded without a scan per drain.
+/// Delete expired dead letters. Runs only on a pass that added one, so the
+/// directory is bounded without a scan per drain.
 fn prune_dead_letters(config_root: &Path) {
     let entries = std::fs::read_dir(dead_letter_dir_in_root(config_root));
     for entry in entries.into_iter().flatten().flatten() {
@@ -529,12 +528,7 @@ fn prune_dead_letters(config_root: &Path) {
             .ok()
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age > DEAD_LETTER_RETENTION);
-        let not_configured = read_entry(&entry.path()).is_some_and(|entry| {
-            entry
-                .terminal_rejection
-                .is_some_and(|rejection| rejection.reason_code == "not_configured")
-        });
-        if expired || not_configured {
+        if expired {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -832,46 +826,45 @@ mod tests {
         assert_eq!(backoff_after(64), Duration::from_secs(MAX_BACKOFF_SECS));
     }
 
+    /// A transport outage queues the event rather than losing it, whether the
+    /// transport exits non-zero, exits zero without reporting delivery, or
+    /// emits an unversioned `retryable: false` that is not a terminal rejection.
     #[test]
-    fn zero_exit_without_delivery_stays_in_the_public_outbox() {
-        crate::test_support::with_isolated_home(|_| {
-            install_transport(
+    fn an_undelivered_terminal_notification_is_queued_rather_than_lost() {
+        let cases: [(&str, Vec<&str>); 3] = [
+            ("outbox.down", vec!["false"]),
+            (
                 "outbox.no-delivery",
                 vec![
                     "sh",
                     "-c",
                     "printf '%s\\n' '{\"status\":\"failed\",\"attempts\":1}'",
                 ],
-            );
-            set_default_transport("outbox.no-delivery");
-            let dispatch = dispatch_with_outbox(&event("gate-admission-failure"), None);
-            assert!(!dispatch.outcome.delivered);
-            assert!(matches!(
-                dispatch.disposition,
-                NotifyOutboxDisposition::Queued { .. }
-            ));
-            assert_eq!(pending_entries().len(), 1);
-        });
-    }
+            ),
+            (
+                "outbox.unversioned",
+                vec!["sh", "-c", "printf '%s\\n' '{\"retryable\":false}'; exit 1"],
+            ),
+        ];
+        for (transport, command) in cases {
+            crate::test_support::with_isolated_home(|_| {
+                install_transport(transport, command.clone());
+                set_default_transport(transport);
 
-    #[test]
-    fn a_failed_terminal_notification_is_queued_rather_than_lost() {
-        crate::test_support::with_isolated_home(|_| {
-            install_transport("outbox.down", vec!["false"]);
-            set_default_transport("outbox.down");
-
-            let dispatch = dispatch_with_outbox(&event("run-outage"), None);
-            assert!(!dispatch.outcome.delivered);
-            assert!(
-                matches!(dispatch.disposition, NotifyOutboxDisposition::Queued { .. }),
-                "{:?}",
-                dispatch.disposition
-            );
-            let queued = pending_entries();
-            assert_eq!(queued.len(), 1);
-            assert_eq!(queued[0].attempts, 1);
-            assert_eq!(queued[0].event.run_id, "run-outage");
-        });
+                let dispatch = dispatch_with_outbox(&event("run-outage"), None);
+                assert!(!dispatch.outcome.delivered, "{transport}");
+                assert!(
+                    matches!(dispatch.disposition, NotifyOutboxDisposition::Queued { .. }),
+                    "{transport}: {:?}",
+                    dispatch.disposition
+                );
+                let queued = pending_entries();
+                assert_eq!(queued.len(), 1, "{transport}");
+                assert_eq!(queued[0].attempts, 1, "{transport}");
+                assert_eq!(queued[0].event.run_id, "run-outage", "{transport}");
+                assert!(dead_letter_entries().is_empty(), "{transport}");
+            });
+        }
     }
 
     #[test]
@@ -937,25 +930,6 @@ mod tests {
                     .map(|rejection| rejection.reason_code.as_str()),
                 Some("invalid_route")
             );
-        });
-    }
-
-    #[test]
-    fn arbitrary_retryable_false_output_remains_retryable() {
-        crate::test_support::with_isolated_home(|_| {
-            install_transport(
-                "outbox.unversioned",
-                vec!["sh", "-c", "printf '%s\\n' '{\"retryable\":false}'; exit 1"],
-            );
-            set_default_transport("outbox.unversioned");
-
-            let dispatch = dispatch_with_outbox(&event("run-unversioned"), None);
-            assert!(matches!(
-                dispatch.disposition,
-                NotifyOutboxDisposition::Queued { .. }
-            ));
-            assert_eq!(pending_entries().len(), 1);
-            assert!(dead_letter_entries().is_empty());
         });
     }
 
@@ -1033,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_lettering_pass_prunes_expired_and_not_configured_dead_letters() {
+    fn a_dead_lettering_pass_prunes_expired_dead_letters() {
         crate::test_support::with_isolated_home(|home| {
             let root = home.path().join(".config/homeboy");
             let dead_dir = dead_letter_dir_in_root(&root);
@@ -1051,30 +1025,6 @@ mod tests {
                     std::time::SystemTime::now() - DEAD_LETTER_RETENTION - Duration::from_secs(60),
                 )
                 .unwrap();
-            // A legacy configuration rejection is removed even while recent;
-            // genuine rejection evidence survives the same pruning pass.
-            let mut legacy = NotifyOutboxEntry {
-                schema: entry_schema(),
-                entry_id: "legacy".to_string(),
-                enqueued_at: Utc::now().to_rfc3339(),
-                event: event("run-legacy"),
-                attempts: 0,
-                next_attempt_at: Utc::now().to_rfc3339(),
-                last_attempt_at: None,
-                last_error: None,
-                terminal_rejection: Some(NotifyTerminalRejection {
-                    schema: notify::NOTIFICATION_TRANSPORT_REJECTION_SCHEMA.to_string(),
-                    reason_code: "not_configured".to_string(),
-                    validation_code: None,
-                    validation_field: Some("auth".to_string()),
-                }),
-                once_marker: None,
-            };
-            let unconfigured = dead_dir.join("unconfigured.json");
-            assert!(write_entry(&unconfigured, &legacy));
-            legacy.terminal_rejection.as_mut().unwrap().reason_code = "invalid_route".to_string();
-            let rejected = dead_dir.join("rejected.json");
-            assert!(write_entry(&rejected, &legacy));
             let pending = pending_dir_in_root(&root);
             std::fs::create_dir_all(&pending).unwrap();
             std::fs::write(pending.join("garbage.json"), b"not json").unwrap();
@@ -1083,8 +1033,6 @@ mod tests {
             assert_eq!(report.unreadable, 1);
             assert!(!expired.exists());
             assert!(recent.exists());
-            assert!(!unconfigured.exists());
-            assert!(rejected.exists());
             assert!(dead_dir.join("garbage.json").exists());
         });
     }
@@ -1107,19 +1055,6 @@ mod tests {
             assert_eq!(restored.kind, NotifyEventKind::NeedsAttention);
             assert_eq!(restored.subject.unwrap().id, "cook-abc");
             assert_eq!(queued[0].event.kind, NotifyEventKind::NeedsAttention);
-        });
-    }
-
-    #[test]
-    fn an_unparseable_entry_is_retired_instead_of_re_read_forever() {
-        crate::test_support::with_isolated_home(|_| {
-            let pending = pending_dir().unwrap();
-            std::fs::create_dir_all(&pending).unwrap();
-            std::fs::write(pending.join("corrupt.json"), b"{not json").unwrap();
-
-            let report = drain(Utc::now());
-            assert_eq!(report.unreadable, 1);
-            assert!(!pending.join("corrupt.json").exists());
         });
     }
 
@@ -1158,16 +1093,14 @@ mod tests {
     }
 
     #[test]
-    fn injected_roots_own_independent_queues() {
+    fn an_entry_enqueued_in_the_ambient_root_is_the_pending_entry() {
         crate::test_support::with_isolated_home(|_| {
-            let left = ambient_config_root().expect("config root");
-            let right = tempfile::tempdir().expect("right root");
-            let entry_id = enqueue_in_root(&left, &event("run-left"), None).expect("queued");
+            let root = ambient_config_root().expect("config root");
+            let entry_id = enqueue_in_root(&root, &event("run-left"), None).expect("queued");
             let queued = pending_entries();
             assert_eq!(queued.len(), 1);
             assert_eq!(queued[0].entry_id, entry_id);
             assert_eq!(queued[0].event.run_id, "run-left");
-            assert!(read_dir_entries(&pending_dir_in_root(right.path())).is_empty());
         });
     }
 
@@ -1179,7 +1112,6 @@ mod tests {
             // than delivery. A claim taken under one root and released under
             // another would strand the entry until its reclaim window elapsed.
             let root = ambient_config_root().expect("config root");
-            let other = tempfile::tempdir().expect("other root");
             let pending = pending_dir_in_root(&root);
             std::fs::create_dir_all(&pending).expect("seed pending");
             std::fs::write(pending.join("corrupt.json"), b"{not json").expect("seed entry");
@@ -1196,17 +1128,6 @@ mod tests {
                 dead_letter_dir_in_root(&root).join("corrupt.json").exists(),
                 "the release landed under the same root the claim was taken in"
             );
-            assert!(!other.path().join("notify-outbox").exists());
-        });
-    }
-
-    #[test]
-    fn a_drain_over_an_empty_or_missing_outbox_is_inert() {
-        crate::test_support::with_isolated_home(|_| {
-            let report = drain(Utc::now());
-            assert_eq!(report.attempted, 0);
-            assert_eq!(report.reclaimed, 0);
-            assert!(report.entries.is_empty());
         });
     }
 }

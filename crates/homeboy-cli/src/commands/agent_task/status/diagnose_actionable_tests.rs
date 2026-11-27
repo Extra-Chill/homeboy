@@ -42,73 +42,91 @@ fn actions_for(
     actions
 }
 
+/// Each classification maps to its own ordered recovery chain; the repair
+/// subset is what an operator may run without first reading evidence.
 #[test]
-fn a_provider_failure_asks_which_provider_was_registered_before_retrying() {
-    let actions = actions_for(AgentTaskFailureClassification::Provider, None);
-
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy runs evidence run-1 --task task-a --failure-only",
-            "homeboy agent-task providers",
-            "homeboy --placement local agent-task retry run-1 --run",
-        ]
-    );
-    assert_eq!(
-        repair_commands(&actions),
-        vec!["homeboy --placement local agent-task retry run-1 --run"]
-    );
-}
-
-#[test]
-fn a_transient_failure_leads_with_the_retry_it_is_documented_to_survive() {
-    let actions = actions_for(AgentTaskFailureClassification::Transient, None);
-
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy --placement local agent-task retry run-1 --run",
-            "homeboy runs evidence run-1 --task task-a --failure-only",
-        ]
-    );
-}
-
-#[test]
-fn a_timeout_reviews_the_candidate_before_spending_another_attempt() {
-    let actions = actions_for(AgentTaskFailureClassification::Timeout, None);
-
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy runs evidence run-1 --task task-a --failure-only",
-            "homeboy agent-task review run-1",
-            "homeboy --placement local agent-task retry run-1 --run",
-        ]
-    );
-}
-
-#[test]
-fn a_stalled_run_reconciles_and_repairs_the_runner_that_went_quiet() {
-    let actions = actions_for(AgentTaskFailureClassification::Stalled, Some("homeboy-lab"));
-
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy agent-task reconcile run-1 --dry-run",
-            "homeboy runner status homeboy-lab",
-            "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
-            "homeboy runs evidence run-1 --task task-a --failure-only",
-            "homeboy --placement local agent-task retry run-1 --run",
-        ]
-    );
-    assert_eq!(
-        repair_commands(&actions),
-        vec![
-            "homeboy agent-task reconcile run-1 --dry-run",
-            "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
-            "homeboy --placement local agent-task retry run-1 --run",
-        ]
-    );
+fn each_failure_classification_yields_its_ordered_recovery_chain() {
+    use AgentTaskFailureClassification::*;
+    const EVIDENCE: &str = "homeboy runs evidence run-1 --task task-a --failure-only";
+    const RETRY: &str = "homeboy --placement local agent-task retry run-1 --run";
+    for (classification, runner, expected, repair) in [
+        (
+            Provider,
+            None,
+            vec![EVIDENCE, "homeboy agent-task providers", RETRY],
+            Some(vec![RETRY]),
+        ),
+        (Transient, None, vec![RETRY, EVIDENCE], None),
+        (
+            Timeout,
+            None,
+            vec![EVIDENCE, "homeboy agent-task review run-1", RETRY],
+            None,
+        ),
+        (
+            Stalled,
+            Some("homeboy-lab"),
+            vec![
+                "homeboy agent-task reconcile run-1 --dry-run",
+                "homeboy runner status homeboy-lab",
+                "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
+                EVIDENCE,
+                RETRY,
+            ],
+            Some(vec![
+                "homeboy agent-task reconcile run-1 --dry-run",
+                "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
+                RETRY,
+            ]),
+        ),
+        (
+            RateLimited,
+            None,
+            vec![EVIDENCE, "homeboy agent-task providers", RETRY],
+            None,
+        ),
+        // A policy denial never suggests replaying the denied request.
+        (
+            PolicyDenied,
+            None,
+            vec![EVIDENCE, "homeboy agent-task status run-1"],
+            Some(vec![]),
+        ),
+        // A missing capability runs the readiness repair chain, not another attempt.
+        (
+            CapabilityMissing,
+            Some("homeboy-lab"),
+            vec![
+                EVIDENCE,
+                "homeboy agent-task providers --full",
+                "homeboy agent-task doctor --runner homeboy-lab",
+                "homeboy agent-task doctor --runner homeboy-lab --repair",
+            ],
+            Some(vec![
+                "homeboy agent-task doctor --runner homeboy-lab --repair",
+            ]),
+        ),
+        // Invalid input never offers a retry.
+        (InvalidInput, None, vec![EVIDENCE], None),
+        (
+            ExecutionFailed,
+            None,
+            vec![
+                EVIDENCE,
+                "homeboy agent-task review run-1",
+                "homeboy runs artifacts run-1 --full",
+                RETRY,
+            ],
+            None,
+        ),
+    ] {
+        let label = format!("{classification:?}");
+        let actions = actions_for(classification, runner);
+        assert_eq!(commands(&actions), expected, "{label}");
+        if let Some(repair) = repair {
+            assert_eq!(repair_commands(&actions), repair, "{label}");
+        }
+    }
 }
 
 #[test]
@@ -121,119 +139,24 @@ fn a_stalled_run_without_a_known_runner_never_names_one() {
 }
 
 #[test]
-fn a_rate_limited_failure_offers_provider_rotation() {
-    let actions = actions_for(AgentTaskFailureClassification::RateLimited, None);
+fn unclassifiable_or_undiagnosed_failures_fall_back_to_the_generic_set() {
+    for failures in [
+        vec![failure(AgentTaskFailureClassification::Unknown)],
+        Vec::new(),
+    ] {
+        let (actions, basis) =
+            diagnose_next_actions("run-1", &failures, &[], None, None, false, false);
 
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy runs evidence run-1 --task task-a --failure-only",
-            "homeboy agent-task providers",
-            "homeboy --placement local agent-task retry run-1 --run",
-        ]
-    );
-}
-
-#[test]
-fn a_policy_denial_never_suggests_replaying_the_denied_request() {
-    let actions = actions_for(AgentTaskFailureClassification::PolicyDenied, None);
-
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy runs evidence run-1 --task task-a --failure-only",
-            "homeboy agent-task status run-1",
-        ]
-    );
-    assert!(repair_commands(&actions).is_empty());
-}
-
-#[test]
-fn a_missing_capability_runs_the_readiness_repair_chain_not_another_attempt() {
-    let actions = actions_for(
-        AgentTaskFailureClassification::CapabilityMissing,
-        Some("homeboy-lab"),
-    );
-
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy runs evidence run-1 --task task-a --failure-only",
-            "homeboy agent-task providers --full",
-            "homeboy agent-task doctor --runner homeboy-lab",
-            "homeboy agent-task doctor --runner homeboy-lab --repair",
-        ]
-    );
-    assert_eq!(
-        repair_commands(&actions),
-        vec!["homeboy agent-task doctor --runner homeboy-lab --repair"]
-    );
-}
-
-#[test]
-fn invalid_input_shows_failure_evidence_and_never_offers_retry() {
-    let retry = owner_bound_retry_action("run-1", None, json!({ "placement": "local" }));
-    let failure = DiagnosedFailure {
-        task_id: "task-a".to_string(),
-        classification: AgentTaskFailureClassification::InvalidInput,
-        phase: None,
-        provider_budget_consumed: false,
-    };
-
-    let (actions, basis) =
-        diagnose_next_actions("run-1", &[failure], &[], None, Some(&retry), false, false);
-
-    assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
-    assert_eq!(
-        commands(&actions),
-        vec!["homeboy runs evidence run-1 --task task-a --failure-only"]
-    );
-}
-
-#[test]
-fn an_execution_failure_shows_the_failing_step_and_what_it_produced() {
-    let actions = actions_for(AgentTaskFailureClassification::ExecutionFailed, None);
-
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy runs evidence run-1 --task task-a --failure-only",
-            "homeboy agent-task review run-1",
-            "homeboy runs artifacts run-1 --full",
-            "homeboy --placement local agent-task retry run-1 --run",
-        ]
-    );
-}
-
-#[test]
-fn an_unclassifiable_failure_falls_back_to_the_generic_set() {
-    let (actions, basis) = diagnose_next_actions(
-        "run-1",
-        &[failure(AgentTaskFailureClassification::Unknown)],
-        &[],
-        None,
-        None,
-        false,
-        false,
-    );
-
-    assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
-    assert_eq!(
-        commands(&actions),
-        vec![
-            "homeboy agent-task status run-1",
-            "homeboy runs artifacts run-1",
-            "homeboy agent-task review run-1",
-        ]
-    );
-}
-
-#[test]
-fn a_run_with_no_diagnosis_at_all_falls_back_to_the_generic_set() {
-    let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None, None, false, false);
-
-    assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
-    assert_eq!(actions.len(), 3);
+        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task status run-1",
+                "homeboy runs artifacts run-1",
+                "homeboy agent-task review run-1",
+            ]
+        );
+    }
 }
 
 #[test]
@@ -334,5 +257,61 @@ fn runner_cancellation_uses_runner_evidence_before_a_proven_replay() {
             "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
             "homeboy --runner homeboy-lab agent-task retry run-1 --run",
         ]
+    );
+}
+
+fn lab_required_decision() -> homeboy_lab_contract::ExecutionPlacementDecision {
+    use homeboy_lab_contract::*;
+    ExecutionPlacementDecision::new(
+        "cook-placement",
+        "v1",
+        ExecutionPlacementIdentity {
+            repository: "extrachill".to_string(),
+            workspace: "/tmp/extrachill".to_string(),
+            task: "cook".to_string(),
+            candidate: None,
+            base: None,
+        },
+        Placement::Lab,
+        ExecutionPlacementRequirement::Lab,
+        EffectiveExecutionPlacement::Lab,
+        Some(ExecutionPlacementRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: RunnerSelectionSource::Explicit,
+        }),
+        ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        ExecutionPlacementOverrideAuthorization {
+            authorized: false,
+            authority: None,
+        },
+    )
+}
+
+/// #19181: a Lab-required mission's retry must never be advertised as a
+/// controller-local replay.
+#[test]
+fn lab_required_retry_action_never_emits_placement_local() {
+    assert!(lab_required(&lab_required_decision()));
+    let retry = owner_bound_retry_action("run-1", None, json!({ "placement": "lab" }));
+    assert_eq!(
+        retry.command,
+        "homeboy --placement lab agent-task retry run-1 --run"
+    );
+    assert!(!retry.command.contains("--placement local"));
+
+    let retry = owner_bound_retry_action(
+        "run-1",
+        lab_required_decision()
+            .runner
+            .as_ref()
+            .map(|runner| runner.runner_id.as_str()),
+        json!({ "placement": "runner", "runner_id": "homeboy-lab" }),
+    );
+    assert_eq!(
+        retry.command,
+        "homeboy --runner homeboy-lab agent-task retry run-1 --run"
     );
 }

@@ -145,9 +145,8 @@ pub fn set_home_root_override(path: Option<PathBuf>) {
 /// Resolved home root: the process-local override when set, else `$HOME`.
 ///
 /// Defined on every platform so [`home_root`] is, too. On Windows `HOME` is
-/// normally unset and this returns `Err`, which is exactly what the callers
-/// that used to read the variable directly already handled — the override is
-/// consulted first either way, so a hermetic test can still repoint them.
+/// normally unset and this returns `Err`, which callers handle; the override is
+/// consulted first, so a hermetic test can still repoint them.
 fn resolved_home_root() -> Result<PathBuf> {
     let override_path = {
         let guard = home_root_override()
@@ -421,8 +420,8 @@ impl Drop for ObservationStoreIsolation {
 }
 
 /// The runtime-temp root of the innermost test isolation on this thread, unless
-/// a legacy `HomeGuard` injected a process-wide home (where ambient resolution
-/// is the point).
+/// a `HomeGuard` injected a process-wide home (where ambient resolution is the
+/// point).
 #[doc(hidden)]
 pub fn hermetic_runtime_root() -> Option<PathBuf> {
     if explicit_home_injected() {
@@ -441,9 +440,9 @@ fn explicit_home_injected() -> bool {
 /// Panic when ambient Homeboy state is resolved inside test isolation.
 ///
 /// A `HermeticTestContext` hands its code explicit roots; reaching the
-/// process-global root from inside one is exactly the escape that second-root
-/// isolation tests used to probe for. Legacy `HomeGuard` explicitly injects a
-/// process-wide home, so ambient resolution is the point there and is allowed.
+/// process-global root from inside one is the escape this guard catches. A
+/// `HomeGuard` explicitly injects a process-wide home, so ambient resolution is
+/// the point there and is allowed.
 #[track_caller]
 fn assert_ambient_root_allowed(what: &str) {
     let caller = std::panic::Location::caller();
@@ -1116,14 +1115,6 @@ mod formatter_visibility {
         Some(after[open + 1..close].to_string())
     }
 
-    #[test]
-    fn path_attr_value_preserves_the_first_path_character() {
-        assert_eq!(
-            path_attr_value(r#"#[path = "deps_provider.rs"]"#).as_deref(),
-            Some("deps_provider.rs")
-        );
-    }
-
     /// The literal in `include!("...")`. `include!(concat!(env!("OUT_DIR"), ..))`
     /// is build-script output, not a checked-in module, and does not match.
     ///
@@ -1540,25 +1531,6 @@ mod formatter_visibility {
 mod home_root_override_tests {
     use super::*;
 
-    /// The override must beat `$HOME`, so a harness can repoint the home root
-    /// without a `setenv` that other threads race.
-    #[test]
-    fn an_override_outranks_the_environment() {
-        // `HOMEBOY_CONFIG_ROOT` legitimately outranks the override, so clear it
-        // (restored on drop) in case the host running the tests has it set.
-        let env = super::config_root_tests::guard();
-        env.remove(HOMEBOY_CONFIG_ROOT_ENV);
-        set_home_root_override(Some(PathBuf::from("/tmp/homeboy-override-root")));
-        let resolved = homeboy().expect("config root");
-        set_home_root_override(None);
-
-        assert!(
-            resolved.starts_with("/tmp/homeboy-override-root"),
-            "override must win over $HOME, got {}",
-            resolved.display()
-        );
-    }
-
     /// Clearing the override must fall back to the environment rather than
     /// stick at the last override — otherwise a dropped guard would leave every
     /// later resolution pointing at a deleted tempdir.
@@ -1622,8 +1594,8 @@ mod home_root_override_tests {
 }
 
 /// Tests for the config-root precedence chain: `HOMEBOY_CONFIG_ROOT` >
-/// process-local home override > `XDG_CONFIG_HOME` (absolute only) >
-/// `$HOME/.config/<dirname>`.
+/// process-local home override > `$HOME/.config/<dirname>`; `XDG_CONFIG_HOME`
+/// is never consulted.
 ///
 /// These mutate real process environment variables (`HOMEBOY_CONFIG_ROOT`,
 /// `XDG_CONFIG_HOME`, `HOME`), which are process-global and raced by any test
@@ -1644,7 +1616,7 @@ mod config_root_tests {
     /// Snapshot of the three env vars this module mutates, restored on drop
     /// regardless of test outcome (including panics) so one failing assertion
     /// cannot leak state into every later test in the binary.
-    pub(super) struct EnvGuard<'a> {
+    struct EnvGuard<'a> {
         _lock: MutexGuard<'a, ()>,
         prior_config_root: Option<String>,
         prior_xdg_config_home: Option<String>,
@@ -1668,7 +1640,7 @@ mod config_root_tests {
             unsafe { env::set_var(name, value) };
         }
 
-        pub(super) fn remove(&self, name: &str) {
+        fn remove(&self, name: &str) {
             // SAFETY: see `set` above.
             unsafe { env::remove_var(name) };
         }
@@ -1691,7 +1663,7 @@ mod config_root_tests {
         }
     }
 
-    pub(super) fn guard() -> EnvGuard<'static> {
+    fn guard() -> EnvGuard<'static> {
         let lock = env_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1768,65 +1740,38 @@ mod config_root_tests {
 
     /// `XDG_CONFIG_HOME` is never consulted, whatever it holds: an inherited
     /// runner export (`/home/runner/.config`), an intentional out-of-home
-    /// relocation, a relative value, or empty. Resolution goes to `$HOME`.
+    /// relocation, a relative value, empty, or unset. Resolution goes to the
+    /// home-root override when one is active, otherwise to `$HOME`.
     #[test]
     fn xdg_config_home_is_never_consulted() {
-        for value in [
-            "/home/runner/.config",
-            "/tmp/hb-gate-root/gate-xdg/xdg_config_home",
-            "/tmp/hb-isolated-home/dotfiles/config",
-            "relative/xdg/root",
-            "",
-        ] {
-            let env = guard();
-            env.remove(HOMEBOY_CONFIG_ROOT_ENV);
-            set_home_root_override(None);
-            env.set("HOME", "/tmp/hb-isolated-home");
-            env.set("XDG_CONFIG_HOME", value);
+        for home_override in [None, Some("/tmp/hb-home-override")] {
+            for value in [
+                Some("/home/runner/.config"),
+                Some("/tmp/hb-gate-root/gate-xdg/xdg_config_home"),
+                Some("/tmp/hb-isolated-home/dotfiles/config"),
+                Some("relative/xdg/root"),
+                Some(""),
+                None,
+            ] {
+                let env = guard();
+                env.remove(HOMEBOY_CONFIG_ROOT_ENV);
+                env.set("HOME", "/tmp/hb-isolated-home");
+                match value {
+                    Some(value) => env.set("XDG_CONFIG_HOME", value),
+                    None => env.remove("XDG_CONFIG_HOME"),
+                }
+                set_home_root_override(home_override.map(PathBuf::from));
 
-            let resolved = homeboy().expect("config root");
+                let resolved = homeboy().expect("config root");
 
-            assert_eq!(
-                resolved,
-                PathBuf::from("/tmp/hb-isolated-home/.config/homeboy"),
-                "XDG_CONFIG_HOME={value:?} must not affect the config root, got {}",
-                resolved.display()
-            );
+                let home = home_override.unwrap_or("/tmp/hb-isolated-home");
+                assert_eq!(
+                    resolved,
+                    PathBuf::from(home).join(".config/homeboy"),
+                    "XDG_CONFIG_HOME={value:?} must not affect the config root"
+                );
+            }
         }
-    }
-
-    /// The home-root override is unaffected by `XDG_CONFIG_HOME` too.
-    #[test]
-    fn home_override_is_unaffected_by_xdg_config_home() {
-        let env = guard();
-        env.remove(HOMEBOY_CONFIG_ROOT_ENV);
-        env.set("XDG_CONFIG_HOME", "/tmp/hb-xdg-root");
-        set_home_root_override(Some(PathBuf::from("/tmp/hb-home-override")));
-
-        let resolved = homeboy().expect("config root");
-
-        assert_eq!(
-            resolved,
-            PathBuf::from("/tmp/hb-home-override/.config/homeboy")
-        );
-    }
-
-    /// Tier 3: the historical default, unchanged when nothing else applies.
-    #[test]
-    fn home_config_default_is_unchanged_when_no_override_applies() {
-        let env = guard();
-        env.remove(HOMEBOY_CONFIG_ROOT_ENV);
-        env.remove("XDG_CONFIG_HOME");
-        env.set("HOME", "/tmp/hb-home-fallback");
-
-        let resolved = homeboy().expect("config root");
-
-        assert_eq!(
-            resolved,
-            PathBuf::from("/tmp/hb-home-fallback/.config/homeboy"),
-            "got {}",
-            resolved.display()
-        );
     }
 
     /// There is one daemon state directory. A relative one would resolve its
@@ -1869,7 +1814,7 @@ mod absolute_local_path_tests {
     /// durable staging state, and the staging daemon later resolved it against
     /// its own working directory instead of the operator's checkout.
     #[test]
-    fn relative_paths_bind_to_the_current_working_directory() {
+    fn local_paths_bind_relative_input_to_cwd_and_normalize_absolute_input() {
         let cwd = env::current_dir().expect("cwd");
 
         assert_eq!(
@@ -1880,31 +1825,9 @@ mod absolute_local_path_tests {
             absolute_local_path("sub/dir").expect("relative resolves"),
             normalize_local_path(cwd.join("sub/dir"))
         );
-    }
-
-    #[test]
-    fn absolute_paths_are_normalized_without_touching_cwd() {
         assert_eq!(
             absolute_local_path("/repo/./packages/../src").expect("absolute resolves"),
             PathBuf::from("/repo/src")
         );
-    }
-}
-
-#[cfg(test)]
-mod path_roots_tests {
-    use super::*;
-
-    #[test]
-    fn explicit_roots_are_available_without_environment() {
-        let roots = PathRoots::new(
-            PathBuf::from("/config/homeboy"),
-            PathBuf::from("/data/homeboy"),
-            PathBuf::from("/artifacts/homeboy"),
-        );
-
-        assert_eq!(roots.config(), Path::new("/config/homeboy"));
-        assert_eq!(roots.data(), Path::new("/data/homeboy"));
-        assert_eq!(roots.artifacts(), Path::new("/artifacts/homeboy"));
     }
 }

@@ -1080,7 +1080,7 @@ fn scoped_provider_backend(backend: Option<&str>, catalog: bool) -> Option<&str>
 
 /// Filter the catalog to the scoped backend's providers, or return the full set
 /// when unscoped. All derived catalog sections are built from the result, so a
-/// single-backend query no longer emits every other backend's data (#9654).
+/// single-backend query emits only that backend's data (#9654).
 fn scope_providers(
     all_providers: &[AgentTaskExecutorProvider],
     scoped_backend: Option<&str>,
@@ -1907,11 +1907,10 @@ fn validate_effective_provider_route(
 
 /// Readiness for every backend the catalog declares, one entry per backend.
 ///
-/// `--validate-readiness` used to inherit Cook's default-backend precondition,
-/// so the command Cook's own error tells an operator to run in order to *find* a
-/// usable backend failed with that same missing-default error. The only way
-/// forward was guessing declared backends one at a time (#12569). An absent
-/// `--backend` now validates each declared backend exactly the way
+/// `--validate-readiness` is the command Cook's missing-default error tells an
+/// operator to run to *find* a usable backend, so it does not inherit Cook's
+/// default-backend precondition (#12569). An absent `--backend` validates each
+/// declared backend exactly the way
 /// `--backend <backend> --validate-readiness` would, and reports every verdict:
 /// a backend that fails readiness is captured here, never propagated, because
 /// the failing backends are half of the picture this sweep exists to produce.
@@ -2517,10 +2516,13 @@ mod tests {
             // fixture provider uses the built-in Pi probe and
             // --validate-readiness was not requested, so the verdict is
             // structurally dispatchable without a live-validated "ready".
-            assert_eq!(
-                output["operator_summary"]["state"],
-                "structurally_dispatchable"
-            );
+            for state in [
+                &output["operator_summary"]["state"],
+                &output["dispatchability"]["state"],
+                &output["readiness_validation"]["live_dispatch"],
+            ] {
+                assert_eq!(state, "structurally_dispatchable");
+            }
             assert_eq!(
                 render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
                 Some(
@@ -2654,9 +2656,6 @@ mod tests {
         });
     }
 
-    // Extension readiness JSON account/capacity classifications and reset
-    // evidence are retired: the Pi CLI does not publish that protocol.
-
     /// #14858 acceptance: unknown capacity. A provider that never fills in
     /// `capacity` remains dispatchable and is reported as unknown with a
     /// reason, never silently treated as unavailable nor as available.
@@ -2781,25 +2780,6 @@ mod tests {
     }
 
     #[test]
-    fn providers_public_dispatchability_envelope_reports_all_ready() {
-        let provider = provider("ready.provider", "ready");
-        let mut args = providers_args();
-        args.backend = Some("ready".to_string());
-        let output = providers_with_catalog(args, provider_catalog(vec![provider]))
-            .expect("provider envelope")
-            .0;
-
-        assert_eq!(
-            output["dispatchability"]["state"],
-            "structurally_dispatchable"
-        );
-        assert_eq!(
-            output["readiness_validation"]["live_dispatch"],
-            "structurally_dispatchable"
-        );
-    }
-
-    #[test]
     fn typed_test_steps_and_overrides_have_explicit_grammar() {
         let step = parse_test_step("cargo test dossier=>all tests pass").expect("typed step");
         assert_eq!(step.command, "cargo test dossier");
@@ -2865,6 +2845,18 @@ mod tests {
             .as_str()
             .expect("common mistake")
             .contains("codex"));
+
+        // Without registered providers the example falls back to the
+        // documented sample selector.
+        let layers = dispatch_config_layers(&[]);
+        assert!(layers["example"]["command"]
+            .as_str()
+            .expect("example command")
+            .contains("--selector sample.executor-provider"));
+        assert_eq!(
+            layers["layers"][0]["registered_provider_ids"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -2888,19 +2880,6 @@ mod tests {
             serde_json::json!(["anthropic", "openai"])
         );
         assert!(catalog[0]["model"].is_null());
-    }
-
-    #[test]
-    fn dispatch_config_layers_falls_back_to_documented_selector_without_providers() {
-        let layers = dispatch_config_layers(&[]);
-        let command = layers["example"]["command"]
-            .as_str()
-            .expect("example command");
-        assert!(command.contains("--selector sample.executor-provider"));
-        assert_eq!(
-            layers["layers"][0]["registered_provider_ids"],
-            serde_json::json!([])
-        );
     }
 
     #[test]
@@ -2948,16 +2927,12 @@ mod tests {
             !actions.contains("inspect finalization status"),
             "error-inspection guidance is reserved for real failures: {actions}"
         );
-    }
 
-    /// A genuinely failed publication keeps the error-inspection guidance.
-    #[test]
-    fn finalization_handoff_keeps_error_guidance_for_failed_publication() {
-        let handoff = finalization_handoff("failed", None);
-
-        assert_eq!(handoff["boundary"], "pr_not_opened");
+        // A genuinely failed publication keeps the error-inspection guidance.
+        let failed = finalization_handoff("failed", None);
+        assert_eq!(failed["boundary"], "pr_not_opened");
         assert_eq!(
-            handoff["next_actions"][0],
+            failed["next_actions"][0],
             "PR was not opened; inspect finalization status and git/PR errors"
         );
     }
@@ -3430,53 +3405,47 @@ esac
 
     #[test]
     fn finalization_base_validation_rejects_immutable_and_revision_bases() {
-        for base in [
-            "a".repeat(40),
-            "abcd".to_string(),
-            "HEAD".to_string(),
-            "main~1".to_string(),
-            "refs/heads/main".to_string(),
-            "CHERRY_PICK_HEAD".to_string(),
-            "REVERT_HEAD".to_string(),
-            "BISECT_HEAD".to_string(),
-            "AUTO_MERGE".to_string(),
-        ] {
-            let error =
-                validate_finalization_base(None, &base, None).expect_err("base is not a branch");
+        let full_sha = "a".repeat(40);
+        let mut rejected = [
+            full_sha.as_str(),
+            "abcd",
+            "HEAD",
+            "main~1",
+            "refs/heads/main",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "BISECT_HEAD",
+            "AUTO_MERGE",
+        ]
+        .map(|base| (base, None, "--verified-base-sha"))
+        .to_vec();
+        rejected.push(("main", Some("abcdef0"), "full immutable Git object ID"));
+        for (base, verified, expected) in rejected {
+            let error = validate_finalization_base(None, base, verified).expect_err(base);
             assert_eq!(
                 error.code,
                 homeboy::core::error::ErrorCode::ValidationInvalidArgument
             );
-            assert!(error.message.contains("--verified-base-sha"));
+            assert!(
+                error.message.contains(expected),
+                "{base}: {}",
+                error.message
+            );
         }
     }
 
+    /// Branch syntax is accepted without a verified SHA too; a branch missing
+    /// from origin is left to remote resolution.
     #[test]
-    fn finalization_base_validation_allows_branch_names_and_full_verified_sha() {
+    fn finalization_base_validation_allows_branch_names() {
         let verified_base_sha = "a".repeat(40);
-
-        validate_finalization_base(None, "main", Some(&verified_base_sha))
-            .expect("default branch is valid");
-        validate_finalization_base(None, "release/2026.08", Some(&verified_base_sha))
-            .expect("slash-separated branch is valid");
-    }
-
-    #[test]
-    fn finalization_base_validation_defers_missing_branch_to_remote_resolution() {
-        validate_finalization_base(None, "missing-remote-branch", None)
-            .expect("branch syntax is valid even when origin does not have it");
-    }
-
-    #[test]
-    fn finalization_base_validation_rejects_abbreviated_verified_sha() {
-        let error = validate_finalization_base(None, "main", Some("abcdef0"))
-            .expect_err("verified base must be immutable");
-
-        assert_eq!(
-            error.code,
-            homeboy::core::error::ErrorCode::ValidationInvalidArgument
-        );
-        assert!(error.message.contains("full immutable Git object ID"));
+        for (base, verified) in [
+            ("main", Some(verified_base_sha.as_str())),
+            ("release/2026.08", Some(verified_base_sha.as_str())),
+            ("missing-remote-branch", None),
+        ] {
+            validate_finalization_base(None, base, verified).expect(base);
+        }
     }
 
     #[test]
@@ -3521,52 +3490,36 @@ esac
         });
     }
 
-    fn provider_fixture(id: &str, backend: &str) -> AgentTaskExecutorProvider {
-        serde_json::from_value(serde_json::json!({
-            "id": id,
-            "backend": backend,
-        }))
-        .expect("provider fixture")
-    }
-
     #[test]
-    fn providers_scope_filters_to_requested_backend_by_default() {
+    fn providers_scope_to_requested_backend_unless_catalog_is_requested() {
         let all = vec![
-            provider_fixture("pi.executor", "pi"),
-            provider_fixture("codex.executor", "codex"),
-            provider_fixture("pi.executor-2", "pi"),
+            provider("pi.executor", "pi"),
+            provider("codex.executor", "codex"),
+            provider("pi.executor-2", "pi"),
         ];
-
-        // `--backend pi` (no `--catalog`) scopes to pi only.
-        let backend = scoped_provider_backend(Some("pi"), false);
-        assert_eq!(backend, Some("pi"));
-        let scoped = scope_providers(&all, backend);
-        assert_eq!(scoped.len(), 2);
-        assert!(scoped.iter().all(|provider| provider.backend == "pi"));
-    }
-
-    #[test]
-    fn providers_scope_catalog_flag_returns_full_multi_backend_set() {
-        let all = vec![
-            provider_fixture("pi.executor", "pi"),
-            provider_fixture("codex.executor", "codex"),
-        ];
-
-        // `--catalog` overrides `--backend` and returns everything.
-        let backend = scoped_provider_backend(Some("pi"), true);
-        assert_eq!(backend, None);
-        assert_eq!(scope_providers(&all, backend).len(), 2);
-
-        // An absent `--backend` also returns the full set.
-        let unscoped = scoped_provider_backend(None, false);
-        assert_eq!(unscoped, None);
-        assert_eq!(scope_providers(&all, unscoped).len(), 2);
-    }
-
-    #[test]
-    fn providers_scope_unknown_backend_yields_empty_slice() {
-        let all = vec![provider_fixture("pi.executor", "pi")];
-        let scoped = scope_providers(&all, scoped_provider_backend(Some("nope"), false));
-        assert!(scoped.is_empty());
+        for (requested, catalog, expected) in [
+            (Some("pi"), false, vec!["pi.executor", "pi.executor-2"]),
+            (
+                Some("pi"),
+                true,
+                vec!["pi.executor", "codex.executor", "pi.executor-2"],
+            ),
+            (
+                None,
+                false,
+                vec!["pi.executor", "codex.executor", "pi.executor-2"],
+            ),
+            (Some("nope"), false, vec![]),
+        ] {
+            let scoped = scope_providers(&all, scoped_provider_backend(requested, catalog));
+            assert_eq!(
+                scoped
+                    .iter()
+                    .map(|provider| provider.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{requested:?} catalog={catalog}"
+            );
+        }
     }
 }

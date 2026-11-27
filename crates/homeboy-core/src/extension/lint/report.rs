@@ -311,71 +311,50 @@ mod tests {
         );
     }
 
+    /// A passing lint only claims "no findings" when there were none; advisory
+    /// findings are still reported.
     #[test]
-    fn passing_lint_with_advisory_findings_does_not_claim_no_findings() {
-        let result = LintRunWorkflowResult {
-            status: "passed".to_string(),
-            component: "fixture".to_string(),
-            exit_code: 0,
-            harness_error: false,
-            infrastructure_failure: false,
-            autofix: None,
-            hints: None,
-            baseline_comparison: None,
-            baseline_provenance: None,
-            formatting_findings: None,
-            findings: Some(vec![HomeboyFinding::builder("phpcs", "phpcs warning")
-                .severity("warning")
-                .build()]),
-            producer_summaries: vec![
-                FindingProducerSummary::new("phpcs", "passed").finding_count(1)
-            ],
-            summary: None,
-            self_check_capture: None,
-            extension_phase_timings: Vec::new(),
-            cargo_target: None,
-        };
+    fn passing_lint_summary_distinguishes_advisory_findings_from_none() {
+        for (findings, producer_count, expected) in [
+            (
+                vec![HomeboyFinding::builder("phpcs", "phpcs warning")
+                    .severity("warning")
+                    .build()],
+                1,
+                "lint phase passed with 1 advisory finding(s) across phpcs passed: 1",
+            ),
+            (Vec::new(), 0, "lint phase passed with no findings"),
+        ] {
+            let result = LintRunWorkflowResult {
+                status: "passed".to_string(),
+                component: "fixture".to_string(),
+                exit_code: 0,
+                harness_error: false,
+                infrastructure_failure: false,
+                autofix: None,
+                hints: None,
+                baseline_comparison: None,
+                baseline_provenance: None,
+                formatting_findings: None,
+                findings: Some(findings),
+                producer_summaries: vec![
+                    FindingProducerSummary::new("phpcs", "passed").finding_count(producer_count)
+                ],
+                summary: None,
+                self_check_capture: None,
+                extension_phase_timings: Vec::new(),
+                cargo_target: None,
+            };
 
-        let (output, exit_code) = from_main_workflow(result);
+            let (output, exit_code) = from_main_workflow(result);
 
-        assert_eq!(exit_code, 0);
-        assert_eq!(
-            output.phase.status,
-            homeboy_extension_contract::PhaseStatus::Passed
-        );
-        assert_eq!(
-            output.phase.summary,
-            "lint phase passed with 1 advisory finding(s) across phpcs passed: 1"
-        );
-    }
-
-    #[test]
-    fn passing_lint_without_findings_still_reports_no_findings() {
-        let result = LintRunWorkflowResult {
-            status: "passed".to_string(),
-            component: "fixture".to_string(),
-            exit_code: 0,
-            harness_error: false,
-            infrastructure_failure: false,
-            autofix: None,
-            hints: None,
-            baseline_comparison: None,
-            baseline_provenance: None,
-            formatting_findings: None,
-            findings: Some(Vec::new()),
-            producer_summaries: vec![
-                FindingProducerSummary::new("phpcs", "passed").finding_count(0)
-            ],
-            summary: None,
-            self_check_capture: None,
-            extension_phase_timings: Vec::new(),
-            cargo_target: None,
-        };
-
-        let (output, exit_code) = from_main_workflow(result);
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.phase.summary, "lint phase passed with no findings");
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                output.phase.status,
+                homeboy_extension_contract::PhaseStatus::Passed
+            );
+            assert_eq!(output.phase.summary, expected);
+        }
     }
 
     #[test]

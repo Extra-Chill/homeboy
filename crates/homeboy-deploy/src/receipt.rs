@@ -254,10 +254,8 @@ fn sync_directory(path: &Path) -> Result<(), Error> {
 /// The receipt path for one deployment identity, below an explicitly injected
 /// data root.
 ///
-/// Infallible now that the root is supplied: resolution was the only fallible
-/// step. The `homeboy_data` error it used to propagate is raised once by the
-/// caller's `PathRoots::from_environment`, which reports the same coded error
-/// rather than flattening a missing or unwritable data root into a sentence.
+/// Infallible because the root is supplied. A missing or unwritable data root
+/// is raised once by the caller's `PathRoots::from_environment` as a coded error.
 fn path_in_roots(
     data_root: &Path,
     project: &Project,

@@ -663,43 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_reclaims_only_terminal_unreferenced_reconstructable_resources() {
-        let mut active = item("active", ExternalStorageResourceClass::Scratch);
-        active.active = true;
-        let mut referenced = item("referenced", ExternalStorageResourceClass::DurableArtifact);
-        referenced.referenced = true;
-        let mut unknown = item("old-unmanaged", ExternalStorageResourceClass::Scratch);
-        unknown.ownership_known = false;
-        let inventory = vec![
-            item("terminal-scratch", ExternalStorageResourceClass::Scratch),
-            active,
-            referenced,
-            unknown,
-            item("credentials", ExternalStorageResourceClass::Credential),
-        ];
-        let planned = plan(&inventory, &HashSet::new(), 0, 100, 10, "generation");
-        assert_eq!(
-            planned
-                .iter()
-                .map(|item| item.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["terminal-scratch"]
-        );
-    }
-
-    #[test]
-    fn plan_is_bounded_before_evidence_is_rendered() {
-        let inventory = vec![
-            item("one", ExternalStorageResourceClass::Scratch),
-            item("two", ExternalStorageResourceClass::Scratch),
-        ];
-        assert_eq!(
-            plan(&inventory, &HashSet::new(), 0, 100, 1, "generation").len(),
-            1
-        );
-    }
-
-    #[test]
     fn plan_uses_the_serialized_reclaim_prefix_including_opaque_tokens() {
         let mut inventory = (0..MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS + 1)
             .map(|index| {
@@ -783,7 +746,9 @@ mod tests {
         pinned.age_days = 99;
         let mut referenced = item("referenced", ExternalStorageResourceClass::DurableArtifact);
         referenced.referenced = true;
-        let inventory = vec![old, young, live, credential, pinned, referenced];
+        let mut unmanaged = item("unmanaged", ExternalStorageResourceClass::Scratch);
+        unmanaged.ownership_known = false;
+        let inventory = vec![old, young, live, credential, pinned, referenced, unmanaged];
         assert_eq!(
             plan(&inventory, &HashSet::new(), 7, 10, 10, "generation")
                 .iter()
@@ -798,7 +763,7 @@ mod tests {
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["old", "young"],
-            "reserve pressure bypasses age only; live, referenced, credential, and pinned resources remain protected",
+            "reserve pressure bypasses age only; live, referenced, unmanaged, credential, and pinned resources remain protected",
         );
     }
 

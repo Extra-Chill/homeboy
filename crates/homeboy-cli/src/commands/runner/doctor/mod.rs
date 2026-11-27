@@ -144,6 +144,29 @@ pub(crate) fn run_with_options(
     if observes_complete_capabilities(options.scope) {
         runner::observe_runner_capabilities(runner_id);
     }
+    match homeboy::core::runtime_promotion::blocking_lease_status() {
+        Ok(Some(lease)) => report.checks.push(checks::error(
+            "runtime_promotion",
+            lease["message"]
+                .as_str()
+                .unwrap_or("Runtime promotion is blocked")
+                .to_string(),
+            Some(
+                lease["recovery_command"]
+                    .as_str()
+                    .unwrap_or("homeboy self doctor")
+                    .to_string(),
+            ),
+            BTreeMap::from([("evidence".to_string(), lease.to_string())]),
+        )),
+        Err(error) => report.checks.push(checks::error(
+            "runtime_promotion",
+            error.to_string(),
+            Some("homeboy self doctor".to_string()),
+            BTreeMap::new(),
+        )),
+        Ok(None) => {}
+    }
     if options.scope == RunnerDoctorScope::LabOffload {
         let catalog = homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover();
         let eligible_provider_ids = probes::eligible_provider_ids(

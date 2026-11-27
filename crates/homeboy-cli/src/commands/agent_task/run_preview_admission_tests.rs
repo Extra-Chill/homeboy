@@ -1,202 +1,17 @@
 use super::*;
 
-/// #14729: with no ready Lab runner, `--placement auto` preview must
-/// report the *resolved* placement (local) rather than the request, and
-/// must name why — not just that a substitution happened somewhere.
-#[test]
-fn preview_with_no_lab_runner_reports_local_placement_and_names_the_reason() {
-    crate::test_support::with_isolated_home(|_| {
-        let source = tempfile::NamedTempFile::new().expect("prompt source");
-        std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
-        let repository = tempfile::tempdir().expect("repository");
-        let _capacity = declare_preview_fixture_capacity(repository.path());
-        let primary = repository.path().join("primary");
-        let workspace = repository.path().join("task-worktree");
-        assert!(std::process::Command::new("git")
-            .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
-            .status()
-            .expect("initialize primary")
-            .success());
-        for (key, value) in [
-            ("user.email", "fixture@example.test"),
-            ("user.name", "Fixture"),
-        ] {
-            assert!(std::process::Command::new("git")
-                .args([
-                    "-C",
-                    primary.to_str().expect("UTF-8 primary"),
-                    "config",
-                    key,
-                    value
-                ])
-                .status()
-                .expect("configure fixture repository")
-                .success());
-        }
-        std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
-        assert!(std::process::Command::new("git")
-            .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
-            .status()
-            .expect("stage fixture")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args([
-                "-C",
-                primary.to_str().expect("UTF-8 primary"),
-                "commit",
-                "--quiet",
-                "-m",
-                "fixture"
-            ])
-            .status()
-            .expect("commit fixture")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args([
-                "-C",
-                primary.to_str().expect("UTF-8 primary"),
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "task",
-                workspace.to_str().expect("UTF-8 workspace"),
-            ])
-            .status()
-            .expect("create linked workspace")
-            .success());
-
-        let cli = Cli::try_parse_from([
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--base".to_string(),
-            "main".to_string(),
-            "--preview".to_string(),
-            "--backend".to_string(),
-            "fixture".to_string(),
-            "--repo".to_string(),
-            "fixture-repository".to_string(),
-            "--prompt".to_string(),
-            format!("@{}", source.path().display()),
-            "--to-worktree".to_string(),
-            workspace.to_str().expect("UTF-8 workspace").to_string(),
-            "--no-finalize".to_string(),
-            "--verify".to_string(),
-            "true".to_string(),
-        ])
-        .expect("parse preview");
-
-        // No lab runner is registered at all: the readiness snapshot a real
-        // dispatch would compute is `absent`, with no available runners.
-        crate::cli_runtime::capture_preflight_result_for_test(
-            &cli,
-            Some(
-                crate::core::parsed_command_preflight::LabReadinessSnapshot {
-                    state: "absent".to_string(),
-                    selected_runner_id: None,
-                    available_runner_ids: Vec::new(),
-                    reasons: Vec::new(),
-                    remediation_commands: vec!["homeboy runner connect <runner-id>".to_string()],
-                    repair_admitted_runner_ids: Vec::new(),
-                },
-            ),
-        );
-
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent-task command");
-        };
-        let super::super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
-            panic!("Cook command");
-        };
-
-        let (preview, exit_code) = preview_cook(*args, None).expect("compile preview");
-        assert_eq!(exit_code, 0);
-        assert_eq!(preview["resolved"]["placement"]["requested"], "auto");
-        assert_eq!(preview["resolved"]["placement"]["selected"], "local");
-        assert_eq!(
-            preview["resolved"]["placement"]["fallback_reason"],
-            "no Lab runner is configured"
-        );
-
-        let summary = crate::commands::agent_task_summary::render_agent_task_summary(
-            crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
-            &preview,
-        )
-        .expect("cook preview summary renders");
-        assert!(
-            summary.contains("Placement: local  (requested: auto — no Lab runner is configured)"),
-            "summary did not name the resolved placement and reason: {summary}"
-        );
-    });
-}
-
-/// Shared fixture for the `#14731`/`#14963` gate-admission tests below: a
-/// real Git repository with a linked worktree, and a Cook `--preview`
-/// invocation whose declared `--verify` gate is the caller's choice. No
-/// Lab runner is registered at all — the readiness snapshot a real
-/// dispatch would compute is `absent`, with no available runners.
+/// Shared fixture for the placement tests below: a real Git repository with a
+/// linked worktree, and a Cook `--preview` invocation whose declared
+/// `--verify` gate is the caller's choice. No Lab runner is registered at
+/// all — the readiness snapshot a real dispatch would compute is `absent`,
+/// with no available runners.
 fn preview_cook_result_for_declared_gate(
     verify_gate: &str,
 ) -> homeboy::core::Result<(serde_json::Value, i32)> {
     let source = tempfile::NamedTempFile::new().expect("prompt source");
     std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
-    let repository = tempfile::tempdir().expect("repository");
-    let primary = repository.path().join("primary");
-    let workspace = repository.path().join("task-worktree");
-    assert!(std::process::Command::new("git")
-        .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
-        .status()
-        .expect("initialize primary")
-        .success());
-    for (key, value) in [
-        ("user.email", "fixture@example.test"),
-        ("user.name", "Fixture"),
-    ] {
-        assert!(std::process::Command::new("git")
-            .args([
-                "-C",
-                primary.to_str().expect("UTF-8 primary"),
-                "config",
-                key,
-                value
-            ])
-            .status()
-            .expect("configure fixture repository")
-            .success());
-    }
-    std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
-    assert!(std::process::Command::new("git")
-        .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
-        .status()
-        .expect("stage fixture")
-        .success());
-    assert!(std::process::Command::new("git")
-        .args([
-            "-C",
-            primary.to_str().expect("UTF-8 primary"),
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture"
-        ])
-        .status()
-        .expect("commit fixture")
-        .success());
-    assert!(std::process::Command::new("git")
-        .args([
-            "-C",
-            primary.to_str().expect("UTF-8 primary"),
-            "worktree",
-            "add",
-            "--quiet",
-            "-b",
-            "task",
-            workspace.to_str().expect("UTF-8 workspace"),
-        ])
-        .status()
-        .expect("create linked workspace")
-        .success());
+    let (repository, workspace) = linked_preview_workspace();
+    let _capacity = declare_preview_fixture_capacity(repository.path());
 
     let cli = Cli::try_parse_from([
         "homeboy".to_string(),
@@ -242,6 +57,34 @@ fn preview_cook_result_for_declared_gate(
     preview_cook(*args, None)
 }
 
+/// #14729: with no ready Lab runner, `--placement auto` preview must
+/// report the *resolved* placement (local) rather than the request, and
+/// must name why — not just that a substitution happened somewhere.
+#[test]
+fn preview_with_no_lab_runner_reports_local_placement_and_names_the_reason() {
+    crate::test_support::with_isolated_home(|_| {
+        let (preview, exit_code) =
+            preview_cook_result_for_declared_gate("true").expect("compile preview");
+        assert_eq!(exit_code, 0);
+        assert_eq!(preview["resolved"]["placement"]["requested"], "auto");
+        assert_eq!(preview["resolved"]["placement"]["selected"], "local");
+        assert_eq!(
+            preview["resolved"]["placement"]["fallback_reason"],
+            "no Lab runner is configured"
+        );
+
+        let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+            &preview,
+        )
+        .expect("cook preview summary renders");
+        assert!(
+            summary.contains("Placement: local  (requested: auto — no Lab runner is configured)"),
+            "summary did not name the resolved placement and reason: {summary}"
+        );
+    });
+}
+
 /// #14731 / #14963: preview must still refuse a `homeboy review test`
 /// gate that *pins* an unavailable Lab route — `--placement lab` has no
 /// local fallback and hard-fails at execution time instead of deferring,
@@ -273,53 +116,45 @@ fn preview_rejects_admission_for_a_pinned_lab_gate_with_no_ready_lab_runner() {
 
 /// #14729: backgrounded/detached dispatches never see preview output, so
 /// the non-preview path must report the same resolved-vs-requested
-/// substitution independently. Exercised against a directly constructed
-/// directive (not the shared process-global capture slot) so this stays
-/// deterministic under parallel test execution.
+/// substitution independently, and stay silent when nothing diverged.
+/// Exercised against directly constructed directives (not the shared
+/// process-global capture slot) so this stays deterministic under parallel
+/// test execution.
 #[test]
-fn resolved_execution_placement_line_names_a_local_fallback() {
-    let directive = crate::core::parsed_command_preflight::PlacementDirective {
-        requested: homeboy_lab_contract::Placement::Auto,
-        required: homeboy_lab_contract::ExecutionPlacementRequirement::Either,
-        selected: homeboy_lab_contract::EffectiveExecutionPlacement::Local,
-        runner: None,
-        fallback: homeboy_lab_contract::ExecutionPlacementFallback {
-            local_allowed: true,
-            reason: Some("the configured Lab runner is disconnected".to_string()),
-        },
-        override_authorization: homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
-            authorized: false,
-            authority: None,
-        },
-    };
-
-    assert_eq!(
-        format_resolved_execution_placement_line(&directive),
-        "cook: placement: local  (requested: auto — the configured Lab runner is disconnected)"
-    );
-}
-
-#[test]
-fn resolved_execution_placement_line_is_silent_when_nothing_diverged() {
-    let directive = crate::core::parsed_command_preflight::PlacementDirective {
-        requested: homeboy_lab_contract::Placement::Local,
-        required: homeboy_lab_contract::ExecutionPlacementRequirement::Either,
-        selected: homeboy_lab_contract::EffectiveExecutionPlacement::Local,
-        runner: None,
-        fallback: homeboy_lab_contract::ExecutionPlacementFallback {
-            local_allowed: false,
-            reason: None,
-        },
-        override_authorization: homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
-            authorized: true,
-            authority: Some("operator --placement local".to_string()),
-        },
-    };
-
-    assert_eq!(
-        format_resolved_execution_placement_line(&directive),
-        "cook: placement: local"
-    );
+fn resolved_execution_placement_line_names_only_a_diverging_fallback() {
+    for (requested, reason, expected) in [
+        (
+            homeboy_lab_contract::Placement::Auto,
+            Some("the configured Lab runner is disconnected"),
+            "cook: placement: local  (requested: auto — the configured Lab runner is disconnected)",
+        ),
+        (
+            homeboy_lab_contract::Placement::Local,
+            None,
+            "cook: placement: local",
+        ),
+    ] {
+        let directive = crate::core::parsed_command_preflight::PlacementDirective {
+            requested,
+            required: homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+            selected: homeboy_lab_contract::EffectiveExecutionPlacement::Local,
+            runner: None,
+            fallback: homeboy_lab_contract::ExecutionPlacementFallback {
+                local_allowed: reason.is_some(),
+                reason: reason.map(str::to_string),
+            },
+            override_authorization: homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: reason.is_none(),
+                authority: reason
+                    .is_none()
+                    .then(|| "operator --placement local".to_string()),
+            },
+        };
+        assert_eq!(
+            format_resolved_execution_placement_line(&directive),
+            expected
+        );
+    }
 }
 
 /// #15039: preview reports the same admitted-component resolution lab staging
@@ -470,63 +305,8 @@ fn local_preview_projects_prompt_evidence_without_execution_admission() {
             format!("Read {} before editing.\n", source.path().display()),
         )
         .expect("write prompt containing a declared path");
-        let repository = tempfile::tempdir().expect("repository");
+        let (repository, workspace) = linked_preview_workspace();
         let _capacity = declare_preview_fixture_capacity(repository.path());
-        let primary = repository.path().join("primary");
-        let workspace = repository.path().join("task-worktree");
-        assert!(std::process::Command::new("git")
-            .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
-            .status()
-            .expect("initialize workspace")
-            .success());
-        for (key, value) in [
-            ("user.email", "fixture@example.test"),
-            ("user.name", "Fixture"),
-        ] {
-            assert!(std::process::Command::new("git")
-                .args([
-                    "-C",
-                    primary.to_str().expect("UTF-8 primary"),
-                    "config",
-                    key,
-                    value
-                ])
-                .status()
-                .expect("configure fixture repository")
-                .success());
-        }
-        std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
-        assert!(std::process::Command::new("git")
-            .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
-            .status()
-            .expect("stage fixture")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args([
-                "-C",
-                primary.to_str().expect("UTF-8 primary"),
-                "commit",
-                "--quiet",
-                "-m",
-                "fixture"
-            ])
-            .status()
-            .expect("commit fixture")
-            .success());
-        assert!(std::process::Command::new("git")
-            .args([
-                "-C",
-                primary.to_str().expect("UTF-8 primary"),
-                "worktree",
-                "add",
-                "--quiet",
-                "-b",
-                "task",
-                workspace.to_str().expect("UTF-8 workspace"),
-            ])
-            .status()
-            .expect("create linked workspace")
-            .success());
         let args = cook(&[
             "homeboy",
             "agent-task",
@@ -758,81 +538,20 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
 
 /// Scopes the captured controller preflight to this test thread so a
 /// concurrently running preview test cannot observe or overwrite it.
-struct ResetCapturedPreflight(
-    #[allow(dead_code)] homeboy::core::parsed_command_preflight::CapturedResultTestScope,
-);
+struct ResetCapturedPreflight {
+    _scope: homeboy::core::parsed_command_preflight::CapturedResultTestScope,
+}
 
 impl ResetCapturedPreflight {
     fn new() -> Self {
-        Self(homeboy::core::parsed_command_preflight::isolate_captured_result_for_test())
+        Self {
+            _scope: homeboy::core::parsed_command_preflight::isolate_captured_result_for_test(),
+        }
     }
-}
-
-fn preview_fixture_worktree() -> (tempfile::TempDir, String) {
-    let repository = tempfile::tempdir().expect("repository");
-    let primary = repository.path().join("primary");
-    let workspace = repository.path().join("task-worktree");
-    assert!(Command::new("git")
-        .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
-        .status()
-        .expect("initialize primary")
-        .success());
-    for (key, value) in [
-        ("user.email", "fixture@example.test"),
-        ("user.name", "Fixture"),
-    ] {
-        assert!(Command::new("git")
-            .args([
-                "-C",
-                primary.to_str().expect("UTF-8 primary"),
-                "config",
-                key,
-                value
-            ])
-            .status()
-            .expect("configure fixture repository")
-            .success());
-    }
-    std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
-    assert!(Command::new("git")
-        .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
-        .status()
-        .expect("stage fixture")
-        .success());
-    assert!(Command::new("git")
-        .args([
-            "-C",
-            primary.to_str().expect("UTF-8 primary"),
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture"
-        ])
-        .status()
-        .expect("commit fixture")
-        .success());
-    assert!(Command::new("git")
-        .args([
-            "-C",
-            primary.to_str().expect("UTF-8 primary"),
-            "worktree",
-            "add",
-            "--quiet",
-            "-b",
-            "task",
-            workspace.to_str().expect("UTF-8 workspace"),
-        ])
-        .status()
-        .expect("create linked workspace")
-        .success());
-    (
-        repository,
-        workspace.to_str().expect("UTF-8 workspace").to_string(),
-    )
 }
 
 fn preview_cook_with_captured_runner(runner_id: Option<&str>) -> (Value, i32) {
-    let (repository, workspace) = preview_fixture_worktree();
+    let (repository, workspace) = linked_preview_workspace();
     let _capacity =
         homeboy::core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
             repository.path(),
@@ -851,7 +570,7 @@ fn preview_cook_with_captured_runner(runner_id: Option<&str>) -> (Value, i32) {
         "--base".to_string(),
         "main".to_string(),
         "--to-worktree".to_string(),
-        workspace,
+        workspace.to_str().expect("UTF-8 workspace").to_string(),
         "--no-finalize".to_string(),
         "--verify".to_string(),
         "true".to_string(),
@@ -1531,15 +1250,6 @@ fn read_only_evidence_projection_uses_the_controller_store() {
         assert!(!path.starts_with(workspace.path().to_str().expect("workspace path")));
         assert!(path.contains("provider-evidence"));
         assert!(projected[0]["read_only"].as_bool().expect("read-only flag"));
-
-        let bounded = redact_preview_replay_argv(
-            (0..MAX_PREVIEW_REPLAY_ARGS + 1).map(|index| format!("arg-{index}")),
-        );
-        assert_eq!(bounded.argv.len(), MAX_PREVIEW_REPLAY_ARGS);
-        assert!(bounded
-            .requires
-            .iter()
-            .any(|item| item.contains("safety budget")));
     });
 }
 

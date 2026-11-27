@@ -165,6 +165,11 @@ pub fn claim_runner_reconnect_attempt(dir: &Path, runner: &str, now: SystemTime)
 
 /// Classify a refusal by its error code and structured details.
 pub fn is_transient_refusal(code: &str, details: &serde_json::Value) -> bool {
+    // Admission already consumed its entire budget. An outer substrate wait
+    // must not silently start another promotion wait.
+    if ErrorCode::from_str(code) == Some(ErrorCode::RuntimePromotionWaitTimeout) {
+        return false;
+    }
     let reasons_transient = |value: &serde_json::Value| {
         value
             .as_array()
@@ -172,7 +177,7 @@ pub fn is_transient_refusal(code: &str, details: &serde_json::Value) -> bool {
     };
     matches!(
         ErrorCode::from_str(code),
-        Some(ErrorCode::RuntimePromotionContended | ErrorCode::RuntimePromotionWaitTimeout)
+        Some(ErrorCode::RuntimePromotionContended)
     ) || details["execution_step_disposition"] == "runner_ineligible"
         || details["admission_wait"] == crate::parsed_command_preflight::READINESS_UNOBSERVED
         || details["daemon_transport_error"]["kind"] == "timeout"
@@ -396,7 +401,7 @@ mod tests {
                     ErrorCode::RuntimePromotionWaitTimeout,
                     serde_json::json!({}),
                 ),
-                true,
+                false,
             ),
             (
                 refusal(

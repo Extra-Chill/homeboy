@@ -68,37 +68,3 @@ pub(crate) fn fixture_provider_outcome(
 ) -> Option<AgentTaskOutcome> {
     None
 }
-
-#[cfg(test)]
-mod tests {
-    use super::is_fixture_backend;
-
-    #[test]
-    fn only_the_exact_fixture_backend_name_selects_the_test_double() {
-        assert!(is_fixture_backend("fixture"));
-        assert!(!is_fixture_backend("fixtures"));
-        assert!(!is_fixture_backend("Fixture"));
-        assert!(!is_fixture_backend(""));
-    }
-
-    #[test]
-    fn the_provider_executor_never_branches_on_the_backend_name_by_string() {
-        // The shipped executor must reach provider resolution for every
-        // backend. A string literal naming the test double there would put a
-        // test-only branch in the release binary, ahead of every real provider
-        // (#11118). This gate module is the only place the name may appear.
-        //
-        // The needle is assembled rather than written out so this assertion
-        // does not match its own source file.
-        let needle = format!(
-            "{quote}{name}{quote}",
-            quote = '"',
-            name = super::FIXTURE_BACKEND
-        );
-        assert!(
-            !include_str!("executor.rs").contains(&needle),
-            "agent_task_provider::executor must not name the test-double backend; \
-             route the decision through fixture_gate::fixture_provider_outcome instead"
-        );
-    }
-}

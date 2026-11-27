@@ -26,46 +26,30 @@ fn formatting_findings_use_distinct_declared_format_files() {
 }
 
 #[test]
-fn self_check_output_is_harness_failure_detects_missing_runner_steps() {
-    // The runner-steps.sh missing-harness environmental issue (#4586).
-    assert!(self_check_output_is_harness_failure(
-        1,
-        "",
-        "sh: runner-steps.sh: No such file or directory"
-    ));
-}
-
-#[test]
-fn self_check_output_is_harness_failure_detects_high_exit_code() {
-    // Exit codes >= 2 conventionally indicate tooling/internal errors.
-    assert!(self_check_output_is_harness_failure(2, "boom", ""));
-    assert!(self_check_output_is_harness_failure(7, "", ""));
-    assert!(self_check_output_is_harness_failure(127, "", ""));
-}
-
-#[test]
-fn self_check_output_is_harness_failure_detects_generic_infra_marker() {
-    // Core only recognizes ecosystem-agnostic infra markers at exit 1.
-    // Ecosystem-specific signatures are detected by the owning extension.
-    assert!(self_check_output_is_harness_failure(
-        1,
-        "lint runner infrastructure failure",
-        ""
-    ));
-}
-
-#[test]
-fn self_check_output_is_harness_failure_rejects_plain_lint_failure() {
-    // Exit 1 with no infra markers is a genuine lint failure, not a harness
-    // failure — it must hard-block the release.
-    assert!(!self_check_output_is_harness_failure(
-        1,
-        "FOUND 2 ERRORS AFFECTING 2 LINES",
-        ""
-    ));
-}
-
-#[test]
-fn self_check_output_is_harness_failure_accepts_clean_pass() {
-    assert!(!self_check_output_is_harness_failure(0, "", ""));
+fn self_check_output_is_harness_failure_classifies_exit_and_markers() {
+    // (exit, stdout, stderr, is_harness_failure)
+    let cases = [
+        // Missing runner-steps.sh harness (#4586).
+        (
+            1,
+            "",
+            "sh: runner-steps.sh: No such file or directory",
+            true,
+        ),
+        // Exit codes >= 2 indicate tooling/internal errors.
+        (2, "boom", "", true),
+        (127, "", "", true),
+        // Ecosystem-agnostic infra marker at exit 1.
+        (1, "lint runner infrastructure failure", "", true),
+        // Genuine lint failure must hard-block the release.
+        (1, "FOUND 2 ERRORS AFFECTING 2 LINES", "", false),
+        (0, "", "", false),
+    ];
+    for (exit, stdout, stderr, expected) in cases {
+        assert_eq!(
+            self_check_output_is_harness_failure(exit, stdout, stderr),
+            expected,
+            "exit={exit} stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
 }

@@ -1885,14 +1885,13 @@ mod tests {
         .expect("composer adapter");
     }
 
+    /// The extension provider receives its effective settings and the
+    /// consumer path whether or not a lockfile also matches a builtin adapter.
     #[test]
     fn extension_hydration_receives_effective_settings_and_consumer_path() {
-        check_extension_hydration_settings(false);
-    }
-
-    #[test]
-    fn extension_hydration_with_package_lock_receives_effective_settings_and_consumer_path() {
-        check_extension_hydration_settings(true);
+        for with_package_lock in [false, true] {
+            check_extension_hydration_settings(with_package_lock);
+        }
     }
 
     fn check_extension_hydration_settings(with_package_lock: bool) {
@@ -2016,7 +2015,7 @@ esac
     }
 
     #[test]
-    fn extension_owned_install_path_becomes_portable_invocation() {
+    fn extension_asset_install_paths_become_portable_invocations() {
         crate::test_support::with_isolated_home(|home| {
             let extension_id = "fixture-runtime";
             let extension_root = home
@@ -2029,48 +2028,40 @@ esac
                 r#"{"name":"Fixture runtime","version":"1.0.0"}"#,
             )
             .expect("extension manifest");
-            let invocation = dependency_install_invocation(vec![
-                "sh".to_string(),
-                extension_root
-                    .join("scripts/install.sh")
-                    .display()
-                    .to_string(),
-                "install".to_string(),
-            ])
-            .expect("portable invocation");
 
-            assert_eq!(
-                invocation,
-                DependencyInstallInvocation::ExtensionEntrypoint {
-                    extension_id: extension_id.to_string(),
-                    entrypoint: "scripts/install.sh".to_string(),
-                    argv: vec!["sh".to_string(), "install".to_string()],
-                    entrypoint_index: 1,
-                }
-            );
-        });
-    }
+            // An installed extension in the active home, and a configured asset
+            // path from a foreign controller home, both stay portable.
+            for (program, script) in [
+                (
+                    "sh",
+                    extension_root
+                        .join("scripts/install.sh")
+                        .display()
+                        .to_string(),
+                ),
+                (
+                    "bash",
+                    "/controller/home/.config/homeboy/extensions/fixture-runtime/scripts/install.sh"
+                        .to_string(),
+                ),
+            ] {
+                let invocation = dependency_install_invocation(vec![
+                    program.to_string(),
+                    script,
+                    "install".to_string(),
+                ])
+                .expect("portable invocation");
 
-    #[test]
-    fn configured_extension_asset_from_foreign_controller_home_becomes_portable() {
-        crate::test_support::with_isolated_home(|_active_home| {
-            let invocation = dependency_install_invocation(vec![
-                "bash".to_string(),
-                "/controller/home/.config/homeboy/extensions/fixture-runtime/scripts/install.sh"
-                    .to_string(),
-                "install".to_string(),
-            ])
-            .expect("portable invocation");
-
-            assert_eq!(
-                invocation,
-                DependencyInstallInvocation::ExtensionEntrypoint {
-                    extension_id: "fixture-runtime".to_string(),
-                    entrypoint: "scripts/install.sh".to_string(),
-                    argv: vec!["bash".to_string(), "install".to_string()],
-                    entrypoint_index: 1,
-                }
-            );
+                assert_eq!(
+                    invocation,
+                    DependencyInstallInvocation::ExtensionEntrypoint {
+                        extension_id: extension_id.to_string(),
+                        entrypoint: "scripts/install.sh".to_string(),
+                        argv: vec![program.to_string(), "install".to_string()],
+                        entrypoint_index: 1,
+                    }
+                );
+            }
         });
     }
 
@@ -2470,59 +2461,32 @@ esac
     }
 
     #[test]
-    fn dependency_install_plan_preserves_nested_component_root() {
+    fn dependency_install_plan_records_the_component_root_within_its_repository() {
         crate::test_support::with_isolated_home(|home| {
             write_builtin_dependency_adapters(home.path());
-            let repository = tempfile::tempdir().expect("repository");
-            crate::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
-            let component = repository.path().join("php-transformer");
-            std::fs::create_dir_all(&component).expect("nested component");
-            std::fs::write(component.join("composer.json"), "{}").expect("composer manifest");
-            let plan = dependency_install_plan(&component).expect("composer plan");
+            for (relative, expected) in [("php-transformer", "php-transformer"), ("", "")] {
+                let repository = tempfile::tempdir().expect("repository");
+                crate::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
+                let component = repository.path().join(relative);
+                std::fs::create_dir_all(&component).expect("component dir");
+                std::fs::write(component.join("composer.json"), "{}").expect("composer manifest");
 
-            assert_eq!(plan.len(), 1);
-            assert_eq!(plan[0].provider_id, "composer");
-            assert_eq!(plan[0].workspace_relative_root, "php-transformer");
+                let plan = dependency_install_plan(&component).expect("composer plan");
+
+                assert_eq!(plan.len(), 1);
+                assert_eq!(plan[0].provider_id, "composer");
+                assert_eq!(plan[0].workspace_relative_root, expected);
+            }
         });
     }
 
     #[test]
-    fn dependency_install_plan_uses_empty_root_for_repository_workspace() {
-        crate::test_support::with_isolated_home(|home| {
-            write_builtin_dependency_adapters(home.path());
-            let repository = tempfile::tempdir().expect("repository");
-            crate::test_support::run_git_fixture_command(repository.path(), &["init", "-q"]);
-            std::fs::write(repository.path().join("composer.json"), "{}")
-                .expect("composer manifest");
-
-            let plan = dependency_install_plan(repository.path()).expect("composer plan");
-
-            assert_eq!(plan.len(), 1);
-            assert_eq!(plan[0].provider_id, "composer");
-            assert_eq!(plan[0].workspace_relative_root, "");
-        });
-    }
-
-    #[test]
-    fn dependency_install_plan_rejects_traversal_roots() {
+    fn dependency_install_plan_rejects_traversal_roots_and_outputs() {
         let workspace = tempfile::tempdir().expect("workspace");
-        let step = DependencyInstallPlanStep {
+        let step = |root: &str| DependencyInstallPlanStep {
             provider_id: "fixture".to_string(),
             invocation: DependencyInstallInvocation::Argv { argv: Vec::new() },
-            workspace_relative_root: "../outside".to_string(),
-            outputs: Vec::new(),
-        };
-
-        assert!(dependency_install_step_workspace_root(workspace.path(), &step).is_err());
-    }
-
-    #[test]
-    fn dependency_install_plan_rejects_traversal_outputs() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let step = DependencyInstallPlanStep {
-            provider_id: "fixture".to_string(),
-            invocation: DependencyInstallInvocation::Argv { argv: Vec::new() },
-            workspace_relative_root: String::new(),
+            workspace_relative_root: root.to_string(),
             outputs: Vec::new(),
         };
         let output = DependencyInstallOutput {
@@ -2530,7 +2494,10 @@ esac
             kind: DependencyInstallOutputKind::Directory,
         };
 
-        assert!(dependency_install_step_output_path(workspace.path(), &step, &output).is_err());
+        assert!(
+            dependency_install_step_workspace_root(workspace.path(), &step("../outside")).is_err()
+        );
+        assert!(dependency_install_step_output_path(workspace.path(), &step(""), &output).is_err());
     }
 
     fn hydration_policy(
@@ -3063,7 +3030,7 @@ esac
     }
 
     #[test]
-    fn cancellation_keeps_provider_discovery_caller_owned() {
+    fn cancellation_keeps_provider_work_caller_owned() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let policy = hydration_policy(Arc::clone(&cancelled), Arc::new(Mutex::new(Vec::new())));
@@ -3098,51 +3065,6 @@ esac
             },
         )
         .expect("discovery cancellation result");
-        canceller.join().expect("canceller");
-        assert!(result.is_none());
-        assert!(completed.load(Ordering::SeqCst));
-        assert!(started.elapsed() < Duration::from_millis(500));
-        let (lock, wake) = &*release;
-        *lock.lock().expect("lock release") = true;
-        wake.notify_one();
-    }
-
-    #[test]
-    fn cancellation_keeps_provider_planning_caller_owned() {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-        let policy = hydration_policy(Arc::clone(&cancelled), Arc::new(Mutex::new(Vec::new())));
-        let release_for_operation = Arc::clone(&release);
-        let completed = Arc::new(AtomicBool::new(false));
-        let completed_for_operation = Arc::clone(&completed);
-        let started = Instant::now();
-        let canceller = std::thread::spawn({
-            let cancelled = Arc::clone(&cancelled);
-            move || {
-                std::thread::sleep(Duration::from_millis(25));
-                cancelled.store(true, Ordering::SeqCst);
-            }
-        });
-        let result = run_with_hydration_deadline(
-            &policy,
-            Instant::now() + Duration::from_secs(2),
-            move |control| {
-                let (lock, wake) = &*release_for_operation;
-                let mut released = lock.lock().expect("lock release");
-                while !*released {
-                    let (next, _) = wake
-                        .wait_timeout(released, Duration::from_millis(10))
-                        .expect("wait release");
-                    released = next;
-                    if control.is_cancelled() {
-                        completed_for_operation.store(true, Ordering::SeqCst);
-                        return Ok(());
-                    }
-                }
-                Ok(())
-            },
-        )
-        .expect("planning cancellation result");
         canceller.join().expect("canceller");
         assert!(result.is_none());
         assert!(completed.load(Ordering::SeqCst));

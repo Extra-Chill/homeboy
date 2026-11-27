@@ -21,7 +21,9 @@ const DRAFT_LINE: &str = r#"{"id":123,"tag_name":"v0.321.1","draft":true,"assets
 
 #[test]
 fn a_stranded_draft_is_resolved_with_its_assets_and_digests() {
-    let metadata = parse_listed_release_metadata(DRAFT_LINE).expect("draft must resolve");
+    // Pagination can put blank lines before the match.
+    let stdout = format!("\n   \n{DRAFT_LINE}\n");
+    let metadata = parse_listed_release_metadata(&stdout).expect("draft must resolve");
 
     assert!(
         metadata.is_draft,
@@ -43,47 +45,33 @@ fn a_stranded_draft_is_resolved_with_its_assets_and_digests() {
 }
 
 #[test]
-fn a_published_release_is_resolved_as_not_draft() {
-    let published = r#"{"id":124,"tag_name":"v0.321.0","draft":false,"assets":[]}"#;
-    let metadata = parse_listed_release_metadata(published).expect("published must resolve");
-    assert!(!metadata.is_draft);
-    assert!(metadata.assets.is_empty());
-}
-
-#[test]
-fn leading_blank_lines_from_pagination_are_skipped() {
-    let stdout = format!("\n   \n{DRAFT_LINE}\n");
-    let metadata =
-        parse_listed_release_metadata(&stdout).expect("blank pages must not hide the match");
-    assert!(metadata.is_draft);
-    assert_eq!(metadata.assets.len(), 1);
-}
-
-#[test]
-fn no_match_yields_none_so_the_caller_can_report_it() {
-    // `--jq select(...)` prints nothing when no page contains the tag. The
-    // caller turns this into "no release matched", which is a different
-    // operator action than "the gh call failed".
-    assert!(parse_listed_release_metadata("").is_none());
-    assert!(parse_listed_release_metadata("\n\n   \n").is_none());
-}
-
-#[test]
-fn unparseable_output_yields_none_rather_than_a_wrong_draft_verdict() {
-    // Guessing here would be worse than failing: defaulting to "published"
-    // would let the step report a delivered release over a stranded draft,
-    // and defaulting to "draft" would republish a live release.
-    assert!(parse_listed_release_metadata("not json at all").is_none());
-    assert!(parse_listed_release_metadata("{").is_none());
-    assert!(parse_listed_release_metadata("[]").is_none());
-}
-
-#[test]
-fn the_graphql_is_draft_spelling_is_accepted_too() {
+fn draft_verdict_resolves_from_rest_and_graphql_spellings() {
     // `gh release list --json isDraft` uses camelCase; the metadata type
     // aliases it so both shapes resolve to the same verdict.
-    let graphql = r#"{"tagName":"v0.321.1","isDraft":true}"#;
-    let metadata = parse_listed_release_metadata(graphql).expect("camelCase must resolve");
-    assert!(metadata.is_draft);
-    assert!(metadata.assets.is_empty());
+    for (stdout, is_draft) in [
+        (
+            r#"{"id":124,"tag_name":"v0.321.0","draft":false,"assets":[]}"#,
+            false,
+        ),
+        (r#"{"tagName":"v0.321.1","isDraft":true}"#, true),
+    ] {
+        let metadata = parse_listed_release_metadata(stdout).expect("release must resolve");
+        assert_eq!(metadata.is_draft, is_draft, "{stdout}");
+        assert!(metadata.assets.is_empty());
+    }
+}
+
+#[test]
+fn no_match_or_unparseable_output_yields_none_rather_than_a_wrong_draft_verdict() {
+    // `--jq select(...)` prints nothing when no page contains the tag; the
+    // caller reports that as "no release matched". Guessing on unparseable
+    // output would be worse: defaulting to "published" would report a
+    // delivered release over a stranded draft, and defaulting to "draft"
+    // would republish a live release.
+    for stdout in ["", "\n\n   \n", "not json at all", "{", "[]"] {
+        assert!(
+            parse_listed_release_metadata(stdout).is_none(),
+            "{stdout:?}"
+        );
+    }
 }

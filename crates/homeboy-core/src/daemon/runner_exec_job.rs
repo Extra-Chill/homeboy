@@ -283,7 +283,11 @@ fn supervise_adopted(
     custody: RunnerExecCustody,
 ) {
     let job = store.handle(job_id);
-    let observed_live = root_is_live(pid, ticks);
+    // Recover by job identity, not by the PID's current cgroup (PID reuse
+    // must never grant custody of another job's processes).
+    let cgroup = crate::job_cgroup::JobCgroup::for_job(&job_id.to_string())
+        .ok()
+        .flatten();
     while root_is_live(pid, ticks) {
         if job.is_cancelled() {
             let _ = crate::process::terminate_isolated_process_group(pid, CANCEL_GRACE);
@@ -291,9 +295,19 @@ fn supervise_adopted(
         }
         std::thread::sleep(SUPERVISE_POLL);
     }
-    if observed_live {
-        let _ = crate::engine::command::terminate_remaining_process_group(pid);
+    if let Some(cgroup) = &cgroup {
+        if let Ok(Some(message)) = cgroup.stop_with_evidence() {
+            use std::io::Write;
+            if let Ok(mut stderr) = fs::OpenOptions::new()
+                .append(true)
+                .open(custody.dir().join(STDERR_FILE))
+            {
+                let _ = writeln!(stderr, "\n{message}");
+            }
+        }
     }
+    // Without a job cgroup there is no safe post-exit PID/PGID custody:
+    // the identifier may already belong to unrelated work.
     let _ = terminalize(store, job_id, custody.dir());
 }
 
@@ -515,24 +529,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_recovery_settles_a_child_that_exited_between_daemons() {
-        with_isolated_home(|home| {
-            let path = home.path().join("jobs.sqlite");
-            let (job_id, mut child) = spawn_then_lose_daemon(&path, "echo ok; exit 0");
-            // The child exits while no daemon supervises it (#18109).
-            child.wait().unwrap();
-            let store = restarted_daemon(&path);
-            super::super::recover_dead_generations(&store, "restarted-daemon").unwrap();
-            let job = wait_terminal(&store, job_id);
-
-            assert_eq!(job.status, JobStatus::Succeeded);
-            let result = result(&store, job_id);
-            assert_eq!(result["exit_code"], 0);
-            assert_eq!(result["stdout"], "ok\n");
-        });
-    }
-
-    #[test]
     fn cancelling_a_re_adopted_job_stops_its_process_tree() {
         with_isolated_home(|home| {
             let path = home.path().join("jobs.sqlite");
@@ -584,8 +580,10 @@ mod tests {
             child.wait().unwrap();
             fs::remove_file(job_dir(unrecorded).unwrap().join(EXIT_FILE)).unwrap();
 
+            // Both exit while no daemon supervises them (#18109); startup
+            // recovery must re-adopt before reconciling the dead lease.
             let store = restarted_daemon(&path);
-            recover_runner_exec_jobs(&store);
+            super::super::recover_dead_generations(&store, "restarted-daemon").unwrap();
 
             let job = wait_terminal(&store, recorded);
             assert_eq!(job.status, JobStatus::Succeeded);
@@ -603,6 +601,7 @@ mod tests {
             assert_eq!(error["reason"], "runner_exec_exit_unrecorded");
         });
     }
+
     /// Another controller's daemon shares the ledger but never adopts this
     /// scope's child, even while its owner is down and custody is free
     /// (#16104). Nor does any daemon adopt a scope-less (pre-scope) child.

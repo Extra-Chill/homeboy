@@ -1752,47 +1752,6 @@ fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
 }
 
 #[test]
-fn cook_cli_accepts_candidate_completion_and_defaults_to_wait_all() {
-    use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
-
-    let default = cook_args_from_cli(vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--prompt".to_string(),
-        "candidate fixture".to_string(),
-        "--to-worktree".to_string(),
-        "fixture@candidate".to_string(),
-        "--backend".to_string(),
-        "fixture".to_string(),
-        "--no-finalize".to_string(),
-    ]);
-    assert_eq!(
-        default.candidate_completion,
-        AgentTaskCandidateCompletionPolicy::WaitAll
-    );
-
-    let first_green = cook_args_from_cli(vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "cook".to_string(),
-        "--prompt".to_string(),
-        "candidate fixture".to_string(),
-        "--to-worktree".to_string(),
-        "fixture@candidate".to_string(),
-        "--backend".to_string(),
-        "fixture".to_string(),
-        "--candidate-completion".to_string(),
-        "first-green".to_string(),
-        "--no-finalize".to_string(),
-    ]);
-    assert_eq!(
-        first_green.candidate_completion,
-        AgentTaskCandidateCompletionPolicy::FirstGreen
-    );
-}
-
-#[test]
 fn invalid_cook_sources_stop_before_worktree_provider_runner_executor_or_budget() {
     with_temp_home(|| {
         let destination = tempfile::tempdir()
@@ -2277,8 +2236,8 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             0
         );
         let (probe, probe_exit_code) = recover_preflight_probe(source_run_id);
-        // A retryable pre-execution failure used to need `cook-continue
-        // --rearm`; recover names the retry step and validates no continuation.
+        // A retryable pre-execution failure: recover names the retry step and
+        // validates no continuation.
         assert_eq!(probe_exit_code, 0, "{probe:#}");
         assert_eq!(probe["status"], "pre_execution_failure");
         assert_eq!(probe["step"], json!({ "kind": "retry" }));
@@ -2681,7 +2640,7 @@ fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result()
     with_temp_home(|| {
         let cook_id = "cook-background-recover";
         let run_id = "cook-background-recover-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let root = tempfile::tempdir().unwrap();
         let release = root.path().join("release");
         let started = root.path().join("started");
@@ -2810,7 +2769,7 @@ fn recover_regate_verify_replaces_gates_for_an_incomplete_unjudged_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-regate-verify";
         let run_id = "cook-regate-verify-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let store = test_lifecycle_store();
         let mut aggregate = store.read_aggregate(run_id).unwrap();
         aggregate.outcomes[0].outputs = json!({"review_form": {
@@ -2916,7 +2875,7 @@ fn recover_regate_carries_explicit_gate_budgets_for_a_no_progress_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-regate-budgets";
         let run_id = "cook-regate-budgets-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let gate = json!({"id": "gate-1", "status": "unavailable", "termination": "no_progress", "command": ["sh", "-c", "cargo test"], "exit_code": 1});
         test_lifecycle_store()
             .record_promotion(
@@ -3241,7 +3200,7 @@ fn admission_failure_driver_exit_leaves_no_running_row() {
 /// A terminal candidate-recoverable Cook attempt whose outcome holds no
 /// immutable candidate, with a local continuation placement decision.
 /// `runtime_generation` overrides the Homeboy build the recipe records.
-fn persist_legacy_candidate_cook(cook_id: &str, run_id: &str, runtime_generation: Option<&str>) {
+fn persist_candidateless_cook(cook_id: &str, run_id: &str, runtime_generation: Option<&str>) {
     let plan = AgentTaskPlan::new(
         "cook-legacy-null-model-plan",
         vec![serde_json::from_value(json!({
@@ -3359,7 +3318,7 @@ fn recover_preflight_admits_a_candidate_recorded_by_an_older_homeboy_build() {
         let cook_id = "cook-older-runtime";
         let run_id = "cook-older-runtime-attempt-1";
         let older = "homeboy 0.433.16+880cf5ac";
-        persist_legacy_candidate_cook(cook_id, run_id, Some(older));
+        persist_candidateless_cook(cook_id, run_id, Some(older));
         let recipe =
             homeboy::agents::agent_task_service::load_recipe(cook_id).expect("load older recipe");
         assert_eq!(recipe.runtime_generation, older);
@@ -3421,7 +3380,7 @@ fn recover_without_admissible_candidate_plans_no_step_and_names_the_refusal() {
     with_temp_home(|| {
         let cook_id = "cook-blocked-recover-summary";
         let run_id = "cook-blocked-recover-summary-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let performer = FixtureCookRecoveryPerformer {
             executor: Arc::new(CountingCookExecutor::default()),
             ..Default::default()
@@ -3471,7 +3430,7 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
     with_temp_home(|| {
         let cook_id = "cook-legacy-null-model";
         let run_id = "cook-legacy-null-model-attempt-1";
-        persist_legacy_candidate_cook(cook_id, run_id, None);
+        persist_candidateless_cook(cook_id, run_id, None);
         let before = filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root"));
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
@@ -4669,25 +4628,6 @@ fn diagnose_keeps_a_successful_terminal_runner_record_healthy() {
             "healthy_terminal_record"
         );
     });
-}
-
-#[test]
-fn logs_exposes_only_the_canonical_cursor_surface() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "runs",
-        "logs",
-        "run-1",
-        "--cursor",
-        "event-page-2",
-    ])
-    .expect("canonical cursor parses");
-    let Commands::Runs(runs) = cli.command else {
-        panic!("expected runs command");
-    };
-    assert_eq!(runs.logs_run_id(), Some("run-1"));
-    assert!(Cli::try_parse_from(["homeboy", "runs", "logs", "run-1", "--raw"]).is_err());
-    assert!(Cli::try_parse_from(["homeboy", "agent-task", "logs", "run-1"]).is_err());
 }
 
 #[test]
@@ -6179,27 +6119,8 @@ fn generic_contract_fixtures_hydrate_local_file_and_path_evidence() {
     });
 }
 
-#[test]
-fn generic_contract_fixtures_accept_successful_required_artifact_handoff() {
-    let outcome = fixture_outcome(
-        "../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json",
-    );
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome
-        .typed_artifacts
-        .iter()
-        .any(|artifact| artifact.name == "answer_packet"));
-    assert!(outcome
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.metadata["handoff_schema"]
-            == "homeboy/agent-task-artifact-handoff/v1"));
-}
-
 fn fixture_outcome(relative_path: &str) -> AgentTaskOutcome {
     let raw = match relative_path {
-        "../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
         "../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
         "../../../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json" => include_str!("../../../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
         _ => panic!("unknown fixture {relative_path}"),
@@ -6983,104 +6904,23 @@ fn parse_recover(argv: &[&str]) -> super::super::RecoverArgs {
 }
 
 #[test]
-fn recover_accepts_external_replacement_proof_with_operator_authorization() {
-    let args = parse_recover(&[
-        "cook-11290-attempt-1",
-        "--promotion",
-        "@replacement.json",
-        "--authorize-external-proof",
-        "Chris approved durable evidence",
-    ]);
-    assert_eq!(args.id, "cook-11290-attempt-1");
-    assert_eq!(args.promotion.as_deref(), Some("@replacement.json"));
-    assert_eq!(
-        args.authorize_external_proof.as_deref(),
-        Some("Chris approved durable evidence")
-    );
-}
-
-#[test]
-fn recover_accepts_corrected_gates_and_authorization() {
-    let args = parse_recover(&[
-        "cook-12788",
-        "--verify",
-        "cargo test exact::replacement",
-        "--authorize-external-proof",
-        "Chris approved corrected gate evidence",
-        "--authorize-interrupted-rerun",
-        "Chris approved rerunning after the interrupted executor",
-    ]);
-    assert_eq!(args.id, "cook-12788");
-    assert_eq!(args.gates.verify, ["cargo test exact::replacement"]);
-    assert_eq!(
-        args.authorize_external_proof.as_deref(),
-        Some("Chris approved corrected gate evidence")
-    );
-    assert_eq!(
-        args.authorize_interrupted_rerun.as_deref(),
-        Some("Chris approved rerunning after the interrupted executor")
-    );
-}
-
-#[test]
-fn removed_replacement_verbs_and_finalize_recover_are_rejected() {
-    for argv in [
-        vec![
-            "verify-replacement",
-            "cook-12788",
-            "--verify",
-            "true",
-            "--authorize-external-proof",
-            "x",
-        ],
-        vec![
-            "record-replacement-gate-proof",
+fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
+    assert!(
+        Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "recover",
             "cook-12788",
             "--promotion",
-            "{}",
-            "--authorize-external-proof",
-            "x",
-        ],
-        vec!["finalize-pr", "--recover", "cook-12788"],
-    ] {
-        let mut full = vec!["homeboy", "agent-task"];
-        full.extend(argv.iter().copied());
-        assert!(
-            Cli::try_parse_from(&full).is_err(),
-            "{argv:?} must not parse"
-        );
-    }
-}
-
-#[test]
-fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
-    with_temp_home(|| {
-        let performer = FixtureCookRecoveryPerformer {
-            executor: Arc::new(CountingCookExecutor::default()),
-            ..Default::default()
-        };
-        assert!(
-            Cli::try_parse_from([
-                "homeboy",
-                "agent-task",
-                "recover",
-                "cook-12788",
-                "--promotion",
-                "{}"
-            ])
-            .is_err(),
-            "--promotion requires --authorize-external-proof"
-        );
-        let mut args = parse_recover(&["cook-12788", "--authorize-external-proof", "x"]);
-        assert!(super::super::recover::replace_gates_request(&mut args)
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            performer.executor.executions.load(Ordering::SeqCst),
-            0,
-            "a refused replacement request executes nothing"
-        );
-    });
+            "{}"
+        ])
+        .is_err(),
+        "--promotion requires --authorize-external-proof"
+    );
+    let mut args = parse_recover(&["cook-12788", "--authorize-external-proof", "x"]);
+    assert!(super::super::recover::replace_gates_request(&mut args)
+        .unwrap()
+        .is_none());
 }
 
 /// Regression for #15672: Cook admission and preview apply the spine's

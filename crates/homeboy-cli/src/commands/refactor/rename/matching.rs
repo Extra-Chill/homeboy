@@ -109,62 +109,73 @@ pub fn find_case_insensitive_matches(text: &str, term: &str) -> Vec<(usize, Stri
 mod tests {
     use super::*;
 
-    // --- Boundary matching tests ---
-
     #[test]
-    fn boundary_matches_word_boundaries() {
-        assert_eq!(find_boundary_matches("pub mod widget;", "widget"), vec![8]);
-        assert_eq!(find_boundary_matches("load_widget", "widget"), vec![5]);
-        assert_eq!(find_boundary_matches("WIDGET_DIR", "WIDGET"), vec![0]);
+    fn boundary_matches_respect_word_case_and_acronym_boundaries() {
+        let cases: &[(&str, &str, &[usize])] = &[
+            // word, snake_case and UPPER_SNAKE boundaries
+            ("pub mod widget;", "widget", &[8]),
+            ("load_widget", "widget", &[5]),
+            ("is_widget_linked", "widget", &[3]),
+            ("widget_init", "widget", &[0]),
+            ("WIDGET_DIR", "WIDGET", &[0]),
+            ("THE_WIDGET_CONFIG", "WIDGET", &[4]),
+            ("Plugin: WP Agent v1", "WP Agent", &[8]),
+            // camelCase joins
+            ("WidgetManifest", "Widget", &[0]),
+            ("loadWidget", "Widget", &[4]),
+            // consecutive-uppercase acronym boundaries
+            ("WPAgent", "Agent", &[2]),
+            ("WPAgent", "WP", &[0]),
+            ("XMLParser", "XML", &[0]),
+            ("XMLParser", "Parser", &[3]),
+            // partial words never match
+            ("widgetry", "widget", &[]),
+            ("rewidget", "widget", &[]),
+            ("node_modules", "module", &[]),
+            ("node_modules", "modules", &[5]),
+        ];
+        for (text, term, expected) in cases {
+            assert_eq!(
+                find_boundary_matches(text, term),
+                expected.to_vec(),
+                "boundary match of {term:?} in {text:?}"
+            );
+        }
     }
 
     #[test]
-    fn boundary_rejects_partial_match() {
-        assert!(find_boundary_matches("widgetry", "widget").is_empty());
-        assert!(find_boundary_matches("rewidget", "widget").is_empty());
+    fn literal_matches_every_exact_substring() {
+        let cases: &[(&str, &str, &[usize])] = &[
+            ("the-widget-plugin", "widget", &[4]),
+            // no boundary filtering
+            ("widgetry", "widget", &[0]),
+            (
+                "sampleplugin-events and sampleplugin-events",
+                "sampleplugin-events",
+                &[0, 24],
+            ),
+            ("sample-plugin-events", "sampleplugin-events", &[]),
+        ];
+        for (text, term, expected) in cases {
+            assert_eq!(
+                find_literal_matches(text, term),
+                expected.to_vec(),
+                "literal match of {term:?} in {text:?}"
+            );
+        }
     }
 
     #[test]
-    fn boundary_matches_camel_case() {
-        assert_eq!(find_boundary_matches("WidgetManifest", "Widget"), vec![0]);
-        assert_eq!(find_boundary_matches("loadWidget", "Widget"), vec![4]);
-    }
-
-    #[test]
-    fn boundary_matches_consecutive_uppercase() {
-        // WPAgent → WP at 0, Agent at 2
-        assert_eq!(find_boundary_matches("WPAgent", "Agent"), vec![2]);
-        assert_eq!(find_boundary_matches("WPAgent", "WP"), vec![0]);
-        assert_eq!(find_boundary_matches("XMLParser", "XML"), vec![0]);
-        assert_eq!(find_boundary_matches("XMLParser", "Parser"), vec![3]);
-    }
-
-    // --- Literal matching tests ---
-
-    #[test]
-    fn literal_matches_exact_substring() {
-        assert_eq!(find_literal_matches("the-widget-plugin", "widget"), vec![4]);
-        // Literal matches inside words (no boundaries)
-        assert_eq!(find_literal_matches("widgetry", "widget"), vec![0]);
-    }
-
-    // --- Case-insensitive matching tests ---
-
-    #[test]
-    fn case_insensitive_finds_different_casing() {
-        let matches = find_case_insensitive_matches("namespace WPAgent;", "wpagent");
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].0, 10); // position
-        assert_eq!(matches[0].1, "WPAgent"); // actual casing preserved
-    }
-
-    #[test]
-    fn case_insensitive_finds_multiple_casings() {
-        let text = "WPAgent and wpagent and Wpagent";
-        let matches = find_case_insensitive_matches(text, "wpagent");
-        assert_eq!(matches.len(), 3);
-        assert_eq!(matches[0].1, "WPAgent");
-        assert_eq!(matches[1].1, "wpagent");
-        assert_eq!(matches[2].1, "Wpagent");
+    fn case_insensitive_matches_preserve_actual_casing() {
+        let matches =
+            find_case_insensitive_matches("namespace WPAgent; wpagent and Wpagent", "wpagent");
+        assert_eq!(
+            matches,
+            vec![
+                (10, "WPAgent".to_string()),
+                (19, "wpagent".to_string()),
+                (31, "Wpagent".to_string()),
+            ]
+        );
     }
 }

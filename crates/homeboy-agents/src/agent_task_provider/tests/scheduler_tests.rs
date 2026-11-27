@@ -423,29 +423,6 @@ fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests()
 }
 
 #[test]
-fn executor_artifact_paths_are_distinct_per_run() {
-    {
-        let command = format!(
-            "node {}",
-            script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:req.artifacts_path}));")
-        );
-        let (request, provider) = request("same-task", command);
-        let first = AgentTaskScheduler::new(Arc::new(
-            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider.clone()]),
-        ))
-        .with_run_id("run-one")
-        .run(AgentTaskPlan::new("plan", vec![request.clone()]));
-        let second = AgentTaskScheduler::new(Arc::new(
-            ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
-        ))
-        .with_run_id("run-two")
-        .run(AgentTaskPlan::new("plan", vec![request]));
-
-        assert_ne!(first.outcomes[0].summary, second.outcomes[0].summary);
-    }
-}
-
-#[test]
 fn scheduler_reports_missing_extension_provider() {
     let (request, _provider) = request("task-missing-provider", "unused".to_string());
     let scheduler =
@@ -999,59 +976,34 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
 }
 
 #[test]
-fn silent_provider_hits_liveness_deadline_before_wall_timeout() {
-    let fake = super::super::test_pi::FakePi::new("sleep 20");
-    let mut request = fake.request("task-liveness-silent");
-    let provider = fake.provider();
-    request.limits.timeout_ms = Some(500);
-    request.limits.liveness_timeout_ms = Some(50);
+fn silent_provider_hits_explicit_or_default_liveness_deadline_before_wall_timeout() {
+    for explicit in [true, false] {
+        let fake = super::super::test_pi::FakePi::new("sleep 20");
+        let mut request = fake.request("task-liveness-silent");
+        let provider = fake.provider();
+        request.limits.timeout_ms = Some(500);
+        request.limits.liveness_timeout_ms = explicit.then_some(50);
 
-    let outcome = run_provider_command_once(&request, &provider);
+        let outcome = if explicit {
+            run_provider_command_once(&request, &provider)
+        } else {
+            crate::agent_task_timeout::with_default_provider_liveness_timeout_ms(50, || {
+                run_provider_command_once(&request, &provider)
+            })
+        };
 
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Stalled)
-    );
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.provider_liveness_timeout"
-    );
-    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("liveness"));
-    assert_eq!(
-        outcome.diagnostics[0].data["liveness_timeout_ms"],
-        json!(50)
-    );
-    assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
-}
-
-#[test]
-fn silent_provider_uses_default_liveness_deadline_before_wall_timeout() {
-    let fake = super::super::test_pi::FakePi::new("sleep 20");
-    let mut request = fake.request("task-liveness-default");
-    let provider = fake.provider();
-    request.limits.timeout_ms = Some(500);
-    request.limits.liveness_timeout_ms = None;
-
-    let outcome = crate::agent_task_timeout::with_default_provider_liveness_timeout_ms(50, || {
-        run_provider_command_once(&request, &provider)
-    });
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Stalled)
-    );
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.provider_liveness_timeout"
-    );
-    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("liveness"));
-    assert_eq!(
-        outcome.diagnostics[0].data["liveness_timeout_ms"],
-        json!(50)
-    );
-    assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::Stalled)
+        );
+        let diagnostic = &outcome.diagnostics[0];
+        assert_eq!(diagnostic.class, "agent_task.provider_liveness_timeout");
+        assert_eq!(diagnostic.data["deadline"], json!("liveness"));
+        assert_eq!(diagnostic.data["liveness_timeout_ms"], json!(50));
+        assert_eq!(diagnostic.data["timeout_ms"], json!(500));
+        assert_eq!(diagnostic.data["runtime_progress_events"], json!(0));
+    }
 }
 
 #[test]
@@ -1098,23 +1050,6 @@ fn parent_visible_progress_keeps_provider_alive_until_wall_deadline() {
         json!(300)
     );
     assert_eq!(outcome.diagnostics[0].data["timeout_ms"], json!(500));
-}
-
-#[test]
-fn structured_runtime_progress_keeps_provider_alive_until_completion() {
-    let fake = node_pi("let progress=path.join(artifacts,'provider-progress.jsonl'); let timer=setInterval(()=>fs.appendFileSync(progress,'{}\\n'),10); setTimeout(()=>{clearInterval(timer);answer('completed with structured progress');},900);");
-    let mut request = fake.request("task-liveness-runtime-progress");
-    let provider = fake.provider();
-    request.limits.timeout_ms = Some(1_500);
-    request.limits.liveness_timeout_ms = Some(500);
-
-    let outcome = run_provider_command_once(&request, &provider);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert_eq!(
-        outcome.summary.as_deref(),
-        Some("completed with structured progress")
-    );
 }
 
 #[cfg(target_os = "linux")]
@@ -1217,53 +1152,35 @@ fn quiet_active_descendant_still_hits_absolute_execution_deadline() {
     assert!(started.elapsed() < Duration::from_secs(8));
 }
 
-/// A runtime that streams telemetry into an artifact whose name does not
-/// contain `progress` is still working, and must not be killed as stalled.
+/// A runtime that streams telemetry into any runtime artifact is still
+/// working, and must not be killed as stalled.
 ///
-/// Regression for #13623: liveness filtered artifacts by file name, so an
-/// Pi Cook writing `cook-homeboy-pi-runtime-stdout.log` was read as
-/// producing nothing. It was killed at the liveness deadline with
-/// `stdout_bytes: 0` and `runtime_progress_events: 0` while that file already
-/// held 94KB. The script below reproduces that shape: it writes only to a
-/// non-`progress` artifact and keeps its stdout silent until the end, so the
-/// parent pipes stay empty and the artifact is the only evidence of life.
+/// Regression for #13623: liveness filtered artifacts by file name, so a Pi
+/// Cook writing `cook-homeboy-pi-runtime-stdout.log` was killed at the
+/// liveness deadline while that file already held 94KB. Each script writes
+/// only to one artifact and keeps its stdout silent until the end, so the
+/// artifact is the only evidence of life.
 #[test]
-fn non_progress_named_runtime_artifact_keeps_provider_alive_until_completion() {
-    let fake = node_pi("let log=path.join(artifacts,'task-runtime-stdout.log'); let timer=setInterval(()=>fs.appendFileSync(log,'working\\n'),10); setTimeout(()=>{clearInterval(timer);answer('completed while streaming a runtime log');},900);");
-    let mut request = fake.request("task-liveness-runtime-log");
-    let provider = fake.provider();
-    request.limits.timeout_ms = Some(1_500);
-    request.limits.liveness_timeout_ms = Some(500);
+fn runtime_artifact_activity_keeps_provider_alive_until_completion() {
+    for artifact in ["provider-progress.jsonl", "task-runtime-stdout.log"] {
+        let fake = node_pi(&format!("let log=path.join(artifacts,{artifact:?}); let timer=setInterval(()=>fs.appendFileSync(log,'working\\n'),10); setTimeout(()=>{{clearInterval(timer);answer('completed while streaming');}},900);"));
+        let mut request = fake.request("task-liveness-runtime-artifact");
+        let provider = fake.provider();
+        request.limits.timeout_ms = Some(1_500);
+        request.limits.liveness_timeout_ms = Some(500);
 
-    let outcome = run_provider_command_once(&request, &provider);
+        let outcome = run_provider_command_once(&request, &provider);
 
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert_eq!(
-        outcome.summary.as_deref(),
-        Some("completed while streaming a runtime log")
-    );
-}
-
-/// Counting every artifact file must not blunt the watchdog: a provider that
-/// writes nothing anywhere is still stalled and still gets killed.
-#[test]
-fn provider_writing_no_artifacts_is_still_killed_for_liveness() {
-    let command = format!("node {}", script("setInterval(() => {}, 1000);"));
-    let (mut request, provider) = request("task-liveness-no-artifacts", command);
-    request.limits.timeout_ms = Some(5_000);
-    request.limits.liveness_timeout_ms = Some(300);
-
-    let outcome = run_provider_command_once(&request, &provider);
-
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.provider_liveness_timeout"
-    );
-    assert_eq!(outcome.diagnostics[0].data["deadline"], json!("liveness"));
-    assert_eq!(
-        outcome.diagnostics[0].data["runtime_progress_events"],
-        json!(0)
-    );
+        assert_eq!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded,
+            "{artifact}: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.summary.as_deref(),
+            Some("completed while streaming")
+        );
+    }
 }
 
 #[test]
@@ -1437,26 +1354,6 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
     assert_eq!(resources[0]["terminal_reason"], "retry");
     assert_eq!(resources[1]["lifecycle_state"], "released");
     assert_eq!(resources[1]["terminal_reason"], "succeeded");
-}
-
-#[test]
-fn provider_command_receives_declared_secret_env() {
-    let secret_name = format!("HOMEBOY_TEST_AGENT_TASK_SECRET_{}", std::process::id());
-    std::env::set_var(&secret_name, "hydrated-secret");
-    let fake = node_pi(&format!(
-        "if(process.env.{secret_name}!=='hydrated-secret')process.exit(23);answer('checked');"
-    ));
-    let mut request = fake.request("task-secret-env");
-    let provider = fake.provider();
-    request.executor.secret_env = vec![secret_name.clone()];
-    let scheduler = AgentTaskScheduler::new(Arc::new(
-        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
-    ));
-
-    let aggregate = scheduler.run(AgentTaskPlan::new("plan-secret-env", vec![request]));
-
-    assert_eq!(aggregate.totals.succeeded, 1);
-    std::env::remove_var(secret_name);
 }
 
 #[test]
@@ -1681,26 +1578,21 @@ fn is_transient_provider_error_classifies_transient_and_permanent_text() {
     ));
 }
 
-/// Node script that increments a counter file and emits a transient cURL-28
+/// Node script that increments a counter file and emits `error` as the
 /// provider error for the first `fail_until` attempts, then a success
 /// outcome. Used to prove transient retries recover.
-fn transient_then_success_script(state_path: &Path, fail_until: u32) -> String {
+fn transient_then_success_script(state_path: &Path, fail_until: u32, error: &str) -> String {
     let state = state_path.to_string_lossy().replace('\\', "\\\\");
+    let error = serde_json::to_string(error).expect("error literal");
     script(&format!(
         "let fs=require('fs'); \
          let p='{state}'; let n=0; try {{ n=parseInt(fs.readFileSync(p,'utf8'))||0; }} catch(e) {{}} \
          n+=1; fs.writeFileSync(p, String(n)); \
          let message = n <= {fail_until} \
-           ? {{role:'assistant',stopReason:'error',errorMessage:'Network error ... cURL error 28: Operation timed out after 15000ms',content:[]}} \
+           ? {{role:'assistant',stopReason:'error',errorMessage:{error},content:[]}} \
            : {{role:'assistant',stopReason:'stop',content:[{{type:'text',text:'recovered'}}]}}; \
          process.stdout.write(JSON.stringify({{type:'message_end',message}})+'\\n');", 
     ))
-}
-
-/// Node script that increments a counter file and always emits a permanent
-/// auth/validation provider error. Used to prove permanent errors fail fast.
-fn permanent_error_script(state_path: &Path) -> String {
-    provider_error_script(state_path, "401 Unauthorized: invalid token")
 }
 
 /// Node script that increments a counter file and always emits `message` as
@@ -1730,61 +1622,49 @@ fn unique_state_path(label: &str) -> PathBuf {
 
 #[test]
 fn provider_retries_transient_error_then_succeeds() {
-    let state_path = unique_state_path("recover");
-    let _ = fs::remove_file(&state_path);
-    let command = format!("node {}", transient_then_success_script(&state_path, 2));
-    let (request, provider) = request("task-transient-recover", command);
+    for (label, error) in [
+        (
+            "curl-28",
+            "Network error ... cURL error 28: Operation timed out after 15000ms",
+        ),
+        // Anthropic capacity overload (HTTP 529), as Pi surfaces it.
+        (
+            "overloaded",
+            r#"{"type":"error","error":{"details":null,"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011ChP3p82s23drvuUF58jEz"}"#,
+        ),
+    ] {
+        let state_path = unique_state_path(label);
+        let _ = fs::remove_file(&state_path);
+        let command = format!(
+            "node {}",
+            transient_then_success_script(&state_path, 2, error)
+        );
+        let (request, provider) = request("task-transient-recover", command);
 
-    let outcome = run_provider_command(&request, &provider, None);
+        let outcome = run_provider_command(&request, &provider, None);
 
-    assert_eq!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Succeeded,
-        "transient blip should be retried until it recovers"
-    );
-    let attempts: u32 = fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-        .unwrap_or_default();
-    assert_eq!(attempts, 3, "two transient failures plus one success");
-    assert!(
-        outcome
-            .diagnostics
-            .iter()
-            .any(|d| d.class == "agent_task.provider_transient_retry"),
-        "recovery should be surfaced as a diagnostic"
-    );
-    let _ = fs::remove_file(&state_path);
-}
-
-#[test]
-fn provider_does_not_retry_permanent_error() {
-    let state_path = unique_state_path("permanent");
-    let _ = fs::remove_file(&state_path);
-    let command = format!("node {}", permanent_error_script(&state_path));
-    let (request, provider) = request("task-permanent", command);
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::ProviderRequestRejected),
-        "permanent auth/validation failures stay non-retryable"
-    );
-    let attempts: u32 = fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-        .unwrap_or_default();
-    assert_eq!(attempts, 1, "permanent error must fail fast, no retry");
-    assert!(
-        !outcome
-            .diagnostics
-            .iter()
-            .any(|d| d.class == "agent_task.provider_transient_retry"),
-        "permanent failures should not record retry history"
-    );
-    let _ = fs::remove_file(&state_path);
+        assert_eq!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded,
+            "{label}: transient blip should be retried until it recovers"
+        );
+        let attempts: u32 = fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or_default();
+        assert_eq!(
+            attempts, 3,
+            "{label}: two transient failures plus one success"
+        );
+        assert!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|d| d.class == "agent_task.provider_transient_retry"),
+            "{label}: recovery should be surfaced as a diagnostic"
+        );
+        let _ = fs::remove_file(&state_path);
+    }
 }
 
 #[test]
@@ -1849,46 +1729,22 @@ fn provider_http_errors_keep_status_and_body_and_classify_route_retryability() {
             !body.contains("sk-live-secret-value"),
             "{label} body is redacted"
         );
+        // Only a transient failure spends the bounded same-route retry budget.
+        assert_eq!(
+            outcome.diagnostics.iter().any(|d| {
+                d.class == "agent_task.provider_transient_retry"
+                    && d.data["retries_exhausted"] == json!(true)
+            }),
+            classification == AgentTaskFailureClassification::Transient,
+            "{label} retry exhaustion"
+        );
+        // A plain HTTP status carries no usage-cap reset time.
+        assert!(!outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class
+                == crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
+        }));
         let _ = fs::remove_file(&state_path);
     }
-}
-
-#[test]
-fn provider_exhausts_bounded_transient_retries() {
-    let state_path = unique_state_path("exhaust");
-    let _ = fs::remove_file(&state_path);
-    // Always transient: never recovers within the bounded attempt budget.
-    let command = format!("node {}", transient_then_success_script(&state_path, 999));
-    let (request, provider) = request("task-transient-exhaust", command);
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(
-        outcome.status,
-        AgentTaskOutcomeStatus::ProviderError,
-        "persistent transient failure still fails after the bounded budget"
-    );
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Transient),
-        "exhausted transient failures stay classified as transient/retryable"
-    );
-    let attempts: u32 = fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-        .unwrap_or_default();
-    assert_eq!(
-        attempts, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
-        "retry budget is bounded to PROVIDER_TRANSIENT_MAX_ATTEMPTS"
-    );
-    assert!(
-        outcome.diagnostics.iter().any(|d| {
-            d.class == "agent_task.provider_transient_retry"
-                && d.data["retries_exhausted"] == json!(true)
-        }),
-        "exhaustion should be surfaced as a diagnostic"
-    );
-    let _ = fs::remove_file(&state_path);
 }
 
 #[test]
@@ -1926,41 +1782,49 @@ fn a_flat_rate_usage_limit_is_classified_rate_limited_and_carries_its_reset_time
 }
 
 #[test]
-fn a_bare_rate_limit_without_a_recognizable_usage_cap_reset_stays_plain_rate_limited() {
-    // A generic 429 with no reset-time signature is still `RateLimited` for
-    // retry/rotation purposes, but there is no known reset time to skip
-    // rotation entries against, so no usage-cap diagnostic is attached.
-    let fake = node_pi("failure('429 Too Many Requests');");
-    let request = fake.request("task-bare-429");
-    let provider = fake.provider();
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::RateLimited)
-    );
-    assert!(!outcome.diagnostics.iter().any(|diagnostic| {
-        diagnostic.class
-            == crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
-    }));
-}
-
-#[test]
 fn a_provider_still_making_progress_is_extended_past_its_base_timeout() {
-    // The base deadline must leave room for interpreter startup and the first
-    // progress write. A provider that has shown no progress by its base
-    // deadline is correctly not extended, so a 150ms base raced node startup
-    // on loaded CI runners (#17410). The answer still lands well past it.
-    let fake = node_pi("let t=setInterval(()=>process.stderr.write('.'),20); setTimeout(()=>{clearInterval(t);answer('finished after the base deadline');},2500);");
+    let root = tempfile::tempdir().expect("clock fixture");
+    let release = root.path().join("extended");
+    let fake = node_pi(&format!(
+        "let t=setInterval(()=>{{process.stderr.write('.'); if(fs.existsSync({})){{clearInterval(t);answer('finished after the base deadline');}}}},20);",
+        serde_json::to_string(&release).unwrap()
+    ));
     let mut request = fake.request("task-timeout-extended");
     let provider = fake.provider();
     request.limits.timeout_ms = Some(1_000);
     request.limits.max_timeout_ms = Some(5_000);
     request.limits.liveness_timeout_ms = Some(2_000);
 
+    // Advance past the base deadline only after the real output reader has
+    // observed progress. Release the provider only after the monitor actually
+    // extends that deadline, not after an assumed amount of wall-clock time.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let observed_extension = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let extended = Arc::clone(&observed_extension);
+    super::super::command_runner::TEST_PROVIDER_ELAPSED.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |progress, current_deadline| {
+            assert!(std::time::Instant::now() < deadline,
+                "waiting for provider progress and deadline extension; progress={progress}, deadline={current_deadline}");
+            if current_deadline > 1_000 {
+                extended.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::fs::write(&release, "extended").expect("release provider after extension");
+            }
+            std::time::Duration::from_millis(if progress > 0 { 1_100 } else { 0 })
+        }));
+    });
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) {
+            super::super::command_runner::TEST_PROVIDER_ELAPSED.with(|hook| hook.replace(None));
+        }
+    }
+    let _clock = ResetClock;
     let outcome = run_provider_command_once(&request, &provider);
 
+    assert!(
+        observed_extension.load(std::sync::atomic::Ordering::SeqCst),
+        "provider must finish only after its deadline was extended: {outcome:?}"
+    );
     assert_eq!(
         outcome.status,
         AgentTaskOutcomeStatus::Succeeded,

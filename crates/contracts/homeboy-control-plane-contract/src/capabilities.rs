@@ -109,7 +109,7 @@ mod tests {
     };
 
     #[test]
-    fn capabilities_document_serializes_only_runtime_declared_operations() {
+    fn capabilities_wire_shape_omits_empty_compatibility_windows() {
         let document = ControlPlaneCapabilities::new(
             vec![ControlPlaneResource::Run],
             vec![
@@ -117,56 +117,22 @@ mod tests {
                 ControlPlaneOperation::GetRun,
             ],
         );
-        let value = serde_json::to_value(&document).expect("serialize");
-        assert_eq!(value["schema"], CONTROL_PLANE_CAPABILITIES_SCHEMA);
-        assert_eq!(value["resources"], serde_json::json!(["run"]));
-        assert!(value.get("compatibility_windows").is_none());
         assert_eq!(
-            value["operations"],
-            serde_json::json!(["get_capabilities", "get_run"])
+            serde_json::to_value(&document).expect("serialize"),
+            serde_json::json!({
+                "schema": CONTROL_PLANE_CAPABILITIES_SCHEMA,
+                "resources": ["run"],
+                "operations": ["get_capabilities", "get_run"],
+            })
         );
-        assert!(
-            !document.operations.iter().any(|operation| !matches!(
-                operation,
-                ControlPlaneOperation::GetCapabilities
-                    | ControlPlaneOperation::ListMissions
-                    | ControlPlaneOperation::GetMission
-                    | ControlPlaneOperation::SubmitRun
-                    | ControlPlaneOperation::ListRuns
-                    | ControlPlaneOperation::GetRun
-                    | ControlPlaneOperation::ListRunTasks
-                    | ControlPlaneOperation::GetRunTask
-                    | ControlPlaneOperation::ListTaskAttempts
-                    | ControlPlaneOperation::GetTaskAttempt
-                    | ControlPlaneOperation::ListAttemptExecutions
-                    | ControlPlaneOperation::GetAttemptExecution
-                    | ControlPlaneOperation::ListRunArtifacts
-                    | ControlPlaneOperation::GetRunArtifact
-                    | ControlPlaneOperation::RegisterRunArtifact
-                    | ControlPlaneOperation::ListRunEvidence
-                    | ControlPlaneOperation::GetRunEvidence
-                    | ControlPlaneOperation::RegisterRunEvidence
-                    | ControlPlaneOperation::ListRunExternalReferences
-                    | ControlPlaneOperation::GetRunExternalReference
-                    | ControlPlaneOperation::RegisterRunExternalReference
-                    | ControlPlaneOperation::GetRunReview
-                    | ControlPlaneOperation::GetRunEvents
-                    | ControlPlaneOperation::GetRunEventRetention
-                    | ControlPlaneOperation::AppendRunEvent
-                    | ControlPlaneOperation::ExecuteRunAction
-            )),
-            "capabilities must not advertise unwired mutations"
-        );
-        let decoded: ControlPlaneCapabilities = serde_json::from_value(value).expect("deserialize");
-        assert_eq!(decoded, document);
-        assert_eq!(decoded.resources, vec![ControlPlaneResource::Run]);
-        assert_eq!(
-            decoded.operations,
-            vec![
-                ControlPlaneOperation::GetCapabilities,
-                ControlPlaneOperation::GetRun
-            ]
-        );
+
+        let windowed = document.with_compatibility_windows(vec![ControlPlaneCompatibilityWindow {
+            projection: "homeboy/legacy-run/v1".to_string(),
+            replacement_schema: "homeboy/control-plane-run/v1".to_string(),
+            remove_in: "0.370.0".to_string(),
+        }]);
+        let value = serde_json::to_value(&windowed).expect("serialize");
+        assert_eq!(value["compatibility_windows"][0]["remove_in"], "0.370.0");
     }
 
     #[test]
@@ -184,29 +150,6 @@ mod tests {
                 ControlPlaneOperation::GetRun,
                 ControlPlaneOperation::Unknown
             ]
-        );
-    }
-
-    #[test]
-    fn compatibility_windows_declare_a_concrete_removal_release() {
-        let document = ControlPlaneCapabilities::new(
-            vec![ControlPlaneResource::Run],
-            vec![ControlPlaneOperation::GetRun],
-        )
-        .with_compatibility_windows(vec![ControlPlaneCompatibilityWindow {
-            projection: "homeboy/legacy-run/v1".to_string(),
-            replacement_schema: "homeboy/control-plane-run/v1".to_string(),
-            remove_in: "0.370.0".to_string(),
-        }]);
-
-        let value = serde_json::to_value(document).expect("serialize");
-        assert_eq!(
-            value["compatibility_windows"],
-            serde_json::json!([{
-                "projection": "homeboy/legacy-run/v1",
-                "replacement_schema": "homeboy/control-plane-run/v1",
-                "remove_in": "0.370.0"
-            }])
         );
     }
 }

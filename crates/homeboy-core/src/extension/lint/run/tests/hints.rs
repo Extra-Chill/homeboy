@@ -2,29 +2,25 @@ use super::super::hints::build_autofix_hint;
 use super::lint_args;
 
 #[test]
-fn autofix_hint_preserves_changed_since_scope() {
-    let mut args = lint_args();
-    args.path_override = Some("/tmp/pr checkout".to_string());
-    args.changed_since = Some("origin/main".to_string());
+fn autofix_hint_preserves_lint_scope() {
+    let mut changed_since = lint_args();
+    changed_since.path_override = Some("/tmp/pr checkout".to_string());
+    changed_since.changed_since = Some("origin/main".to_string());
 
-    let hint = build_autofix_hint(&args);
+    let mut changed_only = lint_args();
+    changed_only.file = Some("src/lib.rs".to_string());
+    changed_only.changed_only = true;
 
-    assert_eq!(
-        hint,
-        "Auto-fix: homeboy review lint demo --path '/tmp/pr checkout' --changed-since origin/main --fix"
-    );
-}
-
-#[test]
-fn autofix_hint_preserves_changed_only_and_file_scope() {
-    let mut args = lint_args();
-    args.file = Some("src/lib.rs".to_string());
-    args.changed_only = true;
-
-    let hint = build_autofix_hint(&args);
-
-    assert_eq!(
-        hint,
-        "Auto-fix: homeboy review lint demo --file src/lib.rs --changed-only --fix"
-    );
+    for (args, expected) in [
+        (
+            changed_since,
+            "Auto-fix: homeboy review lint demo --path '/tmp/pr checkout' --changed-since origin/main --fix",
+        ),
+        (
+            changed_only,
+            "Auto-fix: homeboy review lint demo --file src/lib.rs --changed-only --fix",
+        ),
+    ] {
+        assert_eq!(build_autofix_hint(&args), expected);
+    }
 }

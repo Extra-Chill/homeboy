@@ -47,6 +47,8 @@ fn sync_workspace_batch_once(
     requests: Vec<(RunnerWorkspaceSyncOptions, Vec<String>)>,
     control: &WorkspaceControl,
 ) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
+    control.stage("scanning");
+    control.checkpoint()?;
     let runner_id = runner.id.as_str();
     let workspace_root = runner
         .workspace_root
@@ -283,11 +285,20 @@ fn sync_workspace_batch_once(
         commit_roots[*index].metadata.remote_path = remote_path;
         commit_roots[*index].source_evidence = Some(dependency.source_evidence.clone());
     }
+    control.stage(&format!(
+        "scanning ({} files)",
+        outputs
+            .iter()
+            .map(|output| output.counts.files)
+            .sum::<usize>()
+    ));
     let plan = PlanRequest {
         lab_contract_version: CONTRACT,
         roots: summaries,
     };
     write_json(&transfer.path().join("plan.json"), &plan)?;
+    control.stage("planning on runner");
+    control.checkpoint()?;
     let response = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
         .time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.plan",
@@ -362,6 +373,8 @@ fn sync_workspace_batch_once(
     {
         return Err(snapshot_capacity_error(&probe, requirement, runner, None));
     }
+    control.stage("reserving sync storage");
+    control.checkpoint()?;
     admissions.push(SnapshotFilesystemAdmission::acquire(
         roots.data(),
         transfer.path().to_path_buf(),
@@ -369,6 +382,8 @@ fn sync_workspace_batch_once(
         requirement,
         runner,
     )?);
+    control.checkpoint()?;
+    control.stage("preparing Git bundles");
     for (index, ((head, remote_url), root)) in git_sources
         .into_iter()
         .zip(commit_roots.iter_mut())
@@ -460,6 +475,10 @@ fn sync_workspace_batch_once(
             roots: commit_roots,
         },
     )?;
+    control.stage(&format!(
+        "transferring 0/{:.2} MB",
+        missing_bytes as f64 / 1_000_000.0
+    ));
     let committed = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
         .time::<_, homeboy_core::Error>("stage.lab.source_materialization.commit", || {
             homeboy_engine_primitives::phase_timing::PhaseTimer::current()
@@ -539,6 +558,12 @@ pub(super) fn invoke(
         |writer| {
             let mut archive = tar::Builder::new(writer);
             if let Some((sources, missing)) = blobs {
+                let total: u64 = missing
+                    .iter()
+                    .filter_map(|digest| sources.get(digest))
+                    .map(|source| source.metadata.len())
+                    .sum();
+                let mut sent = 0u64;
                 for digest in missing {
                     control.checkpoint()?;
                     sources
@@ -549,7 +574,18 @@ pub(super) fn invoke(
                             &PathBuf::from("blobs").join(super::blobs::key(digest)?),
                             control,
                         )?;
+                    sent += sources
+                        .get(digest)
+                        .expect("source checked above")
+                        .metadata
+                        .len();
+                    control.stage(&format!(
+                        "transferring {:.2}/{:.2} MB",
+                        sent as f64 / 1_000_000.0,
+                        total as f64 / 1_000_000.0
+                    ));
                 }
+                control.stage("applying on runner (transfer complete)");
                 for entry in
                     fs::read_dir(directory).materialization("read_dir", directory, "controller")?
                 {

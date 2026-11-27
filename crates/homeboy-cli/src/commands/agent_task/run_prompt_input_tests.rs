@@ -31,65 +31,47 @@ fn dispatch_with_prompt(prompt: Option<&str>) -> DispatchArgs {
 }
 
 /// Shell-sensitive prompt content must reach the executor byte-for-byte,
-/// with no interpolation and no trimming (#10100).
+/// with no interpolation and no trimming, whether the `@file` path is
+/// relative or absolute (#10100).
 #[test]
-fn at_file_prompt_is_read_verbatim() {
-    let file = tempfile::NamedTempFile::new().expect("prompt file");
-    let body = "Run `cargo test` for $HOME\n\nUse \"quotes\" and 'apostrophes'.\n";
-    std::fs::write(file.path(), body).expect("write prompt");
-
-    let mut args = dispatch_with_prompt(Some(&format!("@{}", file.path().display())));
-    resolve_dispatch_prompt(&mut args).expect("resolve @file prompt");
-
-    assert_eq!(args.prompt.as_deref(), Some(body));
-}
-
-#[test]
-fn relative_and_absolute_at_file_prompts_resolve_to_equivalent_bytes() {
+fn at_file_prompts_are_read_verbatim_from_relative_and_absolute_paths() {
     let cwd = std::env::current_dir().expect("current directory");
     let file = tempfile::NamedTempFile::new_in(&cwd).expect("prompt file");
-    let body = "Preserve these prompt bytes.\n\n";
+    let body = "Run `cargo test` for $HOME\n\nUse \"quotes\" and 'apostrophes'.\n\n";
     std::fs::write(file.path(), body).expect("write prompt");
     let relative = file
         .path()
         .strip_prefix(&cwd)
         .expect("prompt file is in the current directory");
 
-    let mut relative_args = dispatch_with_prompt(Some(&format!("@{}", relative.display())));
-    let mut absolute_args = dispatch_with_prompt(Some(&format!("@{}", file.path().display())));
-    resolve_dispatch_prompt(&mut relative_args).expect("resolve relative @file prompt");
-    resolve_dispatch_prompt(&mut absolute_args).expect("resolve absolute @file prompt");
-
-    assert_eq!(relative_args.prompt, absolute_args.prompt);
-    assert_eq!(absolute_args.prompt.as_deref(), Some(body));
+    for path in [relative, file.path()] {
+        let mut args = dispatch_with_prompt(Some(&format!("@{}", path.display())));
+        resolve_dispatch_prompt(&mut args).expect("resolve @file prompt");
+        assert_eq!(args.prompt.as_deref(), Some(body), "{}", path.display());
+    }
 }
 
 #[test]
-fn inline_prompt_is_unchanged() {
-    let mut args = dispatch_with_prompt(Some("fix the flaky test"));
-    resolve_dispatch_prompt(&mut args).expect("resolve inline prompt");
-
-    assert_eq!(args.prompt.as_deref(), Some("fix the flaky test"));
+fn inline_and_absent_prompts_pass_through_unchanged() {
+    for prompt in [Some("fix the flaky test"), None] {
+        let mut args = dispatch_with_prompt(prompt);
+        resolve_dispatch_prompt(&mut args).expect("resolve prompt");
+        assert_eq!(args.prompt.as_deref(), prompt);
+    }
 }
 
 #[test]
-fn missing_at_file_is_reported_not_passed_through() {
-    let mut args = dispatch_with_prompt(Some("@/definitely/not/a/prompt/file/10100"));
-    resolve_dispatch_prompt(&mut args).expect_err("a missing prompt file must fail");
-}
-
-#[test]
-fn empty_at_prefix_is_rejected() {
-    let mut args = dispatch_with_prompt(Some("@"));
-    let error = resolve_dispatch_prompt(&mut args).expect_err("bare @ is not a path");
-    assert!(error.message.contains("missing file path"), "{error:?}");
-}
-
-#[test]
-fn absent_prompt_is_a_no_op() {
-    let mut args = dispatch_with_prompt(None);
-    resolve_dispatch_prompt(&mut args).expect("no prompt is fine");
-    assert!(args.prompt.is_none());
+fn missing_or_empty_at_file_is_reported_not_passed_through() {
+    for (prompt, expected) in [
+        ("@/definitely/not/a/prompt/file/10100", None),
+        ("@", Some("missing file path")),
+    ] {
+        let mut args = dispatch_with_prompt(Some(prompt));
+        let error = resolve_dispatch_prompt(&mut args).expect_err(prompt);
+        if let Some(expected) = expected {
+            assert!(error.message.contains(expected), "{error:?}");
+        }
+    }
 }
 
 #[test]

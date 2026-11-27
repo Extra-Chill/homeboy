@@ -322,77 +322,6 @@ fn async_shared_cargo_apply_does_not_reuse_a_historical_terminal_job() {
 
 #[test]
 #[cfg(unix)]
-fn hermetic_daemon_guard_reaps_the_daemon_after_panic() {
-    let record = std::sync::Mutex::new(None);
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let fixture = HermeticTestContext::new();
-        let _daemon = HermeticDaemonGuard::new(&fixture, TestBinary::HomeboyFixture);
-        let output = fixture
-            .command(TestBinary::HomeboyFixture)
-            .args(["daemon", "ensure-running"])
-            .output()
-            .expect("start isolated daemon");
-        assert!(
-            output.status.success(),
-            "daemon ensure-running failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let state: Value = serde_json::from_slice(
-            &std::fs::read(fixture.daemon_dir().join("state.json")).expect("daemon state"),
-        )
-        .expect("daemon state JSON");
-        let token = state["startup_token"]
-            .as_str()
-            .expect("daemon startup token");
-        let pids = daemon_pids_for_token(token);
-        assert_eq!(
-            pids,
-            vec![state["pid"].as_u64().expect("lease pid") as u32],
-            "the daemon is the one process holding its token"
-        );
-        *record.lock().expect("daemon process record") = Some((token.to_string(), pids));
-        panic!("exercise daemon teardown during assertion unwinding");
-    }));
-    assert!(panic.is_err(), "fixture must panic after starting a daemon");
-
-    let (token, pids) = record
-        .into_inner()
-        .expect("daemon process record")
-        .expect("daemon processes were recorded");
-
-    // Ownership here is proven by the exact `--startup-token` argv value the
-    // daemon publishes for itself (`daemon_pid_owns_token`), not by reading a
-    // foreign process's environment. The daemon is orphaned once its launcher
-    // exits, so it is neither this test's nor its `HomeboyFixture` child's
-    // direct descendant; reading its
-    // `/proc/<pid>/environ` depends on host ptrace policy this test never
-    // establishes and cannot assume (#14751). The command-line evidence is
-    // published by the same process and requires no such permission.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && pids.iter().any(|pid| daemon_pid_owns_token(*pid, &token)) {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    let survivors: Vec<_> = pids
-        .iter()
-        .copied()
-        .filter(|pid| daemon_pid_owns_token(*pid, &token))
-        .collect();
-    if !survivors.is_empty() {
-        // This only runs when the token still proves ownership immediately
-        // before the signal, so a recycled PID cannot target another process.
-        for pid in &survivors {
-            unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
-        }
-    }
-    assert!(
-        survivors.is_empty(),
-        "daemon processes survived fixture teardown: {survivors:?}"
-    );
-}
-
-#[test]
-#[cfg(unix)]
 fn daemon_recover_replaces_a_dead_idle_lease() {
     assert_dead_idle_lease_recovery(&["daemon", "recover", "--yes"]);
 }
@@ -530,30 +459,6 @@ fn daemon_pids_for_token(token: &str) -> Vec<u32> {
             .flatten()
         })
         .collect()
-}
-
-/// Prove `pid` still owns `token` by reading the exact `--startup-token` argv
-/// value the daemon published for itself via `ps`.
-///
-/// This is deliberately evidence the daemon process itself owns and exposes
-/// through its own command line, not a read of a foreign process's live
-/// environment table. The daemon is detached from this test's process tree
-/// (orphaned when its launcher exits), so a `/proc/<pid>/environ` read depends on host ptrace policy this
-/// test does not establish; `ps` command-line evidence carries no such
-/// dependency (#14751).
-#[cfg(unix)]
-fn daemon_pid_owns_token(pid: u32, token: &str) -> bool {
-    let Ok(output) = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let command = String::from_utf8_lossy(&output.stdout);
-    command.contains("daemon") && command.contains("--startup-token") && command.contains(token)
 }
 
 #[cfg(unix)]

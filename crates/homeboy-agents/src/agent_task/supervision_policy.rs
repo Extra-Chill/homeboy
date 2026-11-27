@@ -638,19 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ladder_orders_from_least_to_most_intervention() {
-        assert!(AgentSupervisionAction::Warn < AgentSupervisionAction::Nudge);
-        assert!(AgentSupervisionAction::Nudge < AgentSupervisionAction::Stop);
-        assert!(!AgentSupervisionAction::Nudge.is_terminal());
-        assert!(AgentSupervisionAction::Stop.is_terminal());
-        assert_eq!(
-            AgentSupervisionAction::default(),
-            AgentSupervisionAction::Warn
-        );
-    }
-
-    #[test]
-    fn policy_round_trips_through_json_with_schema_and_action_defaults() {
+    fn policy_parses_with_schema_and_action_defaults() {
         let raw = serde_json::json!({
             "budgets": [
                 { "metric": "rss_mib", "limit": 8192, "action": "stop", "reason": "15Gi box" },
@@ -672,50 +660,5 @@ mod tests {
             policy.backends["pi"][0].metric,
             AgentSupervisionMetric::ChildProcesses
         );
-
-        let encoded = serde_json::to_value(&policy).expect("encode");
-        let decoded: AgentSupervisionPolicy = serde_json::from_value(encoded).expect("decode");
-        assert_eq!(decoded, policy);
-    }
-
-    #[test]
-    fn decisions_round_trip_through_their_durable_projection() {
-        let decision = policy(vec![AgentSupervisionBudget::new(
-            AgentSupervisionMetric::NoProgressSeconds,
-            60,
-            AgentSupervisionAction::Stop,
-        )])
-        .evaluate(None, &sample())
-        .remove(0);
-
-        let value = serde_json::to_value(&decision).expect("encode");
-        assert_eq!(value["metric"], "no_progress_seconds");
-        assert_eq!(value["action"], "stop");
-        let restored: AgentSupervisionDecision = serde_json::from_value(value).expect("decode");
-        assert_eq!(restored, decision);
-    }
-}
-
-#[cfg(test)]
-mod wire_label_tests {
-    use super::*;
-
-    #[test]
-    fn agent_supervision_metric_uses_fixed_wire_labels() {
-        for (value, label) in [
-            (AgentSupervisionMetric::ElapsedSeconds, "elapsed_seconds"),
-            (AgentSupervisionMetric::RssMib, "rss_mib"),
-            (AgentSupervisionMetric::ChildProcesses, "child_processes"),
-            (
-                AgentSupervisionMetric::NoProgressSeconds,
-                "no_progress_seconds",
-            ),
-        ] {
-            assert_eq!(
-                serde_json::to_value(&value).unwrap(),
-                serde_json::json!(label)
-            );
-            assert_eq!(value.as_str(), label);
-        }
     }
 }

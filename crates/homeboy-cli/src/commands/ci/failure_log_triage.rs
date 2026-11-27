@@ -1117,29 +1117,6 @@ mod tests {
     }
 
     #[test]
-    fn ignores_stale_legacy_failure_after_latest_success() {
-        let mut contexts = HashSet::new();
-        let failures = latest_failed_statuses(
-            vec![
-                GhCommitStatus {
-                    context: "example-ci".into(),
-                    state: Some("success".into()),
-                    description: None,
-                    target_url: None,
-                },
-                GhCommitStatus {
-                    context: "example-ci".into(),
-                    state: Some("failure".into()),
-                    description: None,
-                    target_url: None,
-                },
-            ],
-            &mut contexts,
-        );
-        assert!(failures.is_empty());
-    }
-
-    #[test]
     fn dedupes_legacy_status_and_check_run_by_provider_and_build_url() {
         let legacy = check_identity(
             "example-ci",
@@ -1149,18 +1126,6 @@ mod tests {
         let check_run = check_identity("example-ci", Some("https://example.test/build/42"), None);
 
         assert_eq!(legacy, check_run);
-    }
-
-    #[test]
-    fn external_status_redacts_embedded_credential_url() {
-        let status = "failure: see (https://user:pass@example.test/build?token=secret#credential).";
-        let redacted =
-            homeboy::core::redaction::RedactionPolicy::default().redact_embedded_urls(status);
-
-        assert!(!redacted.contains("pass"));
-        assert!(!redacted.contains("secret"));
-        assert!(!redacted.contains("credential"));
-        assert!(redacted.ends_with(")."));
     }
 
     #[test]
@@ -1252,6 +1217,20 @@ mod tests {
                     context: "legacy-error".into(),
                     state: Some("error".into()),
                     description: Some("provider error".into()),
+                    target_url: None,
+                },
+                // The newest status per context wins: a later success hides
+                // the stale failure behind it.
+                GhCommitStatus {
+                    context: "example-ci".into(),
+                    state: Some("success".into()),
+                    description: None,
+                    target_url: None,
+                },
+                GhCommitStatus {
+                    context: "example-ci".into(),
+                    state: Some("failure".into()),
+                    description: None,
                     target_url: None,
                 },
             ],

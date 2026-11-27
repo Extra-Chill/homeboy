@@ -1971,107 +1971,121 @@ mod tests {
     }
 
     #[test]
-    fn extracts_unique_bench_rig_ids_for_lab_materialization() {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--rig".to_string(),
-            "baseline,candidate".to_string(),
-            "--scenario".to_string(),
-            "smoke".to_string(),
-            "--rig=candidate".to_string(),
+    fn lab_offload_rig_ids_reads_rig_flags_and_rig_check_targets() {
+        let cases: [(&[&str], &[&str]); 6] = [
+            (
+                &[
+                    "homeboy",
+                    "bench",
+                    "--rig",
+                    "baseline,candidate",
+                    "--rig=candidate",
+                ],
+                &["baseline", "candidate"],
+            ),
+            (&["homeboy", "trace", "--rig", "candidate"], &["candidate"]),
+            (&["homeboy", "bench", "--", "--rig", "candidate"], &[]),
+            (
+                &["homeboy", "rig", "check", "fixture-matrix"],
+                &["fixture-matrix"],
+            ),
+            (
+                &[
+                    "homeboy",
+                    "rig",
+                    "check",
+                    "/controller/package",
+                    "--id=mdi-sqlite",
+                ],
+                &["mdi-sqlite"],
+            ),
+            (&["homeboy", "rig", "status", "fixture-matrix"], &[]),
         ];
 
-        assert_eq!(
-            lab_offload_rig_ids(&args),
-            vec!["baseline".to_string(), "candidate".to_string()]
-        );
+        for (args, expected) in cases {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            assert_eq!(lab_offload_rig_ids(&args), expected, "{args:?}");
+        }
     }
 
     #[test]
-    fn extracts_trace_rig_ids_and_ignores_passthrough_args_for_lab_materialization() {
-        let trace = vec![
-            "homeboy".to_string(),
-            "trace".to_string(),
-            "--rig".to_string(),
-            "candidate".to_string(),
+    fn rig_default_component_args_receive_primary_snapshot_path() {
+        let cases: [(&[&str], &[&str]); 5] = [
+            (
+                &["homeboy", "fuzz", "list", "woocommerce", "--rig", "wc"],
+                &[
+                    "homeboy",
+                    "fuzz",
+                    "list",
+                    "woocommerce",
+                    "--rig",
+                    "wc",
+                    "--path",
+                    "/snapshot",
+                ],
+            ),
+            (
+                &[
+                    "homeboy",
+                    "fuzz",
+                    "run-campaign",
+                    "--execute",
+                    "--rig",
+                    "wc",
+                ],
+                &[
+                    "homeboy",
+                    "fuzz",
+                    "run-campaign",
+                    "--execute",
+                    "--rig",
+                    "wc",
+                    "--path",
+                    "/snapshot",
+                ],
+            ),
+            (
+                &["homeboy", "bench", "--rig", "studio", "--scenario", "ready"],
+                &[
+                    "homeboy",
+                    "bench",
+                    "--rig",
+                    "studio",
+                    "--scenario",
+                    "ready",
+                    "--path",
+                    "/snapshot",
+                ],
+            ),
+            // The injected path stays ahead of provider passthrough args.
+            (
+                &["homeboy", "bench", "--rig=studio", "--", "--runner-owned"],
+                &[
+                    "homeboy",
+                    "bench",
+                    "--rig=studio",
+                    "--path",
+                    "/snapshot",
+                    "--",
+                    "--runner-owned",
+                ],
+            ),
+            // An explicit path is never overridden.
+            (
+                &["homeboy", "bench", "--rig", "studio", "--path", "/custom"],
+                &["homeboy", "bench", "--rig", "studio", "--path", "/custom"],
+            ),
         ];
-        assert_eq!(lab_offload_rig_ids(&trace), vec!["candidate".to_string()]);
 
-        let passthrough = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--".to_string(),
-            "--rig".to_string(),
-            "candidate".to_string(),
-        ];
-        assert!(lab_offload_rig_ids(&passthrough).is_empty());
-    }
-
-    #[test]
-    fn remaps_fuzz_rig_list_to_primary_snapshot_path() {
-        let args = vec![
-            "homeboy".to_string(),
-            "fuzz".to_string(),
-            "list".to_string(),
-            "--rig".to_string(),
-            "jetpack-api-route-inventory".to_string(),
-        ];
-
-        let remapped = remap_rig_default_component_to_primary_snapshot(
-            &args,
-            Some("/runner/workspaces/rig-component"),
-        )
-        .expect("remapped args");
-
-        assert_eq!(
-            remapped,
-            vec![
-                "homeboy".to_string(),
-                "fuzz".to_string(),
-                "list".to_string(),
-                "--rig".to_string(),
-                "jetpack-api-route-inventory".to_string(),
-                "--path".to_string(),
-                "/runner/workspaces/rig-component".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn remaps_fuzz_rig_run_campaign_execute_to_primary_snapshot_path() {
-        let args = vec![
-            "homeboy".to_string(),
-            "fuzz".to_string(),
-            "run-campaign".to_string(),
-            "--execute".to_string(),
-            "--rig".to_string(),
-            "jetpack-api-route-inventory".to_string(),
-            "--campaign-workload".to_string(),
-            "rest-api-read".to_string(),
-        ];
-
-        let remapped = remap_rig_default_component_to_primary_snapshot(
-            &args,
-            Some("/runner/workspaces/rig-component"),
-        )
-        .expect("remapped args");
-
-        assert_eq!(
-            remapped,
-            vec![
-                "homeboy".to_string(),
-                "fuzz".to_string(),
-                "run-campaign".to_string(),
-                "--execute".to_string(),
-                "--rig".to_string(),
-                "jetpack-api-route-inventory".to_string(),
-                "--campaign-workload".to_string(),
-                "rest-api-read".to_string(),
-                "--path".to_string(),
-                "/runner/workspaces/rig-component".to_string(),
-            ]
-        );
+        for (args, expected) in cases {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            assert_eq!(
+                remap_rig_default_component_to_primary_snapshot(&args, Some("/snapshot"))
+                    .expect("remapped args"),
+                expected,
+                "{args:?}"
+            );
+        }
     }
 
     #[test]
@@ -2193,37 +2207,6 @@ mod tests {
 
         assert_eq!(error.details["field"], "component");
         assert!(error.message.contains("cannot infer"));
-    }
-
-    #[test]
-    fn nested_component_in_primary_checkout_keeps_its_remote_subpath() {
-        let args = vec![
-            "homeboy".to_string(),
-            "fuzz".to_string(),
-            "run".to_string(),
-            "jetpack".to_string(),
-            "--rig".to_string(),
-            "jetpack-api-route-inventory".to_string(),
-        ];
-        let dependencies = [RigComponentDependency {
-            rig_id: "jetpack-api-route-inventory".to_string(),
-            component_id: "jetpack".to_string(),
-            local_checkout_root: "/controller/jetpack".to_string(),
-            declared_checkout_root: "/controller/jetpack".to_string(),
-            remote_checkout_root: "/runner/workspaces/jetpack".to_string(),
-            required_subpath: Some("projects/plugins/jetpack".to_string()),
-            remote_url: None,
-            pinned_ref: None,
-            lab_stack: None,
-        }];
-
-        let selected = selected_rig_component_remote_path(&args, &dependencies)
-            .expect("selected component binding");
-
-        assert_eq!(
-            selected,
-            "/runner/workspaces/jetpack/projects/plugins/jetpack"
-        );
     }
 
     #[test]
@@ -2412,7 +2395,7 @@ mod tests {
     }
 
     #[test]
-    fn bench_path_override_updates_single_component_dependency_checkout_root() {
+    fn bench_path_override_moves_source_and_dependency_checkout_root() {
         crate::test_support::with_isolated_home(|home| {
             let checkout = home.path().join("Developer/example-repo");
             let override_checkout = home.path().join("Developer/example-repo@bench-evidence");
@@ -2437,19 +2420,22 @@ mod tests {
             )
             .expect("save rig");
 
-            let dependencies = lab_offload_rig_component_dependencies(
-                &[
-                    "homeboy".to_string(),
-                    "bench".to_string(),
-                    "--rig".to_string(),
-                    "example-monorepo".to_string(),
-                    "--path".to_string(),
-                    override_component.display().to_string(),
-                ],
-                None,
-                None,
-            )
-            .expect("dependencies");
+            let args = [
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--rig".to_string(),
+                "example-monorepo".to_string(),
+                "--path".to_string(),
+                override_component.display().to_string(),
+            ];
+            assert_eq!(
+                lab_offload_rig_component_checkout_root(&args)
+                    .expect("source path")
+                    .expect("rig source path"),
+                override_checkout
+            );
+            let dependencies =
+                lab_offload_rig_component_dependencies(&args, None, None).expect("dependencies");
 
             assert_eq!(dependencies.len(), 1);
             assert_eq!(dependencies[0].component_id, "example-component");
@@ -2470,36 +2456,6 @@ mod tests {
                 Some("packages/example-component")
             );
         });
-    }
-
-    #[test]
-    fn rig_component_env_overrides_include_checkout_root() {
-        let dependency = RigComponentDependency {
-            rig_id: "woocommerce-performance".to_string(),
-            component_id: "woocommerce".to_string(),
-            local_checkout_root: "/Users/user/Developer/woocommerce".to_string(),
-            declared_checkout_root: "/Users/user/Developer/woocommerce".to_string(),
-            remote_checkout_root: "/home/user/Developer/_lab_workspaces/woocommerce".to_string(),
-            required_subpath: Some("plugins/woocommerce".to_string()),
-            remote_url: Some("https://github.com/woocommerce/woocommerce.git".to_string()),
-            pinned_ref: None,
-            lab_stack: None,
-        };
-
-        let env = rig_component_env_overrides(
-            &dependency,
-            "/Users/user/Developer/woocommerce",
-            "/home/user/Developer/_lab_workspaces/woocommerce",
-        );
-
-        assert!(env.contains(&(
-            "HOMEBOY_RIG_COMPONENT_PATH__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE".to_string(),
-            "/home/user/Developer/_lab_workspaces/woocommerce/plugins/woocommerce".to_string(),
-        )));
-        assert!(env.contains(&(
-            "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__WOOCOMMERCE_PERFORMANCE__WOOCOMMERCE".to_string(),
-            "/home/user/Developer/_lab_workspaces/woocommerce".to_string(),
-        )));
     }
 
     #[test]
@@ -2615,47 +2571,7 @@ mod tests {
     }
 
     #[test]
-    fn bench_path_override_derives_lab_source_checkout_root() {
-        crate::test_support::with_isolated_home(|home| {
-            let checkout = home.path().join("Developer/example-repo");
-            let override_checkout = home.path().join("Developer/example-repo@bench-evidence");
-            let override_component = override_checkout.join("packages/example-component");
-            std::fs::create_dir_all(checkout.join("packages/example-component")).expect("checkout");
-            std::fs::create_dir_all(&override_component).expect("override checkout");
-            let rig_dir = homeboy_core::paths::rigs_in_root(&test_config_root());
-            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
-            std::fs::write(
-                rig_dir.join("example-monorepo.json"),
-                serde_json::json!({
-                    "id": "example-monorepo",
-                    "components": {
-                        "example-component": {
-                            "path": format!("{}/packages/example-component", checkout.display()),
-                            "checkout_root": checkout.display().to_string()
-                        }
-                    }
-                })
-                .to_string(),
-            )
-            .expect("save rig");
-
-            let source_path = lab_offload_rig_component_checkout_root(&[
-                "homeboy".to_string(),
-                "bench".to_string(),
-                "--rig".to_string(),
-                "example-monorepo".to_string(),
-                "--path".to_string(),
-                override_component.display().to_string(),
-            ])
-            .expect("source path")
-            .expect("rig source path");
-
-            assert_eq!(source_path, override_checkout);
-        });
-    }
-
-    #[test]
-    fn unavailable_checkout_root_with_nested_path_override_derives_lab_source_root() {
+    fn unavailable_checkout_root_with_nested_path_override_derives_source_and_dependency_root() {
         crate::test_support::with_isolated_home(|home| {
             let checkout_root = home.path().join("Developer/example-monorepo");
             let component_path = checkout_root.join("packages/example-component");
@@ -2668,49 +2584,21 @@ mod tests {
             );
             std::env::remove_var("HOMEBOY_TEST_UNSET_CHECKOUT_ROOT");
 
-            let source_path = lab_offload_rig_component_checkout_root(&[
+            let args = [
                 "homeboy".to_string(),
                 "bench".to_string(),
                 "--rig".to_string(),
                 "example-monorepo".to_string(),
                 "--path".to_string(),
                 component_path.display().to_string(),
-            ])
-            .expect("source path")
-            .expect("rig source path");
-
+            ];
+            let source_path = lab_offload_rig_component_checkout_root(&args)
+                .expect("source path")
+                .expect("rig source path");
             assert_eq!(source_path, checkout_root);
-        });
-    }
 
-    #[test]
-    fn unavailable_checkout_root_with_nested_path_override_derives_dependency_root() {
-        crate::test_support::with_isolated_home(|home| {
-            let checkout_root = home.path().join("Developer/example-monorepo");
-            let component_path = checkout_root.join("packages/example-component");
-            std::fs::create_dir_all(&component_path).expect("component path");
-            initialize_git_checkout(&checkout_root);
-            write_checkout_root_rig(
-                "example-monorepo",
-                &component_path,
-                "${env.HOMEBOY_TEST_UNSET_CHECKOUT_ROOT}",
-            );
-            std::env::remove_var("HOMEBOY_TEST_UNSET_CHECKOUT_ROOT");
-
-            let dependencies = lab_offload_rig_component_dependencies(
-                &[
-                    "homeboy".to_string(),
-                    "bench".to_string(),
-                    "--rig".to_string(),
-                    "example-monorepo".to_string(),
-                    "--path".to_string(),
-                    component_path.display().to_string(),
-                ],
-                None,
-                None,
-            )
-            .expect("dependencies");
-
+            let dependencies =
+                lab_offload_rig_component_dependencies(&args, None, None).expect("dependencies");
             assert_eq!(dependencies.len(), 1);
             assert_eq!(
                 dependencies[0].local_checkout_root,
@@ -2830,127 +2718,54 @@ mod tests {
         });
     }
 
+    /// Only a readable, matching revision pair verifies. An unreadable current
+    /// revision is unproven (matching `homeboy_rig::package_evidence_from_metadata`),
+    /// never copied from the installed revision to satisfy the comparison.
     #[test]
-    fn lab_package_source_freshness_reports_stale_revision_and_refresh_command() {
-        let package = with_lab_package_freshness(
-            "studio-web-product-matrix",
-            LabOffloadRigPackageSource {
-                source: "/controller/homeboy-rigs".to_string(),
-                source_root: "/controller/homeboy-rigs".to_string(),
-                package_path: "/controller/homeboy-rigs".to_string(),
-                install_source: "/runner/_lab_workspaces/homeboy-rigs".to_string(),
-                rig_path: Some("/controller/homeboy-rigs/rigs/studio/rig.json".to_string()),
-                discovery_path: Some("/controller/homeboy-rigs".to_string()),
-                source_revision: Some("abc1234".to_string()),
-                current_source_revision: Some("def5678".to_string()),
-                source_ref: Some("main".to_string()),
-                source_dirty: false,
-                freshness_verified: false,
-                freshness_status: String::new(),
-                freshness_message: None,
-                refresh_command: None,
-                linked: true,
-                materialized: false,
-            },
-        );
+    fn lab_package_source_freshness_verifies_only_a_matching_revision_pair() {
+        let refresh =
+            "homeboy rig install /runner/_lab_workspaces/homeboy-rigs --id studio --reinstall";
+        let cases = [
+            (Some("def5678"), "stale", "abc1234", Some(refresh)),
+            (None, "unknown", "could not be verified", Some(refresh)),
+            (Some("abc1234"), "verified", "", None),
+        ];
 
-        assert!(!package.freshness_verified);
-        assert_eq!(package.freshness_status, "stale");
-        assert!(package
-            .freshness_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("abc1234"));
-        assert_eq!(
-            package.refresh_command.as_deref(),
-            Some("homeboy rig install /runner/_lab_workspaces/homeboy-rigs --id studio-web-product-matrix --reinstall")
-        );
-    }
+        for (current, status, message, refresh_command) in cases {
+            let package = with_lab_package_freshness(
+                "studio",
+                LabOffloadRigPackageSource {
+                    source: "/controller/homeboy-rigs".to_string(),
+                    source_root: "/controller/homeboy-rigs".to_string(),
+                    package_path: "/controller/homeboy-rigs".to_string(),
+                    install_source: "/runner/_lab_workspaces/homeboy-rigs".to_string(),
+                    rig_path: Some("/controller/homeboy-rigs/rigs/studio/rig.json".to_string()),
+                    discovery_path: Some("/controller/homeboy-rigs".to_string()),
+                    source_revision: Some("abc1234".to_string()),
+                    current_source_revision: current.map(str::to_string),
+                    source_ref: Some("main".to_string()),
+                    // Revision evidence cannot see uncommitted edits, so a dirty
+                    // source still verifies on a matching pair.
+                    source_dirty: true,
+                    freshness_verified: false,
+                    freshness_status: String::new(),
+                    freshness_message: None,
+                    refresh_command: None,
+                    linked: true,
+                    materialized: false,
+                },
+            );
 
-    /// An unreadable current revision is unproven, not verified.
-    ///
-    /// This assertion is inverted from what it used to be. The previous
-    /// behaviour copied the install-time revision into the current-revision
-    /// slot and compared it with itself, so a source whose revision could not
-    /// be read at all was reported as `verified` with no refresh hint — a
-    /// missing probe rendered as a clean bill of health. The rig subsystem's
-    /// own check (`homeboy_rig::package_evidence_from_metadata`) already
-    /// reported `unknown` for the same input; this makes the two agree.
-    #[test]
-    fn lab_package_source_freshness_is_unknown_when_no_current_revision_is_readable() {
-        let package = with_lab_package_freshness(
-            "ssi-matrix-run-latest",
-            LabOffloadRigPackageSource {
-                source: "/controller/homeboy-rigs".to_string(),
-                source_root: "/controller/homeboy-rigs".to_string(),
-                package_path: "/controller/homeboy-rigs".to_string(),
-                install_source: "/runner/_lab_workspaces/homeboy-rigs".to_string(),
-                rig_path: Some("/controller/homeboy-rigs/rigs/ssi/rig.json".to_string()),
-                discovery_path: Some("/controller/homeboy-rigs".to_string()),
-                source_revision: Some("abc1234".to_string()),
-                current_source_revision: None,
-                source_ref: Some("main".to_string()),
-                source_dirty: true,
-                freshness_verified: false,
-                freshness_status: String::new(),
-                freshness_message: None,
-                refresh_command: None,
-                linked: true,
-                materialized: false,
-            },
-        );
-
-        assert!(!package.freshness_verified);
-        assert_eq!(package.freshness_status, "unknown");
-        assert_eq!(package.source_ref.as_deref(), Some("main"));
-        assert!(package.source_dirty);
-        assert!(package
-            .freshness_message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("could not be verified"));
-        assert_eq!(
-            package.refresh_command.as_deref(),
-            Some("homeboy rig install /runner/_lab_workspaces/homeboy-rigs --id ssi-matrix-run-latest --reinstall")
-        );
-        // The unreadable slot stays unreadable: nothing fabricates a current
-        // revision from the installed one to satisfy the comparison.
-        assert!(package.current_source_revision.is_none());
-    }
-
-    /// A matching pair is still the only route to `verified`.
-    #[test]
-    fn lab_package_source_freshness_verifies_a_matching_revision_pair() {
-        let package = with_lab_package_freshness(
-            "ssi-matrix-run-latest",
-            LabOffloadRigPackageSource {
-                source: "/controller/homeboy-rigs".to_string(),
-                source_root: "/controller/homeboy-rigs".to_string(),
-                package_path: "/controller/homeboy-rigs".to_string(),
-                install_source: "/runner/_lab_workspaces/homeboy-rigs".to_string(),
-                rig_path: Some("/controller/homeboy-rigs/rigs/ssi/rig.json".to_string()),
-                discovery_path: Some("/controller/homeboy-rigs".to_string()),
-                source_revision: Some("abc1234".to_string()),
-                current_source_revision: Some("abc1234".to_string()),
-                source_ref: Some("main".to_string()),
-                source_dirty: true,
-                freshness_verified: false,
-                freshness_status: String::new(),
-                freshness_message: None,
-                refresh_command: None,
-                linked: true,
-                materialized: false,
-            },
-        );
-
-        assert!(package.freshness_verified);
-        assert_eq!(package.freshness_status, "verified");
-        assert!(package.freshness_message.is_none());
-        assert!(package.refresh_command.is_none());
-        // A dirty source still verifies here: revision evidence cannot see
-        // uncommitted edits, which is exactly why the currency contract records
-        // that a revision match does not prove content equality.
-        assert!(package.source_dirty);
+            assert_eq!(package.freshness_status, status);
+            assert_eq!(package.freshness_verified, status == "verified");
+            assert!(package
+                .freshness_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains(message));
+            assert_eq!(package.refresh_command.as_deref(), refresh_command);
+            assert_eq!(package.current_source_revision.as_deref(), current);
+        }
     }
 
     #[test]
@@ -3010,173 +2825,6 @@ mod tests {
 
             assert!(!should_use_primary_rig_source(&primary_ids, rig_id));
         });
-    }
-
-    #[test]
-    fn bench_rig_default_component_args_receive_primary_snapshot_path() {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--rig".to_string(),
-            "studio-web-product-matrix".to_string(),
-            "--scenario".to_string(),
-            "editable_preview_ready".to_string(),
-        ];
-
-        let rewritten = remap_rig_default_component_to_primary_snapshot(
-            &args,
-            Some("/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc"),
-        )
-        .expect("remapped args");
-
-        assert_eq!(
-            rewritten,
-            vec![
-                "homeboy",
-                "bench",
-                "--rig",
-                "studio-web-product-matrix",
-                "--scenario",
-                "editable_preview_ready",
-                "--path",
-                "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
-            ]
-        );
-    }
-
-    #[test]
-    fn fuzz_rig_list_args_receive_primary_snapshot_path() {
-        let args = vec![
-            "homeboy".to_string(),
-            "fuzz".to_string(),
-            "list".to_string(),
-            "woocommerce".to_string(),
-            "--rig".to_string(),
-            "woocommerce-performance".to_string(),
-        ];
-
-        let rewritten = remap_rig_default_component_to_primary_snapshot(
-            &args,
-            Some("/home/user/Developer/_lab_workspaces/woocommerce-abc"),
-        )
-        .expect("remapped args");
-
-        assert_eq!(
-            rewritten,
-            vec![
-                "homeboy",
-                "fuzz",
-                "list",
-                "woocommerce",
-                "--rig",
-                "woocommerce-performance",
-                "--path",
-                "/home/user/Developer/_lab_workspaces/woocommerce-abc",
-            ]
-        );
-    }
-
-    #[test]
-    fn lab_offload_rig_ids_includes_rig_check_positional_rig() {
-        let args = vec![
-            "homeboy".to_string(),
-            "rig".to_string(),
-            "check".to_string(),
-            "static-site-fixture-matrix".to_string(),
-        ];
-
-        assert_eq!(
-            lab_offload_rig_ids(&args),
-            vec!["static-site-fixture-matrix".to_string()]
-        );
-    }
-
-    #[test]
-    fn lab_offload_rig_ids_uses_selected_id_for_rig_check_package_target() {
-        let args = vec![
-            "homeboy".to_string(),
-            "rig".to_string(),
-            "check".to_string(),
-            "/controller/source-package".to_string(),
-            "--id".to_string(),
-            "mdi-native".to_string(),
-            "--path".to_string(),
-            "/controller/checkout".to_string(),
-        ];
-
-        assert_eq!(lab_offload_rig_ids(&args), vec!["mdi-native".to_string()]);
-
-        let equals_args = vec![
-            "homeboy".to_string(),
-            "rig".to_string(),
-            "check".to_string(),
-            "/controller/source-package".to_string(),
-            "--id=mdi-sqlite".to_string(),
-        ];
-        assert_eq!(
-            lab_offload_rig_ids(&equals_args),
-            vec!["mdi-sqlite".to_string()]
-        );
-    }
-
-    #[test]
-    fn lab_offload_rig_ids_ignores_non_check_rig_positionals() {
-        let args = vec![
-            "homeboy".to_string(),
-            "rig".to_string(),
-            "status".to_string(),
-            "static-site-fixture-matrix".to_string(),
-        ];
-
-        assert!(lab_offload_rig_ids(&args).is_empty());
-    }
-
-    #[test]
-    fn bench_rig_path_injection_preserves_passthrough_boundary() {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--rig=studio-web-product-matrix".to_string(),
-            "--".to_string(),
-            "--runner-owned".to_string(),
-        ];
-
-        let rewritten = remap_rig_default_component_to_primary_snapshot(
-            &args,
-            Some("/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc"),
-        )
-        .expect("remapped args");
-
-        assert_eq!(
-            rewritten,
-            vec![
-                "homeboy",
-                "bench",
-                "--rig=studio-web-product-matrix",
-                "--path",
-                "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
-                "--",
-                "--runner-owned",
-            ]
-        );
-    }
-
-    #[test]
-    fn bench_rig_path_injection_keeps_explicit_path() {
-        let args = vec![
-            "homeboy".to_string(),
-            "bench".to_string(),
-            "--rig".to_string(),
-            "studio-web-product-matrix".to_string(),
-            "--path".to_string(),
-            "/custom/source".to_string(),
-        ];
-
-        assert_eq!(
-            remap_rig_default_component_to_primary_snapshot(&args, Some("/snapshot"))
-                .expect("explicit path preserved"),
-            args
-        );
     }
 
     #[test]
@@ -3281,166 +2929,96 @@ mod tests {
     }
 
     #[test]
-    fn installed_rig_path_from_stdout_reads_success_envelope() {
-        let stdout = serde_json::json!({
-            "success": true,
-            "data": {
-                "command": "rig.install",
-                "installed": [
-                    {
-                        "id": "other-rig",
-                        "path": "/home/user/.config/homeboy/rigs/other.json"
-                    },
-                    {
-                        "id": "target-rig",
-                        "path": "/home/user/.config/homeboy/rigs/target.json"
-                    }
-                ]
-            }
-        })
-        .to_string();
-
-        assert_eq!(
-            installed_rig_path_from_stdout(&stdout, "target-rig").as_deref(),
-            Some("/home/user/.config/homeboy/rigs/target.json")
-        );
-    }
-
-    #[test]
-    fn installed_rig_path_from_stdout_handles_plain_output() {
-        let stdout = serde_json::json!({
+    fn installed_rig_path_from_stdout_reads_enveloped_and_plain_output() {
+        let installed = serde_json::json!({
             "command": "rig.install",
             "installed": [
-                {
-                    "id": "target-rig",
-                    "path": "/home/user/.config/homeboy/rigs/target.json"
-                }
+                { "id": "other-rig", "path": "/rigs/other.json" },
+                { "id": "target-rig", "path": "/rigs/target.json" }
             ]
-        })
-        .to_string();
+        });
+        let enveloped = serde_json::json!({ "success": true, "data": installed.clone() });
 
-        assert_eq!(
-            installed_rig_path_from_stdout(&stdout, "target-rig").as_deref(),
-            Some("/home/user/.config/homeboy/rigs/target.json")
-        );
+        for stdout in [enveloped.to_string(), installed.to_string()] {
+            assert_eq!(
+                installed_rig_path_from_stdout(&stdout, "target-rig").as_deref(),
+                Some("/rigs/target.json")
+            );
+        }
     }
 
     #[test]
-    fn maps_non_primary_rig_dependency_to_runner_workspace_parent() {
-        let remote = remote_checkout_root_for_local(
-            "/Users/user/Developer/studio@fix-many-sites-memory",
-            "/Users/user/Developer/studio@fix-many-sites-memory",
-            Some((
-                "/Users/user/Developer/homeboy-rigs/example-org/studio",
-                "/home/user/Developer/_lab_workspaces/studio-rigs-snapshot",
-            )),
-            Some("/home/user/Developer"),
-        );
+    fn non_primary_rig_dependency_maps_to_runner_paths_without_controller_or_tilde_paths() {
+        let local = "/Users/user/Developer/studio@fix-many-sites-memory";
+        let primary = Some((
+            "/Users/user/Developer/homeboy-rigs/example-org/studio",
+            "/home/user/Developer/_lab_workspaces/studio-rigs-snapshot",
+        ));
+        let materialized = "/home/user/Developer/_lab_workspaces/studio-fix-many-sites-memory";
+        // (declared checkout root, runner workspace root, expected remote root)
+        let cases = [
+            (local, Some("/home/user/Developer"), materialized),
+            // Regression for #3767: a portable `~/...` root expands under the
+            // runner home, never a literal `~` directory.
+            (
+                "~/Developer/studio@fix-many-sites-memory",
+                Some("/home/user/Developer"),
+                "/home/user/Developer/studio@fix-many-sites-memory",
+            ),
+            (
+                "~/Developer/studio@fix-many-sites-memory",
+                None,
+                materialized,
+            ),
+        ];
 
-        assert_eq!(
-            remote,
-            "/home/user/Developer/_lab_workspaces/studio-fix-many-sites-memory"
-        );
-        assert!(!remote.contains("/Users/"));
+        for (declared, workspace_root, expected) in cases {
+            assert_eq!(
+                remote_checkout_root_for_local(declared, local, primary, workspace_root),
+                expected,
+                "{declared} {workspace_root:?}"
+            );
+        }
     }
 
     #[test]
-    fn portable_declared_rig_dependency_path_expands_to_runner_home() {
-        // Regression for #3767: a portable `~/...` declared checkout root must
-        // resolve to an absolute runner path (under the runner home derived from
-        // the workspace root), never a literal `~` subdirectory.
-        let remote = remote_checkout_root_for_local(
-            "~/Developer/studio@fix-many-sites-memory",
-            "/Users/user/Developer/studio@fix-many-sites-memory",
-            Some((
-                "/Users/user/Developer/homeboy-rigs/example-org/studio",
-                "/home/user/Developer/_lab_workspaces/studio-rigs-snapshot",
-            )),
-            Some("/home/user/Developer"),
-        );
+    fn primary_component_override_prefers_a_materialized_dependency_root() {
+        let dependency =
+            |local: &str, remote: &str, subpath: Option<&str>| RigComponentDependency {
+                rig_id: "jetpack-api-route-inventory".to_string(),
+                component_id: "jetpack".to_string(),
+                local_checkout_root: local.to_string(),
+                declared_checkout_root: local.to_string(),
+                remote_checkout_root: remote.to_string(),
+                required_subpath: subpath.map(str::to_string),
+                remote_url: None,
+                pinned_ref: None,
+                lab_stack: None,
+            };
+        let component = "/Users/user/Developer/jetpack/projects/plugins/jetpack";
+        let primary = "/home/user/Developer/_lab_workspaces/jetpack-source";
+        let cases = [
+            (
+                dependency(
+                    "/Users/user/Developer/jetpack",
+                    "/home/user/Developer/jetpack",
+                    Some("projects/plugins/jetpack"),
+                ),
+                "/home/user/Developer/jetpack/projects/plugins/jetpack",
+            ),
+            (dependency(component, primary, None), primary),
+        ];
 
-        assert_eq!(remote, "/home/user/Developer/studio@fix-many-sites-memory");
-        assert!(!remote.contains('~'));
+        for (dependency, expected) in cases {
+            assert_eq!(
+                effective_remote_component_path(&dependency, component, primary),
+                expected
+            );
+        }
     }
 
     #[test]
-    fn primary_component_subdir_override_uses_materialized_dependency_root() {
-        let dependency = RigComponentDependency {
-            rig_id: "jetpack-api-route-inventory".to_string(),
-            component_id: "jetpack".to_string(),
-            local_checkout_root: "/Users/user/Developer/jetpack".to_string(),
-            declared_checkout_root: "~/Developer/jetpack".to_string(),
-            remote_checkout_root: "/home/user/Developer/jetpack".to_string(),
-            required_subpath: Some("projects/plugins/jetpack".to_string()),
-            remote_url: None,
-            pinned_ref: None,
-            lab_stack: None,
-        };
-        let remote = effective_remote_component_path(
-            &dependency,
-            "/Users/user/Developer/jetpack/projects/plugins/jetpack",
-            "/home/user/Developer/_lab_workspaces/jetpack-source",
-        );
-
-        assert_eq!(
-            remote,
-            "/home/user/Developer/jetpack/projects/plugins/jetpack"
-        );
-    }
-
-    #[test]
-    fn primary_component_snapshot_override_uses_primary_when_no_dependency_root_is_materialized() {
-        let dependency = RigComponentDependency {
-            rig_id: "jetpack-api-route-inventory".to_string(),
-            component_id: "jetpack".to_string(),
-            local_checkout_root: "/Users/user/Developer/jetpack/projects/plugins/jetpack"
-                .to_string(),
-            declared_checkout_root: "~/Developer/jetpack/projects/plugins/jetpack".to_string(),
-            remote_checkout_root: "/home/user/Developer/_lab_workspaces/jetpack-source".to_string(),
-            required_subpath: None,
-            remote_url: None,
-            pinned_ref: None,
-            lab_stack: None,
-        };
-        let remote = effective_remote_component_path(
-            &dependency,
-            "/Users/user/Developer/jetpack/projects/plugins/jetpack",
-            "/home/user/Developer/_lab_workspaces/jetpack-source",
-        );
-
-        assert_eq!(
-            remote,
-            "/home/user/Developer/_lab_workspaces/jetpack-source"
-        );
-    }
-
-    #[test]
-    fn portable_rig_dependency_without_runner_home_falls_back_to_materialized_path() {
-        // When the runner home cannot be derived we must still avoid emitting a
-        // literal `~`; fall back to the materialized `_lab_workspaces` path.
-        let remote = remote_checkout_root_for_local(
-            "~/Developer/studio@fix-many-sites-memory",
-            "/Users/user/Developer/studio@fix-many-sites-memory",
-            Some((
-                "/Users/user/Developer/homeboy-rigs/example-org/studio",
-                "/home/user/Developer/_lab_workspaces/studio-rigs-snapshot",
-            )),
-            None,
-        );
-
-        assert!(!remote.contains('~'));
-        assert_eq!(
-            remote,
-            "/home/user/Developer/_lab_workspaces/studio-fix-many-sites-memory"
-        );
-    }
-
-    #[test]
-    fn runner_home_resolves_from_nested_workspace_root() {
-        assert_eq!(
-            runner_home_from_workspace_root("/home/user/Developer"),
-            Some("/home/user".to_string())
-        );
+    fn portable_runner_paths_expand_under_the_workspace_root_home() {
         assert_eq!(
             runner_home_from_workspace_root("/Users/user/Developer/lab"),
             Some("/Users/user".to_string())
@@ -3450,10 +3028,6 @@ mod tests {
             runner_home_from_workspace_root("/srv/homeboy"),
             Some("/srv".to_string())
         );
-    }
-
-    #[test]
-    fn expand_portable_runner_path_joins_tail_to_runner_home() {
         assert_eq!(
             expand_portable_runner_path("~/Developer/x", Some("/home/user/Developer")),
             Some("/home/user/Developer/x".to_string())

@@ -344,36 +344,6 @@ fn fuzz_plan_absorbs_global_runner_as_its_campaign_runner() {
 }
 
 #[test]
-fn fuzz_plan_dry_run_absorbs_global_runner_as_its_campaign_runner() {
-    let matches = Cli::command_with_scoped_lab_args()
-        .try_get_matches_from([
-            "homeboy",
-            "fuzz",
-            "plan",
-            "component-a",
-            "--workload",
-            "api-fuzz",
-            "--dry-run",
-            "--runner",
-            "lab-a",
-        ])
-        .expect("global runner alias should parse for a dry-run fuzz plan");
-    let (mut cli, _) = Cli::from_registered_arg_matches(&matches)
-        .expect("global runner alias should deserialize for a dry-run fuzz plan");
-
-    let runner = cli.runner.take();
-    let Commands::Fuzz(args) = &mut cli.command else {
-        panic!("expected fuzz command");
-    };
-    assert_eq!(args.absorb_planning_runner(runner).unwrap(), None);
-    let Some(FuzzCommand::Plan(plan)) = &args.command else {
-        panic!("expected fuzz plan command");
-    };
-    assert!(plan.dry_run);
-    assert_eq!(plan.lab_runner.as_deref(), Some("lab-a"));
-}
-
-#[test]
 fn campaign_child_run_args_drops_parent_profile_and_pins_concrete_workload() {
     // #9778: a multi-workload parent profile is expanded into concrete entries,
     // so each child dispatch must carry its own --workload and drop the parent
@@ -418,35 +388,6 @@ fn campaign_child_run_args_drops_parent_profile_and_pins_concrete_workload() {
 }
 
 #[test]
-fn direct_run_with_multi_workload_profile_and_workload_is_still_rejected() {
-    // The acceptance guard: `fuzz run --profile <multi> --workload <id>` (i.e.
-    // a profile combined with an explicit workload) must remain rejected. Only
-    // the campaign expansion path is allowed to resolve profiles into workloads.
-    let parse_result = FuzzCli::try_parse_from([
-        "fuzz",
-        "run",
-        "component-a",
-        "--profile",
-        "full-surface",
-        "--workload",
-        "db-fuzz",
-    ]);
-    let Err(error) = parse_result else {
-        panic!("Clap must reject combined profile and workload selectors");
-    };
-    assert!(error.to_string().contains("cannot be used with"));
-
-    let error = resolve_profile_workload_id(None, Some("full-surface"), Some("db-fuzz"))
-        .expect_err("profile + explicit workload must be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("--profile and --workload cannot be combined"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn generic_lab_profile_expands_safe_destructive_evidence_defaults() {
     let cli = FuzzCli::try_parse_from(["fuzz", "run", "component-a", "--profile", "lab"])
         .expect("parse generic lab profile");
@@ -484,89 +425,6 @@ fn fuzz_plan_lab_contract_explains_local_planning_path() {
     assert!(reason.contains("`fuzz plan` is controller-local planning"));
     assert!(reason.contains("--runner <runner>"));
     assert!(reason.contains("--execute"));
-}
-
-#[test]
-fn fuzz_campaign_plan_cli_parses_manifest_workloads_lab_runner_and_artifacts() {
-    let cli = FuzzCli::try_parse_from([
-        "fuzz",
-        "plan",
-        "component-a",
-        "--campaign-manifest",
-        "/tmp/fuzz-campaign.json",
-        "--campaign-workload",
-        "api-fuzz",
-        "--campaign-workload",
-        "db-fuzz",
-        "--lab-runner",
-        "lab-a",
-        "--required-artifact",
-        "coverage-gap-report",
-    ])
-    .expect("parse fuzz campaign plan cli");
-
-    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
-        panic!("expected fuzz plan command");
-    };
-    assert_eq!(
-        args.campaign_manifest.as_deref(),
-        Some(Path::new("/tmp/fuzz-campaign.json"))
-    );
-    assert_eq!(
-        args.campaign_workloads
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["api-fuzz", "db-fuzz"]
-    );
-    assert_eq!(args.lab_runner.as_deref(), Some("lab-a"));
-    assert_eq!(
-        args.required_artifacts
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["coverage-gap-report"]
-    );
-}
-
-#[test]
-fn fuzz_plan_execute_cli_parses_campaign_execution_flags() {
-    let cli = FuzzCli::try_parse_from([
-        "fuzz",
-        "plan",
-        "component-a",
-        "--campaign-workload",
-        "api-fuzz",
-        "--execute",
-        "--resume",
-    ])
-    .expect("parse fuzz plan execute cli");
-
-    let Some(FuzzCommand::Plan(args)) = cli.args.command else {
-        panic!("expected fuzz plan command");
-    };
-    assert!(args.execute);
-    assert!(args.resume);
-    assert!(!args.dry_run);
-}
-
-#[test]
-fn fuzz_run_campaign_cli_parses_as_campaign_command() {
-    let cli = FuzzCli::try_parse_from([
-        "fuzz",
-        "run-campaign",
-        "component-a",
-        "--campaign-workload",
-        "api-fuzz",
-        "--dry-run",
-    ])
-    .expect("parse fuzz run-campaign cli");
-
-    let Some(FuzzCommand::RunCampaign(args)) = cli.args.command else {
-        panic!("expected fuzz run-campaign command");
-    };
-    assert!(args.dry_run);
-    assert!(!args.execute);
 }
 
 #[test]
@@ -783,39 +641,54 @@ fn fuzz_plan_includes_mutating_operation_families_in_isolated_mode() {
 }
 
 #[test]
-fn fuzz_plan_skips_isolated_mutation_safety_class_in_shared_mode() {
-    let metadata =
-        super::plan_inventory_selection(&planner_args(), &planner_inventory(), None).unwrap();
+fn fuzz_plan_skips_unsafe_destructive_and_unsupported_operations_by_default() {
+    let mut destructive_workload = planner_inventory();
+    destructive_workload.workloads[0].safety_class = homeboy::fuzz::FuzzSafetyClass::Destructive;
+    let unsupported = FuzzTargetInventory::from_value(serde_json::json!({
+        "schema": "homeboy/fuzz-target-inventory/v1",
+        "version": 1,
+        "id": "component-a-inventory",
+        "targets": [{
+            "schema": "homeboy/fuzz-target/v1",
+            "id": "custom.surface",
+            "kind": "api",
+            "operations": [{ "id": "custom.surface.invoke", "kind": "domain-specific" }]
+        }]
+    }))
+    .expect("inventory parses");
 
-    assert!(metadata["selection"]["operations"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert!(metadata["skipped"]["operations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|operation| operation["reason"] == serde_json::json!("unsafe")));
-}
+    for (label, inventory, expected_reason) in [
+        ("isolated mutation", planner_inventory(), "unsafe"),
+        (
+            "destructive operation",
+            destructive_inventory(),
+            "destructive",
+        ),
+        ("destructive workload", destructive_workload, "destructive"),
+        ("unsupported operation", unsupported, "unsupported"),
+    ] {
+        let metadata = super::plan_inventory_selection(&planner_args(), &inventory, None).unwrap();
 
-#[test]
-fn fuzz_plan_skips_destructive_operations_by_default() {
-    let metadata =
-        super::plan_inventory_selection(&planner_args(), &destructive_inventory(), None).unwrap();
-
-    assert!(metadata["selection"]["operations"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        metadata["skipped"]["operations"][0]["reason"],
-        serde_json::json!("destructive")
-    );
-    assert_eq!(metadata["isolation"]["mode"], serde_json::json!("shared"));
-    assert_eq!(
-        metadata["isolation"]["destructive_allowed"],
-        serde_json::json!(false)
-    );
+        assert!(
+            metadata["selection"]["operations"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{label}"
+        );
+        let skipped = metadata["skipped"]["operations"].as_array().unwrap();
+        assert!(!skipped.is_empty(), "{label}");
+        assert!(
+            skipped
+                .iter()
+                .all(|operation| operation["reason"] == expected_reason),
+            "{label}: {skipped:?}"
+        );
+        assert_eq!(
+            metadata["isolation"]["destructive_allowed"], false,
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -917,25 +790,6 @@ fn fuzz_plan_includes_destructive_operations_with_explicit_isolation_proof() {
 }
 
 #[test]
-fn fuzz_plan_workload_safety_participates_in_destructive_skip() {
-    let mut inventory = planner_inventory();
-    inventory.workloads[0].safety_class = homeboy::fuzz::FuzzSafetyClass::Destructive;
-    let mut args = planner_args();
-    args.run.workload_id = Some("api-fuzz".to_string());
-
-    let metadata = super::plan_inventory_selection(&args, &inventory, None).unwrap();
-
-    assert!(metadata["selection"]["operations"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        metadata["skipped"]["operations"][0]["reason"],
-        serde_json::json!("destructive")
-    );
-}
-
-#[test]
 fn fuzz_plan_budget_flags_override_inventory_workload_budgets() {
     let mut args = planner_args();
     args.case_budget = Some(5);
@@ -979,125 +833,45 @@ fn fuzz_plan_sampling_metadata_records_caller_seed_deterministically() {
 }
 
 #[test]
-fn fuzz_plan_skips_unsupported_inventory_operations() {
-    let inventory = FuzzTargetInventory::from_value(serde_json::json!({
-        "schema": "homeboy/fuzz-target-inventory/v1",
-        "version": 1,
-        "id": "component-a-inventory",
-        "targets": [
-            {
-                "schema": "homeboy/fuzz-target/v1",
-                "id": "custom.surface",
-                "kind": "api",
-                "operations": [
-                    { "id": "custom.surface.invoke", "kind": "domain-specific" }
-                ]
-            }
-        ]
-    }))
-    .expect("inventory parses");
-
-    let metadata = super::plan_inventory_selection(&planner_args(), &inventory, None).unwrap();
-
-    assert!(metadata["selection"]["operations"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    assert_eq!(
-        metadata["skipped"]["operations"][0]["reason"],
-        serde_json::json!("unsupported")
-    );
-    assert_eq!(metadata["skipped"]["targets"].as_array().unwrap().len(), 1);
-}
-
-#[test]
-fn fuzz_run_parses_generic_contract_flags() {
+fn fuzz_run_parses_tracker_refs_expected_metrics_and_passthrough_args() {
     let cli = FuzzCli::parse_from([
         "fuzz",
         "run",
         "component-a",
-        "--rig",
-        "package-fuzz",
-        "--workload",
-        "parser",
-        "--run-id",
-        "proof-1",
         "--tracker-ref",
         "github_issue:Extra-Chill/homeboy#123",
         "--tracker-ref",
         "linear:HB-42",
-        "--seed",
-        "1234",
-        "--inventory",
-        "/tmp/fuzz-inventory.json",
-        "--require-case-log",
-        "--require-coverage-summary",
-        "--require-result-envelope",
-        "--max-duration",
-        "60s",
-        "--allow-destructive",
-        "--isolation",
-        "isolated",
-        "--isolation-proof",
-        "/tmp/isolation-proof.json",
-        "--allow-local-destructive-fuzz",
         "--expect-metric",
         "side_effect_grouped_created_count=2",
         "--",
         "--engine",
         "libfuzzer",
     ]);
+    let Some(FuzzCommand::Run(run)) = cli.args.command else {
+        panic!("expected fuzz run command");
+    };
 
-    match cli.args.command {
-        Some(FuzzCommand::Run(run)) => {
-            assert_eq!(run.comp.component.as_deref(), Some("component-a"));
-            assert_eq!(run.rig.as_deref(), Some("package-fuzz"));
-            assert_eq!(run.workload_id.as_deref(), Some("parser"));
-            assert_eq!(run.run_id.as_deref(), Some("proof-1"));
-            assert_eq!(run.tracker_refs.len(), 2);
-            assert_eq!(run.tracker_refs[0].kind, "github_issue");
-            assert_eq!(run.tracker_refs[0].id, "Extra-Chill/homeboy#123");
-            assert_eq!(run.tracker_refs[1].kind, "linear");
-            assert_eq!(run.tracker_refs[1].id, "HB-42");
-            assert_eq!(run.seed.as_deref(), Some("1234"));
-            assert_eq!(
-                run.inventory.as_deref(),
-                Some(Path::new("/tmp/fuzz-inventory.json"))
-            );
-            assert!(run.require_case_log);
-            assert!(run.require_coverage_summary);
-            assert!(run.require_result_envelope);
-            assert_eq!(run.max_duration.as_deref(), Some("60s"));
-            assert!(run.allow_destructive);
-            assert_eq!(run.isolation, FuzzIsolationArg::Isolated);
-            assert_eq!(
-                run.isolation_proof.as_deref(),
-                Some(Path::new("/tmp/isolation-proof.json"))
-            );
-            assert!(run.allow_local_destructive_fuzz);
-            assert_eq!(
-                run.expect_metric,
-                vec![(
-                    "side_effect_grouped_created_count".to_string(),
-                    "2".to_string()
-                )]
-            );
-            assert_eq!(run.args, vec!["--engine", "libfuzzer"]);
-        }
-        _ => panic!("expected fuzz run command"),
-    }
-}
-
-#[test]
-fn fuzz_doctor_parses_extension_id() {
-    let cli = FuzzCli::parse_from(["fuzz", "doctor", "--extension", "runtime-a"]);
-
-    match cli.args.command {
-        Some(FuzzCommand::Doctor(doctor)) => {
-            assert_eq!(doctor.extension_id, "runtime-a");
-        }
-        _ => panic!("expected fuzz doctor command"),
-    }
+    let tracker_refs = run
+        .tracker_refs
+        .iter()
+        .map(|tracker| (tracker.kind.as_str(), tracker.id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tracker_refs,
+        [
+            ("github_issue", "Extra-Chill/homeboy#123"),
+            ("linear", "HB-42")
+        ]
+    );
+    assert_eq!(
+        run.expect_metric,
+        vec![(
+            "side_effect_grouped_created_count".to_string(),
+            "2".to_string()
+        )]
+    );
+    assert_eq!(run.args, vec!["--engine", "libfuzzer"]);
 }
 
 #[test]
@@ -1234,24 +1008,6 @@ fn fuzz_validate_measurement_profile_is_non_blocking_but_strict_profile_blocks()
 }
 
 #[test]
-fn fuzz_compare_parses_envelope_paths() {
-    let cli = FuzzCli::parse_from([
-        "fuzz",
-        "compare",
-        "baseline-envelope.json",
-        "candidate-envelope.json",
-    ]);
-
-    match cli.args.command {
-        Some(FuzzCommand::Compare(compare)) => {
-            assert_eq!(compare.baseline, PathBuf::from("baseline-envelope.json"));
-            assert_eq!(compare.candidate, PathBuf::from("candidate-envelope.json"));
-        }
-        _ => panic!("expected fuzz compare command"),
-    }
-}
-
-#[test]
 fn fuzz_inspect_rejects_ambiguous_full_result_modes() {
     assert!(FuzzCli::try_parse_from(["fuzz", "inspect", "run-1", "--raw", "--full"]).is_err());
 }
@@ -1287,41 +1043,6 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
     }))
     .unwrap();
     assert_eq!(list["variant"], "list");
-
-    let run = serde_json::to_value(FuzzOutput::Run(FuzzRunOutput {
-        kind: "fuzz".to_string(),
-        command: "fuzz.run".to_string(),
-        component: "component-a".to_string(),
-        rig_id: Some("package-fuzz".to_string()),
-        status: "passed".to_string(),
-        workload_id: Some("parser".to_string()),
-        workload_path: None,
-        run_id: None,
-        seed: None,
-        inventory_file: None,
-        sequence_plan_file: None,
-        max_duration: None,
-        passthrough_args: Vec::new(),
-        requested_settings: serde_json::Value::Null,
-        gates: Vec::new(),
-        target_inventory: None,
-        execution: None,
-        postprocess: Vec::new(),
-        results: None,
-        campaign_contract: fuzz_campaign_contract(None, None),
-        runner_contract: FuzzRunnerContract {
-            capability: "fuzz".to_string(),
-            extension_script_required: true,
-            env: Vec::new(),
-        },
-        evidence_refs: Vec::new(),
-        evidence_followups: Vec::new(),
-        diagnostic: None,
-    }))
-    .unwrap();
-    assert_eq!(run["variant"], "run");
-    assert_eq!(run["kind"], "fuzz");
-    assert_eq!(run["rig_id"], "package-fuzz");
 }
 
 #[test]

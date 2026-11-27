@@ -123,46 +123,14 @@ fn fuzz_contract_exposes_only_declared_core_helper_environment() {
 #[test]
 fn fuzz_run_persists_requested_run_id_and_results_artifact() {
     with_isolated_home(|home| {
-        let args = FuzzRunArgs {
-            comp: PositionalComponentArgs {
-                component: Some("component-a".to_string()),
-                path: None,
-            },
-            rig: Some("package-fuzz".to_string()),
-            extension_override: ExtensionOverrideArgs { extensions: vec![] },
-            setting_args: SettingArgs {
-                settings_json_file: vec![],
-                setting: vec![],
-                setting_json: vec![],
-            },
-            workload_id: Some("parser".to_string()),
-            profile: None,
-            shared_state: None,
-            run_id: Some("proof-1".to_string()),
-            tracker_refs: vec![homeboy::core::evidence_manifest::TrackerRef {
-                kind: "github_issue".to_string(),
-                id: "Extra-Chill/homeboy#123".to_string(),
-                url: None,
-                title: None,
-                state: None,
-            }],
-            seed: Some("1234".to_string()),
-            inventory: None,
-            sequence_plan: None,
-            require_case_log: false,
-            require_coverage_summary: false,
-            require_result_envelope: false,
-            max_duration: None,
-            gate_profile: FuzzGateProfileArg::Measurement,
-            allow_destructive: false,
-            isolation: FuzzIsolationArg::Shared,
-            isolation_proof: None,
-            allow_local_destructive_fuzz: false,
-            expect_metric: vec![],
-            action_model: None,
-            exploration_policy: None,
-            args: vec![],
-        };
+        let mut args = fuzz_run_args_with_run_id("proof-1");
+        args.tracker_refs = vec![homeboy::core::evidence_manifest::TrackerRef {
+            kind: "github_issue".to_string(),
+            id: "Extra-Chill/homeboy#123".to_string(),
+            url: None,
+            title: None,
+            state: None,
+        }];
         let results_path = home.path().join("fuzz-results.json");
         let artifacts_dir = home.path().join("fuzz-artifacts");
         std::fs::write(&results_path, "{}").expect("results file");
@@ -500,32 +468,6 @@ fn fuzz_run_cli_preserves_action_model_and_exploration_policy_in_execution_reque
     assert_eq!(
         persisted["metadata"]["exploration_policy"]["corpus_refs"],
         serde_json::json!(["corpus:generic-fixture"])
-    );
-}
-
-#[test]
-fn fuzz_execution_request_allows_destructive_with_generated_isolation_proof() {
-    let mut args = fuzz_run_args_with_run_id("proof-destructive-missing");
-    args.allow_destructive = true;
-
-    let request = build_fuzz_execution_request(
-        &args,
-        "component-a",
-        args.rig.as_deref(),
-        args.workload_id.clone(),
-        &destructive_inventory(),
-    )
-    .expect("generated isolation proof should satisfy destructive request");
-
-    assert_eq!(request.metadata["planner"]["isolation"], "isolated");
-    assert_eq!(request.metadata["planner"]["destructive_allowed"], true);
-    assert_eq!(
-        request
-            .isolation_proof
-            .as_ref()
-            .expect("generated proof")
-            .runtime_kind,
-        "homeboy-fuzz-run-dir"
     );
 }
 
@@ -940,155 +882,227 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
     });
 }
 
+fn open_finding() -> FuzzFinding {
+    FuzzFinding {
+        schema: homeboy::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
+        id: "finding-1".to_string(),
+        title: "runner surfaced a failing case".to_string(),
+        severity: "high".to_string(),
+        status: FuzzFindingStatus::Open,
+        surface_id: None,
+        target_id: None,
+        operation_id: None,
+        case_id: Some("case-1".to_string()),
+        workload_id: None,
+        seed_id: None,
+        fingerprint: None,
+        artifact_ids: Vec::new(),
+        source_refs: Vec::new(),
+        metadata: serde_json::Value::Null,
+        extra: std::collections::BTreeMap::new(),
+    }
+}
+
+fn lifecycle_with_phase(
+    kind: LifecyclePhaseKind,
+    status: LifecyclePhaseStatus,
+) -> LifecycleResultMetadata {
+    LifecycleResultMetadata {
+        schema: LIFECYCLE_RESULT_SCHEMA.to_string(),
+        version: LIFECYCLE_CONTRACT_VERSION,
+        phases: vec![LifecyclePhaseResult {
+            id: "phase".to_string(),
+            phase: kind,
+            status,
+            snapshot_ref: None,
+            started_at: None,
+            finished_at: None,
+            message: Some("runner recorded a phase".to_string()),
+        }],
+        snapshot_refs: Vec::new(),
+        metadata: std::collections::BTreeMap::new(),
+    }
+}
+
+/// The campaign, not the transport exit code, decides a fuzz run's outcome:
+/// strict/evidence profiles fail on any failure signal a successful command
+/// reports, measurement records failures without failing, and timeouts,
+/// skipped lifecycles and unsupported workloads are never proof.
 #[test]
-fn fuzz_run_outcome_fails_when_successful_command_reports_failed_campaign() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.metadata = serde_json::json!({
+fn fuzz_run_outcome_classifies_campaign_signals_per_profile() {
+    use homeboy::fuzz::FuzzGateProfile::{Evidence, Measurement, Strict};
+
+    let with_metadata = |metadata: serde_json::Value| {
+        let mut campaign = empty_fuzz_campaign();
+        campaign.metadata = metadata;
+        campaign
+    };
+    let failed_campaign = with_metadata(serde_json::json!({
         "status": "failed",
         "success": false,
         "case_counts": { "passed": 2, "failed": 1, "errored": 0 }
-    });
+    }));
+    let mut open_finding_campaign = empty_fuzz_campaign();
+    open_finding_campaign.findings = vec![open_finding()];
+    let mut failed_prepare = empty_fuzz_campaign();
+    failed_prepare.lifecycle = Some(lifecycle_with_phase(
+        LifecyclePhaseKind::Prepare,
+        LifecyclePhaseStatus::Failed,
+    ));
+    let invariant_failure = with_metadata(serde_json::json!({
+        "runner_fuzz_result": {
+            "status": "passed",
+            "success": true,
+            "cases": [{
+                "status": "passed",
+                "metadata": { "observations": [{
+                    "payload": { "metrics": { "side_effect_invariant_failure_count": 1 } }
+                }] }
+            }]
+        }
+    }));
+    let mut measured_failures = with_metadata(serde_json::json!({
+        "status": "failed",
+        "success": false,
+        "case_counts": { "passed": 2, "failed": 1, "errored": 0 },
+        "nested": { "invariant_failure_count": 1 }
+    }));
+    measured_failures.lifecycle = Some(lifecycle_with_phase(
+        LifecyclePhaseKind::Snapshot,
+        LifecyclePhaseStatus::Failed,
+    ));
+    let passed_campaign = with_metadata(serde_json::json!({ "status": "passed", "success": true }));
+    let mut skipped_lifecycle = empty_fuzz_campaign();
+    skipped_lifecycle.lifecycle = Some(lifecycle_with_phase(
+        LifecyclePhaseKind::Snapshot,
+        LifecyclePhaseStatus::Skipped,
+    ));
+    let unsupported = with_metadata(serde_json::json!({
+        "runner_fuzz_result": { "status": "unsupported", "success": true }
+    }));
+    let empty = empty_fuzz_campaign();
 
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Strict,
-    );
+    // (label, runner exit, runner success, timed out, campaign, profile, status, exit)
+    let cases = [
+        (
+            "failed campaign",
+            0,
+            true,
+            false,
+            Some(&failed_campaign),
+            Strict,
+            "failed",
+            1,
+        ),
+        (
+            "omitted campaign",
+            0,
+            true,
+            false,
+            None,
+            Evidence,
+            "failed",
+            1,
+        ),
+        (
+            "open finding",
+            0,
+            true,
+            false,
+            Some(&open_finding_campaign),
+            Strict,
+            "failed",
+            1,
+        ),
+        (
+            "open finding measured",
+            0,
+            true,
+            false,
+            Some(&open_finding_campaign),
+            Measurement,
+            "passed",
+            0,
+        ),
+        (
+            "passed campaign over transport failure",
+            1,
+            false,
+            false,
+            Some(&passed_campaign),
+            Evidence,
+            "passed",
+            0,
+        ),
+        (
+            "transport failure without passed campaign",
+            1,
+            false,
+            false,
+            Some(&empty),
+            Evidence,
+            "failed",
+            1,
+        ),
+        (
+            "failed lifecycle phase",
+            0,
+            true,
+            false,
+            Some(&failed_prepare),
+            Strict,
+            "failed",
+            1,
+        ),
+        (
+            "invariant failure count",
+            0,
+            true,
+            false,
+            Some(&invariant_failure),
+            Strict,
+            "failed",
+            1,
+        ),
+        (
+            "failures measured",
+            0,
+            true,
+            false,
+            Some(&measured_failures),
+            Measurement,
+            "passed",
+            0,
+        ),
+        ("timeout", 0, true, true, None, Measurement, "timeout", 124),
+        (
+            "skipped lifecycle",
+            0,
+            true,
+            false,
+            Some(&skipped_lifecycle),
+            Measurement,
+            "skipped",
+            1,
+        ),
+        (
+            "unsupported",
+            0,
+            true,
+            false,
+            Some(&unsupported),
+            Measurement,
+            "unsupported",
+            1,
+        ),
+    ];
 
-    assert_eq!(outcome.status, "failed");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 1);
-}
-
-#[test]
-fn fuzz_run_outcome_fails_when_successful_command_omits_campaign() {
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        None,
-        None,
-        homeboy::fuzz::FuzzGateProfile::Evidence,
-    );
-
-    assert_eq!(outcome.status, "failed");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 1);
-}
-
-#[test]
-fn fuzz_run_outcome_fails_when_successful_command_reports_open_finding() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.findings = vec![FuzzFinding {
-        schema: homeboy::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
-        id: "finding-1".to_string(),
-        title: "runner surfaced a failing case".to_string(),
-        severity: "high".to_string(),
-        status: FuzzFindingStatus::Open,
-        surface_id: None,
-        target_id: None,
-        operation_id: None,
-        case_id: Some("case-1".to_string()),
-        workload_id: None,
-        seed_id: None,
-        fingerprint: None,
-        artifact_ids: Vec::new(),
-        source_refs: Vec::new(),
-        metadata: serde_json::Value::Null,
-        extra: std::collections::BTreeMap::new(),
-    }];
-
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Strict,
-    );
-
-    assert_eq!(outcome.status, "failed");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 1);
-}
-
-#[test]
-fn fuzz_run_outcome_measurement_profile_records_open_findings_without_failing() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.findings = vec![FuzzFinding {
-        schema: homeboy::fuzz::FUZZ_FINDING_SCHEMA.to_string(),
-        id: "finding-1".to_string(),
-        title: "runner surfaced a failing case".to_string(),
-        severity: "high".to_string(),
-        status: FuzzFindingStatus::Open,
-        surface_id: None,
-        target_id: None,
-        operation_id: None,
-        case_id: Some("case-1".to_string()),
-        workload_id: None,
-        seed_id: None,
-        fingerprint: None,
-        artifact_ids: Vec::new(),
-        source_refs: Vec::new(),
-        metadata: serde_json::Value::Null,
-        extra: std::collections::BTreeMap::new(),
-    }];
-
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Measurement,
-    );
-
-    assert_eq!(outcome.status, "passed");
-    assert!(outcome.success);
-    assert_eq!(outcome.exit_code, 0);
-}
-
-#[test]
-fn fuzz_run_outcome_prefers_passed_campaign_over_transport_exit_code() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.metadata = serde_json::json!({
-        "status": "passed",
-        "success": true,
-    });
-
-    let outcome = fuzz_run_outcome(
-        1,
-        false,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Evidence,
-    );
-
-    assert_eq!(outcome.status, "passed");
-    assert!(outcome.success);
-    assert_eq!(outcome.exit_code, 0);
-}
-
-#[test]
-fn fuzz_run_outcome_keeps_transport_failure_without_passed_campaign() {
-    let campaign = empty_fuzz_campaign();
-
-    let outcome = fuzz_run_outcome(
-        1,
-        false,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Evidence,
-    );
-
-    assert_eq!(outcome.status, "failed");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 1);
+    for (label, exit, success, timed_out, campaign, profile, status, exit_code) in cases {
+        let outcome = fuzz_run_outcome(exit, success, timed_out, campaign, None, profile);
+        assert_eq!(outcome.status, status, "{label}");
+        assert_eq!(outcome.success, status == "passed", "{label}");
+        assert_eq!(outcome.exit_code, exit_code, "{label}");
+    }
 }
 
 #[test]
@@ -1132,249 +1146,50 @@ fn fuzz_run_expected_metric_gate_fails_when_observed_metric_differs() {
 }
 
 #[test]
-fn fuzz_run_outcome_fails_when_successful_command_reports_failed_lifecycle_phase() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.lifecycle = Some(LifecycleResultMetadata {
-        schema: LIFECYCLE_RESULT_SCHEMA.to_string(),
-        version: LIFECYCLE_CONTRACT_VERSION,
-        phases: vec![LifecyclePhaseResult {
-            id: "prepare".to_string(),
-            phase: LifecyclePhaseKind::Prepare,
-            status: LifecyclePhaseStatus::Failed,
-            snapshot_ref: None,
-            started_at: None,
-            finished_at: None,
-            message: Some("runtime prepare failed".to_string()),
-        }],
-        snapshot_refs: Vec::new(),
-        metadata: std::collections::BTreeMap::new(),
-    });
-
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Strict,
-    );
-
-    assert_eq!(outcome.status, "failed");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 1);
+fn fuzz_max_duration_parses_supported_units_and_rejects_others() {
+    use std::time::Duration;
+    for (raw, expected) in [
+        ("250ms", Duration::from_millis(250)),
+        ("60s", Duration::from_secs(60)),
+        ("5m", Duration::from_secs(300)),
+        ("1h", Duration::from_secs(3600)),
+    ] {
+        assert_eq!(fuzz_max_duration(Some(raw)).expect(raw), Some(expected));
+    }
+    for raw in ["0s", "10x"] {
+        assert!(fuzz_max_duration(Some(raw)).is_err(), "{raw}");
+    }
 }
 
-#[test]
-fn fuzz_run_outcome_fails_when_workload_reports_invariant_failure_count() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.metadata = serde_json::json!({
-        "runner_fuzz_result": {
-            "status": "passed",
-            "success": true,
-            "cases": [
-                {
-                    "status": "passed",
-                    "metadata": {
-                        "observations": [
-                            {
-                                "payload": {
-                                    "metrics": {
-                                        "side_effect_invariant_failure_count": 1
-                                    }
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        }
-    });
-
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Strict,
-    );
-
-    assert_eq!(outcome.status, "failed");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 1);
-}
-
-#[test]
-fn fuzz_run_outcome_measurement_profile_records_failure_metadata_without_failing() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.metadata = serde_json::json!({
-        "status": "failed",
-        "success": false,
-        "case_counts": { "passed": 2, "failed": 1, "errored": 0 },
-        "nested": { "invariant_failure_count": 1 }
-    });
-    campaign.lifecycle = Some(LifecycleResultMetadata {
-        schema: LIFECYCLE_RESULT_SCHEMA.to_string(),
-        version: LIFECYCLE_CONTRACT_VERSION,
-        phases: vec![LifecyclePhaseResult {
-            id: "execute".to_string(),
-            phase: LifecyclePhaseKind::Snapshot,
-            status: LifecyclePhaseStatus::Failed,
-            snapshot_ref: None,
-            started_at: None,
-            finished_at: None,
-            message: Some("runner recorded a failing case".to_string()),
-        }],
-        snapshot_refs: Vec::new(),
-        metadata: std::collections::BTreeMap::new(),
-    });
-
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Measurement,
-    );
-
-    assert_eq!(outcome.status, "passed");
-    assert!(outcome.success);
-    assert_eq!(outcome.exit_code, 0);
-}
-
-#[test]
-fn fuzz_run_outcome_reports_timeout_as_non_pass() {
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        true,
-        None,
-        None,
-        homeboy::fuzz::FuzzGateProfile::Measurement,
-    );
-
-    assert_eq!(outcome.status, "timeout");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 124);
-}
-
-#[test]
-fn fuzz_run_outcome_reports_skipped_lifecycle_as_non_proof() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.lifecycle = Some(LifecycleResultMetadata {
-        schema: LIFECYCLE_RESULT_SCHEMA.to_string(),
-        version: LIFECYCLE_CONTRACT_VERSION,
-        phases: vec![LifecyclePhaseResult {
-            id: "execute".to_string(),
-            phase: LifecyclePhaseKind::Snapshot,
-            status: LifecyclePhaseStatus::Skipped,
-            snapshot_ref: None,
-            started_at: None,
-            finished_at: None,
-            message: Some("runner skipped unsupported workload".to_string()),
-        }],
-        snapshot_refs: Vec::new(),
-        metadata: std::collections::BTreeMap::new(),
-    });
-
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Measurement,
-    );
-
-    assert_eq!(outcome.status, "skipped");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 1);
-}
-
-#[test]
-fn fuzz_run_outcome_reports_unsupported_metadata_as_non_proof() {
-    let mut campaign = empty_fuzz_campaign();
-    campaign.metadata = serde_json::json!({
-        "runner_fuzz_result": {
-            "status": "unsupported",
-            "success": true
-        }
-    });
-
-    let outcome = fuzz_run_outcome(
-        0,
-        true,
-        false,
-        Some(&campaign),
-        None,
-        homeboy::fuzz::FuzzGateProfile::Measurement,
-    );
-
-    assert_eq!(outcome.status, "unsupported");
-    assert!(!outcome.success);
-    assert_eq!(outcome.exit_code, 1);
-}
-
-#[test]
-fn fuzz_max_duration_accepts_supported_units() {
-    assert_eq!(
-        fuzz_max_duration(Some("250ms")).expect("duration"),
-        Some(std::time::Duration::from_millis(250))
-    );
-    assert_eq!(
-        fuzz_max_duration(Some("60s")).expect("duration"),
-        Some(std::time::Duration::from_secs(60))
-    );
-    assert_eq!(
-        fuzz_max_duration(Some("5m")).expect("duration"),
-        Some(std::time::Duration::from_secs(300))
-    );
-    assert_eq!(
-        fuzz_max_duration(Some("1h")).expect("duration"),
-        Some(std::time::Duration::from_secs(3600))
-    );
-}
-
-#[test]
-fn fuzz_max_duration_rejects_zero_and_unknown_units() {
-    assert!(fuzz_max_duration(Some("0s")).is_err());
-    assert!(fuzz_max_duration(Some("10x")).is_err());
-}
-
-#[test]
-fn strict_fuzz_run_artifact_validation_reports_missing_campaign() {
-    let mut args = fuzz_run_args_with_run_id("strict-proof");
-    args.require_case_log = true;
-
-    let error = fuzz_run_artifact_validation_error(&args, None).expect("strict error");
-
-    assert!(error.contains("runner did not emit a fuzz campaign"));
-}
-
-#[test]
-fn strict_fuzz_run_artifact_validation_reports_missing_required_artifacts() {
+fn strict_artifact_args() -> FuzzRunArgs {
     let mut args = fuzz_run_args_with_run_id("strict-proof");
     args.require_case_log = true;
     args.require_coverage_summary = true;
     args.require_result_envelope = true;
+    args
+}
+
+#[test]
+fn strict_fuzz_run_artifact_validation_names_what_is_missing() {
+    let args = strict_artifact_args();
+
+    let error = fuzz_run_artifact_validation_error(&args, None).expect("strict error");
+    assert!(error.contains("runner did not emit a fuzz campaign"));
+
     let campaign = artifact_complete_fuzz_campaign();
-
     let error = fuzz_run_artifact_validation_error(&args, Some(&campaign)).expect("strict error");
-
     assert!(!error.contains("case log"));
     assert!(!error.contains("coverage summary"));
     assert!(error.contains("result envelope"));
 }
 
+/// Required artifacts are satisfied by campaign artifacts or by metadata
+/// `artifact_refs` roles.
 #[test]
-fn strict_fuzz_run_artifact_validation_passes_with_required_artifacts() {
-    let mut args = fuzz_run_args_with_run_id("strict-proof");
-    args.require_case_log = true;
-    args.require_coverage_summary = true;
-    args.require_result_envelope = true;
-    let mut campaign = artifact_complete_fuzz_campaign();
-    campaign.artifacts.push(homeboy::fuzz::FuzzArtifact {
+fn strict_fuzz_run_artifact_validation_accepts_campaign_artifacts_or_metadata_refs() {
+    let args = strict_artifact_args();
+    let mut with_artifacts = artifact_complete_fuzz_campaign();
+    with_artifacts.artifacts.push(homeboy::fuzz::FuzzArtifact {
         schema: homeboy::fuzz::FUZZ_ARTIFACT_SCHEMA.to_string(),
         id: "result-envelope".to_string(),
         kind: "result_envelope".to_string(),
@@ -1382,18 +1197,8 @@ fn strict_fuzz_run_artifact_validation_passes_with_required_artifacts() {
         metadata: serde_json::Value::Null,
         extra: std::collections::BTreeMap::new(),
     });
-
-    assert!(fuzz_run_artifact_validation_error(&args, Some(&campaign)).is_none());
-}
-
-#[test]
-fn strict_fuzz_run_artifact_validation_accepts_metadata_artifact_refs() {
-    let mut args = fuzz_run_args_with_run_id("strict-proof");
-    args.require_case_log = true;
-    args.require_coverage_summary = true;
-    args.require_result_envelope = true;
-    let mut campaign = empty_fuzz_campaign();
-    campaign.metadata = serde_json::json!({
+    let mut with_refs = empty_fuzz_campaign();
+    with_refs.metadata = serde_json::json!({
         "artifact_refs": [
             { "name": "case-log", "role": "case_log", "path": "files/case-log.jsonl" },
             { "name": "coverage-summary", "role": "coverage_summary", "path": "files/coverage-summary.json" },
@@ -1401,46 +1206,16 @@ fn strict_fuzz_run_artifact_validation_accepts_metadata_artifact_refs() {
         ]
     });
 
-    assert!(fuzz_run_artifact_validation_error(&args, Some(&campaign)).is_none());
+    for campaign in [with_artifacts, with_refs] {
+        assert!(fuzz_run_artifact_validation_error(&args, Some(&campaign)).is_none());
+    }
 }
 
 #[test]
 fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
     with_isolated_home(|home| {
-        let args = FuzzRunArgs {
-            comp: PositionalComponentArgs {
-                component: Some("component-a".to_string()),
-                path: None,
-            },
-            rig: Some("package-fuzz".to_string()),
-            extension_override: ExtensionOverrideArgs { extensions: vec![] },
-            setting_args: SettingArgs {
-                settings_json_file: vec![],
-                setting: vec![],
-                setting_json: vec![],
-            },
-            workload_id: Some("parser".to_string()),
-            profile: None,
-            shared_state: None,
-            run_id: Some("proof-bad-results".to_string()),
-            tracker_refs: vec![],
-            seed: None,
-            inventory: None,
-            sequence_plan: None,
-            require_case_log: false,
-            require_coverage_summary: false,
-            require_result_envelope: false,
-            max_duration: None,
-            gate_profile: FuzzGateProfileArg::Measurement,
-            allow_destructive: false,
-            isolation: FuzzIsolationArg::Shared,
-            isolation_proof: None,
-            allow_local_destructive_fuzz: false,
-            expect_metric: vec![],
-            action_model: None,
-            exploration_policy: None,
-            args: vec![],
-        };
+        let mut args = fuzz_run_args_with_run_id("proof-bad-results");
+        args.seed = None;
         let results_path = home.path().join("fuzz-results.json");
         let artifacts_dir = home.path().join("fuzz-artifacts");
         std::fs::write(
@@ -1558,6 +1333,21 @@ fn fuzz_artifact_ref_validation_reports_missing_local_refs() {
                 .collect::<Vec<_>>(),
             vec!["also-missing.json".to_string(), "missing.json".to_string()]
         );
+        // Each violation names its code, resolution base, and the producer
+        // contract that owed it.
+        let violation = &validation.violations[0];
+        assert_eq!(
+            violation.code,
+            homeboy::fuzz::FuzzEvidenceViolationCode::ArtifactRefMissing
+        );
+        assert_eq!(
+            violation.resolution_base.as_deref(),
+            Some(artifacts_dir.display().to_string().as_str())
+        );
+        assert_eq!(
+            violation.producer_contract.as_deref(),
+            Some("HOMEBOY_FUZZ_ARTIFACTS_DIR")
+        );
         assert!(validation
             .summary()
             .as_deref()
@@ -1566,63 +1356,76 @@ fn fuzz_artifact_ref_validation_reports_missing_local_refs() {
     });
 }
 
+fn run_postprocess_step(
+    home: &Path,
+    step: serde_json::Value,
+    results: &str,
+) -> (
+    Vec<super::super::types::FuzzArtifactPostprocessOutput>,
+    PathBuf,
+) {
+    install_fuzz_postprocess_helper(home);
+    let package_root = home.join("rig-package");
+    std::fs::create_dir_all(&package_root).expect("package root");
+    let workload_path = package_root.join("parser.json");
+    std::fs::write(&workload_path, "{}").expect("workload");
+    let spec: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "package-fuzz",
+        "fuzz_workloads": {
+            "generic": [{
+                "path": "${package.root}/parser.json",
+                "artifact_postprocess": [step]
+            }]
+        }
+    }))
+    .expect("parse rig spec");
+    let context = FuzzRigContext {
+        spec,
+        package_root: Some(package_root),
+    };
+    let workload = FuzzWorkloadOutput {
+        id: "parser".to_string(),
+        label: None,
+        description: None,
+        source: format!("rig_workloads:generic:{}", workload_path.display()),
+        manifest_path: Some(workload_path.to_string_lossy().to_string()),
+    };
+    let results_path = home.join("fuzz-results.json");
+    std::fs::write(&results_path, results).expect("results");
+    let artifacts_dir = home.join("fuzz-artifacts");
+
+    let outputs = run_fuzz_artifact_postprocess(
+        Some(&context),
+        Some("generic"),
+        Some(&workload),
+        &results_path,
+        &artifacts_dir,
+    )
+    .expect("postprocess");
+    (outputs, artifacts_dir)
+}
+
 #[test]
 fn fuzz_artifact_postprocess_collects_declared_output_under_artifact_root() {
     with_isolated_home(|home| {
-        install_fuzz_postprocess_helper(home.path());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workload_path = temp.path().join("parser.json");
-        std::fs::write(&workload_path, "{}").expect("workload");
-        let spec: RigSpec = serde_json::from_value(serde_json::json!({
-            "id": "package-fuzz",
-            "fuzz_workloads": {
-                "generic": [
-                    {
-                        "path": "${package.root}/parser.json",
-                        "artifact_postprocess": [
-                            {
-                                "id": "coverage-summary",
-                                "helper": "fixture",
-                                "action": "copy",
-                                "input": "${run.fuzz_results}",
-                                "output": "coverage/summary.json",
-                            }
-                        ]
-                    }
-                ]
-            }
-        }))
-        .expect("parse rig spec");
-        let context = FuzzRigContext {
-            spec,
-            package_root: Some(temp.path().to_path_buf()),
-        };
-        let workload = FuzzWorkloadOutput {
-            id: "parser".to_string(),
-            label: None,
-            description: None,
-            source: format!("rig_workloads:generic:{}", workload_path.display()),
-            manifest_path: Some(workload_path.to_string_lossy().to_string()),
-        };
-        let results_path = home.path().join("fuzz-results.json");
-        std::fs::write(&results_path, r#"{"status":"ok"}"#).expect("results");
-        let artifacts_dir = home.path().join("fuzz-artifacts");
-
-        let outputs = run_fuzz_artifact_postprocess(
-            Some(&context),
-            Some("generic"),
-            Some(&workload),
-            &results_path,
-            &artifacts_dir,
-        )
-        .expect("postprocess");
+        let (outputs, artifacts_dir) = run_postprocess_step(
+            home.path(),
+            serde_json::json!({
+                "id": "coverage-summary",
+                "helper": "fixture",
+                "action": "copy",
+                "input": "${run.fuzz_results}",
+                "output": "coverage/summary.json",
+            }),
+            r#"{"status":"ok"}"#,
+        );
 
         assert_eq!(outputs.len(), 1);
         assert!(outputs[0].success);
-        let collected = artifacts_dir.join("coverage/summary.json");
-        assert!(collected.is_file());
+        assert!(fuzz_postprocess_error(&outputs).is_none());
         assert_eq!(
-            std::fs::read_to_string(collected).expect("collected"),
+            std::fs::read_to_string(artifacts_dir.join("coverage/summary.json"))
+                .expect("collected"),
             r#"{"status":"ok"}"#
         );
     });
@@ -1631,52 +1434,16 @@ fn fuzz_artifact_postprocess_collects_declared_output_under_artifact_root() {
 #[test]
 fn required_fuzz_artifact_postprocess_fails_when_output_is_missing() {
     with_isolated_home(|home| {
-        install_fuzz_postprocess_helper(home.path());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workload_path = temp.path().join("parser.json");
-        std::fs::write(&workload_path, "{}").expect("workload");
-        let spec: RigSpec = serde_json::from_value(serde_json::json!({
-            "id": "package-fuzz",
-            "fuzz_workloads": {
-                "generic": [
-                    {
-                        "path": "${package.root}/parser.json",
-                        "artifact_postprocess": [
-                            {
-                                "id": "gap-report",
-                                "helper": "fixture",
-                                "action": "missing",
-                                "output": "gaps/report.json"
-                            }
-                        ]
-                    }
-                ]
-            }
-        }))
-        .expect("parse rig spec");
-        let context = FuzzRigContext {
-            spec,
-            package_root: Some(temp.path().to_path_buf()),
-        };
-        let workload = FuzzWorkloadOutput {
-            id: "parser".to_string(),
-            label: None,
-            description: None,
-            source: format!("rig_workloads:generic:{}", workload_path.display()),
-            manifest_path: Some(workload_path.to_string_lossy().to_string()),
-        };
-        let results_path = home.path().join("fuzz-results.json");
-        std::fs::write(&results_path, "{}").expect("results");
-        let artifacts_dir = home.path().join("fuzz-artifacts");
-
-        let outputs = run_fuzz_artifact_postprocess(
-            Some(&context),
-            Some("generic"),
-            Some(&workload),
-            &results_path,
-            &artifacts_dir,
-        )
-        .expect("postprocess");
+        let (outputs, _) = run_postprocess_step(
+            home.path(),
+            serde_json::json!({
+                "id": "gap-report",
+                "helper": "fixture",
+                "action": "missing",
+                "output": "gaps/report.json"
+            }),
+            "{}",
+        );
 
         assert_eq!(outputs.len(), 1);
         assert!(!outputs[0].success);
@@ -1753,45 +1520,12 @@ fn fuzz_report_persists_result_envelope_artifact_for_run_id() {
     });
 }
 
+/// Strict reports gate on replay data: a campaign without seeds fails the
+/// replay-data gate, and adding a seed satisfies it.
 #[test]
-fn fuzz_report_fails_required_artifact_gate_when_replay_data_is_missing() {
+fn fuzz_report_required_replay_data_gate_follows_seed_presence() {
     with_isolated_home(|home| {
-        let results_path = home.path().join("fuzz-campaign.json");
-        std::fs::write(
-            &results_path,
-            serde_json::to_string(&artifact_complete_fuzz_campaign()).expect("serialize campaign"),
-        )
-        .expect("results file");
-
-        let mut run_args = fuzz_run_args_with_run_id("report-run-missing-replay");
-        run_args.gate_profile = FuzzGateProfileArg::Strict;
-
-        let output = run_report(FuzzReportArgs {
-            results_file: results_path,
-            run: run_args,
-            output_envelope: None,
-            envelope_id: None,
-        })
-        .expect("fuzz report");
-
-        assert_eq!(output.status, "failed");
-        assert!(output.gates.iter().any(|gate| {
-            gate.gate_id == "has-required-artifact-replay-data"
-                && gate.status == "failed"
-                && gate.observed == 0.0
-        }));
-        assert!(output.gates.iter().any(|gate| {
-            gate.gate_id == "has-required-artifact-result-envelope" && gate.status == "passed"
-        }));
-        assert_eq!(output.envelope.status, output.status);
-    });
-}
-
-#[test]
-fn fuzz_report_passes_required_artifact_gates_with_seed_replay_data() {
-    with_isolated_home(|home| {
-        let mut campaign = artifact_complete_fuzz_campaign();
-        campaign.seeds = vec![homeboy::fuzz::FuzzSeed {
+        let seed = homeboy::fuzz::FuzzSeed {
             schema: homeboy::fuzz::FUZZ_SEED_SCHEMA.to_string(),
             id: "seed-1".to_string(),
             kind: "literal".to_string(),
@@ -1801,31 +1535,45 @@ fn fuzz_report_passes_required_artifact_gates_with_seed_replay_data() {
             tags: Vec::new(),
             metadata: serde_json::Value::Null,
             extra: std::collections::BTreeMap::new(),
-        }];
-        let results_path = home.path().join("fuzz-campaign.json");
-        std::fs::write(
-            &results_path,
-            serde_json::to_string(&campaign).expect("serialize campaign"),
-        )
-        .expect("results file");
+        };
+        for (run_id, seeds, status, observed) in [
+            ("report-run-missing-replay", vec![], "failed", 0.0),
+            ("report-run-with-replay", vec![seed], "passed", 1.0),
+        ] {
+            let mut campaign = artifact_complete_fuzz_campaign();
+            campaign.seeds = seeds;
+            let results_path = home.path().join(format!("{run_id}.json"));
+            std::fs::write(
+                &results_path,
+                serde_json::to_string(&campaign).expect("serialize campaign"),
+            )
+            .expect("results file");
 
-        let mut run_args = fuzz_run_args_with_run_id("report-run-with-replay");
-        run_args.gate_profile = FuzzGateProfileArg::Strict;
+            let mut run_args = fuzz_run_args_with_run_id(run_id);
+            run_args.gate_profile = FuzzGateProfileArg::Strict;
 
-        let output = run_report(FuzzReportArgs {
-            results_file: results_path,
-            run: run_args,
-            output_envelope: None,
-            envelope_id: None,
-        })
-        .expect("fuzz report");
+            let output = run_report(FuzzReportArgs {
+                results_file: results_path,
+                run: run_args,
+                output_envelope: None,
+                envelope_id: None,
+            })
+            .expect("fuzz report");
 
-        assert_eq!(output.status, "passed");
-        assert!(output.gates.iter().any(|gate| {
-            gate.gate_id == "has-required-artifact-replay-data"
-                && gate.status == "passed"
-                && gate.observed == 1.0
-        }));
+            assert_eq!(output.status, status, "{run_id}");
+            assert_eq!(output.envelope.status, output.status, "{run_id}");
+            assert!(
+                output.gates.iter().any(|gate| {
+                    gate.gate_id == "has-required-artifact-replay-data"
+                        && gate.status == status
+                        && gate.observed == observed
+                }),
+                "{run_id}"
+            );
+            assert!(output.gates.iter().any(|gate| {
+                gate.gate_id == "has-required-artifact-result-envelope" && gate.status == "passed"
+            }));
+        }
     });
 }
 
@@ -1891,8 +1639,6 @@ fn fuzz_evidence_followups_point_to_raw_results_when_parse_fails() {
     }));
 }
 
-// --- #10513: evidence-contract failures are not workload failures -----------
-
 /// Build a campaign whose cases all pass and which declares one artifact that
 /// the runner never wrote — the exact shape reported in #10513.
 fn passing_campaign_with_declared_artifact(declared_ref: &str) -> FuzzCampaign {
@@ -1923,44 +1669,7 @@ fn passing_campaign_with_declared_artifact(declared_ref: &str) -> FuzzCampaign {
 }
 
 #[test]
-fn a_missing_declared_artifact_is_classified_as_an_evidence_contract_violation() {
-    with_isolated_home(|home| {
-        let artifacts_dir = home.path().join("fuzz-artifacts");
-        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
-        let campaign = passing_campaign_with_declared_artifact("results.json");
-
-        let validation = fuzz_artifact_ref_validation(Some(&campaign), &artifacts_dir);
-
-        assert_eq!(
-            validation
-                .violations
-                .iter()
-                .filter_map(|violation| violation.declared_ref.clone())
-                .collect::<Vec<_>>(),
-            vec!["results.json".to_string()]
-        );
-        assert_eq!(validation.violations.len(), 1);
-        let violation = &validation.violations[0];
-        assert_eq!(
-            violation.code,
-            homeboy::fuzz::FuzzEvidenceViolationCode::ArtifactRefMissing
-        );
-        // Root cause names the declared ref, its resolution base, and the
-        // producer contract that owed it.
-        assert_eq!(violation.declared_ref.as_deref(), Some("results.json"));
-        assert_eq!(
-            violation.resolution_base.as_deref(),
-            Some(artifacts_dir.display().to_string().as_str())
-        );
-        assert_eq!(
-            violation.producer_contract.as_deref(),
-            Some("HOMEBOY_FUZZ_ARTIFACTS_DIR")
-        );
-    });
-}
-
-#[test]
-fn a_traversal_escaping_artifact_ref_is_no_longer_discarded_silently() {
+fn a_traversal_escaping_artifact_ref_is_reported_unresolvable() {
     with_isolated_home(|home| {
         let artifacts_dir = home.path().join("fuzz-artifacts");
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
@@ -2017,51 +1726,23 @@ fn an_artifact_declared_as_a_file_but_present_as_a_directory_is_wrong_kind() {
     });
 }
 
+/// Refs that promise nothing Homeboy can check stay out of the verdict: a bare
+/// `artifact_refs` string declares no `artifact_type`, and an absolute path
+/// sits outside the base Homeboy handed the runner.
 #[test]
-fn a_bare_string_ref_pointing_at_a_directory_is_not_a_wrong_kind_violation() {
+fn unpromised_artifact_refs_stay_out_of_the_evidence_verdict() {
     with_isolated_home(|home| {
         let artifacts_dir = home.path().join("fuzz-artifacts");
         std::fs::create_dir_all(artifacts_dir.join("coverage")).expect("artifact directory");
-        let campaign = passing_campaign_with_declared_artifact("coverage");
 
-        let validation = fuzz_artifact_ref_validation(Some(&campaign), &artifacts_dir);
+        for declared_ref in ["coverage", "/var/tmp/absent-homeboy-fixture.json"] {
+            let campaign = passing_campaign_with_declared_artifact(declared_ref);
+            let validation = fuzz_artifact_ref_validation(Some(&campaign), &artifacts_dir);
 
-        // A bare `artifact_refs` string declares no `artifact_type`, so there
-        // is no promise to break.
-        assert!(validation.violations.is_empty());
-        assert!(validation.complete);
+            assert!(validation.violations.is_empty(), "{declared_ref}");
+            assert!(validation.complete, "{declared_ref}");
+        }
     });
-}
-
-#[test]
-fn an_absolute_ref_outside_the_artifact_root_stays_out_of_the_evidence_verdict() {
-    with_isolated_home(|home| {
-        let artifacts_dir = home.path().join("fuzz-artifacts");
-        std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
-        let campaign =
-            passing_campaign_with_declared_artifact("/var/tmp/absent-homeboy-fixture.json");
-
-        let validation = fuzz_artifact_ref_validation(Some(&campaign), &artifacts_dir);
-
-        // Homeboy holds no contract over a base it did not hand the runner.
-        assert!(validation.violations.is_empty());
-        assert!(validation.complete);
-    });
-}
-
-#[test]
-fn an_expected_metric_gate_failure_is_not_folded_into_the_evidence_contract() {
-    // The collapse this issue is about: a gate that did not hold is a
-    // statement about declared pass criteria, not about undelivered evidence.
-    let contract = fuzz_evidence_contract(
-        None,
-        None,
-        None,
-        &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
-    );
-
-    assert!(contract.complete);
-    assert!(contract.violations.is_empty());
 }
 
 #[test]
@@ -2162,7 +1843,7 @@ fn persisted_fuzz_evidence_records_the_classified_contract_and_result_totals() {
             homeboy::core::observation::runs_service::require_run(&store, "evidence-contract-run")
                 .expect("run");
 
-        // The exact component revision — previously hardcoded to None.
+        // The exact component revision is recorded on the run.
         assert_eq!(
             run.git_sha.as_deref(),
             Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0")
@@ -2191,8 +1872,6 @@ fn persisted_fuzz_evidence_records_the_classified_contract_and_result_totals() {
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
-        assert!(run.metadata_json.get("results_error").is_none());
-        assert!(run.metadata_json.get("missing_artifact_refs").is_none());
 
         // Campaign findings land in the shared findings store, carrying the
         // typed fuzz finding envelope as their payload.

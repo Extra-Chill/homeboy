@@ -138,41 +138,14 @@ where
 mod tests {
     use super::*;
 
+    /// Caches written by earlier releases stay readable: the on-disk JSON
+    /// shape is a durable record.
     #[test]
-    fn cache_freshness_within_24h() {
-        let cache = ExtensionUpdateCache {
-            extensions_behind: HashMap::new(),
-            checked_at: homeboy_engine_primitives::now_secs() - 100,
-        };
-        assert!(update_check_cache::is_cache_fresh(
-            cache.checked_at,
-            CHECK_INTERVAL_SECS
-        ));
-    }
-
-    #[test]
-    fn cache_stale_after_24h() {
-        let cache = ExtensionUpdateCache {
-            extensions_behind: HashMap::new(),
-            checked_at: homeboy_engine_primitives::now_secs() - CHECK_INTERVAL_SECS - 1,
-        };
-        assert!(!update_check_cache::is_cache_fresh(
-            cache.checked_at,
-            CHECK_INTERVAL_SECS
-        ));
-    }
-
-    #[test]
-    fn cache_roundtrip() {
-        let mut behind = HashMap::new();
-        behind.insert("wordpress".to_string(), 3);
-        let cache = ExtensionUpdateCache {
-            extensions_behind: behind,
-            checked_at: 1700000000,
-        };
-        let json = serde_json::to_string(&cache).unwrap();
-        let parsed: ExtensionUpdateCache = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.extensions_behind.len(), 1);
+    fn decodes_on_disk_cache_record() {
+        let parsed: ExtensionUpdateCache = serde_json::from_str(
+            r#"{"extensions_behind":{"wordpress":3},"checked_at":1700000000}"#,
+        )
+        .unwrap();
         assert_eq!(parsed.extensions_behind["wordpress"], 3);
         assert_eq!(parsed.checked_at, 1700000000);
     }
@@ -191,34 +164,28 @@ mod tests {
         assert_eq!(calls, 0, "an exhausted startup budget must stay silent");
     }
 
+    /// Within budget every extension is probed once, all against the same
+    /// deadline, and only reported updates are collected.
     #[test]
-    fn fast_update_probe_keeps_the_startup_path_quiet_and_complete() {
-        let extensions = vec!["one".to_string(), "two".to_string()];
+    fn startup_collection_probes_every_extension_against_one_deadline() {
+        let extensions = vec!["one".to_string(), "two".to_string(), "three".to_string()];
         let mut calls = Vec::new();
 
-        let updates = collect_updates_with_budget(&extensions, Duration::from_secs(1), |id, _| {
-            calls.push(id.to_string());
-            None
-        });
-
-        assert!(updates.is_empty());
-        assert_eq!(calls, extensions);
-    }
-
-    #[test]
-    fn startup_collection_passes_one_decreasing_deadline_to_each_probe() {
-        let extensions = vec!["one".to_string(), "two".to_string(), "three".to_string()];
-        let mut deadlines = Vec::new();
-
         let updates =
-            collect_updates_with_budget(&extensions, Duration::from_secs(1), |_, deadline| {
-                deadlines.push(deadline);
+            collect_updates_with_budget(&extensions, Duration::from_secs(1), |id, deadline| {
+                calls.push((id.to_string(), deadline));
                 std::thread::sleep(Duration::from_millis(25));
-                None
+                (id == "two").then(|| homeboy_core::extension::lifecycle::UpdateAvailable {
+                    extension_id: id.to_string(),
+                    installed_version: "1.0.0".to_string(),
+                    behind_count: 4,
+                })
             });
 
-        assert!(updates.is_empty());
-        assert_eq!(deadlines.len(), extensions.len());
-        assert!(deadlines.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates["two"], 4);
+        let ids: Vec<_> = calls.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(ids, extensions);
+        assert!(calls.windows(2).all(|pair| pair[0].1 == pair[1].1));
     }
 }

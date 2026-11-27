@@ -144,58 +144,35 @@ mod release_tag_version_tests {
     }
 
     #[test]
-    fn a_root_component_release_tag_resolves_its_version() {
-        assert_eq!(
-            release_tag_version_for_prefix("v1.2.3", None),
-            Some("1.2.3".to_string())
-        );
-    }
-
-    #[test]
-    fn a_scoped_component_release_tag_resolves_its_version() {
-        assert_eq!(
-            release_tag_version_for_prefix(
+    fn release_tag_version_requires_the_component_namespace_and_a_semver() {
+        let cases = [
+            ("v1.2.3", None, Some("1.2.3")),
+            ("v1.2.3-rc.1", None, Some("1.2.3-rc.1")),
+            (
                 "data-machine-events-v0.55.1",
-                Some("data-machine-events")
+                Some("data-machine-events"),
+                Some("0.55.1"),
             ),
-            Some("0.55.1".to_string())
-        );
-    }
+            // A scoped component does not release under bare `vX.Y.Z`, and must
+            // not claim another component's namespace.
+            ("v0.55.1", Some("events"), None),
+            ("other-component-v0.55.1", Some("events"), None),
+            // Branches and raw SHAs are not release tags; `v`-prefixed branch
+            // names make the semver parse load-bearing.
+            ("main", None, None),
+            ("release/v1.2.3", None, None),
+            ("9b780f558f0e4a1b2c3d4e5f60718293a4b5c6d7", None, None),
+            ("vnext", None, None),
+            ("v2", None, None),
+        ];
 
-    #[test]
-    fn a_tag_outside_the_components_namespace_is_not_a_release_tag() {
-        // A scoped component does not release under bare `vX.Y.Z`, and must not
-        // claim another component's namespace.
-        assert_eq!(
-            release_tag_version_for_prefix("v0.55.1", Some("events")),
-            None
-        );
-        assert_eq!(
-            release_tag_version_for_prefix("other-component-v0.55.1", Some("events")),
-            None
-        );
-    }
-
-    #[test]
-    fn branches_and_raw_shas_are_not_release_tags() {
-        assert_eq!(release_tag_version_for_prefix("main", None), None);
-        assert_eq!(release_tag_version_for_prefix("release/v1.2.3", None), None);
-        assert_eq!(
-            release_tag_version_for_prefix("9b780f558f0e4a1b2c3d4e5f60718293a4b5c6d7", None),
-            None
-        );
-        // A `v`-prefixed branch name is the case that makes the version parse
-        // load-bearing rather than decorative.
-        assert_eq!(release_tag_version_for_prefix("vnext", None), None);
-        assert_eq!(release_tag_version_for_prefix("v2", None), None);
-    }
-
-    #[test]
-    fn prerelease_and_build_metadata_tags_are_release_tags() {
-        assert_eq!(
-            release_tag_version_for_prefix("v1.2.3-rc.1", None),
-            Some("1.2.3-rc.1".to_string())
-        );
+        for (git_ref, prefix, expected) in cases {
+            assert_eq!(
+                release_tag_version_for_prefix(git_ref, prefix).as_deref(),
+                expected,
+                "ref={git_ref} prefix={prefix:?}"
+            );
+        }
     }
 }
 
@@ -210,52 +187,35 @@ mod checkout_less_release_version_tests {
     }
 
     #[test]
-    fn is_none_when_a_local_checkout_exists() {
+    fn is_none_when_a_checkout_exists_or_no_github_remote_is_declared() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let component = Component {
-            id: "fixture".to_string(),
-            local_path: temp.path().to_string_lossy().to_string(),
-            remote_url: Some(
-                "https://github.com/Extra-Chill-Test/checkout-exists-fixture".to_string(),
+        let cases = [
+            // A component with a real checkout uses `version::get_component_version`;
+            // this fallback only applies when that path has nothing to read.
+            (
+                temp.path().to_string_lossy().to_string(),
+                Some("https://github.com/Extra-Chill-Test/checkout-exists-fixture"),
             ),
-            ..Component::default()
-        };
+            ("/tmp/homeboy-14782-no-remote-url".to_string(), None),
+            (
+                "/tmp/homeboy-14782-non-github-remote".to_string(),
+                Some("https://gitlab.com/example/fixture.git"),
+            ),
+        ];
 
-        // A component with a real checkout uses `version::get_component_version`;
-        // this fallback only ever applies when that path has nothing to read.
-        assert_eq!(
-            checkout_less_release_version(&component).expect("resolves"),
-            None
-        );
-    }
-
-    #[test]
-    fn is_none_without_a_remote_url() {
-        let component = Component {
-            id: "fixture".to_string(),
-            local_path: "/tmp/homeboy-14782-no-remote-url".to_string(),
-            ..Component::default()
-        };
-
-        assert_eq!(
-            checkout_less_release_version(&component).expect("resolves"),
-            None
-        );
-    }
-
-    #[test]
-    fn is_none_for_a_non_github_remote_url() {
-        let component = Component {
-            id: "fixture".to_string(),
-            local_path: "/tmp/homeboy-14782-non-github-remote".to_string(),
-            remote_url: Some("https://gitlab.com/example/fixture.git".to_string()),
-            ..Component::default()
-        };
-
-        assert_eq!(
-            checkout_less_release_version(&component).expect("resolves"),
-            None
-        );
+        for (local_path, remote_url) in cases {
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: local_path.clone(),
+                remote_url: remote_url.map(str::to_string),
+                ..Component::default()
+            };
+            assert_eq!(
+                checkout_less_release_version(&component).expect("resolves"),
+                None,
+                "local_path={local_path} remote_url={remote_url:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -299,15 +259,10 @@ mod checkout_less_release_version_tests {
 mod tests {
     /// The shared version reader must not branch on ecosystem-specific terms —
     /// it is consumed by every extension's release and deploy path.
-    ///
-    /// This assertion moved here with `version.rs` when it was lifted out of
-    /// `homeboy-release` (#11144); it previously lived in that crate's
-    /// `pipeline` facade alongside the same check for `executor.rs`.
     #[test]
     fn version_core_stays_ecosystem_agnostic() {
-        // `component_version.rs` carries the single version-read spine that
-        // used to be three copies inside `version.rs` (#11144), so it is held
-        // to the same contract.
+        // `component_version.rs` carries the single version-read spine
+        // (#11144), so it is held to the same contract.
         let sources = [
             ("version.rs", include_str!("version.rs")),
             (

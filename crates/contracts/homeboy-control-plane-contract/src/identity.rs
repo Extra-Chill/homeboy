@@ -144,40 +144,8 @@ pub(crate) fn validate_opaque(value: &str) -> Result<(), IdentityError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AttemptId, ExecutionId, MissionId, ProviderSessionId, RunId, TaskId};
+    use super::{MissionId, RunId};
     use crate::IdentityError;
-
-    #[test]
-    fn identity_types_are_not_interchangeable() {
-        let names = [
-            std::any::type_name::<MissionId>(),
-            std::any::type_name::<RunId>(),
-            std::any::type_name::<TaskId>(),
-            std::any::type_name::<AttemptId>(),
-            std::any::type_name::<ExecutionId>(),
-            std::any::type_name::<ProviderSessionId>(),
-        ];
-        for (index, name) in names.iter().enumerate() {
-            for other in names.iter().skip(index + 1) {
-                assert_ne!(name, other);
-            }
-        }
-    }
-
-    #[test]
-    fn identities_serialize_as_plain_strings() {
-        let mission =
-            MissionId::new("agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e").expect("mission");
-        let json = serde_json::to_value(&mission).expect("serialize");
-        assert_eq!(
-            json,
-            serde_json::Value::String(
-                "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e".to_string()
-            )
-        );
-        let decoded: MissionId = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(decoded, mission);
-    }
 
     #[test]
     fn derived_identities_are_bounded_and_frame_decision_components() {

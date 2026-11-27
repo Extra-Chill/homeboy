@@ -1,5 +1,3 @@
-#[path = "cli_binary/agent_task_provider_flag_diagnostic.rs"]
-mod agent_task_provider_flag_diagnostic;
 #[path = "cli_binary/agent_tool_dispatch.rs"]
 mod agent_tool_dispatch;
 #[path = "cli_binary/build_cache.rs"]
@@ -38,8 +36,6 @@ mod output_dispatch;
 mod output_errors;
 #[path = "cli_binary/product_identity_test.rs"]
 mod product_identity_test;
-#[path = "cli_binary/promotion_provider_stdin.rs"]
-mod promotion_provider_stdin;
 #[path = "cli_binary/recover_preflight.rs"]
 mod recover_preflight;
 #[path = "cli_binary/refactor_rename_test.rs"]

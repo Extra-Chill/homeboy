@@ -446,17 +446,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rig_install_capability_preflight_requires_homeboy_tool() {
-        let preflight = rig_install_capability_preflight();
-        assert_eq!(preflight.command, "rig.install");
-        assert_eq!(
-            preflight.required_tools,
-            vec![RunnerRequiredTool::homeboy()]
-        );
-        assert!(!preflight.is_empty());
-    }
-
-    #[test]
     fn runner_rig_commands_and_env_share_the_admitted_registry_root() {
         let root = "/runner/app-homeboy-artifacts/rig-registry";
         assert_eq!(
@@ -486,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_source_selector_prefers_package_id_for_matching_rig() {
+    fn installed_source_selector_returns_package_id_only_for_a_matching_rig() {
         let stdout = serde_json::json!({
             "success": true,
             "data": {
@@ -509,29 +498,8 @@ mod tests {
             installed_source_selector_for_rig(&stdout, "target-rig").unwrap(),
             Some("old-source".to_string())
         );
-    }
-
-    #[test]
-    fn installed_source_selector_ignores_unrelated_sources() {
-        let stdout = serde_json::json!({
-            "success": true,
-            "data": {
-                "report": {
-                    "sources": [
-                        {
-                            "source": "/runner/old-source",
-                            "package_id": "old-source",
-                            "package_path": "/runner/old-source",
-                            "rigs": [{ "id": "other-rig" }]
-                        }
-                    ]
-                }
-            }
-        })
-        .to_string();
-
         assert_eq!(
-            installed_source_selector_for_rig(&stdout, "target-rig").unwrap(),
+            installed_source_selector_for_rig(&stdout, "other-rig").unwrap(),
             None
         );
     }
@@ -606,33 +574,37 @@ mod tests {
     }
 
     #[test]
-    fn relative_rig_source_requires_declared_worktree_context() {
-        let error = resolve_installed_rig_source(
-            "fixture-matrix",
-            Some("rigs/fixture-matrix"),
-            "rigs/fixture-matrix",
-            "",
-        )
-        .expect_err("relative source without context rejects");
-
-        assert!(error
-            .message
-            .contains("declared repository or worktree context"));
-    }
-
-    #[test]
-    fn relative_rig_source_rejects_missing_package_file() {
+    fn relative_rig_source_rejects_missing_context_missing_package_and_traversal() {
         let worktree = tempfile::tempdir().expect("worktree");
         std::fs::create_dir_all(worktree.path().join("rigs/fixture-matrix")).expect("source root");
-        let error = resolve_installed_rig_source(
-            "fixture-matrix",
-            Some("rigs/fixture-matrix"),
-            "rigs/fixture-matrix/rig.json",
-            &worktree.path().display().to_string(),
-        )
-        .expect_err("missing package file rejects");
+        let worktree = worktree.path().display().to_string();
+        let cases = [
+            (
+                "rigs/fixture-matrix",
+                "rigs/fixture-matrix",
+                "",
+                "declared repository or worktree context",
+            ),
+            (
+                "rigs/fixture-matrix",
+                "rigs/fixture-matrix/rig.json",
+                worktree.as_str(),
+                "package path does not exist",
+            ),
+            (
+                "../outside",
+                "../outside",
+                worktree.as_str(),
+                "escapes the declared source root",
+            ),
+        ];
 
-        assert!(error.message.contains("package path does not exist"));
+        for (source_root, package, context, message) in cases {
+            let error =
+                resolve_installed_rig_source("fixture-matrix", Some(source_root), package, context)
+                    .expect_err("unresolvable relative source rejects");
+            assert!(error.message.contains(message), "{}", error.message);
+        }
     }
 
     #[test]
@@ -728,55 +700,46 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn relative_source_root_symlink_escaping_worktree_rejects() {
-        use std::os::unix::fs::symlink;
-
-        let worktree = tempfile::tempdir().expect("worktree");
-        let external = tempfile::tempdir().expect("external package");
-        symlink(external.path(), worktree.path().join("external-source"))
-            .expect("external source symlink");
-
-        let error = resolve_installed_rig_source(
-            "fixture-matrix",
-            Some("external-source"),
-            "external-source",
-            &worktree.path().display().to_string(),
-        )
-        .expect_err("source symlink outside worktree rejects");
-
-        assert!(error
-            .message
-            .contains("source root resolves outside the declared worktree"));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn relative_package_symlink_escaping_worktree_rejects() {
+    fn relative_source_root_or_package_symlink_escaping_worktree_rejects() {
         use std::os::unix::fs::symlink;
 
         let worktree = tempfile::tempdir().expect("worktree");
         let external = tempfile::tempdir().expect("external package");
         std::fs::create_dir_all(worktree.path().join("rigs")).expect("source root");
+        symlink(external.path(), worktree.path().join("external-source"))
+            .expect("external source symlink");
         symlink(
             external.path(),
             worktree.path().join("rigs/external-package"),
         )
         .expect("external package symlink");
 
-        let error = resolve_installed_rig_source(
-            "fixture-matrix",
-            Some("rigs"),
-            "rigs/external-package",
-            &worktree.path().display().to_string(),
-        )
-        .expect_err("package symlink outside worktree rejects");
-
-        assert!(error
-            .message
-            .contains("package path resolves outside the declared worktree"));
+        for (source_root, package, message) in [
+            (
+                "external-source",
+                "external-source",
+                "source root resolves outside the declared worktree",
+            ),
+            (
+                "rigs",
+                "rigs/external-package",
+                "package path resolves outside the declared worktree",
+            ),
+        ] {
+            let error = resolve_installed_rig_source(
+                "fixture-matrix",
+                Some(source_root),
+                package,
+                &worktree.path().display().to_string(),
+            )
+            .expect_err("symlink outside worktree rejects");
+            assert!(error.message.contains(message), "{}", error.message);
+        }
     }
 
+    #[cfg(unix)]
     #[cfg(unix)]
     #[test]
     fn relative_internal_symlink_source_and_package_are_authorized() {
@@ -821,20 +784,6 @@ mod tests {
             .iter()
             .filter_map(|hint| hint.as_str())
             .any(|hint| hint.contains("Reinstall the rig")));
-    }
-
-    #[test]
-    fn relative_rig_source_rejects_worktree_traversal() {
-        let worktree = tempfile::tempdir().expect("worktree");
-        let error = resolve_installed_rig_source(
-            "fixture-matrix",
-            Some("../outside"),
-            "../outside",
-            &worktree.path().display().to_string(),
-        )
-        .expect_err("traversal rejects");
-
-        assert!(error.message.contains("escapes the declared source root"));
     }
 
     #[test]

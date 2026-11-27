@@ -263,7 +263,7 @@ fn resolve_changelog_info(
     let info = crate::release_provider::changelog_info(component)?;
 
     // No hint: homeboy auto-generates changelog entries from commits at
-    // release time, so an empty `## Unreleased` section no longer implies
+    // release time, so an empty `## Unreleased` section does not mean
     // the user needs to do anything. The count itself is still useful
     // context for `homeboy release changes` output.
     Some(ChangelogInfo {

@@ -8,50 +8,31 @@ use homeboy_core::api_jobs::{
 };
 use homeboy_core::test_support::with_isolated_home;
 
-/// The tests below drive the store-rooted lifecycle entry points. Resolving the
-/// store once here keeps the ambient lookup in a single place instead of at
-/// every call site, and lets the ambient wrappers be deleted (#7505).
 fn test_lifecycle_store() -> AgentTaskLifecycleStore {
     AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
+/// A new `runner exec --run-id` binds its daemon job to a generic run created
+/// on demand, and a re-bind replaces the job. Creation, reuse and the
+/// agent-task ownership collision share `ensure_generic_runner_exec_run` and
+/// are covered by `diagnostic_ssh_run_id_creates_generic_run_without_a_runner_job`.
 #[test]
-fn runner_exec_run_id_creates_generic_run_on_demand() {
-    // #8447: `runner exec --run-id <new-id>` documents an explicit persisted
-    // evidence ID, but the ID was routed through agent-task lifecycle lookup and
-    // rejected as a missing agent-task record before the command executed. A new
-    // ad hoc ID must own a generic runner-execution run created on demand.
+fn runner_exec_job_identity_creates_and_rebinds_a_generic_run() {
     with_isolated_home(|_| {
         let command = vec!["cargo".to_string(), "build".to_string()];
-
-        // (1) A new valid runner-exec ID creates and binds a generic run.
         let created = record_runner_exec_job_identity(
-            "recovery-8447-lab-build-r3",
+            "recovery-lab-build-r3",
             "homeboy-lab",
             "job-1",
             "/runner/workspace/homeboy",
             &command,
         )
         .expect("new ad hoc run id creates a generic runner-exec run");
-        assert_eq!(created.kind, "runner_execution");
         assert_eq!(created.metadata_json["kind"], RUNNER_EXEC_RUN_KIND);
-        assert_eq!(created.metadata_json["runner_id"], "homeboy-lab");
         assert_eq!(created.metadata_json["runner_job_id"], "job-1");
-        assert!(created.metadata_json.get("agent_task_run").is_none());
 
-        // The generic run is a real durable record without agent-task metadata.
-        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        let loaded = store
-            .get_run("recovery-8447-lab-build-r3")
-            .expect("read run")
-            .expect("generic run persisted");
-        assert_eq!(loaded.kind, "runner_execution");
-        assert_eq!(loaded.metadata_json["kind"], RUNNER_EXEC_RUN_KIND);
-        assert!(loaded.metadata_json.get("agent_task_run").is_none());
-
-        // (2) Reusing the same generic ID re-attaches without error.
         let reused = record_runner_exec_job_identity(
-            "recovery-8447-lab-build-r3",
+            "recovery-lab-build-r3",
             "homeboy-lab",
             "job-2",
             "/runner/workspace/homeboy",
@@ -59,27 +40,13 @@ fn runner_exec_run_id_creates_generic_run_on_demand() {
         )
         .expect("existing generic run id re-binds");
         assert_eq!(reused.metadata_json["runner_job_id"], "job-2");
-
-        // (3) An ID already owned by an agent-task lifecycle run is a different
-        //     owner: reusing it as a generic runner-exec run fails closed before
-        //     any runner mutation, with an ownership diagnostic.
-        submit_plan(&test_plan(), Some("agent-task-owned-8447")).expect("agent-task run submitted");
-        let collision = record_runner_exec_job_identity(
-            "agent-task-owned-8447",
-            "homeboy-lab",
-            "job-3",
-            "/runner/workspace/homeboy",
-            &command,
-        )
-        .expect_err("reusing an agent-task id as a generic runner-exec run must fail closed");
-        assert_eq!(collision.code, ErrorCode::ValidationInvalidArgument);
-        assert!(
-            collision
-                .message
-                .contains("already exists as an agent-task run"),
-            "ownership diagnostic should name the conflicting agent-task owner: {}",
-            collision.message
-        );
+        let loaded = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run("recovery-lab-build-r3")
+            .expect("read run")
+            .expect("generic run persisted");
+        assert_eq!(loaded.metadata_json["runner_job_id"], "job-2");
+        assert!(loaded.metadata_json.get("agent_task_run").is_none());
     });
 }
 
@@ -109,11 +76,9 @@ fn generic_runner_exec_adopts_and_reuses_a_direct_runner_exec_run() {
 
 #[test]
 fn diagnostic_ssh_run_id_creates_generic_run_without_a_runner_job() {
-    // #9485: the diagnostic-SSH transport executes synchronously and never
-    // accepts a durable runner job, but `runner exec --ssh --run-id <new-id>`
-    // with declared `--artifact`/`--summary` still needs a persisted run to
-    // attach evidence to. A new ad hoc ID must create a generic runner-exec run
-    // on demand even with no runner job, restoring #8447 for the SSH path.
+    // The diagnostic-SSH transport never accepts a durable runner job, but
+    // `runner exec --ssh --run-id <new-id>` still needs a persisted run to
+    // attach declared evidence to.
     with_isolated_home(|_| {
         let command = vec!["node".to_string(), "fuzz.mjs".to_string()];
 
@@ -368,38 +333,6 @@ fn accepted_binding_wins_the_pre_handoff_terminalization_race() {
 }
 
 #[test]
-fn generic_runner_exec_run_supports_artifact_attachment() {
-    // The end-to-end contract #9485 restores: once the generic run exists, the
-    // declared evidence attaches to it (previously `run record not found`).
-    with_isolated_home(|_| {
-        use homeboy_core::observation::ObservationStore;
-
-        ensure_generic_runner_exec_run(
-            "adhoc-evidence-9485",
-            "homeboy-lab",
-            "/runner/workspace",
-            &["node".to_string(), "fuzz.mjs".to_string()],
-        )
-        .expect("generic run created");
-
-        let store = ObservationStore::open_initialized().expect("store");
-        let temp = tempfile::tempdir().expect("tempdir");
-        let summary = temp.path().join("summary.json");
-        std::fs::write(&summary, r#"{"status":"fail","findings":3}"#).expect("write summary");
-
-        let artifact = store
-            .record_artifact_with_metadata(
-                "adhoc-evidence-9485",
-                "summary",
-                &summary,
-                serde_json::json!({ "promoted_by": "runner.exec" }),
-            )
-            .expect("declared summary attaches to the generic run");
-        assert_eq!(artifact.run_id, "adhoc-evidence-9485");
-    });
-}
-
-#[test]
 fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
     with_isolated_home(|_| {
         let command = vec!["node".to_string(), "fuzz.mjs".to_string()];
@@ -490,13 +423,9 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
 
 #[test]
 fn terminal_runner_result_projection_stays_handled_when_a_generic_runner_exec_snapshot_repeats() {
-    // #14169: `project_terminal_runner_result_in_store` owns generic runner-exec
-    // runs through its observation branch, but that branch reports `false` on a
-    // repeated terminal snapshot (the observation row is already terminal), so
-    // the caller fell through to the agent-task `read_record` — which a row
-    // without `agent_task_run` metadata cannot satisfy — and turned idempotent
-    // replay into an error. Both the first projection and its replay must stay
-    // handled for success and failure terminal snapshots alike.
+    // A replayed terminal snapshot of a generic runner-exec run must stay
+    // handled by its observation branch instead of falling through to the
+    // agent-task record lookup, which such a run cannot satisfy (#14169).
     with_isolated_home(|_| {
         let command = vec!["node".to_string(), "fuzz.mjs".to_string()];
         for (run_id, status, expected_status) in [

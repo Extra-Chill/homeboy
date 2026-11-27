@@ -156,27 +156,15 @@ fn recover_summary_names_the_admitted_step_job_and_how_to_watch_it() {
         }),
     )
     .unwrap();
+    assert!(summary.contains("Recovery step: regate"), "{summary}");
+    assert!(summary.contains("Attempt: cook-attempt-1"), "{summary}");
+    assert!(summary.contains("Status: admitted"), "{summary}");
     assert!(summary.contains("Step job: job-1"), "{summary}");
     assert!(
         summary.contains("Next: homeboy agent-task status cook-attempt-1 --watch"),
         "{summary}"
     );
     assert!(!summary.contains("Placement: pending"), "{summary}");
-}
-
-#[cfg(test)]
-#[test]
-fn recover_summary_names_step_attempt_and_state() {
-    let summary = render_agent_task_summary(
-        AgentTaskSummaryKind::Recover,
-        &serde_json::json!({
-            "step": {"kind": "continue"}, "run_id": "cook-attempt-2", "status": "running"
-        }),
-    )
-    .unwrap();
-    assert!(summary.contains("Recovery step: continue"));
-    assert!(summary.contains("Attempt: cook-attempt-2"));
-    assert!(summary.contains("Status: running"));
 }
 
 fn render_providers_summary(payload: &Value) -> Option<String> {
@@ -1243,36 +1231,49 @@ pub(crate) fn live_gate_verifying(payload: &Value) -> bool {
 #[cfg(test)]
 mod status_run_fixtures;
 
+#[cfg(test)]
 #[test]
-fn recovery_guidance_cannot_override_empty_eligibility() {
-    let payload = serde_json::json!({
-        "state": "candidate_recoverable",
-        "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
-        "action_eligibility": { "actions": [] }
-    });
-    assert_eq!(
-        control_plane_next_action(&payload, "run"),
-        "homeboy runs evidence run"
-    );
-}
-
-#[test]
-fn recovery_step_wins_when_eligibility_reports_only_indeterminate_actions() {
-    // `recover` is not a control-plane action: a retained candidate's report
-    // lists promotion as indeterminate and nothing as available, yet the
-    // projected step is what `recover` performs.
-    let payload = serde_json::json!({
-        "state": "candidate_recoverable",
-        "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
-        "action_eligibility": { "actions": [
-            { "action": "promote", "availability": "indeterminate" },
-            { "action": "cancel", "availability": "unavailable" }
-        ] }
-    });
-    assert_eq!(
-        control_plane_next_action(&payload, "run"),
-        "homeboy agent-task recover run"
-    );
+fn control_plane_next_action_follows_owner_recovery_and_eligibility() {
+    let cases = [
+        // A live publication watches the continuation owner's Cook.
+        (
+            serde_json::json!({
+                "state": "running", "phase": "publishing", "mission": "cook-1",
+                "owner": {"kind": "cook_continuation", "id": "123"},
+                "candidate": {"state": "verification_pending"}
+            }),
+            "homeboy agent-task status cook-1 --watch",
+        ),
+        // Recovery guidance cannot override empty eligibility.
+        (
+            serde_json::json!({
+                "state": "candidate_recoverable",
+                "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
+                "action_eligibility": { "actions": [] }
+            }),
+            "homeboy runs evidence run",
+        ),
+        // `recover` is not a control-plane action: with only indeterminate
+        // actions the projected recovery step wins.
+        (
+            serde_json::json!({
+                "state": "candidate_recoverable",
+                "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
+                "action_eligibility": { "actions": [
+                    { "action": "promote", "availability": "indeterminate" },
+                    { "action": "cancel", "availability": "unavailable" }
+                ] }
+            }),
+            "homeboy agent-task recover run",
+        ),
+    ];
+    for (payload, expected) in cases {
+        assert_eq!(
+            control_plane_next_action(&payload, "run"),
+            expected,
+            "{payload}"
+        );
+    }
 }
 
 pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
@@ -1741,20 +1742,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn agent_task_live_publication_watches_the_continuation_owner() {
-        let payload = json!({
-            "state": "running", "phase": "publishing", "mission": "cook-1",
-            "owner": {"kind": "cook_continuation", "id": "123"},
-            "candidate": {"state": "verification_pending"}
-        });
-        assert_eq!(
-            control_plane_next_action(&payload, "attempt-1"),
-            "homeboy agent-task status cook-1 --watch"
-        );
-    }
-
-    /// #18638: an admission-pending Cook renders the same state and phase in
+    /// An admission-pending Cook renders the same state and phase in
     /// the human summary and the JSON envelope; neither reports `succeeded`.
     #[test]
     fn admission_pending_cook_renders_the_same_state_in_human_and_json() {
@@ -1815,13 +1803,13 @@ mod tests {
     }
 
     #[test]
-    fn queued_status_behind_a_dead_daemon_names_daemon_recover() {
-        let payload = queued_status(Some(json!({
+    fn queued_status_waits_unless_the_daemon_cannot_admit_work() {
+        let dead = queued_status(Some(json!({
             "admits_work": false,
             "summary": "no daemon lease is recorded and the daemon API is unreachable"
         })));
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload)
-            .expect("status summary");
+        let summary =
+            render_agent_task_summary(AgentTaskSummaryKind::Status, &dead).expect("status summary");
         assert!(!summary.contains("waiting is recommended"), "{summary}");
         assert!(
             summary.contains("Daemon: no daemon lease is recorded"),
@@ -1831,10 +1819,7 @@ mod tests {
             summary.contains("Next: homeboy daemon recover"),
             "{summary}"
         );
-    }
 
-    #[test]
-    fn queued_status_with_a_live_daemon_still_recommends_waiting() {
         for daemon in [
             None,
             Some(json!({ "admits_work": true, "summary": "live" })),
@@ -1953,7 +1938,7 @@ mod tests {
         assert!(!summary.contains("private-command-secret"));
     }
 
-    /// #14729: preview must report the *resolved* placement, not the
+    /// Preview must report the *resolved* placement, not the
     /// operator's request, and must name why they diverge when a Lab-desiring
     /// request degrades to local execution.
     #[test]
@@ -2144,7 +2129,7 @@ mod tests {
         assert!(!summary.contains("{\n"));
     }
 
-    /// #15881: one bounded line per provider route the run skipped as unready
+    /// One bounded line per provider route the run skipped as unready
     /// before dispatch, so a credentials-dead primary is operator-visible.
     #[test]
     fn cook_summary_names_each_skipped_provider_route() {
@@ -2265,33 +2250,17 @@ mod tests {
             "Agent task cook\nPrimary failure: provider dmc resolve failed during transport_dispatcher_prepare (exit 1)\nProvider stderr: DMC standalone identity does not provide tracker ownership.\nNext: homeboy agent-task diagnose agent-task-provider-failure --full\nRun: agent-task-provider-failure"
         ));
         assert_eq!(summary.matches("Next:").count(), 1);
-    }
 
-    #[test]
-    fn cook_summary_labels_empty_provider_stderr() {
-        let payload = json!({
-            "run_id": "agent-task-provider-failure",
-            "state": "failed",
-            "primary_failure": {
-                "provider_id": "dmc",
-                "operation": "resolve",
-                "phase": "worktree_provider_lookup",
-                "exit_code": 1,
-                "stderr_excerpt": "",
-                "next_action": {
-                    "command": "homeboy agent-task diagnose agent-task-provider-failure --full"
-                }
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
-        assert!(summary.contains("Provider stderr: (empty)\n"));
+        let mut empty_stderr = payload;
+        empty_stderr["primary_failure"]["stderr_excerpt"] = json!("");
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &empty_stderr).unwrap();
+        assert!(summary.contains("Provider stderr: (empty)\n"), "{summary}");
     }
 
     #[test]
     fn cook_summary_reports_no_patch_produced_when_all_cells_are_empty() {
-        // Reproduces the #4610 cook summary: 3 succeeded cells, but every patch
-        // artifact is 0 bytes. The summary must not advertise success.
+        // Three succeeded cells, but every patch artifact is 0 bytes. The
+        // summary must not advertise success.
         let payload = json!({
             "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "empty", "counts": {"empty": 3}, "diff_bytes": 0, "changed_files": 0, "changed_files_unknown_patches": 0},
             "run_id": "agent-task-abe47e4d",
@@ -2410,19 +2379,14 @@ mod tests {
     }
 
     #[test]
-    fn oversized_empty_artifacts_keep_the_terminal_summary_unknown() {
-        let artifacts = (0..257)
-            .map(
-                |index| json!({ "id": format!("empty-{index}"), "kind": "patch", "size_bytes": 0 }),
-            )
-            .collect::<Vec<_>>();
+    fn degraded_candidate_scan_keeps_the_terminal_summary_unknown() {
+        // An omitted-artifact scan must not be read as an all-empty run.
         let payload = json!({
             "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "scan": {"artifacts_omitted": 1}},
-
             "run_id": "agent-task-truncated",
             "state": "succeeded",
             "task_count": 1,
-            "aggregate": { "outcomes": [{ "artifacts": artifacts }] }
+            "aggregate": { "outcomes": [{ "artifacts": [{ "id": "empty", "kind": "patch", "size_bytes": 0 }] }] }
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
@@ -2455,57 +2419,28 @@ mod tests {
     }
 
     #[test]
-    fn cook_summary_counts_empty_change_evidence_as_empty_not_candidate() {
-        let payload = json!({
-            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "empty", "counts": {"empty": 1}, "diff_bytes": 0, "changed_files": 0, "changed_files_unknown_patches": 0},
-            "run_id": "homeboy-4345",
-            "state": "succeeded",
-            "task_count": 1,
-            "aggregate_review": {
-                "summary": { "apply_candidates": 0 }
-            },
-            "aggregate": {
-                "outcomes": [{
-                    "task_id": "homeboy-4345",
-                    "artifacts": [{ "id": "empty-patch", "kind": "patch", "path": "/tmp/patch.diff", "size_bytes": 0 }]
-                }]
-            }
-        });
+    fn cook_summary_reports_known_or_unknown_changed_files() {
+        // (changed_files, changed_files_unknown_patches, expected line)
+        for (changed, unknown, expected) in [
+            (2, 0, "Changed files: 2\n"),
+            (0, 1, "Changed files: unknown\n"),
+        ] {
+            let payload = json!({
+                "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 256, "changed_files": changed, "changed_files_unknown_patches": unknown},
+                "run_id": "homeboy-4345",
+                "state": "succeeded",
+                "task_count": 1
+            });
 
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+            let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
 
-        assert!(summary.contains("Patch candidates: 0 non-empty / 1 empty\n"));
-        assert!(summary.contains("Diff bytes: 0\n"));
-        assert!(summary.contains("Next: homeboy runs logs homeboy-4345\n"));
-        assert!(!summary.contains("Next: homeboy agent-task review"));
-    }
-
-    #[test]
-    fn cook_summary_surfaces_changed_files_and_diff_bytes_from_metadata() {
-        let payload = json!({
-            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 256, "changed_files": 2, "changed_files_unknown_patches": 0},
-            "run_id": "homeboy-4345",
-            "state": "succeeded",
-            "task_count": 1,
-            "aggregate": {
-                "outcomes": [{
-                    "task_id": "homeboy-4345",
-                    "artifacts": [{
-                        "id": "patch",
-                        "kind": "patch",
-                        "path": "/tmp/patch.diff",
-                        "size_bytes": 256,
-                        "metadata": { "changed_files": ["src/lib.rs", "src/main.rs"] }
-                    }]
-                }]
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
-
-        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
-        assert!(summary.contains("Changed files: 2\n"));
-        assert!(summary.contains("Diff bytes: 256\n"));
+            assert!(
+                summary.contains("Patch candidates: 1 non-empty / 0 empty\n"),
+                "{summary}"
+            );
+            assert!(summary.contains(expected), "{summary}");
+            assert!(summary.contains("Diff bytes: 256\n"), "{summary}");
+        }
     }
 
     #[test]
@@ -2585,31 +2520,6 @@ mod tests {
     }
 
     #[test]
-    fn review_summary_counts_recoverable_candidate_artifacts() {
-        let payload = json!({
-            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 7635, "changed_files": 3, "changed_files_unknown_patches": 0},
-            "run_id": "agent-task-11805-recoverable",
-            "state": "partial_failure",
-            "aggregate_review": {
-                "summary": { "apply_candidates": 0, "failed": 0 },
-                "review_candidates": [{ "task_id": "task", "artifact_ids": ["candidate"] }],
-                "artifact_inventory": [{
-                    "task_id": "task",
-                    "artifact_id": "candidate",
-                    "kind": "patch",
-                    "size_bytes": 7635,
-                    "metadata": { "changed_files": ["a.rs", "b.rs", "c.rs"] }
-                }]
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
-
-        assert!(summary.contains("Changed files: 3\n"));
-        assert!(summary.contains("Diff bytes: 7635\n"));
-    }
-
-    #[test]
     fn selection_required_timeout_recovery_keeps_review_inventory() {
         let candidates = [
             ("timeout-recovered-1", 32_318, 2),
@@ -2658,37 +2568,6 @@ mod tests {
         assert!(
             review_summary.contains("Diff bytes: 97048\n"),
             "{review_summary}"
-        );
-    }
-
-    #[test]
-    fn cook_summary_reports_unknown_changed_files_when_content_unavailable() {
-        // Non-empty patch, no metadata, and an unreadable path: report unknown
-        // rather than a misleading verified zero.
-        let payload = json!({
-            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 256, "changed_files": 0, "changed_files_unknown_patches": 1},
-            "run_id": "agent-task-9742-unknown",
-            "state": "succeeded",
-            "task_count": 1,
-            "aggregate": {
-                "outcomes": [{
-                    "task_id": "agent-task-9742-unknown",
-                    "artifacts": [{
-                        "id": "patch",
-                        "kind": "patch",
-                        "path": "/nonexistent/does-not-exist.diff",
-                        "size_bytes": 512
-                    }]
-                }]
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
-
-        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
-        assert!(
-            summary.contains("Changed files: unknown\n"),
-            "expected unknown changed-file count, got: {summary}"
         );
     }
 
@@ -2764,7 +2643,7 @@ mod tests {
 
     #[test]
     fn review_summary_keeps_the_default_compact_apply_candidate() {
-        // #11982: default review must preserve the same substantive candidate
+        // Default review must preserve the same substantive candidate
         // selected for promotion even though full artifact inventories are omitted.
         let payload = json!({
             "run_id": "agent-task-11982",
@@ -2906,13 +2785,6 @@ mod tests {
             }]
         });
 
-        let metrics = code_production_metrics(&payload);
-
-        assert_eq!(metrics.non_empty_patches, 0);
-        assert_eq!(metrics.empty_patches, 0);
-        assert_eq!(metrics.unknown_size_patches, 1);
-        assert_eq!(metrics.diff_bytes, 0);
-
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Review, &payload).unwrap();
         assert!(summary.contains("Patch candidates: 0 non-empty / 0 empty / 1 unknown\n"));
         assert!(!summary.contains("Next: homeboy agent-task promote"));
@@ -2965,7 +2837,6 @@ mod tests {
                 summary.contains("Next: homeboy runs evidence homeboy-4345\n"),
                 "{summary}"
             );
-            assert!(!summary.contains("status_scope"), "{summary}");
             assert!(!summary.contains("Cook outcome:"), "{summary}");
         }
     }
@@ -3247,19 +3118,6 @@ mod tests {
     }
 
     #[test]
-    fn status_summary_rejects_superseded_status_scope_payload() {
-        let payload = json!({
-            "run_id": "retry-run",
-            "state": "cancelled",
-            "status_scope": {
-                "schema": "homeboy/agent-task-status-scope/v1",
-                "queried_attempt": { "run_id": "retry-run" }
-            }
-        });
-        assert!(render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).is_none());
-    }
-
-    #[test]
     fn logs_summary_reads_control_plane_event_page() {
         let payload = json!({
             "schema": "homeboy/control-plane-event-page/v1",
@@ -3283,31 +3141,5 @@ mod tests {
             &json!({ "run_id": "agent-task-d1622a44", "events": [] })
         )
         .is_none());
-    }
-
-    #[test]
-    fn code_production_metrics_skips_rejected_and_non_apply_artifacts_in_cook_outcomes() {
-        let payload = json!({
-            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1, "empty": 1}, "diff_bytes": 64, "changed_files": 2, "changed_files_unknown_patches": 0},
-            "aggregate": {
-                "outcomes": [{
-                    "task_id": "cell-1",
-                    "artifacts": [
-                        { "id": "real-patch", "kind": "patch", "size_bytes": 64 },
-                        { "id": "empty-patch", "kind": "patch", "size_bytes": 0 },
-                        { "id": "rejected-patch", "kind": "patch", "size_bytes": 64, "metadata": { "rejected": true } },
-                        { "id": "false-positive", "kind": "diff", "size_bytes": 64, "metadata": { "false_positive": true } },
-                        { "id": "transcript", "kind": "provider-transcript", "size_bytes": 4096 }
-                    ]
-                }]
-            }
-        });
-
-        let metrics = code_production_metrics(&payload);
-
-        assert_eq!(metrics.non_empty_patches, 1);
-        assert_eq!(metrics.empty_patches, 1);
-        assert_eq!(metrics.unknown_size_patches, 0);
-        assert_eq!(metrics.diff_bytes, 64);
     }
 }

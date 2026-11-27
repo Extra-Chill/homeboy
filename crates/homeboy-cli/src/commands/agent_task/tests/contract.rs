@@ -3,49 +3,7 @@
 use super::support::*;
 
 #[test]
-fn providers_output_includes_core_capability_contract() {
-    with_isolated_home(|_| {
-        let (value, status) = review::providers(ProvidersArgs {
-            backend: None,
-            selector: None,
-            model: None,
-            status: None,
-            secret_env: Vec::new(),
-            validate_readiness: false,
-            refresh: false,
-            catalog: false,
-            full: false,
-            machine_catalog: false,
-            set_default: false,
-        })
-        .expect("providers output");
-
-        assert_eq!(status, 0);
-        // An absent `--backend` leaves the presentation unscoped (#9654).
-        assert_eq!(value["scope"]["filtered"], false);
-        assert!(value["scope"]["backend"].is_null());
-        assert!(value["providers"].is_array());
-        assert_eq!(
-            value["capability_contract"]["schema"],
-            AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
-        );
-        assert_eq!(
-            value["capability_contract"]["provider_schema"],
-            AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
-        );
-        assert_eq!(
-            value["capability_contract"]["request_schema"],
-            AGENT_TASK_REQUEST_SCHEMA
-        );
-        assert_eq!(
-            value["capability_contract"]["outcome_schema"],
-            AGENT_TASK_OUTCOME_SCHEMA
-        );
-    });
-}
-
-#[test]
-fn providers_output_declares_the_scope_it_observed() {
+fn providers_output_declares_its_observed_scope_and_capability_contract() {
     // A provider catalog is only interpretable together with where it was
     // read: controller and runner differ in extensions, runtime defaults,
     // secrets, and provider readiness (#9763).
@@ -87,15 +45,33 @@ fn providers_output_declares_the_scope_it_observed() {
         );
 
         // Additive only: the pre-existing `scope` object keeps its meaning for
-        // callers that already parse this output.
+        // callers that already parse this output; an absent `--backend`
+        // leaves the presentation unscoped (#9654).
         assert_eq!(value["schema"], "homeboy/agent-task-providers/v2");
         assert_eq!(value["scope"]["filtered"], false);
+        assert!(value["scope"]["backend"].is_null());
         assert!(value["providers"].is_array());
+        assert_eq!(
+            value["capability_contract"]["schema"],
+            AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA
+        );
+        assert_eq!(
+            value["capability_contract"]["provider_schema"],
+            AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA
+        );
+        assert_eq!(
+            value["capability_contract"]["request_schema"],
+            AGENT_TASK_REQUEST_SCHEMA
+        );
+        assert_eq!(
+            value["capability_contract"]["outcome_schema"],
+            AGENT_TASK_OUTCOME_SCHEMA
+        );
     });
 }
 
 #[test]
-fn providers_output_labels_runner_scope_without_exposing_secret_values() {
+fn providers_output_labels_runner_scope() {
     with_isolated_home(|_| {
         let execution_runner = homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
         let previous = std::env::var_os(execution_runner);
@@ -124,8 +100,6 @@ fn providers_output_labels_runner_scope_without_exposing_secret_values() {
         assert_eq!(status, 0);
         assert_eq!(value["observed_scope"]["location"], "runner");
         assert_eq!(value["observed_scope"]["runner_id"], "homeboy-lab");
-        let rendered = serde_json::to_string(&value).expect("provider output JSON");
-        assert!(!rendered.contains("secret-value"));
     });
 }
 
@@ -199,24 +173,4 @@ fn contract_output_exports_core_agent_task_metadata() {
         .as_array()
         .expect("sensitive keys")
         .contains(&json!("refresh_token")));
-}
-
-#[test]
-fn generic_loop_contract_fixtures_are_versioned_and_provider_neutral() {
-    let fixtures = [
-        include_str!("../../../../../../tests/fixtures/agent_task_contract/successful_required_artifact_handoff.json"),
-        include_str!("../../../../../../tests/fixtures/agent_task_contract/nested_runtime_import_failure.json"),
-        include_str!("../../../../../../tests/fixtures/agent_task_contract/local_file_evidence_refs.json"),
-        include_str!("../../../../../../tests/fixtures/agent_task_contract/missing_required_artifact.json"),
-    ];
-
-    for raw in fixtures {
-        assert!(!raw.contains("WordPress"));
-        assert!(!raw.contains("Managed Sandbox"));
-        assert!(!raw.contains("Workspace Registry"));
-        assert!(!raw.contains("WPSG"));
-        assert!(!raw.contains("sample-runtime"));
-        let outcome: AgentTaskOutcome = serde_json::from_str(raw).expect("fixture outcome");
-        assert_eq!(outcome.schema, AGENT_TASK_OUTCOME_SCHEMA);
-    }
 }

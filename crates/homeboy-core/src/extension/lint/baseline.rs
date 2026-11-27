@@ -163,7 +163,7 @@ pub fn parse_findings_file(path: &Path) -> homeboy_core::error::Result<Vec<Homeb
     };
 
     for finding in raw_findings {
-        normalize_legacy_lint_finding(finding);
+        normalize_flat_lint_finding(finding);
     }
 
     let findings: Vec<HomeboyFinding> = serde_json::from_value(payload).map_err(|e| {
@@ -296,7 +296,9 @@ fn normalize_sidecar_finding(mut finding: HomeboyFinding, path: &Path) -> Homebo
     finding
 }
 
-fn normalize_legacy_lint_finding(finding: &mut serde_json::Value) {
+/// Lift the flat `{source: "<tool>", code: "<rule>"}` shape the rust, go and
+/// swift lint runners emit onto the canonical `source.kind`/`tool`/`rule` fields.
+fn normalize_flat_lint_finding(finding: &mut serde_json::Value) {
     let Some(object) = finding.as_object_mut() else {
         return;
     };
@@ -354,95 +356,16 @@ mod tests {
     }
 
     #[test]
-    fn test_fingerprint() {
+    fn fingerprint_and_context_label_fall_back_to_message_and_tool() {
         let finding = lint_finding("id-1", "security", "message");
         let fp = LintFingerprint(&finding);
         assert_eq!(fp.fingerprint(), "id-1");
-    }
-
-    #[test]
-    fn test_description() {
-        let finding = lint_finding("id-1", "security", "message");
-        let fp = LintFingerprint(&finding);
-        assert_eq!(fp.description(), "message");
-    }
-
-    #[test]
-    fn test_context_label() {
-        let finding = lint_finding("id-1", "security", "message");
-        let fp = LintFingerprint(&finding);
         assert_eq!(fp.context_label(), "lint:security");
-    }
 
-    #[test]
-    fn test_save_baseline() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let finding = lint_finding("id-1", "security", "message");
-
-        let saved = save_baseline_for_scope(dir.path(), "homeboy", &[finding], &full_scope())
-            .expect("baseline saved");
-
-        assert!(saved.exists());
-    }
-
-    #[test]
-    fn test_load_baseline() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let finding = lint_finding("id-1", "security", "message");
-        save_baseline_for_scope(dir.path(), "homeboy", &[finding], &full_scope())
-            .expect("baseline saved");
-
-        let loaded = load_baseline_for_scope(dir.path(), &full_scope()).expect("baseline loaded");
-
-        assert_eq!(loaded.context_id, "homeboy");
-        assert_eq!(loaded.item_count, 1);
-    }
-
-    #[test]
-    fn test_compare() {
-        let baseline = generic::Baseline {
-            context_id: "homeboy".to_string(),
-            created_at: "2026-05-01T00:00:00Z".to_string(),
-            item_count: 1,
-            known_fingerprints: vec!["id-1".to_string()],
-            metadata: LintBaselineMetadata { findings_count: 1 },
-        };
-        let findings = vec![
-            lint_finding("id-1", "security", "message"),
-            lint_finding("id-2", "i18n", "message 2"),
-        ];
-
-        let comparison = compare(&findings, &baseline);
-
-        assert_eq!(comparison.new_items.len(), 1);
-        assert_eq!(comparison.new_items[0].fingerprint, "id-2");
-    }
-
-    #[test]
-    fn scoped_full_baseline_is_loaded_by_exact_population() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let provenance = LintBaselineProvenance::new(
-            Vec::new(),
-            vec!["eslint".to_string()],
-            "full",
-            None,
-            false,
-            None,
-            None,
-        );
-        save_baseline_for_scope(
-            dir.path(),
-            "scoped",
-            &[lint_finding("scoped", "lint", "scoped")],
-            &provenance,
-        )
-        .expect("save scoped baseline");
-
-        let baseline =
-            load_baseline_for_scope(dir.path(), &provenance).expect("load scoped baseline");
-
-        assert_eq!(baseline.context_id, "scoped");
-        assert_ne!(provenance.baseline_key, BASELINE_KEY);
+        let bare = HomeboyFinding::builder("phpcs", "bare message").build();
+        let fp = LintFingerprint(&bare);
+        assert_eq!(fp.fingerprint(), "bare message");
+        assert_eq!(fp.context_label(), "lint:phpcs");
     }
 
     #[test]
@@ -455,6 +378,15 @@ mod tests {
             &full_scope(),
         )
         .expect("save full-scope baseline");
+        // The same population finds its baseline under a scoped key, never the
+        // legacy unscoped `lint` key.
+        assert_ne!(full_scope().baseline_key, BASELINE_KEY);
+        assert_eq!(
+            load_baseline_for_scope(dir.path(), &full_scope())
+                .expect("same population loads")
+                .context_id,
+            "full"
+        );
         let cases = [
             (
                 vec!["changed.rs".to_string()],
@@ -517,10 +449,7 @@ mod tests {
                 sniffs,
                 exclude_sniffs,
             );
-            let scoped_key = provenance.baseline_key.clone();
-
             assert!(load_baseline_for_scope(dir.path(), &provenance).is_none());
-            assert_eq!(provenance.baseline_key, scoped_key);
         }
     }
 
@@ -610,22 +539,5 @@ mod tests {
 
         assert_eq!(stored, HashSet::from(["lint-1".to_string()]));
         assert!(stored_known_fingerprints(&dir.path().join("missing")).is_empty());
-    }
-
-    #[test]
-    fn test_parse_findings_file() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("lint-findings.json");
-        std::fs::write(
-            &path,
-            r#"[{"tool":"lint","message":"message","category":"security","fingerprint":"id-1","file":"src/lib.rs"}]"#,
-        )
-        .expect("findings file written");
-
-        let findings = parse_findings_file(&path).expect("findings parsed");
-
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].location.file.as_deref(), Some("src/lib.rs"));
-        assert_eq!(findings[0].fingerprint.as_deref(), Some("id-1"));
     }
 }

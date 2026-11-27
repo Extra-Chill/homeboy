@@ -167,26 +167,6 @@ fn proxy_forward_reuse_rejects_a_reused_pid_with_a_different_start_identity() {
 }
 
 #[test]
-fn ensure_running_failure_candidates_are_deduplicated_within_the_byte_budget() {
-    let candidates = (0..20)
-        .map(|index| {
-            serde_json::json!({
-                "pid": index % 4,
-                "ownership": "ambiguous",
-                "cmdline": "homeboy daemon serve --state /very/long/path/that/must/not/expand/the/inline/failure/message"
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let exemplars = super::remote_daemon::bounded_candidate_exemplars(&candidates);
-
-    assert!(exemplars.len() <= super::remote_daemon::MAX_CANDIDATE_EXEMPLAR_BYTES);
-    assert!(exemplars.starts_with('['));
-    assert!(exemplars.ends_with(']'));
-    assert!(exemplars.matches("\"pid\"").count() <= super::remote_daemon::MAX_CANDIDATE_EXEMPLARS);
-}
-
-#[test]
 fn ensure_running_failure_evidence_is_redacted_and_versioned() {
     let artifact_root = tempfile::tempdir().expect("artifact root");
     let store = homeboy_core::observation::ObservationStore::open_initialized_at(

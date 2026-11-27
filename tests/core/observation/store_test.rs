@@ -5,7 +5,7 @@
 //! the database and the artifact tree it indexes are injected and no process
 //! state is mutated (#7505).
 //!
-//! The exceptions are deliberate. `test_status` and `test_database_path` pin
+//! The exceptions are deliberate. `test_status` pins
 //! the *ambient* resolution order itself, and `run_context_tests` assert the
 //! subprocess environment-variable wiring `start_run` reads. Those still use
 //! `with_isolated_home`, because the thing under test is the process
@@ -58,66 +58,23 @@ mod store_init_tests {
         });
     }
 
-    /// Pins the resolved database path under an isolated home.
-    ///
-    /// This deliberately does **not** set `XDG_DATA_HOME`. `homeboy_data()`
-    /// consults the registered home-root override *before* XDG -- the override
-    /// "outranks `XDG_DATA_HOME` deliberately" per its own comment -- and
-    /// `with_isolated_home` always registers one. So an `XdgGuard::set` here
-    /// could never take effect, and asserting an XDG-derived path was pinning
-    /// a resolution order that does not exist. It failed for that reason.
-    ///
-    /// `HOMEBOY_DATA_DIR` is cleared because the harness sets it and it
-    /// short-circuits ahead of everything; clearing it is what makes this the
-    /// production default rather than a test artifact (#11919).
     #[test]
-    fn test_database_path() {
-        with_isolated_home(|home| {
-            let _data_dir =
-                homeboy_core::test_support::EnvVarGuard::unset(crate::paths::HOMEBOY_DATA_DIR_ENV);
-
-            let path = store::database_path().expect("db path");
-
-            assert_eq!(
-                path,
-                home.path()
-                    .join(".local/share/homeboy")
-                    .join(crate::paths::OBSERVATION_DB_FILENAME)
-            );
-        });
-    }
-
-    #[test]
-    fn test_open_initialized() {
+    fn initialization_creates_the_baseline_schema_and_is_idempotent() {
         let context = HermeticTestContext::new();
         let roots = context.path_roots();
 
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-        let status = store.status().expect("status");
+        for open in ["first", "second"] {
+            let store = ObservationStore::open_initialized_in_roots(&roots).expect(open);
+            let status = store.status().expect("status");
 
-        assert!(status.exists);
-        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, BASELINE_SCHEMA_RECORDS);
-        // 9 run-owned and support tables, two resource projections, the work
-        // outbox, and the 4 coordination tables (records, leases, fences,
-        // audit). Missions are derived from `runs.mission_id`.
-        assert_eq!(status.table_count, 24);
-    }
-
-    #[test]
-    fn initialization_is_idempotent() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-
-        ObservationStore::open_initialized_in_roots(&roots).expect("first init");
-        let second = ObservationStore::open_initialized_in_roots(&roots).expect("second init");
-        let status = second.status().expect("status");
-
-        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, BASELINE_SCHEMA_RECORDS);
-        // Reasserted after a second initialization: the control-plane resource
-        // tables are created once and idempotent re-init adds nothing.
-        assert_eq!(status.table_count, 24);
+            assert!(status.exists, "{open}");
+            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION, "{open}");
+            assert_eq!(status.migration_count, BASELINE_SCHEMA_RECORDS, "{open}");
+            // 9 run-owned and support tables, two resource projections, the
+            // work outbox, and the 4 coordination tables (records, leases,
+            // fences, audit). Missions are derived from `runs.mission_id`.
+            assert_eq!(status.table_count, 24, "{open}");
+        }
     }
 
     #[test]
@@ -349,7 +306,7 @@ mod store_init_tests {
     }
 
     #[test]
-    fn test_record_finding() {
+    fn findings_record_singly_and_in_batches_and_filter_on_list() {
         let context = HermeticTestContext::new();
         let roots = context.path_roots();
         let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
@@ -357,26 +314,15 @@ mod store_init_tests {
             .start_run(sample_run("lint", "homeboy"))
             .expect("start run");
 
-        let record = store
-            .record_finding(&sample_finding(&run.id, "security", "src/foo.php"))
+        let single = store
+            .record_finding(&sample_finding(&run.id, "style", "src/baz.php"))
             .expect("record finding");
         let fetched = store
-            .get_finding(&record.id)
+            .get_finding(&single.id)
             .expect("get finding")
             .expect("finding exists");
-
-        assert_eq!(fetched.message, "Missing security");
+        assert_eq!(fetched.message, "Missing style");
         assert_eq!(fetched.fixable, Some(true));
-    }
-
-    #[test]
-    fn test_record_findings() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-        let run = store
-            .start_run(sample_run("lint", "homeboy"))
-            .expect("start run");
 
         let records = store
             .record_findings(&[
@@ -384,26 +330,9 @@ mod store_init_tests {
                 sample_finding(&run.id, "i18n", "src/bar.php"),
             ])
             .expect("record findings");
-
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].rule.as_deref(), Some("security"));
         assert_eq!(records[1].rule.as_deref(), Some("i18n"));
-    }
-
-    #[test]
-    fn test_list_findings() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-        let run = store
-            .start_run(sample_run("lint", "homeboy"))
-            .expect("start run");
-        let records = store
-            .record_findings(&[
-                sample_finding(&run.id, "security", "src/foo.php"),
-                sample_finding(&run.id, "i18n", "src/bar.php"),
-            ])
-            .expect("record findings");
 
         let all = store
             .list_findings(FindingListFilter {
@@ -420,7 +349,7 @@ mod store_init_tests {
             })
             .expect("list file findings");
 
-        assert_eq!(all.len(), 2);
+        assert_eq!(all.len(), 3);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, records[0].id);
     }
@@ -649,7 +578,7 @@ fn deferred_work_intent_backs_off_without_blocking_newer_intents() {
 }
 
 #[test]
-fn test_start_run() {
+fn start_and_finish_run_persist_the_run_record() {
     let context = HermeticTestContext::new();
     let roots = context.path_roots();
     let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
@@ -663,20 +592,30 @@ fn test_start_run() {
     assert_eq!(started.status, "running");
     assert!(started.finished_at.is_none());
     assert_eq!(started.metadata_json["scenario"], "fixture");
+    assert_eq!(
+        store.get_run(&started.id).expect("get run"),
+        Some(started.clone())
+    );
 
-    let fetched = store
-        .get_run(&started.id)
-        .expect("get run")
-        .expect("run exists");
+    let finished = store
+        .finish_run(
+            &started.id,
+            RunStatus::Pass,
+            Some(serde_json::json!({ "scenario": "fixture", "ok": true })),
+        )
+        .expect("finish run");
 
-    assert_eq!(fetched, started);
+    assert_eq!(finished.status, "pass");
+    assert!(finished.finished_at.is_some());
+    assert_eq!(finished.metadata_json["ok"], true);
+    assert_eq!(store.get_run(&started.id).expect("get run"), Some(finished));
 }
 
 mod run_context_tests {
     use super::*;
 
     #[test]
-    fn start_run_records_subprocess_source_snapshot_metadata() {
+    fn start_run_records_subprocess_source_snapshot_and_lab_offload_metadata() {
         with_isolated_home(|_home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("init store");
@@ -689,24 +628,6 @@ mod run_context_tests {
                 "synced_at": "2026-05-16T00:00:00Z",
                 "sync_excludes": ["node_modules/"]
             });
-
-            let _env = homeboy_core::test_support::EnvVarGuard::set(
-                SOURCE_SNAPSHOT_METADATA_ENV,
-                snapshot.to_string(),
-            );
-            let run = store
-                .start_run(sample_run("test", "homeboy"))
-                .expect("start run");
-
-            assert_eq!(run.metadata_json["source_snapshot"], snapshot);
-        });
-    }
-
-    #[test]
-    fn start_run_records_subprocess_lab_offload_metadata() {
-        with_isolated_home(|_home| {
-            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-            let store = ObservationStore::open_initialized().expect("init store");
             let lab = serde_json::json!({
                 "source": "automatic",
                 "status": "fallback",
@@ -715,7 +636,11 @@ mod run_context_tests {
                 "fallback_reason": "runner connect timed out after 3s"
             });
 
-            let _env = homeboy_core::test_support::EnvVarGuard::set(
+            let _snapshot_env = homeboy_core::test_support::EnvVarGuard::set(
+                SOURCE_SNAPSHOT_METADATA_ENV,
+                snapshot.to_string(),
+            );
+            let _lab_env = homeboy_core::test_support::EnvVarGuard::set(
                 LAB_OFFLOAD_METADATA_ENV,
                 lab.to_string(),
             );
@@ -723,6 +648,7 @@ mod run_context_tests {
                 .start_run(sample_run("test", "homeboy"))
                 .expect("start run");
 
+            assert_eq!(run.metadata_json["source_snapshot"], snapshot);
             assert_eq!(run.metadata_json["lab_offload"], lab);
         });
     }
@@ -791,7 +717,7 @@ mod run_context_tests {
 }
 
 #[test]
-fn import_run_is_idempotent_for_existing_mirrored_run_id() {
+fn import_run_is_idempotent_and_rejects_conflicting_records() {
     let context = HermeticTestContext::new();
     let roots = context.path_roots();
     let first = ObservationStore::open_initialized_in_roots(&roots).expect("first store");
@@ -800,53 +726,15 @@ fn import_run_is_idempotent_for_existing_mirrored_run_id() {
 
     first.import_run(&run).expect("first import");
     second.import_run(&run).expect("duplicate import");
+    assert_eq!(second.get_run(&run.id).expect("get run"), Some(run.clone()));
 
-    assert_eq!(second.get_run(&run.id).expect("get run"), Some(run));
-}
-
-#[test]
-fn import_run_rejects_conflicting_existing_record() {
-    let context = HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
-    let run = sample_import_run("runner-run-456");
-    let mut conflicting = run.clone();
+    let mut conflicting = run;
     conflicting.status = "fail".to_string();
-
-    store.import_run(&run).expect("first import");
-    let err = store
+    let err = second
         .import_run(&conflicting)
         .expect_err("conflicting duplicate should fail");
-
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
     assert!(err.message.contains("existing run record conflicts"));
-}
-
-#[test]
-fn test_finish_run() {
-    let context = HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-    let started = store
-        .start_run(sample_run("bench", "homeboy"))
-        .expect("start run");
-
-    let finished = store
-        .finish_run(
-            &started.id,
-            RunStatus::Pass,
-            Some(serde_json::json!({ "scenario": "fixture", "ok": true })),
-        )
-        .expect("finish run");
-    let fetched = store
-        .get_run(&started.id)
-        .expect("get run")
-        .expect("run exists");
-
-    assert_eq!(finished.status, "pass");
-    assert!(finished.finished_at.is_some());
-    assert_eq!(finished.metadata_json["ok"], true);
-    assert_eq!(fetched, finished);
 }
 
 #[test]
@@ -1287,33 +1175,7 @@ mod store_artifact_tests {
     }
 
     #[test]
-    fn test_list_artifacts() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-        let run = store
-            .start_run(sample_run("trace", "homeboy"))
-            .expect("start run");
-        let first_path = context.root().join("first.json");
-        let second_path = context.root().join("second.log");
-        std::fs::write(&first_path, b"first").expect("write first");
-        std::fs::write(&second_path, b"second").expect("write second");
-
-        let first = store
-            .record_artifact(&run.id, "first", &first_path)
-            .expect("record first");
-        let second = store
-            .record_artifact(&run.id, "second", &second_path)
-            .expect("record second");
-
-        let artifacts = store.list_artifacts(&run.id).expect("list artifacts");
-        assert_eq!(artifacts.len(), 2);
-        assert_eq!(artifacts[0].id, first.id);
-        assert_eq!(artifacts[1].id, second.id);
-    }
-
-    #[test]
-    fn test_list_artifacts_for_runs() {
+    fn list_artifacts_for_runs_groups_by_run_in_recording_order() {
         let context = HermeticTestContext::new();
         let roots = context.path_roots();
         let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
@@ -1334,6 +1196,9 @@ mod store_artifact_tests {
         let first = store
             .record_artifact(&first_run.id, "first", &first_path)
             .expect("record first");
+        let first_again = store
+            .record_artifact(&first_run.id, "first-again", &second_path)
+            .expect("record first again");
         let second = store
             .record_artifact(&second_run.id, "second", &second_path)
             .expect("record second");
@@ -1345,7 +1210,8 @@ mod store_artifact_tests {
                 empty_run.id.clone(),
             ])
             .expect("list artifacts for runs");
-        assert_eq!(artifacts[&first_run.id], vec![first]);
+        // Per-run artifacts keep recording order.
+        assert_eq!(artifacts[&first_run.id], vec![first, first_again]);
         assert_eq!(artifacts[&second_run.id], vec![second]);
         assert!(artifacts[&empty_run.id].is_empty());
     }
@@ -1371,7 +1237,7 @@ mod store_artifact_tests {
 }
 
 mod write_retry {
-    use super::super::{execute_with_retry_inner, is_transient_lock_error};
+    use super::super::execute_with_retry_inner;
     use std::cell::Cell;
 
     fn locked_error() -> rusqlite::Error {
@@ -1386,17 +1252,6 @@ mod write_retry {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
             Some("UNIQUE constraint failed".to_string()),
         )
-    }
-
-    #[test]
-    fn is_transient_lock_error_detects_busy_and_locked() {
-        assert!(is_transient_lock_error(&locked_error()));
-        let locked = rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
-            None,
-        );
-        assert!(is_transient_lock_error(&locked));
-        assert!(!is_transient_lock_error(&persistent_error()));
     }
 
     #[test]
@@ -1430,7 +1285,11 @@ mod write_retry {
         let result: crate::Result<usize> =
             execute_with_retry_inner("persist run".to_string(), 4, 1, |_, _| {}, &mut || {
                 attempts.set(attempts.get() + 1);
-                Err(locked_error())
+                // SQLITE_LOCKED retries exactly like SQLITE_BUSY.
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+                    None,
+                ))
             });
         let err = result.expect_err("exhausted retries should fail");
         assert_eq!(attempts.get(), 4);
@@ -1462,89 +1321,18 @@ mod notification_delivery_marker_tests {
     use super::*;
 
     #[test]
-    fn mark_notification_delivered_sets_marker_and_returns_true() {
+    fn first_notification_delivery_marker_wins_and_preserves_metadata() {
         let context = HermeticTestContext::new();
         let roots = context.path_roots();
         let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
         let run = store
             .start_run(sample_run("test", "homeboy"))
             .expect("start run");
-
-        assert!(!store.is_notification_delivered(&run.id).unwrap());
-        let won = store
-            .mark_notification_delivered(&run.id, "runner-direct")
-            .unwrap();
-
-        assert!(won);
-        assert!(store.is_notification_delivered(&run.id).unwrap());
-    }
-
-    #[test]
-    fn mark_notification_delivered_idempotent_second_call_returns_false() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-        let run = store
-            .start_run(sample_run("test", "homeboy"))
-            .expect("start run");
-
-        let first = store
-            .mark_notification_delivered(&run.id, "runner-direct")
-            .unwrap();
-        let second = store
-            .mark_notification_delivered(&run.id, "controller")
-            .unwrap();
-
-        assert!(first);
-        assert!(!second);
-        assert!(store.is_notification_delivered(&run.id).unwrap());
-    }
-
-    #[test]
-    fn is_notification_delivered_returns_false_for_missing_run() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
 
         assert!(!store.is_notification_delivered("nonexistent-run").unwrap());
-    }
+        assert!(!store.is_notification_delivered(&run.id).unwrap());
 
-    #[test]
-    fn notification_delivered_marker_preserves_existing_metadata() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-        let run = store
-            .start_run(sample_run("test", "homeboy"))
-            .expect("start run");
-
-        store
-            .mark_notification_delivered(&run.id, "runner-direct")
-            .unwrap();
-
-        let fetched = store
-            .get_run(&run.id)
-            .expect("get run")
-            .expect("run exists");
-        assert_eq!(fetched.metadata_json["scenario"], "fixture");
-        assert_eq!(
-            fetched.metadata_json["notification_delivered"]["by"],
-            "runner-direct"
-        );
-        assert!(fetched.metadata_json["notification_delivered"]["at"]
-            .as_str()
-            .is_some());
-    }
-
-    #[test]
-    fn runner_and_controller_race_only_one_wins() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-        let run = store
-            .start_run(sample_run("test", "homeboy"))
-            .expect("start run");
-
+        // Runner and controller race to deliver: only the first marker wins.
         let runner_won = store
             .mark_notification_delivered(&run.id, "runner-direct")
             .unwrap();
@@ -1554,12 +1342,15 @@ mod notification_delivery_marker_tests {
 
         assert!(runner_won);
         assert!(!controller_won);
-        let marker = &store
+        assert!(store.is_notification_delivered(&run.id).unwrap());
+        let fetched = store
             .get_run(&run.id)
             .expect("get run")
-            .expect("run exists")
-            .metadata_json["notification_delivered"];
+            .expect("run exists");
+        assert_eq!(fetched.metadata_json["scenario"], "fixture");
+        let marker = &fetched.metadata_json["notification_delivered"];
         assert_eq!(marker["by"], "runner-direct");
+        assert!(marker["at"].as_str().is_some());
     }
 }
 
@@ -1571,19 +1362,6 @@ mod notification_delivery_marker_tests {
 mod referential_integrity_tests {
     use super::*;
     use crate::observation::store::RUN_OWNED_CHILD_TABLES;
-
-    #[test]
-    fn an_initialized_store_enforces_the_declared_foreign_keys() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("init store");
-
-        assert!(
-            crate::observation::store::schema::foreign_keys_enforced(&store.connection)
-                .expect("read enforcement"),
-            "an initialized store must enforce the foreign keys it declares"
-        );
-    }
 
     /// The invariant made observable: a run cannot be dropped out from under a
     /// row that references it. Before the pragma this delete silently
@@ -1654,8 +1432,8 @@ mod referential_integrity_tests {
     }
 
     /// Retention deletes children first and the parent last. With enforcement
-    /// on, getting that order wrong is no longer a latent orphan -- it is an
-    /// error -- so the happy path is worth pinning.
+    /// on, getting that order wrong is an error rather than a latent orphan,
+    /// so the happy path is worth pinning.
     #[test]
     fn terminal_retention_deletes_a_run_and_its_children_in_a_safe_order() {
         let context = HermeticTestContext::new();

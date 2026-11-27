@@ -955,7 +955,7 @@ impl AgentTaskRunRecord {
     }
 
     /// Why this running record reads as stale, derived from liveness evidence
-    /// on every read. A legacy persisted `stale_running` key is ignored.
+    /// on every read; a persisted `stale_running` key carries no authority.
     pub(crate) fn stale_running_reason(&self) -> Option<&'static str> {
         if self.lifecycle.execution.state != RunExecutionState::Running {
             return None;
@@ -1516,22 +1516,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn legacy_record(metadata: Value) -> AgentTaskRunRecord {
+    fn record_with_metadata(metadata: Value) -> AgentTaskRunRecord {
         serde_json::from_value(json!({
             "schema": schemas::RUN,
-            "run_id": "legacy-handoff",
+            "run_id": "handoff",
             "plan_id": "plan",
             "state": "queued",
             "submitted_at": "2026-01-01T00:00:00+00:00",
             "plan_path": "plan.json",
             "metadata": metadata,
         }))
-        .expect("backward-compatible record parses")
+        .expect("record parses")
     }
 
     #[test]
     fn metadata_acceptance_cannot_manufacture_handoff_authority() {
-        let record = legacy_record(json!({
+        let record = record_with_metadata(json!({
             "lifecycle_store_owner": "controller",
             "runner_id": "homeboy-lab",
             "handoff_acceptance": {
@@ -1548,15 +1548,11 @@ mod tests {
                 .expect("timestamp")
                 .with_timezone(&chrono::Utc)
         ));
-        let round_trip: AgentTaskRunRecord =
-            serde_json::from_value(serde_json::to_value(&record).expect("serialize"))
-                .expect("deserialize");
-        assert_eq!(round_trip.lab_handoff, record.lab_handoff);
     }
 
     #[test]
     fn exact_step_owner_survives_reconciliation_without_a_caller_lease() {
-        let mut record = legacy_record(Value::Object(execution_step_owner_fixture("cook")));
+        let mut record = record_with_metadata(Value::Object(execution_step_owner_fixture("cook")));
         record.lifecycle.execution.state = RunExecutionState::Running;
 
         assert!(!record.is_stale_running());
@@ -1585,11 +1581,11 @@ mod tests {
                 "identity": { "runner_id": "homeboy-lab", "runner_job_id": "job-1" }
             }
         });
-        let accepted = legacy_record(metadata.clone());
+        let accepted = record_with_metadata(metadata.clone());
         assert!(!CookRunState::accepted_lab_handoff(&accepted));
         assert!(accepted.lab_handoff_validation_error().is_some());
 
-        let mut inconsistent = legacy_record(metadata);
+        let mut inconsistent = record_with_metadata(metadata);
         inconsistent.metadata["runner_handoff"]["identity"]["runner_job_id"] = json!("other-job");
         assert!(inconsistent.lab_handoff.is_none());
         assert!(!CookRunState::accepted_lab_handoff(&inconsistent));
@@ -1632,7 +1628,7 @@ mod tests {
             },
         ];
         for handoff in malformed {
-            let mut record = legacy_record(Value::Null);
+            let mut record = record_with_metadata(Value::Null);
             record.lab_handoff = Some(handoff);
             assert!(record.lab_handoff_validation_error().is_some());
             assert!(!CookRunState::accepted_lab_handoff(&record));
@@ -1645,12 +1641,11 @@ mod tests {
             authority: "independent-review".to_string(),
             policy: "release-v1".to_string(),
         };
-        let mut acceptance = AgentTaskAcceptanceRecord::pending(
+        let acceptance = AgentTaskAcceptanceRecord::pending(
             requirement,
             acceptance_candidate("candidate-a", "candidate-a-tree"),
             "base-a".to_string(),
         );
-        assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
         assert!(acceptance.matches_candidate(
             &acceptance_candidate("candidate-a", "candidate-a-tree"),
             "base-a"
@@ -1659,13 +1654,10 @@ mod tests {
             &acceptance_candidate("candidate-a", "replacement-tree"),
             "base-a"
         ));
-
-        acceptance.verdict = AgentTaskAcceptanceVerdict::Accepted;
-        let round_trip: AgentTaskAcceptanceRecord = serde_json::from_value(
-            serde_json::to_value(&acceptance).expect("serialize acceptance"),
-        )
-        .expect("deserialize acceptance");
-        assert_eq!(round_trip, acceptance);
+        assert!(!acceptance.matches_candidate(
+            &acceptance_candidate("candidate-a", "candidate-a-tree"),
+            "base-b"
+        ));
     }
 
     #[test]

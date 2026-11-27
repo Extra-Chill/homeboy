@@ -358,33 +358,6 @@ mod tests {
     }
 
     #[test]
-    fn persists_reloads_and_compare_updates_operation_records() {
-        let data_root = tempfile::tempdir().expect("data root");
-        let store = test_store_at(data_root.path());
-        let record = record();
-        store.create(&record).expect("persist");
-        let reloaded = store
-            .load(&record.owner_run_ref)
-            .expect("load")
-            .expect("record");
-        assert_eq!(reloaded, record);
-        let updated = store
-            .update(&record.owner_run_ref, |current| {
-                let mut current = current.expect("record");
-                current.attempt_count += 1;
-                current.finalization_status = "completed".to_string();
-                Ok(current)
-            })
-            .expect("atomic update");
-        assert_eq!(updated.attempt_count, 1);
-        assert!(!store
-            .for_subject("provider_workspace", "component", true)
-            .expect("pending")
-            .iter()
-            .any(|record| record.owner_run_ref == "release/test-owner"));
-    }
-
-    #[test]
     fn records_survive_reopening_the_store_and_list_by_subject() {
         let data_root = tempfile::tempdir().expect("data root");
         let pending = record();

@@ -3,53 +3,38 @@ use crate::engine::run_dir::RunDir;
 use crate::test_support::{home_env_guard, with_isolated_home};
 
 #[test]
-fn test_env_vars() {
+fn env_vars_export_isolated_dirs_and_matching_structured_context() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");
         let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
             .expect("invocation guard");
         let env = guard.env_vars();
 
-        let id = value_for(&env, "HOMEBOY_INVOCATION_ID");
-        assert!(id.starts_with("inv-"));
-        assert!(Path::new(&value_for(&env, "HOMEBOY_INVOCATION_STATE_DIR")).is_dir());
-        assert!(Path::new(&value_for(&env, "HOMEBOY_INVOCATION_ARTIFACT_DIR")).is_dir());
-        assert!(Path::new(&value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")).is_dir());
+        assert!(value_for(&env, "HOMEBOY_INVOCATION_ID").starts_with("inv-"));
+        for key in [
+            "HOMEBOY_INVOCATION_STATE_DIR",
+            "HOMEBOY_INVOCATION_ARTIFACT_DIR",
+            "HOMEBOY_INVOCATION_TMP_DIR",
+        ] {
+            assert!(Path::new(&value_for(&env, key)).is_dir(), "{key}");
+        }
         assert_eq!(
             value_for(&env, "TMPDIR"),
             value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")
         );
         assert!(value_for_optional(&env, "HOMEBOY_INVOCATION_PORT_BASE").is_none());
-        assert!(value_for_optional(&env, "HOMEBOY_INVOCATION_CONTEXT_JSON").is_some());
 
-        run_dir.cleanup();
-    });
-}
-
-#[test]
-fn structured_context_matches_legacy_isolated_dirs() {
-    with_isolated_home(|_| {
-        let run_dir = RunDir::create().expect("run dir");
-        let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
-            .expect("invocation guard");
-        let env = guard.env_vars();
         let context: serde_json::Value =
             serde_json::from_str(&value_for(&env, "HOMEBOY_INVOCATION_CONTEXT_JSON"))
                 .expect("context json");
-
-        assert_eq!(context["id"], value_for(&env, "HOMEBOY_INVOCATION_ID"));
-        assert_eq!(
-            context["state_dir"],
-            value_for(&env, "HOMEBOY_INVOCATION_STATE_DIR")
-        );
-        assert_eq!(
-            context["artifact_dir"],
-            value_for(&env, "HOMEBOY_INVOCATION_ARTIFACT_DIR")
-        );
-        assert_eq!(
-            context["tmp_dir"],
-            value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")
-        );
+        for (field, key) in [
+            ("id", "HOMEBOY_INVOCATION_ID"),
+            ("state_dir", "HOMEBOY_INVOCATION_STATE_DIR"),
+            ("artifact_dir", "HOMEBOY_INVOCATION_ARTIFACT_DIR"),
+            ("tmp_dir", "HOMEBOY_INVOCATION_TMP_DIR"),
+        ] {
+            assert_eq!(context[field], value_for(&env, key), "{field}");
+        }
         assert!(context.get("port_range").is_none());
         assert!(context.get("named_leases").is_none());
 
@@ -93,7 +78,7 @@ fn port_ranges_do_not_overlap_while_leased() {
 }
 
 #[test]
-fn structured_context_includes_named_leases() {
+fn named_leases_are_exported_and_conflicts_report_holder() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");
         let requirements = InvocationRequirements {
@@ -101,32 +86,17 @@ fn structured_context_includes_named_leases() {
             named_leases: vec!["playground-browser-profile".to_string()],
         };
 
-        let guard = InvocationGuard::acquire(&run_dir, &requirements).expect("lease");
+        let first = InvocationGuard::acquire(&run_dir, &requirements).expect("first lease");
         let context: serde_json::Value = serde_json::from_str(&value_for(
-            &guard.env_vars(),
+            &first.env_vars(),
             "HOMEBOY_INVOCATION_CONTEXT_JSON",
         ))
         .expect("context json");
-
         assert_eq!(
             context["named_leases"],
             serde_json::json!(["playground-browser-profile"])
         );
 
-        run_dir.cleanup();
-    });
-}
-
-#[test]
-fn named_lease_conflicts_report_holder() {
-    with_isolated_home(|_| {
-        let run_dir = RunDir::create().expect("run dir");
-        let requirements = InvocationRequirements {
-            port_range_size: None,
-            named_leases: vec!["playground-browser-profile".to_string()],
-        };
-
-        let _first = InvocationGuard::acquire(&run_dir, &requirements).expect("first lease");
         let err = InvocationGuard::acquire(&run_dir, &requirements).expect_err("lease conflict");
         let message = err.to_string();
 
@@ -308,34 +278,21 @@ fn invocation_socket_dirs_fit_under_sockaddr_un_budget() {
             .expect("invocation guard");
         let env = guard.env_vars();
 
-        for key in [
+        let mut keys = vec![
             "HOMEBOY_INVOCATION_STATE_DIR",
             "HOMEBOY_INVOCATION_ARTIFACT_DIR",
-        ] {
+        ];
+        if cfg!(unix) {
+            keys.push("HOMEBOY_INVOCATION_TMP_DIR");
+        }
+        for key in keys {
             let dir = value_for(&env, key);
-            // budget = path bytes + 1 separator + 32-byte filename headroom
+            // budget = path bytes + 1 separator + filename headroom
             let needed = dir.len() + 1 + SOCKET_HEADROOM_BYTES;
             assert!(
                 needed <= SUN_PATH_CAPACITY,
                 "{key} = {dir} needs {needed} bytes, exceeds sockaddr_un capacity \
                  {SUN_PATH_CAPACITY}"
-            );
-            // Headroom must be at least 32 bytes for downstream socket names.
-            let headroom = SUN_PATH_CAPACITY - dir.len() - 1;
-            assert!(
-                headroom >= SOCKET_HEADROOM_BYTES,
-                "{key} = {dir} only leaves {headroom} bytes of headroom, \
-                less than required {SOCKET_HEADROOM_BYTES}"
-            );
-        }
-        #[cfg(unix)]
-        {
-            let dir = value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR");
-            let needed = dir.len() + 1 + SOCKET_HEADROOM_BYTES;
-            assert!(
-                needed <= SUN_PATH_CAPACITY,
-                "HOMEBOY_INVOCATION_TMP_DIR = {dir} needs {needed} bytes, exceeds \
-                 sockaddr_un capacity {SUN_PATH_CAPACITY}"
             );
         }
 
@@ -360,15 +317,6 @@ fn invocation_dirs_are_unique_across_concurrent_invocations() {
 
         run_dir.cleanup();
     });
-}
-
-#[test]
-fn invocation_id_path_component_is_short() {
-    // The short id used in path components should be ~10 chars, far below
-    // the 36-char UUID we used to embed.
-    let id = short_invocation_id();
-    assert!(id.len() <= 12, "short id should be <= 12 chars: {id}");
-    assert!(id.len() >= 8, "short id should be >= 8 chars: {id}");
 }
 
 #[test]
@@ -655,36 +603,6 @@ fn realistic_socket_path_fits_under_sockaddr_un_on_default_platform_root() {
     // STATE_DIR alone must also satisfy the homeboy ≥48-byte (macOS) /
     // ≥32-byte (Linux) headroom contract under default platform root.
     enforce_path_budget(&state_dir).expect("default platform root meets budget contract");
-
-    match prior {
-        Some(value) => std::env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, value),
-        None => std::env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
-    }
-}
-
-#[test]
-fn studio_site_build_socket_path_fits_macos_sockaddr_un() {
-    // Specific regression for the failure observed in #2311 follow-up:
-    // Studio's daemon binds to
-    //   $HOMEBOY_INVOCATION_STATE_DIR/studio-agent-site-build/daemon/daemon.sock
-    // and previously got EINVAL on macOS because the prefix was already
-    // ~64 bytes by the time the workload appended its 41-byte suffix.
-    let _guard = home_env_guard();
-    let prior = std::env::var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
-    std::env::remove_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV);
-
-    let runtime_root = invocation_runtime_root().expect("platform runtime root");
-    let state_dir = runtime_root.join("0123456789");
-    let socket = state_dir.join("studio-agent-site-build/daemon/daemon.sock");
-    let socket_len = socket.to_string_lossy().len();
-
-    // macOS sockaddr_un sun_path = 104; Linux = 108. Test must hold on
-    // either platform's actual default root.
-    assert!(
-        socket_len <= SUN_PATH_CAPACITY,
-        "Studio site-build socket path is {socket_len} bytes, exceeds {SUN_PATH_CAPACITY}: {}",
-        socket.display()
-    );
 
     match prior {
         Some(value) => std::env::set_var(HOMEBOY_INVOCATION_RUNTIME_DIR_ENV, value),

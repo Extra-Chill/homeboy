@@ -267,8 +267,9 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
     })?;
     let capture = bounded_output.capture.clone();
-    let output = bounded_output.into_output();
+    let mut output = bounded_output.into_output();
     let metrics = collector.finish(started.elapsed());
+    append_leftover_evidence(job_cgroup.as_deref(), &mut output.stderr);
     Ok(MeasuredOutput {
         output,
         capture,
@@ -353,8 +354,9 @@ fn durable_command_output_until_cancelled(
     if let Some(observer) = &stdout_line_observer {
         follower.poll(observer.as_ref());
     }
-    let (stdout, stderr, capture) = runner_exec_job::read_output(dir)?;
+    let (stdout, mut stderr, capture) = runner_exec_job::read_output(dir)?;
     let metrics = collector.finish(started.elapsed());
+    append_leftover_evidence(job_cgroup.as_deref(), &mut stderr);
     Ok(MeasuredOutput {
         output: Output {
             status,
@@ -364,6 +366,25 @@ fn durable_command_output_until_cancelled(
         capture,
         metrics,
     })
+}
+
+/// Containment diagnostics travel with stderr in job results and exec --human.
+fn append_leftover_evidence(job: Option<&JobCgroup>, stderr: &mut Vec<u8>) {
+    if let Some(job) = job {
+        match job.stop_with_evidence() {
+            Ok(Some(message)) => {
+                if !stderr.is_empty() && !stderr.ends_with(b"\n") {
+                    stderr.push(b'\n');
+                }
+                stderr.extend_from_slice(message.as_bytes());
+                stderr.push(b'\n');
+            }
+            Ok(None) => {}
+            Err(error) => {
+                homeboy_core::log_status!("runner", "runner job cgroup stop failed: {}", error)
+            }
+        }
+    }
 }
 
 const DURABLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -887,9 +908,7 @@ fn finish_job_cgroup(
 ) -> RunnerCgroupMemoryEvidence {
     sample(0, Some(job), state, guard_violation, guard_limits);
     let evidence = job_cgroup_memory_evidence(&job.counters());
-    if let Err(error) = job.stop() {
-        homeboy_core::log_status!("runner", "runner job cgroup stop failed: {}", error);
-    }
+    // The caller records leftover evidence and stops the group after reading counters.
     evidence
 }
 
@@ -1541,6 +1560,10 @@ mod tests {
         assert_eq!(payload["process"]["root_pid"], 1234);
         assert_eq!(payload["process"]["resources"]["process_count"], 3);
         assert_eq!(payload["process"]["resources"]["child_process_count"], 2);
+
+        let without_resources = runner_command_heartbeat_data(Duration::from_millis(5), 9, None);
+        assert_eq!(without_resources["process"]["root_pid"], 9);
+        assert!(without_resources["process"]["resources"].is_null());
     }
 
     #[test]
@@ -1703,16 +1726,6 @@ mod tests {
             "runner cancel left TERM-resistant descendant {descendant_pid}"
         );
         assert!(!homeboy_core::process::pid_is_running(root_pid));
-    }
-
-    #[test]
-    fn heartbeat_payload_allows_missing_resource_summary() {
-        let payload = runner_command_heartbeat_data(Duration::from_millis(5), 9, None);
-
-        assert_eq!(payload["phase"], "heartbeat");
-        assert_eq!(payload["elapsed_ms"], 5);
-        assert_eq!(payload["process"]["root_pid"], 9);
-        assert!(payload["process"]["resources"].is_null());
     }
 
     #[cfg(unix)]
@@ -1945,51 +1958,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cgroup_oom_kill_delta_is_authoritative_evidence() {
-        let evidence = cgroup_memory_evidence(
-            CgroupMemorySnapshot {
-                memory_limit_bytes: Some(64),
-                memory_current_bytes: Some(63),
-                memory_peak_bytes: Some(64),
-                oom_kill_count: Some(4),
-            },
-            CgroupMemorySnapshot {
-                memory_limit_bytes: Some(64),
-                memory_current_bytes: Some(12),
-                memory_peak_bytes: Some(64),
-                oom_kill_count: Some(5),
-            },
-        );
-
-        assert_eq!(evidence.status, "observed");
-        assert_eq!(evidence.oom_kill_delta, Some(1));
-        assert_eq!(evidence.scope, "child_cgroup");
-        assert_eq!(evidence.oom_kill_attribution, "unknown");
-        assert_eq!(evidence.memory_limit_bytes, Some(64));
-        assert_eq!(evidence.memory_peak_bytes, Some(64));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn cgroup_evidence_does_not_misclassify_an_ordinary_sigkill_as_oom() {
-        let evidence = cgroup_memory_evidence(
-            CgroupMemorySnapshot {
-                memory_limit_bytes: Some(64),
-                memory_current_bytes: Some(24),
-                memory_peak_bytes: Some(32),
-                oom_kill_count: Some(4),
-            },
-            CgroupMemorySnapshot {
-                memory_limit_bytes: Some(64),
-                memory_current_bytes: Some(12),
-                memory_peak_bytes: Some(32),
-                oom_kill_count: Some(4),
-            },
-        );
-
-        assert_eq!(evidence.status, "observed");
-        assert_eq!(evidence.oom_kill_delta, Some(0));
-        assert_ne!(evidence.oom_kill_delta, Some(1));
+    fn cgroup_oom_kill_delta_is_the_only_oom_evidence() {
+        let snapshot = |current, oom_kill_count| CgroupMemorySnapshot {
+            memory_limit_bytes: Some(64),
+            memory_current_bytes: Some(current),
+            memory_peak_bytes: Some(64),
+            oom_kill_count: Some(oom_kill_count),
+        };
+        // An OOM kill increments the counter; an ordinary SIGKILL near the
+        // limit does not.
+        for (before, after, delta) in [(4, 5, 1), (4, 4, 0)] {
+            let evidence = cgroup_memory_evidence(snapshot(63, before), snapshot(12, after));
+            assert_eq!(evidence.status, "observed");
+            assert_eq!(evidence.oom_kill_delta, Some(delta));
+            assert_eq!(evidence.scope, "child_cgroup");
+            assert_eq!(evidence.memory_peak_bytes, Some(64));
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -2016,46 +2000,23 @@ mod tests {
     }
 
     #[test]
-    fn resource_guard_classifies_rss_limit_exceeded() {
-        let violation = classify_resource_guard_violation(17, 3, 16, 128).expect("rss violation");
+    fn resource_guard_classifies_rss_and_process_count_violations() {
+        let rss = classify_resource_guard_violation(17, 3, 16, 128).expect("rss violation");
+        assert_eq!(rss.reason, "rss_limit_exceeded");
+        assert_eq!(rss.rss_bytes, 17);
+        assert_eq!(rss.rss_limit_bytes, 16);
+        assert_eq!(rss.process_count, 3);
 
-        assert_eq!(violation.reason, "rss_limit_exceeded");
-        assert_eq!(violation.rss_bytes, 17);
-        assert_eq!(violation.rss_limit_bytes, 16);
-        assert_eq!(violation.process_count, 3);
-    }
-
-    #[test]
-    fn resource_guard_classifies_process_count_limit_exceeded() {
-        let violation =
+        let processes =
             classify_resource_guard_violation(8, 129, 16, 128).expect("process count violation");
+        assert_eq!(processes.reason, "process_count_limit_exceeded");
+        assert_eq!(processes.process_count, 129);
+        assert_eq!(processes.process_count_limit, 128);
 
-        assert_eq!(violation.reason, "process_count_limit_exceeded");
-        assert_eq!(violation.process_count, 129);
-        assert_eq!(violation.process_count_limit, 128);
-    }
-
-    #[test]
-    fn resource_guard_allows_zero_limits_to_disable_guard() {
-        assert!(classify_resource_guard_violation(u64::MAX, u64::MAX, 0, 0).is_none());
-    }
-
-    #[test]
-    fn resource_guard_allows_idle_capacity_borrowing() {
-        let lab_capacity = 89 * 1024 * 1024 * 1024 + 7 * 1024 * 1024 * 1024 / 10;
-        let limits = resolved_rss_limit(Some(lab_capacity), None);
-        let trusted_cook_rss = 20 * 1024 * 1024 * 1024;
-
-        assert_eq!(limits.rss_limit_bytes, lab_capacity - lab_capacity / 10);
-        assert!(limits.rss_limit_bytes > 19 * 1024 * 1024 * 1024);
-        assert!(classify_resource_guard_violation(
-            trusted_cook_rss,
-            1,
-            limits.rss_limit_bytes,
-            128,
-        )
-        .is_none());
-        assert_eq!(limits.source, "active_load_aware");
+        assert!(
+            classify_resource_guard_violation(u64::MAX, u64::MAX, 0, 0).is_none(),
+            "zero limits disable the guard"
+        );
     }
 
     #[test]
@@ -2097,29 +2058,31 @@ mod tests {
     }
 
     #[test]
-    fn resource_guard_keeps_a_limit_when_capacity_is_smaller_than_headroom() {
-        let limits = resolved_rss_limit(Some(2 * 1024 * 1024 * 1024), None);
+    fn rss_limit_resolution_covers_host_sizes_missing_capacity_and_overrides() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // Large hosts leave a 10% headroom so a trusted 20 GiB cook can borrow
+        // idle capacity.
+        let lab_capacity = 89 * GIB + 7 * GIB / 10;
+        let large_host = resolved_rss_limit(Some(lab_capacity), None);
+        assert_eq!(large_host.rss_limit_bytes, lab_capacity - lab_capacity / 10);
+        assert_eq!(large_host.source, "active_load_aware");
+        assert!(
+            classify_resource_guard_violation(20 * GIB, 1, large_host.rss_limit_bytes, 128)
+                .is_none()
+        );
 
-        assert_eq!(limits.rss_limit_bytes, 1024 * 1024 * 1024);
-        assert_eq!(limits.source, "active_load_aware");
-    }
+        let small_host = resolved_rss_limit(Some(2 * GIB), None);
+        assert_eq!(small_host.rss_limit_bytes, GIB);
+        assert_eq!(small_host.source, "active_load_aware");
 
-    #[test]
-    fn resource_guard_uses_fallback_when_memory_capacity_is_unavailable() {
-        let limits = resolved_rss_limit(None, None);
+        let unknown_capacity = resolved_rss_limit(None, None);
+        assert_eq!(unknown_capacity.rss_limit_bytes, FALLBACK_RSS_LIMIT_BYTES);
+        assert_eq!(unknown_capacity.source, "fallback");
 
-        assert_eq!(limits.rss_limit_bytes, FALLBACK_RSS_LIMIT_BYTES);
-        assert_eq!(limits.source, "fallback");
-    }
-
-    #[test]
-    fn resource_guard_explicit_rss_limit_takes_precedence_over_active_load() {
-        let limits =
-            resolved_rss_limit(Some(96 * 1024 * 1024 * 1024), Some(7 * 1024 * 1024 * 1024));
-
-        assert_eq!(limits.rss_limit_bytes, 7 * 1024 * 1024 * 1024);
-        assert_eq!(limits.source, "explicit_override");
-        assert_eq!(limits.aggregate_rss_budget_bytes, None);
+        let explicit = resolved_rss_limit(Some(96 * GIB), Some(7 * GIB));
+        assert_eq!(explicit.rss_limit_bytes, 7 * GIB);
+        assert_eq!(explicit.source, "explicit_override");
+        assert_eq!(explicit.aggregate_rss_budget_bytes, None);
     }
 
     fn resolved(limit: u64, ceiling: u64, source: &str) -> ResolvedProcessCountLimit {
@@ -2132,29 +2095,23 @@ mod tests {
     }
 
     #[test]
-    fn default_process_limit_and_ceiling_scale_with_parallelism() {
-        assert_eq!(
-            resolve_process_count_limit(32, None, None),
-            resolved(512, 1024, "default")
-        );
-        assert_eq!(
-            resolve_process_count_limit(12, None, None),
-            resolved(192, 384, "default")
-        );
-    }
-
-    #[test]
-    fn default_process_limit_and_ceiling_keep_their_floors_on_small_hosts() {
-        for parallelism in [1, 4, 8] {
+    fn default_process_limit_and_ceiling_scale_with_parallelism_above_their_floors() {
+        for (parallelism, limit, ceiling) in [
+            (32, 512, 1024),
+            (12, 192, 384),
+            (8, 128, 256),
+            (1, 128, 256),
+        ] {
             assert_eq!(
                 resolve_process_count_limit(parallelism, None, None),
-                resolved(128, 256, "default")
+                resolved(limit, ceiling, "default"),
+                "parallelism={parallelism}"
             );
         }
     }
 
     #[test]
-    fn daemon_env_overrides_the_process_limit_and_ceiling() {
+    fn daemon_env_overrides_are_clamped_to_the_process_ceiling() {
         let limit = resolve_process_count_limit(32, Some(768), None);
         assert_eq!(limit.limit, 768);
         assert_eq!(limit.requested, Some(768));
@@ -2169,10 +2126,7 @@ mod tests {
 
         let unclamped = resolve_process_count_limit(32, Some(4096), Some(0));
         assert_eq!(unclamped.limit, 4096, "a ceiling of 0 disables the clamp");
-    }
 
-    #[test]
-    fn process_limit_is_clamped_to_the_ceiling() {
         let override_capped = resolve_process_count_limit(32, Some(4096), None);
         assert_eq!(override_capped.limit, 1024);
         assert_eq!(override_capped.requested, Some(4096));

@@ -191,6 +191,7 @@ fn source_revision_at(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::extension::bench::parsing::{self, BenchRunExecution};
+    use crate::extension::bench::test_support::{results_with_scenarios, scenario_with_iterations};
     use homeboy_core::engine::invocation::InvocationRequirements;
     use homeboy_engine_primitives::baseline::BaselineFlags;
     use homeboy_extension_contract::ExtensionCapability;
@@ -248,51 +249,10 @@ mod tests {
             rig_package: None,
             invocation_requirements: InvocationRequirements::default(),
         };
-        let mut results = BenchResults {
-            component_id: "homeboy".to_string(),
-            iterations: 7,
-            provenance: Default::default(),
-            run_metadata: None,
-            metadata: BTreeMap::new(),
-            metric_groups: BTreeMap::new(),
-            timeline: Vec::new(),
-            span_definitions: BTreeMap::new(),
-            diagnostics: Vec::new(),
-            child_command_failures: Vec::new(),
-            phase_events: Vec::new(),
-            phase_summaries: Vec::new(),
-            failure_classification: None,
-            responsiveness: None,
-            budget_findings: Vec::new(),
-            scenarios: vec![BenchScenario {
-                id: "boot".to_string(),
-                file: Some("tests/bench/boot.rs".to_string()),
-                source: Some("in_tree".to_string()),
-                default_iterations: None,
-                tags: Vec::new(),
-                iterations: 7,
-                metrics: parsing::BenchMetrics {
-                    values: BTreeMap::new(),
-                    distributions: BTreeMap::new(),
-                },
-                metric_groups: BTreeMap::new(),
-                timeline: Vec::new(),
-                span_definitions: Vec::new(),
-                span_results: Vec::new(),
-                gates: Vec::new(),
-                gate_results: Vec::new(),
-                metadata: BTreeMap::new(),
-                provenance: Default::default(),
-                passed: true,
-                memory: None,
-                artifacts: BTreeMap::new(),
-                diagnostics: Vec::new(),
-                runs: None,
-                runs_summary: None,
-            }],
-            metric_policies: BTreeMap::new(),
-            metric_policy_presets: BTreeMap::new(),
-        };
+        let mut scenario = scenario_with_iterations("boot", &[], 7);
+        scenario.file = Some("tests/bench/boot.rs".to_string());
+        scenario.source = Some("in_tree".to_string());
+        let mut results = results_with_scenarios("homeboy", 7, vec![scenario]);
         results
             .provenance
             .labels

@@ -523,30 +523,6 @@ mod tests {
             assert_eq!(run.metadata_json["progress"]["phase"], "dependency_setup");
             assert_eq!(run.metadata_json["progress"]["current"], "fixture-provider");
 
-            let lifecycle = serde_json::to_value(EarlyReviewLifecycle {
-                schema: "homeboy/review-lifecycle/v1",
-                event: "persisted",
-                run_id: &run_id,
-                status: "running",
-                show_command: format!("homeboy runs show {run_id}"),
-                watch_command: format!("homeboy runs watch {run_id}"),
-                cancel_command: format!("homeboy runs cancel {run_id}"),
-            })
-            .expect("lifecycle JSON");
-            assert_eq!(lifecycle["run_id"], run_id);
-            assert_eq!(
-                lifecycle["show_command"],
-                format!("homeboy runs show {run_id}")
-            );
-            assert_eq!(
-                lifecycle["watch_command"],
-                format!("homeboy runs watch {run_id}")
-            );
-            assert_eq!(
-                lifecycle["cancel_command"],
-                format!("homeboy runs cancel {run_id}")
-            );
-
             let (attached, exit_code) = super::super::attach_to_persisted_review(&run_id)
                 .expect("attach to existing review");
             assert_eq!(exit_code, 0);

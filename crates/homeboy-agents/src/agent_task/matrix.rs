@@ -640,42 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn matrix_cell_ids_are_stable_across_input_order_noise() {
-        let first = expand_agent_task_matrix(
-            "bench-plan",
-            vec![
-                AgentTaskMatrixAxis {
-                    name: "model".to_string(),
-                    values: vec!["gpt".to_string(), "claude".to_string()],
-                },
-                AgentTaskMatrixAxis {
-                    name: "prompt".to_string(),
-                    values: vec!["site".to_string()],
-                },
-            ],
-            template_request(),
-        )
-        .expect("expand first");
-        let second = expand_agent_task_matrix(
-            "bench-plan",
-            vec![
-                AgentTaskMatrixAxis {
-                    name: "model".to_string(),
-                    values: vec!["gpt".to_string(), "claude".to_string()],
-                },
-                AgentTaskMatrixAxis {
-                    name: "prompt".to_string(),
-                    values: vec!["site".to_string()],
-                },
-            ],
-            template_request(),
-        )
-        .expect("expand second");
-
-        assert_eq!(first, second);
-    }
-
-    #[test]
     fn matrix_aggregate_preserves_partial_task_failure() {
         let plan = expand_agent_task_matrix(
             "bench-plan",

@@ -6,8 +6,8 @@
 //! silently replaced the other, so a `daemon serve` that spawned one local
 //! child stopped honouring SIGTERM (#18468). [`ChainedSignal`] installs a
 //! handler with `sigaction(2)`, remembers the disposition it displaced, and
-//! lets the new handler forward to it, so installation order no longer
-//! matters.
+//! lets the new handler forward to it, so installation order does not
+//! matter.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

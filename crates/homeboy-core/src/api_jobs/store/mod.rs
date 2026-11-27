@@ -56,12 +56,6 @@ pub(crate) struct AdmissionReservation {
     pub(crate) token: String,
     pub(crate) expires_at_ms: u64,
     pub(crate) created: bool,
-    /// Exact direct-daemon authority registered before this reservation commit.
-    #[allow(
-        dead_code,
-        reason = "Reservation provenance asserted by cfg(test) admission paths; production branches on the reservation itself."
-    )]
-    pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -355,6 +349,8 @@ pub(super) struct ControllerJobSubmission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredJob {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) attached_exec_heartbeat_ms: Option<u64>,
     /// Durable admission state for direct exec and gate jobs, owned by the executing daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_admission_reason: Option<String>,
@@ -430,10 +426,6 @@ pub(crate) struct LocalRunnerJob {
     pub(crate) lifecycle: Option<super::remote_runner::RunnerJobLifecycleMetadata>,
     /// Exact direct-daemon authority required to execute this queued job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[allow(
-        dead_code,
-        reason = "Reservation provenance asserted by cfg(test) admission paths; production branches on the reservation itself."
-    )]
     pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
 }
 
@@ -1452,10 +1444,6 @@ impl JobStore {
                     token: lease.token.clone(),
                     expires_at_ms: lease.expires_at_ms,
                     created: false,
-                    workspace_owner_lease: stored
-                        .local_runner
-                        .as_ref()
-                        .and_then(|runner| runner.workspace_owner_lease.clone()),
                 };
                 return Ok(reservation);
             }
@@ -1526,7 +1514,6 @@ impl JobStore {
                 token,
                 expires_at_ms,
                 created: false,
-                workspace_owner_lease,
             };
             return Ok(reservation);
         }
@@ -1541,7 +1528,6 @@ impl JobStore {
             token: lease.token,
             expires_at_ms: lease.expires_at_ms,
             created,
-            workspace_owner_lease,
         })
     }
 
@@ -1588,13 +1574,12 @@ impl JobStore {
                 .local_runner
                 .as_mut()
                 .expect("admission local runner was checked")
-                .workspace_owner_lease = renewed_owner_lease.clone();
+                .workspace_owner_lease = renewed_owner_lease;
             Ok(AdmissionReservation {
                 job: stored.job.clone(),
                 token: reservation_token,
                 expires_at_ms,
                 created: false,
-                workspace_owner_lease: renewed_owner_lease,
             })
         })
     }
@@ -1888,6 +1873,7 @@ impl JobStore {
         inner.jobs.insert(
             job.id,
             StoredJob {
+                attached_exec_heartbeat_ms: None,
                 // The worker's first admission probe records any wait.
                 pending_admission_reason: None,
                 pending_execution_envelope,
@@ -2969,6 +2955,7 @@ impl JobStore {
                 data: Some(event_data),
             };
             let mut stored = StoredJob {
+                attached_exec_heartbeat_ms: None,
                 pending_admission_reason: None,
                 pending_execution_envelope: None,
                 job,
@@ -3606,7 +3593,7 @@ impl JobStore {
                 .as_ref()
                 .and_then(|state| state.pending_admission_reason.as_ref())
         });
-        if stored.job.status != JobStatus::Queued || reason.is_none() {
+        if stored.job.status != JobStatus::Queued {
             return Ok(Value::Null);
         }
         let latest = stored
@@ -3615,9 +3602,30 @@ impl JobStore {
             .rev()
             .filter_map(|event| event.data.as_ref())
             .find(|data| data["status"] == "pending_resource_admission");
+        let mut queued = inner
+            .jobs
+            .values()
+            .filter(|candidate| self.owns(candidate) && candidate.job.status == JobStatus::Queued)
+            .map(|candidate| (candidate.job.created_at_ms, candidate.job.id))
+            .collect::<Vec<_>>();
+        queued.sort();
+        let position = queued
+            .iter()
+            .position(|(_, id)| *id == job_id)
+            .map(|index| index + 1);
+        let reservation = stored
+            .events
+            .iter()
+            .rev()
+            .filter_map(|event| event.data.as_ref())
+            .find_map(|data| data.get("reservation_id"));
         Ok(serde_json::json!({
+            "blocker": reservation,
+
+            "queue_position": position,
+            "queue_length": queued.len(),
             "status": "pending_resource_admission",
-            "pending_admission_reason": reason,
+            "pending_admission_reason": reason.map(String::as_str).or_else(|| reservation.map(|_| "reservation")),
             "message": "waiting on Lab capacity",
             "load": latest.and_then(|data| data.get("load")),
             "budget": latest.and_then(|data| data.get("budget")),
@@ -3870,36 +3878,6 @@ impl JobStore {
             stored.job.updated_at_ms = timestamp_ms();
             Ok(())
         })
-    }
-
-    /// Reached only from the `#[cfg(test)]` reconciliation paths in
-    /// `store::reconciliation`; production appends terminal evidence through
-    /// `append_status_event_with_data_at`. Kept because those tests assert real
-    /// reconciliation behavior, suppressed per item so the next unused method in
-    /// this impl still fails the build.
-    #[allow(
-        dead_code,
-        reason = "Reached only from cfg(test) reconciliation paths that assert real behavior."
-    )]
-    pub(super) fn append_status_event_with_data(
-        &self,
-        job_id: Uuid,
-        status: JobStatus,
-        message: impl Into<String>,
-        mut data: Value,
-    ) -> Result<JobEvent> {
-        if !data.is_object() {
-            data = serde_json::json!({ "metadata": data });
-        }
-        if let Some(object) = data.as_object_mut() {
-            object.insert("status".to_string(), serde_json::json!(status));
-        }
-        self.append_event(
-            job_id,
-            JobEventKind::Status,
-            Some(message.into()),
-            Some(data),
-        )
     }
 
     /// Whether a different daemon generation now holds this job's lease. A
@@ -4922,61 +4900,6 @@ impl JobHandle {
 }
 
 #[cfg(test)]
-mod fixture_creation_tests {
-    use super::*;
-
-    #[test]
-    fn running_fixture_is_durable_and_preserved_without_child_identity() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-        let scope = DaemonScope::from_state_dir(temp.path());
-        let store = JobStore::open_without_reconciliation(&path)
-            .expect("open store")
-            .with_daemon_scope(scope.clone());
-        let job = store.create_running("idle-lifetime-active-regression");
-        assert_eq!(job.status, JobStatus::Running);
-        assert!(job.started_at_ms.is_some());
-        assert_eq!(job.updated_at_ms, job.started_at_ms.unwrap());
-        assert!(job.finished_at_ms.is_none());
-        assert!(job.daemon_lease_id.is_none());
-
-        let daemon = JobStore::open_without_reconciliation(&path)
-            .expect("reopen store")
-            .with_daemon_scope(scope)
-            .with_daemon_lease("live-lease".to_string());
-        assert_eq!(
-            serde_json::to_value(daemon.get(job.id).expect("persisted job")).unwrap(),
-            serde_json::to_value(&job).unwrap(),
-        );
-        let events = daemon.events(job.id).expect("persisted events");
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].message.as_deref(), Some("job queued"));
-        assert_eq!(events[1].kind, JobEventKind::Status);
-        assert_eq!(events[1].message.as_deref(), Some("job started"));
-        assert_eq!(
-            events[1].data,
-            Some(serde_json::json!({ "status": JobStatus::Running }))
-        );
-
-        daemon
-            .reconcile_direct_admissions()
-            .expect("direct admissions");
-        assert!(daemon
-            .reconcile_expired_local_child_reservations_at(u64::MAX)
-            .expect("child reservations")
-            .is_empty());
-        let diagnostics = daemon
-            .reconcile_dead_generation_jobs("live-lease")
-            .expect("dead generations");
-        assert_eq!(diagnostics.needs_attestation_job_ids, vec![job.id]);
-        assert_eq!(
-            daemon.get(job.id).expect("preserved job").status,
-            JobStatus::Running
-        );
-    }
-}
-
-#[cfg(test)]
 mod local_child_tests {
     use super::*;
 
@@ -5122,63 +5045,46 @@ mod local_child_tests {
         assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
     }
 
+    /// Without a start-time discriminator, PID liveness is the only proof: a
+    /// live PID blocks recovery (once, without repeated diagnostics) and an
+    /// absent PID terminalizes the job.
     #[test]
-    fn unsupported_identity_with_a_live_pid_blocks_once_without_duplicate_diagnostics() {
-        let store = JobStore::default().with_daemon_lease("dead-lease".to_string());
-        let job = store.create("runner.exec");
-        store
-            .reserve_local_child_at_with_runner_capacity(job.id, timestamp_ms(), None)
-            .map(|_| ())
-            .expect("reserve child");
-        store
-            .start_with_reserved_child_identity(
-                job.id,
-                std::process::id(),
-                None,
-                LocalChildStartDiscriminator::Unsupported {
-                    evidence: "fixture unsupported platform discriminator".to_string(),
-                },
-            )
-            .expect("persist unsupported identity");
+    fn unsupported_identity_follows_pid_liveness() {
+        for (pid, pid_alive) in [(std::process::id(), true), (u32::MAX, false)] {
+            let store = JobStore::default().with_daemon_lease("dead-lease".to_string());
+            let job = store.create("runner.exec");
+            store
+                .reserve_local_child_at_with_runner_capacity(job.id, timestamp_ms(), None)
+                .map(|_| ())
+                .expect("reserve child");
+            store
+                .start_with_reserved_child_identity(
+                    job.id,
+                    pid,
+                    None,
+                    LocalChildStartDiscriminator::Unsupported {
+                        evidence: "fixture unsupported platform discriminator".to_string(),
+                    },
+                )
+                .expect("persist unsupported identity");
 
-        let first = store
-            .reconcile_dead_generation_jobs("successor-lease")
-            .expect("live PID blocks recovery");
-        let event_count = store.events(job.id).expect("events").len();
-        let second = store
-            .reconcile_dead_generation_jobs("successor-lease")
-            .expect("repeated recovery stays blocked");
-
-        assert_eq!(first.protected_job_ids, vec![job.id]);
-        assert_eq!(second.protected_job_ids, vec![job.id]);
-        assert_eq!(store.events(job.id).expect("events").len(), event_count);
-        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
-    }
-
-    #[test]
-    fn unsupported_identity_with_an_absent_pid_terminalizes() {
-        let store = JobStore::default().with_daemon_lease("dead-lease".to_string());
-        let job = store.create("runner.exec");
-        store
-            .reserve_local_child_at_with_runner_capacity(job.id, timestamp_ms(), None)
-            .map(|_| ())
-            .expect("reserve child");
-        store
-            .start_with_reserved_child_identity(
-                job.id,
-                u32::MAX,
-                None,
-                LocalChildStartDiscriminator::Unsupported {
-                    evidence: "fixture unsupported platform discriminator".to_string(),
-                },
-            )
-            .expect("persist unsupported identity");
-
-        let diagnostics = store
-            .reconcile_dead_generation_jobs("successor-lease")
-            .expect("absent PID is safe proof of death");
-        assert!(diagnostics.protected_job_ids.is_empty());
-        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+            let first = store
+                .reconcile_dead_generation_jobs("successor-lease")
+                .expect("first recovery");
+            if !pid_alive {
+                assert!(first.protected_job_ids.is_empty());
+                assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+                continue;
+            }
+            let event_count = store.events(job.id).expect("events").len();
+            let second = store
+                .reconcile_dead_generation_jobs("successor-lease")
+                .expect("repeated recovery stays blocked");
+            assert_eq!(first.protected_job_ids, vec![job.id]);
+            assert_eq!(second.protected_job_ids, vec![job.id]);
+            assert_eq!(store.events(job.id).expect("events").len(), event_count);
+            assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
+        }
     }
 
     #[cfg(target_os = "linux")]

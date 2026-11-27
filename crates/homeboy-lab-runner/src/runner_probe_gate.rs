@@ -741,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_doctor_observation_forces_the_next_refresh_preflight_to_reprobe() {
+    fn capability_inventory_stays_cached_until_a_live_observation_forces_a_reprobe() {
         let _serialized = serialized();
         let connections = Arc::new(AtomicUsize::new(0));
         let probe = |answer: &str| {
@@ -756,31 +756,13 @@ mod tests {
         // A previous capability probe reported the tools absent. Doctor then
         // observes the runner directly and invalidates that stale inventory.
         assert_eq!(probe("missing"), "missing");
+        // Without a live observation the stale inventory stays cached.
+        assert_eq!(probe("present"), "missing");
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
         observe_runner_capabilities("lab");
 
         assert_eq!(probe("present"), "present");
         assert_eq!(connections.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn unchanged_inventory_remains_cached_until_a_live_observation_arrives() {
-        let _serialized = serialized();
-        let connections = Arc::new(AtomicUsize::new(0));
-
-        let first: String = deduplicated_probe("lab", "capabilities", "refresh-homeboy", || {
-            connections.fetch_add(1, Ordering::SeqCst);
-            Ok("missing".to_string())
-        })
-        .expect("stale capability answer");
-        let cached: String = deduplicated_probe("lab", "capabilities", "refresh-homeboy", || {
-            connections.fetch_add(1, Ordering::SeqCst);
-            Ok("present".to_string())
-        })
-        .expect("cached capability answer");
-
-        assert_eq!(first, "missing");
-        assert_eq!(cached, "missing");
-        assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
     #[test]

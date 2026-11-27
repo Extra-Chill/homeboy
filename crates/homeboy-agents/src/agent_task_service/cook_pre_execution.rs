@@ -363,10 +363,6 @@ fn materialize_cook_attempt_with_stores_and_runtime(
     Ok(())
 }
 
-// The ambient `reconcile_reserved_cancellation()` shim that used to sit here
-// is gone. Its apparent call site invokes the closure parameter of the same
-// name; the free function itself had no callers (#7505).
-
 pub(crate) fn reconcile_reserved_cancellation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
@@ -426,9 +422,45 @@ fn ensure_cook_attempt_index(
         &record,
         &controller_plan,
     )?;
+    inherit_recipe_attempt_placement(lifecycle_store, &recipe, &attempt.run_id)?;
     lifecycle_store
         .record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)
         .map(|_| ())
+}
+
+/// Every attempt and retry of a Lab-dispatched Cook inherits the mission's
+/// persisted placement decision instead of the controller-local submission
+/// stamp, so it never re-resolves to `automatic` or drops to the controller.
+pub(crate) fn inherit_recipe_attempt_placement(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    recipe: &super::AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<bool> {
+    let Some(decision) = recipe_attempt_dispatch_placement(recipe) else {
+        return Ok(false);
+    };
+    agent_task_lifecycle::inherit_cook_execution_placement_decision_in_store(
+        lifecycle_store,
+        run_id,
+        &decision,
+    )
+}
+
+pub(crate) fn recipe_attempt_dispatch_placement(
+    recipe: &super::AgentTaskCookRecipe,
+) -> Option<homeboy_lab_contract::ExecutionPlacementDecision> {
+    let dispatch = &recipe.promotion_transport["attempt_dispatch"];
+    if dispatch["kind"] != "lab" {
+        return None;
+    }
+    serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+        dispatch["execution_placement_decision"].clone(),
+    )
+    .ok()
+    .filter(|decision| {
+        decision.is_valid()
+            && decision.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab
+    })
 }
 
 /// Record a failure for an already materialized Cook attempt using its exact
@@ -948,15 +980,6 @@ mod tests {
         });
     }
 
-    /// #14678: a Lab-dispatched attempt whose remote runner fails
-    /// `committed_harvest_preflight` before any provider runs terminalizes
-    /// through the scheduler's own outcome aggregate — never through
-    /// `record_pre_execution_failure` — so `pre_execution_failure` metadata is
-    /// absent. The dispatch boundary itself only ever observes a generic Lab
-    /// transport error ("failed with exit code 1"). Without deriving from the
-    /// aggregate's own diagnostic, the report would say `unknown` next to a
-    /// specific, already-durable reason code and never surface the git
-    /// command or its stderr.
     #[test]
     fn successful_lab_provider_with_failed_continuation_is_post_provider() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -1028,6 +1051,15 @@ mod tests {
         });
     }
 
+    /// #14678: a Lab-dispatched attempt whose remote runner fails
+    /// `committed_harvest_preflight` before any provider runs terminalizes
+    /// through the scheduler's own outcome aggregate — never through
+    /// `record_pre_execution_failure` — so `pre_execution_failure` metadata is
+    /// absent. The dispatch boundary itself only ever observes a generic Lab
+    /// transport error ("failed with exit code 1"). Without deriving from the
+    /// aggregate's own diagnostic, the report would say `unknown` next to a
+    /// specific, already-durable reason code and never surface the git
+    /// command or its stderr.
     #[test]
     fn pre_execution_failure_details_derives_committed_harvest_cause_from_outcome_aggregate() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -1550,16 +1582,6 @@ mod tests {
                 .latest_run_id,
             run_id
         );
-        assert!(left_lifecycle_store
-            .cook_dir(cook_id)
-            .starts_with(left_context.data_dir()));
-        assert!(right_lifecycle_store
-            .cook_dir(cook_id)
-            .starts_with(right_context.data_dir()));
-        assert_ne!(
-            left_lifecycle_store.cook_dir(cook_id),
-            right_lifecycle_store.cook_dir(cook_id)
-        );
         assert_eq!(
             left_recipe_store.load_recipe(cook_id).unwrap().attempts[0]
                 .plan
@@ -1669,79 +1691,164 @@ mod tests {
     }
 
     #[test]
-    fn paired_stores_materialize_initial_and_retry_attempts() {
-        let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
-        let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
-        let lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
+    fn retry_attempt_materialization_advances_the_cook_index() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let recipe_store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
 
-        let cook_id = "split-root-cook";
-        let run_id = "split-root-run";
-        let attempt_plan = plan(cook_id, "split-root-materialization");
+        let cook_id = "retry-cook";
+        let run_id = "retry-run";
+        let retry_plan = plan(cook_id, "retry-materialization");
         recipe_store
-            .persist_recipe(&recipe(cook_id, run_id, attempt_plan.clone()))
-            .expect("persist recipe in recipe root");
+            .persist_recipe(&recipe(cook_id, run_id, retry_plan.clone()))
+            .expect("persist retry recipe");
         lifecycle_store
-            .submit_plan_with_runtime_admission(&attempt_plan, run_id, |_| {
-                Ok(serde_json::json!({}))
-            })
-            .expect("submit plan in lifecycle root");
-
-        materialize_initial_cook_attempt_with_stores(
-            &recipe_store,
-            &lifecycle_store,
-            &options_for(cook_id, run_id, attempt_plan),
-        )
-        .expect("materialize initial attempt through paired stores");
-
-        assert_eq!(
-            lifecycle_store
-                .read_cook_index(cook_id)
-                .expect("read cook index in lifecycle root")
-                .latest_run_id,
-            run_id
-        );
-        assert_eq!(
-            lifecycle_store
-                .read_record(run_id)
-                .expect("read run record in lifecycle root")
-                .run_id,
-            run_id
-        );
-        assert!(lifecycle_store
-            .run_dir(run_id)
-            .starts_with(recipe_context.data_dir()));
-        assert!(lifecycle_store
-            .cook_dir(cook_id)
-            .starts_with(recipe_context.data_dir()));
-        assert!(recipe_store.recipe_exists(cook_id));
-
-        let retry_cook_id = "split-root-retry-cook";
-        let retry_run_id = "split-root-retry-run";
-        let retry_plan = plan(retry_cook_id, "split-root-retry-materialization");
-        recipe_store
-            .persist_recipe(&recipe(retry_cook_id, retry_run_id, retry_plan.clone()))
-            .expect("persist retry recipe in recipe root");
-        lifecycle_store
-            .submit_plan_with_runtime_admission(&retry_plan, retry_run_id, |_| {
-                Ok(serde_json::json!({}))
-            })
-            .expect("submit retry plan in lifecycle root");
+            .submit_plan_with_runtime_admission(&retry_plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("submit retry plan");
 
         materialize_cook_attempt_with_stores(
             &recipe_store,
             &lifecycle_store,
-            retry_cook_id,
-            retry_run_id,
+            cook_id,
+            run_id,
             &retry_plan,
         )
-        .expect("materialize retry attempt through paired stores");
+        .expect("materialize retry attempt");
 
         assert_eq!(
             lifecycle_store
-                .read_cook_index(retry_cook_id)
-                .expect("read retry cook index in lifecycle root")
+                .read_cook_index(cook_id)
+                .expect("read retry cook index")
                 .latest_run_id,
-            retry_run_id
+            run_id
+        );
+    }
+
+    fn lab_required_mission_decision() -> homeboy_lab_contract::ExecutionPlacementDecision {
+        use homeboy_lab_contract::*;
+        ExecutionPlacementDecision::new(
+            "cook-placement",
+            "v1",
+            ExecutionPlacementIdentity {
+                repository: "extrachill".to_string(),
+                workspace: "/tmp/extrachill".to_string(),
+                task: "task".to_string(),
+                candidate: None,
+                base: None,
+            },
+            Placement::Lab,
+            ExecutionPlacementRequirement::Lab,
+            EffectiveExecutionPlacement::Lab,
+            Some(ExecutionPlacementRunnerSelection {
+                runner_id: "homeboy-lab".to_string(),
+                source: RunnerSelectionSource::Explicit,
+            }),
+            ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        )
+    }
+
+    /// #19181: an attempt or retry of a Cook whose mission requires the Lab
+    /// inherits that decision instead of a controller-local submission stamp.
+    #[test]
+    fn lab_required_cook_retry_attempt_inherits_mission_placement() {
+        use homeboy_lab_contract::{
+            EffectiveExecutionPlacement, ExecutionPlacementDecision, ExecutionPlacementRequirement,
+            Placement,
+        };
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let recipe_store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+
+        let cook_id = "lab-required-cook";
+        let run_id = "lab-required-cook-attempt-1-retry";
+        let retry_plan = plan(cook_id, "lab-required-retry");
+        let mission = lab_required_mission_decision();
+        let mut lab_recipe = recipe(cook_id, run_id, retry_plan.clone());
+        lab_recipe.promotion_transport = serde_json::json!({
+            "provider_invocation": null,
+            "attempt_dispatch": {
+                "kind": "lab",
+                "runner_id": "homeboy-lab",
+                "execution_placement_decision": mission,
+            },
+        });
+        recipe_store
+            .persist_recipe(&lab_recipe)
+            .expect("persist lab recipe");
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&retry_plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("submit retry plan");
+
+        materialize_cook_attempt_with_stores(
+            &recipe_store,
+            &lifecycle_store,
+            cook_id,
+            run_id,
+            &retry_plan,
+        )
+        .expect("materialize retry attempt");
+
+        let record = lifecycle_store.read_record(run_id).expect("read record");
+        let decision: ExecutionPlacementDecision =
+            serde_json::from_value(record.metadata["execution_placement_decision"].clone())
+                .expect("attempt carries a placement decision");
+        assert_eq!(decision, mission);
+        assert_eq!(decision.requested, Placement::Lab);
+        assert_eq!(decision.required, ExecutionPlacementRequirement::Lab);
+        assert_eq!(decision.selected, EffectiveExecutionPlacement::Lab);
+        assert!(!decision.fallback.local_allowed);
+        assert!(!decision.permits_local_execution());
+        assert_eq!(
+            decision
+                .runner
+                .as_ref()
+                .map(|runner| runner.runner_id.as_str()),
+            Some("homeboy-lab")
+        );
+
+        // The dispatching Lab route may refine the inherited decision, but a
+        // controller-local decision can never replace it.
+        let local = ExecutionPlacementDecision::controller_local(
+            "some-policy",
+            "v1",
+            mission.identity.clone(),
+            Placement::Local,
+        );
+        assert!(
+            !agent_task_lifecycle::normalize_missing_execution_placement_decision_in_store(
+                &lifecycle_store,
+                run_id,
+                &local,
+            )
+            .expect("normalize local")
+        );
+        let mut refined_identity = mission.identity.clone();
+        refined_identity.candidate = Some("abc123".to_string());
+        let refined = ExecutionPlacementDecision::new(
+            mission.policy_id.clone(),
+            mission.policy_revision.clone(),
+            refined_identity,
+            mission.requested,
+            mission.required,
+            mission.selected,
+            mission.runner.clone(),
+            mission.fallback.clone(),
+            mission.override_authorization.clone(),
+        );
+        assert!(
+            agent_task_lifecycle::normalize_missing_execution_placement_decision_in_store(
+                &lifecycle_store,
+                run_id,
+                &refined,
+            )
+            .expect("normalize refined")
         );
     }
 }

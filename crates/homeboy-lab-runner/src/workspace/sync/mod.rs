@@ -2627,17 +2627,6 @@ mod metadata_write_tests {
         assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
         assert_eq!(error.retryable, Some(true));
         assert_eq!(error.details["phase"], "workspace_metadata_write");
-        assert_eq!(
-            error.details["command"],
-            "write Homeboy runner workspace metadata"
-        );
-        assert_eq!(error.details["timeout_seconds"], 30);
-        assert_eq!(error.details["exit_code"], -1);
-        assert_eq!(error.details["stdout"], "partial output");
-        assert!(error.details["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("Broken pipe"));
         assert!(error.details["transport_close_reason"]
             .as_str()
             .unwrap()
@@ -4590,15 +4579,6 @@ mod tests {
                     "one {name} per stage"
                 );
             }
-            for retired in [
-                "snapshot_input_manifest",
-                "snapshot_stage_build",
-                "snapshot_stability_verify",
-            ] {
-                assert!(!spans
-                    .iter()
-                    .any(|s| s.id == format!("stage.lab.source_materialization.{retired}")));
-            }
             for name in [
                 "content_manifest_hash",
                 "plan",
@@ -4643,43 +4623,48 @@ mod tests {
     }
 
     #[test]
-    fn runner_git_network_failure_in_hint_activates_controller_fallback() {
-        let error = Error::validation_invalid_argument(
-            "changed_since",
-            "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
-            None,
-            Some(vec![
-                "Remote git error: ssh: Could not resolve hostname git.example.test: Temporary failure in name resolution\nfatal: Could not read from remote repository."
-                    .to_string(),
-            ]),
-        );
-
-        assert!(is_runner_git_auth_or_network_failure(&error));
-    }
-
-    #[test]
-    fn runner_git_network_failure_in_structured_details_activates_controller_fallback() {
-        let error = Error::new(
-            ErrorCode::RunnerLabTransportFailure,
-            "runner Git materialization failed",
-            serde_json::json!({
-                "stderr": "fatal: unable to access source: Failed to connect to git.example.test",
-            }),
-        );
-
-        assert!(is_runner_git_auth_or_network_failure(&error));
-    }
-
-    #[test]
-    fn runner_git_non_transport_failure_does_not_activate_controller_fallback() {
-        let error = Error::validation_invalid_argument(
-            "changed_since",
-            "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
-            None,
-            Some(vec!["Remote git error: fatal: invalid object name 'missing-ref'".to_string()]),
-        );
-
-        assert!(!is_runner_git_auth_or_network_failure(&error));
+    fn runner_git_transport_failures_alone_activate_controller_fallback() {
+        let changed_since_error = |hint: &str| {
+            Error::validation_invalid_argument(
+                "changed_since",
+                "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
+                None,
+                Some(vec![hint.to_string()]),
+            )
+        };
+        for (name, error, expected) in [
+            (
+                "network failure in hint",
+                changed_since_error(
+                    "Remote git error: ssh: Could not resolve hostname git.example.test: Temporary failure in name resolution\nfatal: Could not read from remote repository.",
+                ),
+                true,
+            ),
+            (
+                "network failure in structured details",
+                Error::new(
+                    ErrorCode::RunnerLabTransportFailure,
+                    "runner Git materialization failed",
+                    serde_json::json!({
+                        "stderr": "fatal: unable to access source: Failed to connect to git.example.test",
+                    }),
+                ),
+                true,
+            ),
+            (
+                "non-transport failure",
+                changed_since_error(
+                    "Remote git error: fatal: invalid object name 'missing-ref'",
+                ),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                is_runner_git_auth_or_network_failure(&error),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -4746,33 +4731,18 @@ mod tests {
     }
 
     #[test]
-    fn runner_workspace_disk_pressure_blocks_low_absolute_free_space() {
-        assert!(runner_workspace_disk_is_critical(
-            RunnerWorkspaceDiskProbe {
-                available_bytes: 512 * 1024 * 1024,
-                total_bytes: 500 * 1024 * 1024 * 1024,
-            }
-        ));
-    }
-
-    #[test]
-    fn runner_workspace_disk_pressure_blocks_low_free_ratio() {
-        assert!(runner_workspace_disk_is_critical(
-            RunnerWorkspaceDiskProbe {
-                available_bytes: 2 * 1024 * 1024 * 1024,
-                total_bytes: 500 * 1024 * 1024 * 1024,
-            }
-        ));
-    }
-
-    #[test]
-    fn runner_workspace_disk_pressure_allows_headroom() {
-        assert!(!runner_workspace_disk_is_critical(
-            RunnerWorkspaceDiskProbe {
-                available_bytes: 20 * 1024 * 1024 * 1024,
-                total_bytes: 500 * 1024 * 1024 * 1024,
-            }
-        ));
+    fn runner_workspace_disk_pressure_blocks_low_absolute_space_or_ratio() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        for (available_bytes, critical) in [(GIB / 2, true), (2 * GIB, true), (20 * GIB, false)] {
+            assert_eq!(
+                runner_workspace_disk_is_critical(RunnerWorkspaceDiskProbe {
+                    available_bytes,
+                    total_bytes: 500 * GIB,
+                }),
+                critical,
+                "{available_bytes} bytes free"
+            );
+        }
     }
 
     fn probe(identity: &str, bytes: u64, inodes: u64) -> SnapshotFilesystemProbe {

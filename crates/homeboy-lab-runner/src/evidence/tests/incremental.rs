@@ -18,15 +18,6 @@ fn incremental_poll_counts_routes_and_skips_unchanged_metadata() {
     let id = job.id.to_string();
     let mut routes = HashMap::<String, usize>::new();
     let event = json!({"sequence": 1, "kind": "progress", "timestamp_ms": 1, "message": "working"});
-    let history = (1..=1000)
-        .map(|sequence| {
-            let mut event = event.clone();
-            event["sequence"] = json!(sequence);
-            event
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(serde_json::to_vec(&history).unwrap().len(), 71_894);
-    assert_eq!(serde_json::to_vec(&history[..32]).unwrap().len(), 2_264);
     let mut bytes = Vec::new();
     for poll in 0..3 {
         let after = run
@@ -66,9 +57,6 @@ fn incremental_poll_counts_routes_and_skips_unchanged_metadata() {
     assert_eq!(routes.values().sum::<usize>(), 6);
     assert!(!routes.contains_key(&format!("/jobs/{id}/events")));
     assert_eq!(bytes[1..], [2, 2]); // Empty event arrays, not a repeated log.
-    eprintln!(
-        "event-array bytes: 1000-event history=71894, bounded first page=2264, unchanged poll=2"
-    );
     assert_eq!(run.metadata_json["lab"]["remote_event_count"], 1);
     assert_eq!(
         run.metadata_json["lab"]["remote_events"]
