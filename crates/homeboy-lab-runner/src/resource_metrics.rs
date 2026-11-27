@@ -267,8 +267,9 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
     })?;
     let capture = bounded_output.capture.clone();
-    let output = bounded_output.into_output();
+    let mut output = bounded_output.into_output();
     let metrics = collector.finish(started.elapsed());
+    append_leftover_evidence(job_cgroup.as_deref(), &mut output.stderr);
     Ok(MeasuredOutput {
         output,
         capture,
@@ -353,8 +354,9 @@ fn durable_command_output_until_cancelled(
     if let Some(observer) = &stdout_line_observer {
         follower.poll(observer.as_ref());
     }
-    let (stdout, stderr, capture) = runner_exec_job::read_output(dir)?;
+    let (stdout, mut stderr, capture) = runner_exec_job::read_output(dir)?;
     let metrics = collector.finish(started.elapsed());
+    append_leftover_evidence(job_cgroup.as_deref(), &mut stderr);
     Ok(MeasuredOutput {
         output: Output {
             status,
@@ -364,6 +366,25 @@ fn durable_command_output_until_cancelled(
         capture,
         metrics,
     })
+}
+
+/// Containment diagnostics travel with stderr in job results and exec --human.
+fn append_leftover_evidence(job: Option<&JobCgroup>, stderr: &mut Vec<u8>) {
+    if let Some(job) = job {
+        match job.stop_with_evidence() {
+            Ok(Some(message)) => {
+                if !stderr.is_empty() && !stderr.ends_with(b"\n") {
+                    stderr.push(b'\n');
+                }
+                stderr.extend_from_slice(message.as_bytes());
+                stderr.push(b'\n');
+            }
+            Ok(None) => {}
+            Err(error) => {
+                homeboy_core::log_status!("runner", "runner job cgroup stop failed: {}", error)
+            }
+        }
+    }
 }
 
 const DURABLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -887,9 +908,7 @@ fn finish_job_cgroup(
 ) -> RunnerCgroupMemoryEvidence {
     sample(0, Some(job), state, guard_violation, guard_limits);
     let evidence = job_cgroup_memory_evidence(&job.counters());
-    if let Err(error) = job.stop() {
-        homeboy_core::log_status!("runner", "runner job cgroup stop failed: {}", error);
-    }
+    // The caller records leftover evidence and stops the group after reading counters.
     evidence
 }
 
