@@ -4695,12 +4695,20 @@ pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
     schedule: impl FnOnce(&Value) -> Result<Value>,
 ) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
+    reconcile_terminal_cook_provider_result_in_store(&lifecycle_store, run_id, schedule)
+}
+
+pub(crate) fn reconcile_terminal_cook_provider_result_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    schedule: impl FnOnce(&Value) -> Result<Value>,
+) -> Result<AgentTaskRunRecord> {
     let record = lifecycle_store.read_record(run_id)?;
     if !record.state().is_terminal() {
         return Ok(record);
     }
     let recipe_store =
-        crate::agent_task_service::CookRecipeStore::for_lifecycle_store(&lifecycle_store);
+        crate::agent_task_service::CookRecipeStore::for_lifecycle_store(lifecycle_store);
     let recipe = match record
         .metadata
         .get("cook_id")
