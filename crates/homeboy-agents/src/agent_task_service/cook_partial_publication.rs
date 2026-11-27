@@ -160,29 +160,69 @@ pub(crate) fn publish_partial_cook_with<B: AgentTaskPrFinalizationBackend>(
         false,
         backend,
     )?;
-    // The source task and follow-up retain the publication receipt as well as
-    // the PR's reviewer-facing follow-up link.
-    let receipt = serde_json::to_string_pretty(&value)
-        .map_err(|e| Error::internal_json(e.to_string(), None))?;
-    tracker(&[
-        "issue",
-        "comment",
-        source,
-        "--body",
-        &format!("Partial delivery; remaining scope tracked in {follow_up}.\n\n{receipt}"),
-    ])?;
-    tracker(&[
-        "issue",
-        "comment",
-        &follow_up,
-        "--body",
-        &format!("Partial delivery of {source}:\n\n{receipt}"),
-    ])?;
+    let pr_url = value["pr_url"].as_str().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "publish-partial",
+            "publication did not return a PR URL; backlinks were not posted",
+            None,
+            None,
+        )
+    })?;
+    let comment = partial_backlink(&marker, source, pr_url, &follow_up, reason);
+    for target in [source.as_str(), follow_up.as_str()] {
+        // Query the remote marker on every retry, including after a lost
+        // addComment response. Local checkpoints alone cannot close that gap.
+        let found = tracker(&["issue", "view", target, "--json", "comments"])?;
+        let found: Value =
+            serde_json::from_str(&found).map_err(|e| Error::internal_json(e.to_string(), None))?;
+        let exists = found["comments"].as_array().is_some_and(|comments| {
+            comments.iter().any(|comment| {
+                comment["body"]
+                    .as_str()
+                    .is_some_and(|body| body.contains(&marker))
+            })
+        });
+        if !exists {
+            tracker(&["issue", "comment", target, "--body", &comment])?;
+        }
+    }
     let code = i32::from(!matches!(
         value["status"].as_str(),
         Some("succeeded_partial" | "review_ready" | "draft_published")
     ));
     Ok((value, code))
+}
+
+fn partial_backlink(marker: &str, source: &str, pr: &str, follow_up: &str, reason: &str) -> String {
+    // Leave ample room below GitHub's 65,536-character comment limit even
+    // when an agent supplies an exceptionally large incomplete_reason.
+    let scope: String = reason.chars().take(8_000).collect();
+    let suffix = if scope.len() < reason.len() {
+        "\n\nRemaining scope truncated here; see the follow-up for the full scope."
+    } else {
+        ""
+    };
+    format!("{marker}\n\nPartial delivery of {source}: {pr}\nFollow-up: {follow_up}\n\nRemaining scope:\n{scope}{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backlink_bounds_large_agent_scope_without_embedding_receipt() {
+        let body = partial_backlink(
+            "<!-- marker -->",
+            "source",
+            "pr",
+            "follow-up",
+            &"😀".repeat(100_000),
+        );
+        assert!(body.len() < 65_536);
+        assert!(body.contains("Remaining scope truncated"));
+        assert!(body.contains("Partial delivery of source: pr"));
+        assert!(body.contains("Follow-up: follow-up"));
+    }
 }
 
 fn partial_tracker_command(args: &[&str]) -> Result<String> {

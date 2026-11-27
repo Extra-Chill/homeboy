@@ -12220,6 +12220,7 @@ fn green_incomplete_cook_publishes_partial_and_tracks_remaining_scope() {
             match args[1] {
                 "list" => Ok("[]".into()),
                 "create" => Ok(follow_up.into()),
+                "view" => Ok(serde_json::json!({"comments": []}).to_string()),
                 "comment" => Ok(String::new()),
                 other => panic!("unexpected tracker operation {other}"),
             }
@@ -12257,6 +12258,42 @@ fn green_incomplete_cook_publishes_partial_and_tracks_remaining_scope() {
         assert!(calls
             .iter()
             .any(|args| args[1] == "comment" && args[2] == follow_up));
+        for args in calls.iter().filter(|args| args[1] == "comment") {
+            let body = args.last().unwrap();
+            assert!(body.contains(result["pr_url"].as_str().unwrap()));
+            assert!(body.contains("Six remaining files need migration."));
+            assert!(body.len() < 2_000);
+        }
+        let published_comments: Vec<_> = calls
+            .iter()
+            .filter(|args| args[1] == "comment")
+            .map(|args| args.last().unwrap().clone())
+            .collect();
+        let create_count = backend.create_count;
+        let mut retry_tracker = |args: &[&str]| -> Result<String> {
+            assert_eq!(
+                args[1], "view",
+                "retry must not create issues or duplicate comments"
+            );
+            Ok(serde_json::json!({"comments": published_comments.iter()
+                .map(|body| serde_json::json!({"body": body})).collect::<Vec<_>>()})
+            .to_string())
+        };
+        super::super::cook_promotion::publish_partial_cook_with(
+            run_id,
+            &crate::agent_task_service::CookPublishRequest {
+                partial: true,
+                ..Default::default()
+            },
+            false,
+            &mut backend,
+            &mut retry_tracker,
+        )
+        .unwrap();
+        assert_eq!(
+            backend.create_count, create_count,
+            "retry must reuse the PR"
+        );
         let persisted = test_lifecycle_store().read_aggregate(run_id).unwrap();
         assert_eq!(
             persisted.outcomes[0].outputs["review_form"],

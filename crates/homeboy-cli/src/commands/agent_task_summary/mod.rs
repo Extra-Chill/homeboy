@@ -991,6 +991,19 @@ fn compact_status_text(text: &str, limit: usize) -> String {
     format!("{}…", prefix[..boundary].trim_end())
 }
 
+#[test]
+fn partial_publication_status_names_partial_success() {
+    let payload = serde_json::json!({
+        "schema": "homeboy/control-plane-run/v1",
+        "run": "cook-partial",
+        "state": "succeeded",
+        "publication": {"state": "succeeded_partial", "id": "https://github.com/o/r/pull/1"}
+    });
+    assert!(render_status_summary(&payload)
+        .unwrap()
+        .starts_with("Agent task succeeded_partial\n"));
+}
+
 fn render_status_summary(payload: &Value) -> Option<String> {
     if string_value(payload, &["schema"])? != "homeboy/control-plane-run/v1" {
         return None;
@@ -999,7 +1012,14 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     let state = string_value(payload, &["state"]).unwrap_or("unknown");
     // The headline and the JSON envelope's `status` both name the task's own
     // state from this one projection, so they cannot disagree (#18638).
-    let mut lines = vec![format!("Agent task {state}"), format!("Run: {run_id}")];
+    let headline = if state == "succeeded"
+        && string_value(payload, &["publication", "state"]) == Some("succeeded_partial")
+    {
+        "succeeded_partial"
+    } else {
+        state
+    };
+    let mut lines = vec![format!("Agent task {headline}"), format!("Run: {run_id}")];
     if let Some(phase) = string_value(payload, &["phase"]) {
         lines.push(format!("Phase: {phase}"));
     }
