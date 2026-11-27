@@ -164,6 +164,12 @@ pub struct RecoverArgs {
     /// Publish a green incomplete candidate unchanged and file remaining scope on its tracker.
     #[arg(long, conflicts_with_all = ["review_form", "regate", "candidate_ref", "review_overrides"])]
     pub publish_partial: bool,
+    /// Publish as complete after operator verification of the remaining acceptance.
+    #[arg(long, requires = "evidence", conflicts_with_all = ["publish_partial", "review_form", "review_overrides", "regate", "candidate_ref"])]
+    pub publish: bool,
+    /// Operator-verified acceptance evidence: literal text or @path to a UTF-8 file.
+    #[arg(long, requires = "publish", value_name = "TEXT|@FILE")]
+    pub evidence: Option<String>,
     /// Explanation for this operator intervention
     #[arg(long)]
     pub reason: Option<String>,

@@ -2,6 +2,99 @@
 
 use super::*;
 
+/// Complete an incomplete candidate only with operator evidence and green gates.
+pub(crate) fn publish_operator_verified_cook(
+    id: &str,
+    request: &super::super::CookPublishRequest,
+    preflight: bool,
+) -> Result<(Value, i32)> {
+    publish_operator_verified_cook_with(
+        id,
+        request,
+        preflight,
+        &mut RealAgentTaskPrFinalizationBackend,
+    )
+}
+
+pub(crate) fn publish_operator_verified_cook_with<B: AgentTaskPrFinalizationBackend>(
+    id: &str,
+    request: &super::super::CookPublishRequest,
+    preflight: bool,
+    backend: &mut B,
+) -> Result<(Value, i32)> {
+    let invalid =
+        |message: &str| Error::validation_invalid_argument("evidence", message, None, None);
+    let evidence = request
+        .evidence
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| invalid("operator-verified publication requires non-empty evidence"))?;
+    if request.partial || request.review_form.is_some() || !request.review_overrides.is_empty() {
+        return Err(invalid("operator acceptance cannot be combined with partial publication or review form replacements"));
+    }
+    let id = super::super::resolve_cook_continuation_run_id(id)?;
+    let recipe = super::super::load_recipe_for_attempt(&id)?
+        .ok_or_else(|| invalid("a durable Cook recipe is required"))?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let promotion = persisted_promotion_for_attempt(&id)?
+        .filter(|promotion| {
+            promotion.applied_with_passing_verdict()
+                && !promotion.deterministic_gates.is_empty()
+                && promotion
+                    .deterministic_gates
+                    .iter()
+                    .all(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Succeeded)
+        })
+        .ok_or_else(|| invalid("operator acceptance requires passing candidate gates"))?;
+    let aggregate = store.read_aggregate(&id)?;
+    let form = super::super::cook::review_form_from_aggregate(&aggregate)?
+        .ok_or_else(|| invalid("a recorded review form is required"))?;
+    form.validate(title_policy_for_recipe(&recipe, &id))?;
+    let reason = form
+        .incomplete_reason()
+        .ok_or_else(|| invalid("the agent must have declared incomplete acceptance"))?;
+    if store
+        .read_record(&id)?
+        .metadata
+        .get("partial_delivery")
+        .is_some()
+    {
+        return Err(invalid(
+            "an already partially published candidate cannot be attested as complete",
+        ));
+    }
+    if preflight {
+        return Ok((
+            json!({"status": "validated", "operator_verified": true, "evidence": evidence}),
+            0,
+        ));
+    }
+    // The immutable receipt binds the attestation to the exact persisted candidate
+    // and gate proof. Publication retries reuse it without rewriting the agent form.
+    store.compare_and_set_metadata_value(
+        &id,
+        "operator_acceptance",
+        json!({
+            "evidence": evidence,
+            "remaining_scope": reason,
+            "promotion": promotion,
+        }),
+    )?;
+    let value = recover_cook_pr_with_backend_and_review_form(
+        &id,
+        None,
+        request.component.as_deref(),
+        Vec::new(),
+        false,
+        backend,
+    )?;
+    let code = i32::from(!matches!(
+        value["status"].as_str(),
+        Some("review_ready" | "draft_published")
+    ));
+    Ok((value, code))
+}
+
 /// Explicit partial recovery preserves the provider verdict and records its remainder.
 pub(crate) fn publish_partial_cook(
     id: &str,

@@ -186,6 +186,8 @@ pub enum AgentTaskReviewRepro {
     Verified,
     /// A repro gate did not pass on the candidate (or has no base failure).
     FailedOnCandidate,
+    /// An operator verified the remaining acceptance against this candidate.
+    OperatorVerified,
 }
 
 impl AgentTaskReviewRepro {
@@ -193,6 +195,7 @@ impl AgentTaskReviewRepro {
         match self {
             Self::None => "none",
             Self::Verified => "verified",
+            Self::OperatorVerified => "operator_verified",
             Self::FailedOnCandidate => "failed_on_candidate",
         }
     }
@@ -201,6 +204,7 @@ impl AgentTaskReviewRepro {
         let meaning = match self {
             Self::None => "no repro gate was declared, so these gates do not prove the issue",
             Self::Verified => "the repro gate failed on base and passed on the candidate",
+            Self::OperatorVerified => "the operator attested that the remaining acceptance passed on this candidate",
             Self::FailedOnCandidate => {
                 "the repro gate did not both fail on base and pass on the candidate"
             }

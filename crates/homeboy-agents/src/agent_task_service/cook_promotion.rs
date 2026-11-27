@@ -3138,9 +3138,9 @@ fn terminal_form_title(
 
 #[path = "cook_partial_publication.rs"]
 mod partial_publication;
-pub(super) use partial_publication::publish_partial_cook;
+pub(super) use partial_publication::{publish_partial_cook, publish_operator_verified_cook};
 #[cfg(test)]
-pub(super) use partial_publication::publish_partial_cook_with;
+pub(super) use partial_publication::{publish_partial_cook_with, publish_operator_verified_cook_with};
 
 /// Recover publication from the durable Cook recipe and applied promotion.
 pub fn recover_cook_pr(
@@ -3850,13 +3850,19 @@ fn cook_review_dossier_with_stores_and_review_form(
         successful_run_id,
         &terminal_form,
     )?;
-    let repro = super::cook_repro::candidate_repro_verdict(
+    let operator_verified = lifecycle_store.read_record(successful_run_id)?.metadata
+        .get("operator_acceptance")
+        .and_then(|attestation| attestation.get("promotion"))
+        == serde_json::to_value(promotion).ok().as_ref();
+    let repro = if operator_verified && promotion.applied_with_passing_verdict() {
+        crate::agent_task_review_dossier::AgentTaskReviewRepro::OperatorVerified
+    } else { super::cook_repro::candidate_repro_verdict(
         &options.gates.repro,
         // The base repro result is recorded on the Cook before dispatch (#17653).
         super::cook_repro::recorded_repro_base_evidence(lifecycle_store, &options.identity.cook_id)
             .as_ref(),
         verification_promotion,
-    );
+    ) };
     let mut evidence: Vec<AgentTaskReviewEvidence> = terminal_form
         .evidence
         .iter()
@@ -4051,7 +4057,13 @@ fn cook_review_dossier_with_stores_and_review_form(
             } else {
                 terminal_form.delivery.clone()
             },
-        ),
+        ).into_iter().map(|mut item| {
+            if operator_verified {
+                item.status = homeboy_control_plane_contract::CookDeliveryItemStatus::Delivered;
+                item.reason = None;
+            }
+            item
+        }).collect(),
         completion,
     })
 }
@@ -4656,7 +4668,7 @@ fn review_form_for_finalization_in_store(
     let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
         .and_then(|form| {
-            let form = form.ok_or_else(|| {
+            let mut form = form.ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "review_form",
                     format!(
@@ -4668,7 +4680,22 @@ fn review_form_for_finalization_in_store(
                 )
             })?;
             form.validate(title_policy)?;
-            if lifecycle_store.read_record(run_id)?.metadata.get("partial_delivery").is_none() {
+            let record = lifecycle_store.read_record(run_id)?;
+            if let Some(attestation) = record.metadata.get("operator_acceptance") {
+                let promotion = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?;
+                if promotion.as_ref().is_some_and(|promotion| {
+                    promotion.applied_with_passing_verdict()
+                        && serde_json::to_value(promotion).ok().as_ref() == attestation.get("promotion")
+                }) {
+                    form.completion = Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete);
+                    form.incomplete_reason.clear();
+                    form.evidence.push(AgentTaskReviewEvidence {
+                        summary: format!("Operator-verified acceptance: {}", attestation["evidence"].as_str().unwrap_or_default()),
+                        url: None,
+                    });
+                }
+            }
+            if record.metadata.get("partial_delivery").is_none() {
                 form.ensure_publishable()?;
             }
             Ok(form)
