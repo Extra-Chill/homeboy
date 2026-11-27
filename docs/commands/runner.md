@@ -99,6 +99,14 @@ Commands that are both resource-policy hot and portable for Lab offload (full `l
 
 Observation metadata records the routing decision under `metadata.lab_offload` when an observed run is created. The stable contract is `schema: "homeboy/lab-offload/v1"`: `source` is `automatic` or `explicit`; `status` is `offloaded`, `skipped`, or `fallback`; successful offloads include `runner_id` plus `remote_workspace`; local fallback records the runner and `fallback_reason`; skipped local execution records why no automatic offload was used, such as `placement_local_override` or `no_default_runner`. The same object also carries `plan_id` and plan-derived phase fields including `sync_mode`, `capability_preflight`, `extension_parity`, and `patch_captured`.
 
+`runner exec --sync-workspace <path>` reports scanning, planning, transfer size,
+runner application, and completion on stderr, with a heartbeat every 10 seconds
+while sync is active. `--workspace-sync-timeout <DURATION>` defaults to `240s`
+and is a wall-clock deadline across all workspace-sync preparation stages,
+including source provenance collection. Timeout errors identify the active stage
+and its elapsed time. This budget does not limit optional dependency hydration
+or the dispatched command; exec admission and queue behavior are separate.
+
 Commands launched through non-local `homeboy runner exec` run with `HOMEBOY_RUNNER_HOSTED_EXEC=1` and the private `HOMEBOY_RUNNER_PLACEMENT_RESOLVED=1` marker. Nested runner commands such as `homeboy agent-task cook` pass the non-interactive resource preflight without a public placement override because the work is already intentionally hosted on the selected runner.
 
 For reviewer-facing output, treat `runner exec` stdout as operator context and

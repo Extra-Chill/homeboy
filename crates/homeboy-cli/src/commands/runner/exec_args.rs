@@ -27,7 +27,7 @@ pub(crate) struct RunnerExecArgs {
     #[arg(long)]
     pub(super) hydrate_deps: bool,
 
-    /// Bound --sync-workspace snapshot preparation and transfer before command handoff. Defaults to 240s; does not limit dependency hydration or the runner command itself.
+    /// Hard wall-clock deadline across all --sync-workspace stages, including source provenance. Defaults to 240s; does not limit dependency hydration or the runner command itself. Sync progress and 10s heartbeats go to stderr.
     #[arg(long = "workspace-sync-timeout", default_value = "240s", value_parser = crate::commands::utils::watch::parse_duration_arg, value_name = "DURATION")]
     pub(super) workspace_sync_timeout: std::time::Duration,
 
