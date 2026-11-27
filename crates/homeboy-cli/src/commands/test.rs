@@ -924,6 +924,22 @@ fn persist_declared_test_artifacts(
                         "locator": &locator,
                     }),
                 )?;
+            // Stream an explicit handoff before the final JSON report: a gate's
+            // bounded stdout tail may drop that report, and its isolated store
+            // is removed after execution. Only extension-declared files travel.
+            if std::env::var("HOMEBOY_GATE_ARTIFACT_HANDOFF").as_deref() == Ok("1") {
+                if let Ok(contents) = std::fs::read_to_string(&record.path) {
+                    if contents.len() <= 1024 * 1024 {
+                        println!(
+                            "homeboy-gate-test-artifact {}",
+                            serde_json::json!({
+                                "reference": format!("homeboy://run/{}/artifact/{}", record.run_id, record.id),
+                                "contents": contents,
+                            })
+                        );
+                    }
+                }
+            }
             reported_locator_replacements.push(reported_test_artifact_locator_replacement(
                 &record, &locator,
             ));

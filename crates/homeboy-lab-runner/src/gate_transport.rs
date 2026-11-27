@@ -1332,6 +1332,29 @@ fn settle_terminal_gate_job(
             "native gate receipt has no durable evidence owner",
         )
     })?;
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    for (index, evidence) in receipt.report.test_artifacts.iter_mut().enumerate() {
+        let path = job.tmp_dir.join(format!("test-artifact-{index}.log"));
+        std::fs::write(&path, &evidence.contents)
+            .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        let artifact = store.record_artifact_with_metadata(
+            run_id,
+            "lab-gate-test-artifact",
+            &path,
+            serde_json::json!({"source_ref": evidence.reference, "runner_job_id": job_id}),
+        )?;
+        let reference = format!("homeboy://run/{run_id}/artifact/{}", artifact.id);
+        receipt.report.stdout = receipt
+            .report
+            .stdout
+            .replace(&evidence.reference, &reference);
+        receipt.report.stderr = receipt
+            .report
+            .stderr
+            .replace(&evidence.reference, &reference);
+        evidence.reference = reference;
+        evidence.contents.clear();
+    }
     let path = job.tmp_dir.join("terminal-gate-receipt.json");
     std::fs::write(
         &path,
@@ -1339,7 +1362,6 @@ fn settle_terminal_gate_job(
             .map_err(|error| Error::internal_json(error.to_string(), None))?,
     )
     .map_err(|error| Error::internal_io(error.to_string(), None))?;
-    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let artifact = store.record_artifact_with_metadata(run_id, "admitted-lab-gate-receipt", &path, serde_json::json!({"candidate": request.candidate, "request_sha256": request.identity()?, "runner_job_id": job_id, "visibility": request.visibility}))?;
     receipt.artifact_ref = Some(format!("homeboy://run/{run_id}/artifact/{}", artifact.id));
     let lifecycle =
