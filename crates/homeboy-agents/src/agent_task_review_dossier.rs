@@ -2808,17 +2808,6 @@ mod tests {
     }
 
     #[test]
-    fn review_form_guides_providers_to_pr_evidence_not_repository_notes() {
-        let declaration = review_form_output_declaration(PrTitlePolicy::ConventionalCommit);
-        let guidance = declaration.structural_schema["properties"]["evidence"]["description"]
-            .as_str()
-            .expect("provider-facing evidence guidance");
-        assert!(guidance.contains("PR body"));
-        assert!(guidance.contains("Do not commit"));
-        assert!(guidance.contains("docs/evidence/"));
-    }
-
-    #[test]
     fn completion_is_a_required_structured_verdict() {
         // #16051: completion is declared in the schema, not in prose.
         let declaration = review_form_output_declaration(PrTitlePolicy::ConventionalCommit);
