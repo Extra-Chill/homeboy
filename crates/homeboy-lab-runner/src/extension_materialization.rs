@@ -130,6 +130,11 @@ fn materialize_lab_job_extension_overlay_snapshots(
     };
     for id in extension_ids {
         let manifest = homeboy_core::extension::catalog::load_extension(id)?;
+        if let Some(warning) =
+            homeboy_core::extension::lifecycle::linked_extension_source_divergence(id)
+        {
+            eprintln!("WARNING: {}", warning.attributed_message());
+        }
         let source_path = manifest.extension_path.clone().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "extensions",

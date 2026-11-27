@@ -401,7 +401,8 @@ use update::is_extension_update_workdir_clean;
 pub(crate) use update::write_requested_source_ref;
 pub(crate) use update::write_source_metadata;
 pub use update::{
-    extension_update_dirty_paths, resolve_update_revisions, update, update_linked_group,
+    extension_update_dirty_paths, linked_extension_source_divergence, resolve_update_revisions,
+    update, update_linked_group, LINKED_SOURCE_DIVERGENCE_PREFIX,
 };
 
 /// Uninstall a extension. Automatically detects symlinks vs cloned directories.
@@ -1822,6 +1823,73 @@ exec '{}' "$@"
             assert!(
                 source.join("fixture-a/setup-count.txt").exists(),
                 "--force still reruns setup"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_source_divergence_blocks_updates_but_force_pulls() {
+        with_isolated_home(|home| {
+            let source = home.path().join("source");
+            fs::create_dir_all(&source).unwrap();
+            let remote = prepare_git_extension_repo(&source, "fixture").expect("git fixture");
+            let manifest_path = source.join("fixture/fixture.json");
+            let mut manifest: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+            manifest["source_url"] = serde_json::json!("https://example.com/current");
+            fs::write(&manifest_path, manifest.to_string()).unwrap();
+            assert!(commit_all(&source, "declare source"));
+            assert!(run_git(&source, &["push", "origin", "HEAD"]));
+            install(&source.join("fixture").to_string_lossy(), Some("fixture")).unwrap();
+            let before = homeboy_core::git::head_sha(&source);
+            let error = update("fixture", false, None).unwrap_err();
+            assert!(error
+                .attributed_message()
+                .contains("https://example.com/current"));
+            assert!(error
+                .attributed_message()
+                .contains(&source.display().to_string()));
+            let result = update_all(false, |_, _, _| Ok(())).unwrap();
+            assert!(result.updated.is_empty());
+            assert_eq!(
+                result.skipped_details[0].hints,
+                vec![
+                    "homeboy extension install https://example.com/current --id fixture --replace",
+                    "homeboy extension relink fixture <path to a checkout of the declared source>",
+                ]
+            );
+            assert_eq!(homeboy_core::git::head_sha(&source), before);
+
+            // Advance the remote without advancing the linked checkout.
+            let remote_path = remote.path().join("extension.git");
+            let writer = home.path().join("writer");
+            assert!(run_git(
+                home.path(),
+                &[
+                    "clone",
+                    remote_path.to_str().unwrap(),
+                    writer.to_str().unwrap()
+                ]
+            ));
+            fs::write(writer.join("new-file"), "new revision").unwrap();
+            assert!(commit_all(&writer, "advance"));
+            assert!(run_git(&writer, &["push", "origin", "HEAD"]));
+            update("fixture", true, None).expect("force pulls divergent origin");
+            assert_ne!(homeboy_core::git::head_sha(&source), before);
+            assert!(source.join("new-file").exists());
+
+            // Local repository spelling differences use the same identity gate.
+            manifest["source_url"] =
+                serde_json::json!(format!("{}/", remote.path().join("extension").display()));
+            fs::write(&manifest_path, manifest.to_string()).unwrap();
+            assert!(commit_all(&source, "matching source spelling"));
+            assert!(run_git(&source, &["push", "origin", "HEAD"]));
+            assert!(super::linked_extension_source_divergence("fixture").is_none());
+            update("fixture", false, None).expect("matching spelling updates");
+            assert_eq!(
+                update_all(false, |_, _, _| Ok(())).unwrap().updated.len(),
+                1
             );
         });
     }

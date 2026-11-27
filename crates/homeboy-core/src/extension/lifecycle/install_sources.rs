@@ -366,7 +366,7 @@ fn install_shared_assets_from_root(
 /// Whether two recorded source URLs name the same repository. Controllers
 /// spell one GitHub repository differently (`…/repo`, `…/repo.git`, SSH), and
 /// a spelling difference must not read as a competing owner.
-fn same_extension_source(left: &str, right: &str) -> bool {
+pub(super) fn same_extension_source(left: &str, right: &str) -> bool {
     let (left, right) = (left.trim(), right.trim());
     if left == right {
         return true;
