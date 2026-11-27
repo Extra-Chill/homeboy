@@ -1412,6 +1412,8 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
                 "run": if step.phase == StepPhase::Running { run_progress(step.run_id.as_deref()) } else { Value::Null },
                 "items": step.items.iter().enumerate().map(|(index, item)| json!({
                     "index": index,
+                    "started_at_ms": item.started_at_ms,
+                    "usage": item.usage,
                     "item": item.item,
                     "phase": item.phase,
                     "attempt": item.attempt,

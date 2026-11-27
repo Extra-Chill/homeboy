@@ -561,9 +561,26 @@ fn names_durable_cook(id: &str) -> bool {
 
 /// `agent-task status|diagnose <wf-id>`: read the instance from the daemon
 /// and roll its children up.
-pub(super) fn batch_rollup_from_daemon(instance: &str, operation: &str) -> CmdResult<Value> {
+pub(crate) fn batch_rollup_from_daemon(instance: &str, operation: &str) -> CmdResult<Value> {
     let client = homeboy::core::daemon::LocalControllerJobClient::connect()?;
-    batch_rollup(instance, operation, |id| client.workflow(id))
+    batch_or_child_rollup(instance, operation, |id| client.workflow(id))
+}
+
+fn batch_or_child_rollup(
+    instance: &str,
+    operation: &str,
+    mut read_workflow: impl FnMut(&str) -> Result<Value>,
+) -> CmdResult<Value> {
+    if let Some((parent, _)) = instance.rsplit_once("-cook-i") {
+        let (batch, code) = batch_rollup(parent, operation, &mut read_workflow)?;
+        if let Some(child) = batch["children"]
+            .as_array()
+            .and_then(|children| children.iter().find(|child| child["child_id"] == instance))
+        {
+            return Ok((child.clone(), code));
+        }
+    }
+    batch_rollup(instance, operation, read_workflow)
 }
 
 /// The per-child rollup of a cook-batch instance, built only from the
@@ -587,6 +604,17 @@ pub(super) fn batch_rollup(
             None,
         ));
     }
+    let mut rollup = batch_status_view(&view);
+    rollup["operation"] = json!(operation);
+    Ok((rollup, 0))
+}
+
+/// Enrich a controller snapshot without replacing its workflow fields.
+pub(crate) fn batch_status_view(view: &Value) -> Value {
+    if view["workflow"] != COOK_BATCH_WORKFLOW_ID {
+        return view.clone();
+    }
+    let instance = view["instance"].as_str().unwrap_or_default();
     let status = view["status"].as_str().unwrap_or("unknown");
     let terminal = !matches!(status, "running" | "queued");
     let batch_reason = view["reason"].as_str().unwrap_or(status);
@@ -596,18 +624,58 @@ pub(super) fn batch_rollup(
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
-        .map(|item| batch_child(instance, item, status, batch_reason))
+        .map(|item| {
+            let mut child = batch_child(instance, item, status, batch_reason);
+            child["phase"] = json!(child_phase(&child));
+            child["elapsed_ms"] = item["elapsed_ms"]
+                .as_u64()
+                .or_else(|| item["usage"]["wall_ms"].as_u64())
+                .map(|ms| json!(ms))
+                .or_else(|| {
+                    item["started_at_ms"]
+                        .as_u64()
+                        .filter(|_| item["phase"] != "done")
+                        .map(|start| {
+                            let end = item["finished_at_ms"].as_u64().unwrap_or_else(|| {
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64
+                            });
+                            json!(end.saturating_sub(start))
+                        })
+                })
+                .unwrap_or(Value::Null);
+            child
+        })
         .collect::<Vec<_>>();
     let never_started = children
         .iter()
         .filter(|child| child["state"] == homeboy::core::workflow::advance::NEVER_STARTED)
         .count();
+    let mut counts = json!({
+        "queued": 0, "pending_admission": 0, "running": 0, "gating": 0,
+        "candidate_recoverable": 0, "succeeded": 0, "failed": 0, "partial": 0
+    });
+    for child in &children {
+        let phase = child["phase"].as_str().unwrap_or("failed");
+        counts[phase] = json!(counts[phase].as_u64().unwrap_or_default() + 1);
+    }
+    let all_terminal = terminal
+        && children.iter().all(|child| {
+            matches!(
+                child["phase"].as_str(),
+                Some("succeeded" | "failed" | "partial" | "candidate_recoverable")
+            )
+        });
     let mut rollup = json!({
         "schema": COOK_BATCH_STATUS_SCHEMA,
-        "operation": operation,
+        "counts": counts,
+        "all_terminal": all_terminal,
         "instance": instance,
         "status": status,
         "reason": view["reason"],
+        "workflow_children": view["children"],
         "children_total": children.len(),
         "never_started": never_started,
         "children": children,
@@ -620,25 +688,51 @@ pub(super) fn batch_rollup(
             "the batch has not declared its children yet".to_string()
         });
     }
-    Ok((rollup, 0))
+    let mut enriched = view.clone();
+    if let Some(object) = enriched.as_object_mut() {
+        object.extend(rollup.as_object().unwrap().clone());
+    }
+    enriched
+}
+
+fn child_phase(child: &Value) -> &str {
+    match child["state"].as_str().unwrap_or("failed") {
+        "pending" | "admitting" | "pending_admission" => "pending_admission",
+        "queued" => "queued",
+        "running"
+            if child["execution_phase"]
+                .as_str()
+                .is_some_and(|phase| phase.contains("gat") || phase.contains("verif")) =>
+        {
+            "gating"
+        }
+        "running" => "running",
+        "candidate_recoverable" => "candidate_recoverable",
+        "succeeded" => "succeeded",
+        "partial_failure" | "partial" => "partial",
+        _ => "failed",
+    }
 }
 
 fn batch_child(instance: &str, item: &Value, status: &str, batch_reason: &str) -> Value {
     let terminal = !matches!(status, "running" | "queued");
     let index = item["index"].as_u64().unwrap_or_default();
+    let attempt = item["attempt"].as_u64().unwrap_or(1).max(1);
+    let declared_id = format!("{instance}-cook-i1-n{index}-a{attempt}");
     let cook_id = item["run_id"].as_str();
     let mut child = json!({
         "index": index,
         "placement": crate::commands::run_placement::placement(&Value::Null),
         "child_id": cook_id
             .map(str::to_string)
-            .unwrap_or_else(|| format!("{instance}/cook/item-{index}")),
+            .unwrap_or_else(|| declared_id.clone()),
         "task_url": item["item"]["issue_url"],
         "issue_ref": item["item"]["issue_ref"],
         "run_id": Value::Null,
         "verdict": Value::Null,
         "candidate": Value::Null,
         "pr_url": Value::Null,
+        "merged": Value::Null,
     });
     if let Some(run) = cook_id.and_then(child_run) {
         for (key, value) in run {
@@ -651,13 +745,16 @@ fn batch_child(instance: &str, item: &Value, status: &str, batch_reason: &str) -
         .as_str()
         .filter(|error| !error.trim().is_empty());
     let settled = item["phase"] == "done";
+    if settled && outcome == Some("succeeded") {
+        child["state"] = json!("succeeded");
+        child["next_action"] = Value::Null;
+        return child;
+    }
     if !terminal && !settled {
         // Still waiting for a slot or for its Cook to write its first record.
-        child["state"] = json!(if cook_id.is_some() {
-            "admitting"
-        } else {
-            "pending"
-        });
+        child["state"] = json!("pending_admission");
+        child["reason"] =
+            json!("pending admission: waiting for a slot or the first durable Cook record");
         child["next_action"] = json!(format!("homeboy runs watch {instance}"));
         return child;
     }
@@ -715,10 +812,21 @@ fn child_run(cook_id: &str) -> Option<Vec<(&'static str, Value)>> {
         ),
         ("run_id", json!(record.run_id)),
         ("state", json!(verdict.state)),
+        ("execution_phase", json!(verdict.phase)),
+        ("diagnose", json!(verdict.diagnose_command)),
         ("verdict", json!(verdict.state)),
         ("reason", json!(verdict.reason)),
         ("candidate", candidate),
         ("pr_url", json!(pr_url)),
+        ("publication", json!(verdict.publication)),
+        (
+            "merged",
+            if verdict.publication.as_deref() == Some("merged") {
+                json!(true)
+            } else {
+                Value::Null
+            },
+        ),
         ("next_action", json!(verdict.next_action)),
     ])
 }
@@ -1119,6 +1227,25 @@ mod tests {
                 }),
                 1,
             );
+            let mut active = homeboy::core::daemon::workflow_job::projection(&state, None);
+            active["workflow"] = json!(COOK_BATCH_WORKFLOW_ID);
+            let pending = batch_status_view(&active);
+            assert_eq!(pending["children_total"], 3);
+            assert_eq!(pending["counts"]["pending_admission"], 3);
+            assert_eq!(pending["all_terminal"], false);
+            assert_eq!(
+                pending["children"][2]["child_id"],
+                format!("{instance}-cook-i1-n2-a1")
+            );
+            assert_eq!(pending["children"][2]["state"], "pending_admission");
+            let child_id = format!("{instance}-cook-i1-n2-a1");
+            let (child, _) = batch_or_child_rollup(&child_id, "status", |id| {
+                assert_eq!(id, instance);
+                Ok(active.clone())
+            })
+            .unwrap();
+            assert_eq!(child["child_id"], child_id);
+            assert_eq!(child["phase"], "pending_admission");
             let (state, _) = advance(
                 &definition,
                 &state,
@@ -1162,6 +1289,25 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn batch_child_phase_counts_cover_execution_and_recovery() {
+        for (state, execution_phase, expected) in [
+            ("queued", "admission", "queued"),
+            ("running", "provider", "running"),
+            ("running", "verifying", "gating"),
+            ("candidate_recoverable", "done", "candidate_recoverable"),
+            ("succeeded", "done", "succeeded"),
+            ("failed", "done", "failed"),
+            ("partial_failure", "done", "partial"),
+            ("pending_admission", "", "pending_admission"),
+        ] {
+            assert_eq!(
+                child_phase(&json!({"state": state, "execution_phase": execution_phase})),
+                expected
+            );
+        }
     }
 
     #[test]

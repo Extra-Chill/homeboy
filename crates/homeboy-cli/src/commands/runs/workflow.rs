@@ -76,7 +76,16 @@ pub(crate) fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     let (view, code) = match args.command {
         RunsCommand::List(_) => (client.workflow_list()?, 0),
         RunsCommand::Show { run_id, .. } => {
-            let mut view = client.workflow(&run_id)?;
+            if run_id.contains("-cook-i") {
+                let (view, code) =
+                    crate::commands::agent_task::cook_batch::batch_rollup_from_daemon(
+                        &run_id, "show",
+                    )?;
+                return Ok((RunsOutput::Cook(view), code));
+            }
+            let mut view = crate::commands::agent_task::cook_batch::batch_status_view(
+                &client.workflow(&run_id)?,
+            );
             let code = exit_code(&view);
             // Step usage lives on the instance's durable run (#18461).
             if let Some(resources) =
@@ -126,13 +135,19 @@ fn poll_instance(
     let mut last = String::new();
     let mut watched = instance.to_string();
     loop {
-        let view = poll(&watched)?;
+        let view = crate::commands::agent_task::cook_batch::batch_status_view(&poll(&watched)?);
         let line = progress_line(&view);
         if line != last {
             eprintln!("{line}");
             last = line;
         }
-        let child = chain_successor(&view);
+        let child = if view["workflow_children"].is_array() {
+            let mut chain_view = view.clone();
+            chain_view["children"] = view["workflow_children"].clone();
+            chain_successor(&chain_view)
+        } else {
+            chain_successor(&view)
+        };
         if child.is_none() && is_terminal(&view) {
             let code = exit_code(&view);
             return Ok((view, code));
@@ -153,6 +168,24 @@ fn poll_instance(
 }
 
 fn progress_line(view: &Value) -> String {
+    if view["counts"].is_object() {
+        let children = view["children"]
+            .as_array()
+            .map(|children| {
+                children
+                    .iter()
+                    .map(|child| format!("{}:{}", child["issue_ref"], child["phase"]))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        return format!(
+            "{} counts={} all-terminal={} {children}",
+            view["instance"].as_str().unwrap_or_default(),
+            view["counts"],
+            view["all_terminal"]
+        );
+    }
     let steps = view["steps"]
         .as_object()
         .map(|steps| {
@@ -196,6 +229,9 @@ fn progress_line(view: &Value) -> String {
 }
 
 fn is_terminal(view: &Value) -> bool {
+    if let Some(terminal) = view["all_terminal"].as_bool() {
+        return terminal;
+    }
     !matches!(view["status"].as_str(), Some("running" | "queued"))
 }
 
@@ -212,6 +248,36 @@ mod tests {
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
     use serde_json::json;
+
+    #[test]
+    fn three_child_batch_watch_reaches_all_terminal() {
+        let mut polls = 0;
+        let (view, code) = poll_instance("wf-cook-batch-watch", Duration::ZERO, None, |_| {
+            polls += 1;
+            let done = polls == 2;
+            let snapshot = json!({
+                "instance": "wf-cook-batch-watch", "workflow": "cook-batch",
+                "status": if done { "succeeded" } else { "running" },
+                "steps": {"cook": {"items": (0..3).map(|index| json!({
+                    "index": index, "item": {"issue_ref": format!("repo#{index}")},
+                    "phase": if done || index < 2 { "done" } else { "pending" },
+                    "outcome": if done || index < 2 { Some("succeeded") } else { None }
+                })).collect::<Vec<_>>()}}
+            });
+            let enriched = crate::commands::agent_task::cook_batch::batch_status_view(&snapshot);
+            assert_eq!(
+                enriched["counts"]["pending_admission"],
+                if done { 0 } else { 1 }
+            );
+            assert_eq!(enriched["counts"]["succeeded"], if done { 3 } else { 2 });
+            Ok(snapshot)
+        })
+        .unwrap();
+        assert_eq!(polls, 2);
+        assert_eq!(code, 0);
+        assert_eq!(view["all_terminal"], true);
+        assert_eq!(view["counts"]["succeeded"], 3);
+    }
 
     #[test]
     fn workflow_discovery_rejects_filters() {
