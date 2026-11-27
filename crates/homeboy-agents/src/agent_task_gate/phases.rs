@@ -31,20 +31,27 @@ impl GateTestArtifact {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&self.contents) else {
             return Vec::new();
         };
-        ["cause", "message", "detail", "reason", "summary", "remediation"]
-            .into_iter()
-            .filter_map(|field| {
-                let text = value.get(field)?.as_str()?;
-                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                if text.is_empty() {
-                    return None;
-                }
-                Some(format!(
-                    "{field}: {}",
-                    text.chars().take(1024).collect::<String>()
-                ))
-            })
-            .collect()
+        [
+            "cause",
+            "message",
+            "detail",
+            "reason",
+            "summary",
+            "remediation",
+        ]
+        .into_iter()
+        .filter_map(|field| {
+            let text = value.get(field)?.as_str()?;
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "{field}: {}",
+                text.chars().take(1024).collect::<String>()
+            ))
+        })
+        .collect()
     }
 }
 
@@ -231,7 +238,14 @@ mod tests {
 
     #[test]
     fn diagnosis_summary_preserves_field_order_and_character_cap() {
-        let fields = ["cause", "message", "detail", "reason", "summary", "remediation"];
+        let fields = [
+            "cause",
+            "message",
+            "detail",
+            "reason",
+            "summary",
+            "remediation",
+        ];
         let contents: serde_json::Value = fields
             .iter()
             .map(|field| ((*field).to_string(), serde_json::json!("é".repeat(1025))))
