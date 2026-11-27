@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.499.0] - 2026-11-27
+
+### Added
+- expose exec admission waits and queue deadlines
+
+### Fixed
+- report leftover processes killed during cgroup teardown
+- bound workspace sync and report active stages
+
 ## [0.498.0] - 2026-11-27
 
 ### Added
