@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.498.0] - 2026-11-27
+
+### Added
+- aggregate cook-batch child phases and stream batch progress
+
+### Fixed
+- bound promotion admission retries and expose stale lease owners
+- cancel orphaned attached exec jobs and guard duplicates
+
 ## [0.497.33] - 2026-11-27
 
 ### Fixed
