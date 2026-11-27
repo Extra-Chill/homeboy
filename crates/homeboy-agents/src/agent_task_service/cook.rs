@@ -1658,6 +1658,17 @@ pub(super) fn gate_environment_unavailable_stop_reason(
     promotion: &AgentTaskPromotionReport,
     cook_id: &str,
 ) -> String {
+    if let Some(failure) = serde_json::to_value(promotion)
+        .ok()
+        .and_then(|report| super::gate_failure::gate_failure_projection(&report))
+        .filter(|failure| failure["error_code"] == "runner.lab_transport_failure")
+    {
+        if let Some(connect) = failure["next_action"].as_str() {
+            return format!("Blocked: {}. Candidate preserved. Next: {connect} && homeboy agent-task recover {} --regate",
+                failure["message"].as_str().unwrap_or("runner transport unavailable"),
+                homeboy_core::error::posix_quote_arg(cook_id));
+        }
+    }
     let causes = promotion
         .deterministic_gates
         .iter()

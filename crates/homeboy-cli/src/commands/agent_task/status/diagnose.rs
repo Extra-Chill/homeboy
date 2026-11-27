@@ -24,6 +24,32 @@ mod probe_tests {
     use super::*;
 
     #[test]
+    fn disconnected_gate_is_blocked_and_connect_precedes_regate() {
+        let mut value = json!({"state": "running", "summary": "old"});
+        project_gate_failure(
+            &mut value,
+            Some(json!({
+                "gate": "gate-1#1", "reason": "gate_environment_unavailable",
+                "termination": "unavailable", "exit_code": 0,
+                "error_code": "runner.lab_transport_failure",
+                "message": "not_connected", "next_action": "homeboy runner connect homeboy-lab"
+            })),
+            "cook-disconnected",
+        );
+        assert_eq!(value["state"], "blocked");
+        assert_eq!(
+            value["next_commands"],
+            json!([
+                "homeboy runner connect homeboy-lab",
+                "homeboy agent-task recover cook-disconnected --regate"
+            ])
+        );
+        let summary = value["summary"].as_str().unwrap();
+        assert!(summary.contains("runner.lab_transport_failure: not_connected"));
+        assert!(!summary.contains("exit 0"));
+    }
+
+    #[test]
     fn probe_keeps_a_completed_result_and_abandons_a_stalled_one_within_budget() {
         assert_eq!(
             bounded_diagnostic_probe(DIAGNOSTIC_PROBE_TIMEOUT, || 42),
@@ -427,12 +453,25 @@ pub(super) fn project_gate_failure(value: &mut Value, failure: Option<Value>, ru
         failure["reason"].as_str().unwrap_or("gate_failed"),
         &posix_quote_arg(run),
     );
+    let commands = failure["next_action"]
+        .as_str()
+        .map(|connect| vec![connect.to_string(), command.clone()])
+        .unwrap_or_else(|| vec![command.clone()]);
+    let command = commands.join(" && ");
     let action = CommandNextAction::new(description.clone(), command.clone());
+    if failure["error_code"] == "runner.lab_transport_failure" {
+        value["state"] = json!("blocked");
+        value["blocker"] = json!({
+            "code": failure["error_code"],
+            "message": failure["message"],
+            "reason": command,
+        });
+    }
     value["next_action"] = json!({"command": command, "description": description});
     if value["blocker"].is_object() {
         value["blocker"]["reason"] = json!(command);
     }
-    value["next_commands"] = json!([command]);
+    value["next_commands"] = json!(commands);
     value["next_action_basis"] = json!(DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
     attach_actionable_metadata(
         value,
@@ -443,10 +482,19 @@ pub(super) fn project_gate_failure(value: &mut Value, failure: Option<Value>, ru
     );
     if value.get("summary").is_some() {
         value["summary"] = json!(format!(
-            "gate {}: {} (exit {}); artifact: {}",
+            "gate {}: {}; artifact: {}",
             failure["gate"].as_str().unwrap_or("unknown"),
-            failure["termination"].as_str().unwrap_or("unavailable"),
-            failure["exit_code"],
+            failure["error_code"]
+                .as_str()
+                .map(|code| format!(
+                    "{code}: {}",
+                    failure["message"].as_str().unwrap_or("runner unavailable")
+                ))
+                .unwrap_or_else(|| format!(
+                    "{} (exit {})",
+                    failure["termination"].as_str().unwrap_or("unavailable"),
+                    failure["exit_code"]
+                )),
             failure["artifact"].as_str().unwrap_or("unavailable")
         ));
     }

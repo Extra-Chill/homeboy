@@ -4168,6 +4168,35 @@ fn project_summary_fields(
             .count()
     });
     resource.publication = delivery.as_ref().and_then(publication);
+    if resource.state != ControlPlaneState::Succeeded {
+        if let Some(failure) =
+            crate::agent_task_service::recorded_promotion_report(&record.metadata)
+                .ok()
+                .flatten()
+                .and_then(|report| crate::agent_task_service::gate_failure_projection(&report))
+                .filter(|failure| failure["error_code"] == "runner.lab_transport_failure")
+        {
+            resource.state = ControlPlaneState::Blocked;
+            resource.blocker = Some(ControlPlaneBlocker {
+                code: Some("runner.lab_transport_failure".into()),
+                message: failure["message"]
+                    .as_str()
+                    .unwrap_or("runner transport unavailable")
+                    .into(),
+                reason: failure["next_action"].as_str().map(|connect| {
+                    format!(
+                        "{connect} && homeboy agent-task recover {} --regate",
+                        homeboy_core::error::posix_quote_arg(&record.run_id)
+                    )
+                }),
+                details: Some(failure),
+                state: Some("blocked".into()),
+                retry: None,
+                daemon: None,
+                output: None,
+            });
+        }
+    }
     project_live_gate_verification(&mut resource, record);
     if crate::agent_task_lifecycle::CookRunState::of(record).phase
         == crate::agent_task_lifecycle::CookRunPhase::Continuing
@@ -9979,6 +10008,37 @@ mod tests {
         let blocker = resource.blocker.expect("delivery blocker");
         assert_eq!(blocker.code.as_deref(), Some("gate_failed"));
         assert_eq!(blocker.message, "deterministic gate `test` failed");
+    }
+
+    #[test]
+    fn disconnected_lab_gate_projects_blocked_with_connect_action() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.set_state_for_test(RunExecutionState::CandidateRecoverable);
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion/status",
+            json!("gate_environment_unavailable"),
+        );
+        crate::agent_task_service::set_cook_delivery_artifact_for_test(
+            &mut record.metadata,
+            "/promotion/deterministic_gates",
+            json!([{
+                "id": "test", "status": "unavailable", "command": ["true"], "exit_code": 0,
+                "lab_receipt": {"diagnostic": {"code": "runner.lab_transport_failure",
+                    "message": "not_connected", "details": {"next_action": "homeboy runner connect homeboy-lab"}}}
+            }]),
+        );
+        let resource = project_record(&record, None, None).unwrap();
+        assert_eq!(resource.state, ControlPlaneState::Blocked);
+        let blocker = resource.blocker.unwrap();
+        assert_eq!(
+            blocker.code.as_deref(),
+            Some("runner.lab_transport_failure")
+        );
+        assert!(blocker
+            .reason
+            .unwrap()
+            .starts_with("homeboy runner connect homeboy-lab"));
     }
 
     #[test]

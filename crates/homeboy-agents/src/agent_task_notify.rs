@@ -467,6 +467,27 @@ fn terminal_payload(
             })
             .collect::<Vec<_>>();
         payload = payload.with_fact("Gates", gate_summary(&gates));
+        if let Some(failure) = serde_json::to_value(promotion)
+            .ok()
+            .and_then(|report| crate::agent_task_service::gate_failure_projection(&report))
+            .filter(|failure| failure["error_code"] == "runner.lab_transport_failure")
+        {
+            payload = payload.with_fact(
+                "Blocked",
+                failure["message"]
+                    .as_str()
+                    .unwrap_or("runner transport unavailable"),
+            );
+            if let Some(connect) = failure["next_action"].as_str() {
+                payload = payload.with_fact(
+                    "Next",
+                    format!(
+                        "{connect} && homeboy agent-task recover {} --regate",
+                        homeboy_core::error::posix_quote_arg(&report.cook_id)
+                    ),
+                );
+            }
+        }
         for evidence in promotion
             .deterministic_gates
             .iter()
