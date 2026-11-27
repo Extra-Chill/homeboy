@@ -838,11 +838,7 @@ pub(super) fn run_gate_argv_local(
             let diagnostics = report
                 .test_artifacts
                 .iter()
-                .flat_map(|artifact| artifact.contents.lines())
-                .filter(|line| {
-                    line.contains("PHPUNIT_ZERO_TESTS")
-                        || line.contains("Managed runtime service failed")
-                })
+                .flat_map(|artifact| artifact.diagnosis_summary())
                 .take(20)
                 .collect::<Vec<_>>()
                 .join("\n");

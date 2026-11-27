@@ -1841,7 +1841,7 @@ os._exit({code})
 #[test]
 fn zero_test_gate_retains_extension_artifacts_after_finalization() {
     let workspace = tempfile::tempdir().unwrap();
-    let command = r#"echo 'homeboy-gate-test-artifact {"reference":"homeboy://run/test/artifact/diagnosis","contents":"PHPUNIT_ZERO_TESTS: Managed runtime service failed to start"}';
+    let command = r#"echo 'homeboy-gate-test-artifact {"reference":"homeboy://run/test/artifact/diagnosis","contents":"{\"cause\":\"PHPUNIT_ZERO_TESTS\",\"message\":\"Managed runtime service failed to start\"}"}';
         echo 'homeboy-gate-test-artifact {"reference":"homeboy://run/test/artifact/steps","contents":"{\"steps\":[]}"}';
         head -c 100000 /dev/zero | tr '\0' 'x'; echo;
         echo '[test-results] Total: 0, Passed: 0, Failed: 0, Skipped: 0' >&2;
@@ -1850,11 +1850,34 @@ fn zero_test_gate_retains_extension_artifacts_after_finalization() {
     assert_eq!(report.status, AgentTaskGateStatus::Failed);
     assert!(report.capture.stdout.truncated);
     assert_eq!(report.test_artifacts.len(), 2);
-    assert!(report.stderr.starts_with("PHPUNIT_ZERO_TESTS"));
+    assert!(report.stderr.starts_with("cause: PHPUNIT_ZERO_TESTS"));
     let wire = serde_json::to_vec(&report).unwrap();
     let retained: AgentTaskGateReport = serde_json::from_slice(&wire).unwrap();
     assert_eq!(retained.test_artifacts, report.test_artifacts);
     assert!(retained.test_artifacts[1].contents.contains("steps"));
+}
+
+#[test]
+fn diagnosis_artifact_surfaces_extension_defined_cause_and_message() {
+    let workspace = tempfile::tempdir().unwrap();
+    let message = "Recipe extra plugin source requires Composer autoload but could not be prepared: timed out";
+    let artifact = serde_json::json!({
+        "reference": "homeboy://run/test/artifact/diagnosis",
+        "contents": serde_json::json!({
+            "cause": "plugin_source_preparation_timeout",
+            "message": message,
+            "steps": ["private detail not a summary"]
+        }).to_string()
+    });
+    let command = format!("echo 'homeboy-gate-test-artifact {artifact}'; exit 1");
+    let report = run_gate_command(workspace.path(), 1, &command).unwrap();
+    assert!(report
+        .stderr
+        .contains("cause: plugin_source_preparation_timeout"));
+    assert!(report.stderr.contains(message));
+    let evidence = serde_json::to_string(&report.failure_evidence).unwrap();
+    assert!(evidence.contains(message));
+    assert!(!report.stderr.contains("private detail"));
 }
 
 #[test]
