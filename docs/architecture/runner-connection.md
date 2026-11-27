@@ -70,6 +70,17 @@ daemon rather than deferring convergence. That refresh holds its own runtime pro
 lease and finishes before connect takes its lease; its reconnect attaches
 through the non-converging connect, so convergence never recurses.
 
+Promotion admission's `wait_timeout_ms` bounds the entire individual admission
+wait, including owner changes and OS-lock contention. Once consumed, the
+`runtime_promotion.wait_timeout` error is terminal for automatic substrate and
+doctor retries; a new explicit command can start a new budget. Errors include
+the owner PID, operation, liveness, and recovery guidance. Dead or reused owner
+identities are archived on the next contention check, with a reclamation log;
+this also recovers leases left by killed exec clients. Lease expiry (currently
+30 minutes, renewed at transaction boundaries) is diagnostic, not permission to
+steal from a live owner. `runner doctor` and `daemon status` expose dead and
+expired promotion owners as blocking evidence, independently of daemon health.
+
 `homeboy upgrade --upgrade-runner` runs the same convergence decision, but
 targets the controller identity the upgrade just installed rather than the
 running (pre-upgrade) process's build (#16845). See
