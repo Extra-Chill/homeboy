@@ -537,6 +537,16 @@ current rsync behavior. The build writes a deterministic selected-file
 inventory plus the manifest and profile identity as
 `wordpress.package_profile` evidence.
 
+### Plugin entrypoints in multi-plugin packages
+
+Build and release packaging use a unique root plugin file listed in
+`homeboy.json` → `version_targets` when available. Otherwise they prefer a
+root plugin named `<component-id>.php` (or `<directory-name>.php` when no ID
+is available), then a sole plugin or the only plugin with a version header.
+If the headers are still ambiguous, declare the canonical file in
+`version_targets`. Companion plugins can remain in the ZIP without their own
+version headers; release verification checks the selected entrypoint.
+
 ### Additional release package profiles
 
 A component that must preserve its full default package while also publishing

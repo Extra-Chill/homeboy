@@ -84,6 +84,8 @@ LOCAL_WORKSPACE_DEPS_HELPER="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${SHARED_LI
 WP_SCRIPTS_TOOLCHAIN_HELPER="${HOMEBOY_RUNTIME_WP_SCRIPTS_TOOLCHAIN:-${SCRIPT_DIR}/../lib/wp-scripts-toolchain.sh}"
 # shellcheck source=../lib/wp-scripts-toolchain.sh
 source "$WP_SCRIPTS_TOOLCHAIN_HELPER"
+# shellcheck source=../lib/package-entrypoint.sh
+source "${SCRIPT_DIR}/../lib/package-entrypoint.sh"
 
 # Output functions
 print_status() {
@@ -293,27 +295,18 @@ check_dependencies() {
 detect_project() {
     print_status "Detecting project type..."
 
-    # Look for plugin file (*.php with Plugin Name header)
-    local plugin_file=$(find . -maxdepth 1 -name "*.php" -type f -exec grep -l "Plugin Name:" {} \; | head -1)
-
-    if [ -n "$plugin_file" ]; then
-        PROJECT_TYPE="plugin"
-        PROJECT_MAIN_FILE=$(basename "$plugin_file")
-        print_success "Detected WordPress plugin: $PROJECT_MAIN_FILE"
-        return 0
+    if ! PROJECT_MAIN_FILE="$(wordpress_package_entrypoint "${HOMEBOY_COMPONENT_ID:-}")"; then
+        print_error "Could not select a WordPress plugin or theme entrypoint"
+        exit 1
     fi
 
-    # Look for theme (style.css with Theme Name header)
-    if [ -f "style.css" ] && grep -q "Theme Name:" "style.css"; then
+    if [ "$PROJECT_MAIN_FILE" = "style.css" ]; then
         PROJECT_TYPE="theme"
-        PROJECT_MAIN_FILE="style.css"
         print_success "Detected WordPress theme"
-        return 0
+    else
+        PROJECT_TYPE="plugin"
+        print_success "Detected WordPress plugin: $PROJECT_MAIN_FILE"
     fi
-
-    print_error "Could not detect project type (plugin or theme)"
-    print_error "Expected: *.php with 'Plugin Name:' header OR style.css with 'Theme Name:' header"
-    exit 1
 }
 
 # Extract project metadata
@@ -323,22 +316,16 @@ extract_metadata() {
     if [ "$PROJECT_TYPE" = "plugin" ]; then
         # Extract plugin name from filename (remove .php extension)
         PROJECT_NAME="${PROJECT_MAIN_FILE%.php}"
-
-        # Extract version from plugin header
-        PROJECT_VERSION=$(grep -i "Version:" "$PROJECT_MAIN_FILE" | head -1 | sed 's/.*Version:[ ]*\([0-9\.]*\).*/\1/')
-
-    elif [ "$PROJECT_TYPE" = "theme" ]; then
+    else
         # Extract theme name from directory name
         PROJECT_NAME=$(basename "$PWD")
-
-        # Extract version from theme header
-        PROJECT_VERSION=$(grep -i "Version:" "$PROJECT_MAIN_FILE" | head -1 | sed 's/.*Version:[ ]*\([0-9\.]*\).*/\1/')
     fi
+    PROJECT_VERSION="$(wordpress_package_source_header "$PROJECT_MAIN_FILE" Version)"
 
     # When invoked by homeboy, use the component ID for artifact naming so the
     # zip matches the deploy system's artifact_pattern (build/{component_id}.zip).
     # Falls back to the auto-detected PROJECT_NAME for standalone usage.
-    if [ -n "$HOMEBOY_COMPONENT_ID" ]; then
+    if [ -n "${HOMEBOY_COMPONENT_ID:-}" ]; then
         PROJECT_NAME="$HOMEBOY_COMPONENT_ID"
     fi
 

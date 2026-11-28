@@ -43,7 +43,6 @@ set -euo pipefail
 #   - unzip on PATH (when release_latest_branch is configured)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 normalize_github_remote() {
   local remote_url="$1"
@@ -324,10 +323,22 @@ resolve_github_token
 # for 6 days). Strip the leading "v" and any monorepo "<component>-v"
 # prefix from the tag to get the bare semver.
 EXPECTED_VERSION="${TAG##*v}"
-bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${ARTIFACT_PATH}" "${EXPECTED_VERSION}" >/dev/null
+# shellcheck source=../lib/package-entrypoint.sh
+source "${SCRIPT_DIR}/../lib/package-entrypoint.sh"
+release_source_path="$(jq -r '.release.source_path // empty' <<< "${PAYLOAD}")"
+release_local_path="$(jq -r '.release.local_path // empty' <<< "${PAYLOAD}")"
+source_path="${HOMEBOY_WORDPRESS_PACKAGE_SOURCE_PATH:-${HOMEBOY_RELEASE_SOURCE_PATH:-${release_source_path:-${HOMEBOY_COMPONENT_PATH:-${release_local_path:-.}}}}}"
+MAIN_FILE=""
+if [[ -d "${source_path}" ]]; then
+  MAIN_FILE="$(cd "${source_path}" && wordpress_package_entrypoint "${COMPONENT_SLUG}")" || {
+    # Recovery may only have a ZIP. Still fail on ambiguous source headers.
+    [[ "$?" == 1 ]] || exit 1
+  }
+fi
+bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${ARTIFACT_PATH}" "${EXPECTED_VERSION}" "${MAIN_FILE}" >/dev/null
 echo "Verified ${ARTIFACT_PATH} contains version ${EXPECTED_VERSION} (tag ${TAG})" >&2
 for additional_artifact_path in "${ADDITIONAL_ARTIFACT_PATHS[@]}"; do
-  bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${additional_artifact_path}" "${EXPECTED_VERSION}" >/dev/null
+  bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${additional_artifact_path}" "${EXPECTED_VERSION}" "${MAIN_FILE}" >/dev/null
   echo "Verified ${additional_artifact_path} contains version ${EXPECTED_VERSION} (tag ${TAG})" >&2
 done
 

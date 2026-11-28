@@ -64,7 +64,8 @@ if [[ -n "${PACKAGE_SOURCE_PATH}" ]]; then
   fi
   cd "${PACKAGE_SOURCE_PATH}"
 fi
-export HOMEBOY_COMPONENT_PATH="$(pwd)"
+HOMEBOY_COMPONENT_PATH="$(pwd)"
+export HOMEBOY_COMPONENT_PATH
 PACKAGE_ROOT="$(pwd -P)"
 
 COMPONENT_SETTINGS_JSON="{}"
@@ -105,29 +106,23 @@ assert_contained_regular_file() {
   esac
 }
 
-# Resolve the component slug the way build.sh does (so the ZIP path matches).
-COMPONENT_SLUG="${HOMEBOY_COMPONENT_ID:-}"
-if [[ -z "${COMPONENT_SLUG}" ]]; then
-  # Fall back to a plugin/theme header probe so this script also works when
-  # invoked outside the homeboy release pipeline (developer dry-runs).
-  for candidate in *.php; do
-    [[ -f "${candidate}" ]] || continue
-    if grep -q "^[[:space:]]*\*\?[[:space:]]*Plugin Name:" "${candidate}"; then
-      COMPONENT_SLUG="${candidate%.php}"
-      break
-    fi
-  done
-  if [[ -z "${COMPONENT_SLUG}" ]] && [[ -f "style.css" ]]; then
-    if grep -q "^[[:space:]]*\*\?[[:space:]]*Theme Name:" "style.css"; then
-      COMPONENT_SLUG="$(basename "$(pwd)")"
-    fi
-  fi
+# shellcheck source=../lib/package-entrypoint.sh
+source "${SCRIPT_DIR}/../lib/package-entrypoint.sh"
+
+COMPONENT_SLUG="${HOMEBOY_COMPONENT_ID:-$(jq -r '.release.component_id | strings' <<< "${SETTINGS_JSON}")}"
+if ! MAIN_FILE="$(wordpress_package_entrypoint "${COMPONENT_SLUG}")"; then
+  echo "Error: could not select a WordPress plugin or theme entrypoint" >&2
+  exit 1
 fi
 
 if [[ -z "${COMPONENT_SLUG}" ]]; then
-  echo "Error: could not determine WordPress component slug (set HOMEBOY_COMPONENT_ID)" >&2
-  exit 1
+  if [[ "${MAIN_FILE}" == style.css ]]; then
+    COMPONENT_SLUG="${PWD##*/}"
+  else
+    COMPONENT_SLUG="${MAIN_FILE%.php}"
+  fi
 fi
+export HOMEBOY_COMPONENT_ID="${COMPONENT_SLUG}"
 
 # Additional release package profiles: optional profile variants published as
 # extra release assets alongside the primary ZIP. Declarations are validated
@@ -216,27 +211,13 @@ echo "Built ${ARTIFACT_PATH}" >&2
 # The expected version comes from the release payload when homeboy invokes
 # this action; standalone dry-runs fall back to the on-disk header so the
 # check still validates build output against source.
-EXPECTED_VERSION=""
-EXPECTED_VERSION="$(echo "${HOMEBOY_SETTINGS_JSON}" | jq -r '.release.version // empty')"
+EXPECTED_VERSION="$(jq -r '.release.version // empty' <<< "${SETTINGS_JSON}")"
 if [[ -z "${EXPECTED_VERSION}" ]]; then
-  for candidate in *.php; do
-    [[ -f "${candidate}" ]] || continue
-    if grep -qi 'Plugin Name:' "${candidate}"; then
-      EXPECTED_VERSION="$(grep -i -m1 'Version:' "${candidate}" | sed 's/.*[Vv]ersion:[[:space:]]*//' | tr -d '[:space:]')"
-      break
-    fi
-  done
-  if [[ -z "${EXPECTED_VERSION}" ]] && [[ -f "style.css" ]]; then
-    EXPECTED_VERSION="$(grep -i -m1 'Version:' "style.css" | sed 's/.*[Vv]ersion:[[:space:]]*//' | tr -d '[:space:]')"
-  fi
+  EXPECTED_VERSION="$(wordpress_package_source_header "${MAIN_FILE}" Version)"
 fi
 
-if [[ -n "${EXPECTED_VERSION}" ]]; then
-  bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${ARTIFACT_PATH}" "${EXPECTED_VERSION}" >/dev/null
-  echo "Verified ${ARTIFACT_PATH} contains version ${EXPECTED_VERSION}" >&2
-else
-  echo "Warning: could not determine expected version; skipping artifact version verification" >&2
-fi
+bash "${SCRIPT_DIR}/verify-artifact-version.sh" "${ARTIFACT_PATH}" "${EXPECTED_VERSION}" "${MAIN_FILE}" >/dev/null
+echo "Verified ${ARTIFACT_PATH} contains version ${EXPECTED_VERSION}" >&2
 
 # Build every declared additional package profile. build.sh always removes and
 # rewrites build/${COMPONENT_SLUG}.zip, so the verified primary ZIP is parked
@@ -276,12 +257,8 @@ if [[ ${#ADDITIONAL_PROFILE_ARTIFACTS[@]} -gt 0 ]]; then
     fi
     mv "${ARTIFACT_PATH}" "build/${profile_artifact}"
 
-    if [[ -n "${EXPECTED_VERSION}" ]]; then
-      bash "${SCRIPT_DIR}/verify-artifact-version.sh" "build/${profile_artifact}" "${EXPECTED_VERSION}" >/dev/null
-      echo "Verified build/${profile_artifact} contains version ${EXPECTED_VERSION}" >&2
-    else
-      echo "Warning: could not determine expected version; skipping ${profile_artifact} version verification" >&2
-    fi
+    bash "${SCRIPT_DIR}/verify-artifact-version.sh" "build/${profile_artifact}" "${EXPECTED_VERSION}" "${MAIN_FILE}" >/dev/null
+    echo "Verified build/${profile_artifact} contains version ${EXPECTED_VERSION}" >&2
   done
 
   restore_preserved_primary
@@ -307,7 +284,8 @@ if [[ -n "${release_provenance_command}" ]]; then
   export HOMEBOY_WORDPRESS_RELEASE_SOURCE_TAG="${SOURCE_TAG}"
   export HOMEBOY_WORDPRESS_RELEASE_SOURCE_COMMIT="${SOURCE_COMMIT}"
   export HOMEBOY_WORDPRESS_RELEASE_ZIP_PATH="${artifact_absolute_path}"
-  export HOMEBOY_WORDPRESS_RELEASE_OUTPUT_PATH="$(dirname "${artifact_absolute_path}")"
+  HOMEBOY_WORDPRESS_RELEASE_OUTPUT_PATH="$(dirname "${artifact_absolute_path}")"
+  export HOMEBOY_WORDPRESS_RELEASE_OUTPUT_PATH
   export HOMEBOY_WORDPRESS_RELEASE_SIDECAR_PATH="${sidecar_absolute_path}"
 
   rm -f "${sidecar_absolute_path}"

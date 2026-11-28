@@ -87,4 +87,22 @@ if bash "${VERIFY}" "${TMP_DIR}/does-not-exist.zip" "1.0.0" 2>/dev/null; then
   exit 1
 fi
 
+# A matching companion must not hide a stale canonical plugin, even if the
+# companion is first in the ZIP. An explicit entrypoint overrides the wrapper.
+stage="${TMP_DIR}/stage-companion"
+mkdir -p "${stage}/test-plugin"
+printf '%s\n' '<?php' '/* Plugin Name: Companion' ' * Version: 1.2.3' ' */' > "${stage}/test-plugin/a-companion.php"
+printf '%s\n' '<?php' '/* Plugin Name: Canonical' ' * Version: 0.8.1' ' */' > "${stage}/test-plugin/test-plugin.php"
+(cd "${stage}" && zip -q "${TMP_DIR}/multi.zip" test-plugin/a-companion.php test-plugin/test-plugin.php)
+if bash "${VERIFY}" "${TMP_DIR}/multi.zip" "1.2.3" 2>"${TMP_DIR}/multi.err"; then
+  echo "matching companion hid a stale canonical entrypoint" >&2
+  exit 1
+fi
+grep -q 'contains version 0.8.1' "${TMP_DIR}/multi.err"
+[[ "$(bash "${VERIFY}" "${TMP_DIR}/multi.zip" "1.2.3" a-companion.php)" == "1.2.3" ]]
+if bash "${VERIFY}" "${TMP_DIR}/multi.zip" "1.2.3" missing.php 2>/dev/null; then
+  echo "missing explicit entrypoint was not rejected" >&2
+  exit 1
+fi
+
 echo "wordpress release artifact version smoke passed"
