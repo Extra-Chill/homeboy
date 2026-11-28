@@ -305,7 +305,7 @@ pub fn review_form_output_declaration(
                     }
                 } },
                 "used_for": { "type": "string" },
-                "evidence": { "type": "array", "items": {
+                "evidence": { "type": "array", "description": "Put verification evidence in these review-form fields; Homeboy renders it in the PR body. Do not commit per-task evidence notes under evidence/ or docs/evidence/ (or elsewhere in the repository). Durable documentation belongs in the relevant docs page.", "items": {
                     "type": "object", "required": ["summary"], "properties": {
                         "summary": { "type": "string" }, "url": { "type": "string" }
                     }

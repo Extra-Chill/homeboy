@@ -382,6 +382,15 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<(String, Option<String>)> {
         Ok(("ambient_gh".into(), None))
     }
+    /// Added paths between the verified base and candidate tree (not deletions).
+    fn added_candidate_paths(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _tree: &str,
+    ) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     fn current_branch(&mut self, path: &str) -> Result<String>;
     fn prepare_manual_candidate(
         &mut self,

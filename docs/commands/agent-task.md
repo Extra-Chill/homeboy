@@ -605,6 +605,33 @@ homeboy agent-task finalize-pr ... \
   --external-usage-url 'https://github.com/Extra-Chill/homeboy/issues/9750'
 ```
 
+#### Gate runtime admission
+
+Cook checks literal bare executable names in declared gate commands before
+provider dispatch. Each must resolve on the selected local gate environment's
+PATH or the connected runner's authenticated readiness receipt. Missing tools
+report `gate_runtime_unavailable` with the gate, executable, runner, and next
+action. Shell builtins, keywords, dynamic expansions, and path-style commands
+(such as `./scripts/check.sh`) are not inferred: the candidate may supply those
+scripts. This check does not execute gate commands or infer runtimes hidden
+behind extension commands.
+
+#### Verification evidence
+
+Cook agents report verification observations in `review_form.evidence` (`summary`
+and an optional reviewer-accessible `url`). Homeboy renders those entries under
+`## Evidence` in the PR body and retains run evidence outside the checkout.
+Do not commit per-issue verification reports, command transcripts, or handoff
+notes under `evidence/`, `docs/evidence/`, or another repository directory.
+Lasting user or architecture guidance belongs in the relevant documentation page.
+
+At publication (including preflight), Homeboy compares the verified base with the
+candidate tree. Added files under `evidence/` or `docs/evidence/` produce a visible
+warning in the PR's Evidence section asking for removal before merge; they do
+not block publication or discard the agent's reported evidence. Renames into
+these directories count as additions. Deletions, including cleanup of old notes,
+are not flagged, and untracked worktree files are not candidate evidence.
+
 #### Review Dossier Migration
 
 `finalize-pr` accepts typed reviewer fields without breaking existing invocations.

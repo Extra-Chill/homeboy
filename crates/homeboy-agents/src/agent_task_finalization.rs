@@ -350,6 +350,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend + ?Sized>(
     }
     changed_files.sort();
     changed_files.dedup();
+    let added_paths =
+        backend.added_candidate_paths(&options.path, &base.sha, &candidate.tree_sha)?;
+    flag_committed_evidence(&mut options.review_dossier, &added_paths);
     enrich_dossier(
         &mut options.review_dossier,
         &options.evidence.artifact_refs,
@@ -660,6 +663,30 @@ fn validate_durable_acceptance(
     };
     crate::agent_task_lifecycle::revalidate_durable_attestation(&request, attestation)?;
     Ok(Some(acceptance))
+}
+
+/// Keep the candidate publishable, but make misplaced per-task notes visible
+/// in the same PR evidence section that should have contained their content.
+fn flag_committed_evidence(
+    dossier: &mut crate::agent_task_review_dossier::AgentTaskReviewDossier,
+    added_paths: &[String],
+) {
+    let mut paths: Vec<_> = added_paths
+        .iter()
+        .filter(|path| path.starts_with("evidence/") || path.starts_with("docs/evidence/"))
+        .cloned()
+        .collect();
+    paths.sort();
+    paths.dedup();
+    if !paths.is_empty() {
+        dossier.evidence.push(crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+            summary: format!(
+                "Warning: candidate adds repository evidence notes: {}. Move verification evidence to the review form and PR body; remove these files before merge. Durable documentation belongs in the relevant docs page.",
+                paths.join(", ")
+            ),
+            url: None,
+        });
+    }
 }
 
 pub(crate) fn normalize_changed_files(changed_files: &[String]) -> Vec<String> {
