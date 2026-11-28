@@ -173,7 +173,7 @@ pub(crate) fn parse_linux_proc_stat(stat: &str) -> Option<LinuxProcStat> {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn supervisor_signal_children(signal: libc::c_int) {
+pub(crate) fn supervisor_signal_children(signal: libc::c_int) -> bool {
     let mut path = [0u8; 64];
     let prefix = b"/proc/self/task/";
     path[..prefix.len()].copy_from_slice(prefix);
@@ -188,8 +188,9 @@ pub(crate) fn supervisor_signal_children(signal: libc::c_int) {
     path[offset + suffix.len()] = 0;
     let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if fd < 0 {
-        return;
+        return false;
     }
+    let mut delivered = false;
     let self_pid = unsafe { libc::getpid() } as u32;
     let mut buf = [0u8; 4096];
     let mut pid = 0u32;
@@ -211,9 +212,7 @@ pub(crate) fn supervisor_signal_children(signal: libc::c_int) {
                 pid = pid.saturating_mul(10).saturating_add((byte - b'0') as u32);
             } else if in_pid {
                 if pid != 0 && pid != self_pid {
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, signal);
-                    }
+                    delivered |= unsafe { libc::kill(pid as libc::pid_t, signal) == 0 };
                 }
                 pid = 0;
                 in_pid = false;
@@ -224,10 +223,9 @@ pub(crate) fn supervisor_signal_children(signal: libc::c_int) {
         libc::close(fd);
     }
     if in_pid && pid != 0 && pid != self_pid {
-        unsafe {
-            libc::kill(pid as libc::pid_t, signal);
-        }
+        delivered |= unsafe { libc::kill(pid as libc::pid_t, signal) == 0 };
     }
+    delivered
 }
 
 /// Kernel identity used to revalidate Linux cleanup targets against PID reuse.

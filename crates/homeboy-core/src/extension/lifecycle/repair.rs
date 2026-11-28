@@ -6,11 +6,11 @@ use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;
 use std::path::{Path, PathBuf};
 
+use super::install_sources::run_install_setup;
 use super::{
     derive_id_from_url, install_linked_shared_assets, rename_dir, resolve_cloned_extension,
     slugify_id, write_requested_source_ref, write_source_metadata,
 };
-use crate::extension::invoke::run_setup;
 use homeboy_extension_contract::ExtensionManifest;
 
 const REPLACE_CLONE_TEMP_PREFIX: &str = ".replace-clone-tmp";
@@ -117,7 +117,11 @@ fn replace_from_checkout(
         return Err(err);
     }
 
-    run_setup_or_restore(extension_id, &extension_dir, &backup_dir)?;
+    if let Err(error) = run_install_setup(extension_id, url, revision, true) {
+        let _ = remove_existing_install(&extension_dir);
+        let _ = restore_existing_install(&backup_dir, &extension_dir);
+        return Err(error);
+    }
     remove_existing_install(&backup_dir)?;
     let manifest_path = paths::extension_manifest(extension_id)?;
 
@@ -286,7 +290,7 @@ fn install_or_replace_from_checkout(
     resolve_cloned_extension(clone_dir, extension_id, &extension_dir, url)?;
     write_source_metadata(&extension_dir, url, source_revision.clone());
     write_requested_source_ref(&extension_dir, revision);
-    if let Err(err) = run_setup(extension_id) {
+    if let Err(err) = run_install_setup(extension_id, url, revision, false) {
         let _ = remove_existing_install(&extension_dir);
         return Err(err);
     }
@@ -355,7 +359,12 @@ fn replace_from_path(
         return Err(err);
     }
 
-    if let Err(err) = run_setup(&extension_id) {
+    if let Err(err) = run_install_setup(
+        &extension_id,
+        &source.to_string_lossy(),
+        requested_revision,
+        true,
+    ) {
         restore_relinked_install(&extension_dir, &backup_dir, &metadata);
         return Err(err);
     }
@@ -625,16 +634,6 @@ fn restore_relinked_install(
     let _ = remove_existing_install(extension_dir);
     let _ = restore_existing_install(backup_dir, extension_dir);
     let _ = metadata.restore();
-}
-
-fn run_setup_or_restore(extension_id: &str, extension_dir: &Path, backup_dir: &Path) -> Result<()> {
-    if let Err(err) = run_setup(extension_id) {
-        let _ = remove_existing_install(extension_dir);
-        let _ = restore_existing_install(backup_dir, extension_dir);
-        return Err(err);
-    }
-
-    Ok(())
 }
 
 fn clean_replace_temp(path: &Path) -> Result<()> {

@@ -534,6 +534,7 @@ pub(crate) fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::SshConnectFailed => 10,
 
         ErrorCode::RemoteCommandFailed
+        | ErrorCode::ExtensionSetupTimeout
         | ErrorCode::RemoteCommandTimeout
         | ErrorCode::RemoteCapabilityMissing
         | ErrorCode::DeployNoComponentsConfigured

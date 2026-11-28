@@ -318,6 +318,13 @@ if is_monorepo_extension_source "${EXTENSION_SOURCE}"; then
   monorepo_install_status=$?
   set -e
   if [ "${monorepo_install_status}" -ne 0 ]; then
+    # A resolved extension reached runtime setup. Changing repositories cannot
+    # repair that timeout and would replace its evidence with a second attempt.
+    if [ -n "${HOMEBOY_EXTENSION_SETUP_RESULT_FILE:-}" ] && jq -e '
+      .schema == "homeboy/extension-setup-result/v1" and .status == "timeout"
+    ' "${HOMEBOY_EXTENSION_SETUP_RESULT_FILE}" >/dev/null 2>&1; then
+      exit "${monorepo_install_status}"
+    fi
     echo "::warning::Installing extensions from ${EXTENSION_SOURCE}${EXTENSION_REF:+ at ${EXTENSION_REF}} failed; retrying from the frozen ${LEGACY_EXTENSION_SOURCE}. Pin extension-ref to a ref in Extra-Chill/homeboy (e.g. wordpress-vX.Y.Z) and a Homeboy release with nested extension roots to drop this fallback (Extra-Chill/homeboy#16783)."
     EXTENSION_SOURCE="${LEGACY_EXTENSION_SOURCE}"
     EXTENSION_REUSE_ALLOWED=false
