@@ -872,18 +872,62 @@ pub fn install_terminate_handler(stop: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
+/// Stop flags raised by the process-wide SIGINT handler.
+static SHUTDOWN_FLAGS: std::sync::Mutex<Vec<Arc<AtomicBool>>> = std::sync::Mutex::new(Vec::new());
+/// Outcome of the one-time `ctrlc` installation, shared by every caller.
+static SHUTDOWN_HANDLER: std::sync::OnceLock<std::result::Result<(), String>> =
+    std::sync::OnceLock::new();
+
+fn raise_shutdown_flags() {
+    let flags = SHUTDOWN_FLAGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for flag in flags.iter() {
+        flag.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Install the SIGINT (Ctrl-C) stop handler via `ctrlc`.
+///
+/// `ctrlc` allows exactly one handler per process, while several code paths
+/// (runner exec, job log follow, the daemon, bench compare) can each ask for
+/// one within a single process, e.g. a Cook that follows a job and then runs
+/// a gate. The handler is therefore installed once and every caller registers
+/// its `stop` flag with it; Ctrl-C raises all registered flags. Repeat calls
+/// are cheap and never fail with "signal handler already registered".
 ///
 /// `ctrlc` replaces the SIGINT disposition, so call this before any local
 /// child is spawned: the process-group cleanup handler installed on first
 /// spawn chains to it, while installing this afterwards would drop the
 /// cleanup handler's SIGINT bookkeeping. `daemon serve` installs it first.
 pub fn install_shutdown_handler(stop: Arc<AtomicBool>, context: &str) -> Result<()> {
-    let context = context.to_string();
-    ctrlc::set_handler(move || {
-        stop.store(true, Ordering::SeqCst);
-    })
-    .map_err(|err| Error::internal_unexpected(format!("install {context} signal handler: {err}")))
+    SHUTDOWN_HANDLER
+        .get_or_init(|| ctrlc::set_handler(raise_shutdown_flags).map_err(|err| err.to_string()))
+        .clone()
+        .map_err(|err| {
+            Error::internal_unexpected(format!("install {context} signal handler: {err}"))
+        })?;
+    SHUTDOWN_FLAGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(stop);
+    Ok(())
+}
+
+#[cfg(test)]
+mod shutdown_handler_tests {
+    use super::*;
+
+    #[test]
+    fn repeat_installs_succeed_and_share_one_handler() {
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        install_shutdown_handler(first.clone(), "first").expect("first install");
+        install_shutdown_handler(second.clone(), "second").expect("second install must not fail");
+        raise_shutdown_flags();
+        assert!(first.load(Ordering::SeqCst));
+        assert!(second.load(Ordering::SeqCst));
+    }
 }
 
 /// Capture the process group created for an isolated child before exposing it
