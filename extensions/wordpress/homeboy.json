@@ -128,6 +128,7 @@
       "node tests/fuzz-manifest-contracts-smoke.js",
       "bash scripts/workload/wordpress-fuzz-workload-smoke.sh",
       "node tests/helper-manifest-smoke.js",
+      "node tests/wp-codebox-browser-coverage-smoke.js",
       "bash tests/phpcs-ignore-fixer-multiline-sql-smoke.sh",
       "bash tests/phpstan-integrity-guard-smoke.sh",
       "bash tests/phpstan-relative-include-path-smoke.sh",

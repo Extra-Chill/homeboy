@@ -22,14 +22,27 @@ const HELPER_PATHS = Object.freeze({
 	fidelityComparison: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fidelity-comparison.js'),
 	fixtureSetup: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fixture-setup.js'),
 	fuzzManifestContracts: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'fuzz-manifest-contracts.js'),
+	wordpressFuzzManifestValidator: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wordpress-fuzz-manifest-validator.js'),
+	wpCodeboxRecipeHelper: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wp-codebox-recipe-helper.js'),
 	wpCodeboxArtifacts: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wp-codebox-artifacts.js'),
+	wpCodeboxBrowserCoverage: path.join(WORDPRESS_EXTENSION_ROOT, 'lib', 'wp-codebox-browser-coverage.js'),
+});
+
+const HELPER_ENV = Object.freeze({
+	wordpressFuzzManifestValidator: 'HOMEBOY_WORDPRESS_FUZZ_MANIFEST_VALIDATOR',
+	wpCodeboxRecipeHelper: 'HOMEBOY_WP_CODEBOX_RECIPE_HELPER',
+	wpCodeboxArtifacts: 'HOMEBOY_WP_CODEBOX_ARTIFACT_HELPER',
+	wpCodeboxBrowserCoverage: 'HOMEBOY_WP_CODEBOX_BROWSER_COVERAGE_HELPER',
 });
 
 function getWordPressHelperManifest() {
 	return {
 		version: 1,
+		revision: 2,
 		extensionRoot: WORDPRESS_EXTENSION_ROOT,
+		manifestPath: __filename,
 		helpers: { ...HELPER_PATHS },
+		helperEnv: { ...HELPER_ENV },
 	};
 }
 

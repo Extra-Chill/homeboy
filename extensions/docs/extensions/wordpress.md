@@ -1583,25 +1583,40 @@ reviewable artifacts.
 
 ## WordPress Helper Discovery For Node Workloads
 
-Node.js rigs and bench workloads should discover WordPress helper files through
-the helper manifest instead of hardcoding local checkout paths. The WordPress
-extension exports the manifest at `homeboy-extension-wordpress/helper-manifest`:
+Node.js rigs and bench workloads should use named entries in the WordPress
+helper manifest, not derive module paths from `extensionRoot`. No npm package
+alias is needed. On a fresh checkout, install the extension once:
 
-```js
-const {
-	getWordPressHelperManifest,
-} = require('homeboy-extension-wordpress/helper-manifest');
-
-const manifest = getWordPressHelperManifest();
-const requestProfiler = require(manifest.helpers.requestProfiler);
+```sh
+homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress
 ```
 
-The manifest contract is versioned and currently exposes absolute paths for:
+The installed manifest is at `extensions/wordpress/lib/helper-manifest.js`
+under the Homeboy config root (`~/.config/homeboy` on Unix, `%APPDATA%/homeboy`
+on Windows, or `HOMEBOY_CONFIG_ROOT` when set). `HOMEBOY_WORDPRESS_HELPER_MANIFEST`
+can point directly at another manifest. `HOMEBOY_WORDPRESS_EXTENSION_ROOT` can
+point at another extension directory if the manifest override is not set.
 
-- `helpers.requestProfiler` — `wordpress/lib/request-profiler.js`
-- `helpers.externalHttpGuardrail` — `wordpress/lib/external-http-guardrail.js`
-- `helpers.timingCorrelator` — `wordpress/lib/timing-correlator.js`
-- `helpers.bootstrapTimeline` — `wordpress/lib/wordpress-bootstrap-timeline.js`
+`getWordPressHelperManifest()` (also available as `WORDPRESS_HELPER_MANIFEST`
+for consumers that read the exported object directly) reports `version: 1`
+for the schema, `revision: 2` for this set of entries, and `manifestPath` and
+`extensionRoot` for provenance. Paths in `helpers` are absolute. `helperEnv`
+advertises the per-helper environment overrides; a nonempty override takes
+precedence over any manifest path:
+
+| `helpers` key | Environment override |
+| --- | --- |
+| `wordpressFuzzManifestValidator` | `HOMEBOY_WORDPRESS_FUZZ_MANIFEST_VALIDATOR` |
+| `wpCodeboxRecipeHelper` | `HOMEBOY_WP_CODEBOX_RECIPE_HELPER` |
+| `wpCodeboxArtifacts` | `HOMEBOY_WP_CODEBOX_ARTIFACT_HELPER` |
+| `wpCodeboxBrowserCoverage` | `HOMEBOY_WP_CODEBOX_BROWSER_COVERAGE_HELPER` |
+
+A missing manifest means the install or selected override could not be found.
+An existing manifest without a requested key indicates a possibly stale install;
+if the manifest names a file that is absent, the install is incomplete. To
+refresh a managed install, repeat the install command with `--replace`. For a
+checkout selected by an override, update the checkout or correct the override
+instead. Do not fall back to guessing helper filenames from `extensionRoot`.
 
 When the Node.js bench runner is running from the standard Homeboy extensions
 checkout and the sibling WordPress extension is present, it also exports these
@@ -1612,13 +1627,14 @@ stable environment variables for rig-owned extra workloads:
 - `HOMEBOY_WORDPRESS_TIMING_CORRELATOR_HELPER`
 - `HOMEBOY_WORDPRESS_BOOTSTRAP_TIMELINE_HELPER`
 
-Example for a rig-owned Node benchmark workload:
+Example for a rig-owned Node benchmark workload with the extension environment
+provided by Homeboy:
 
 ```js
-const manifestPath = process.env.HOMEBOY_WORDPRESS_HELPER_MANIFEST;
-const { getWordPressHelperManifest } = await import(manifestPath);
+import { createRequire } from 'node:module';
 
-const { installWordPressRequestProfiler } = await import(
-	getWordPressHelperManifest().helpers.requestProfiler
-);
+const require = createRequire(import.meta.url);
+const { getWordPressHelperManifest } = require(process.env.HOMEBOY_WORDPRESS_HELPER_MANIFEST);
+const { helpers, helperEnv } = getWordPressHelperManifest();
+const artifacts = require(process.env[helperEnv.wpCodeboxArtifacts] || helpers.wpCodeboxArtifacts);
 ```

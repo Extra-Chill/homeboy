@@ -106,10 +106,10 @@ if ! cmp -s "$EXPECTED_LOG" "$LOG_FILE"; then
 fi
 
 : > "$LOG_FILE"
-HOMEBOY_FAKE_LOG="$LOG_FILE" "$SCRIPT" --extensions "wordpress" --repo "https://example.com/extensions.git" --homeboy "$FAKE_HOMEBOY" --replace-existing >/dev/null
+HOMEBOY_FAKE_LOG="$LOG_FILE" "$SCRIPT" --extensions "wordpress" --homeboy "$FAKE_HOMEBOY" --replace-existing >/dev/null
 
 cat > "$EXPECTED_LOG" <<EOF
-extension install https://example.com/extensions.git --id wordpress --replace
+extension install https://github.com/Extra-Chill/homeboy --id wordpress --replace
 extension show wordpress
 extension list
 EOF

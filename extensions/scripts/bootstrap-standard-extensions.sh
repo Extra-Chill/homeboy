@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_REPO="https://github.com/Extra-Chill/homeboy-extensions"
+DEFAULT_REPO="https://github.com/Extra-Chill/homeboy"
 DEFAULT_EXTENSIONS="nodejs rust wordpress go swift"
 
 TARGET=""
@@ -22,7 +22,7 @@ Options:
   --extensions "<ids>"       Space-separated extension IDs to install.
                              Default: nodejs rust wordpress go swift.
   --repo <url-or-path>        Extension monorepo URL or path.
-                             Default: https://github.com/Extra-Chill/homeboy-extensions.
+                             Default: https://github.com/Extra-Chill/homeboy.
   --homeboy <command>         Homeboy executable on the target.
                               Default: homeboy.
   --replace-existing          Replace existing extension installs with managed
@@ -34,7 +34,7 @@ Options:
 Examples:
   scripts/bootstrap-standard-extensions.sh --target example-runner
   scripts/bootstrap-standard-extensions.sh --target operator@example-runner --extensions "nodejs rust wordpress"
-  scripts/bootstrap-standard-extensions.sh --repo /path/to/homeboy-extensions --extensions "rust" --dry-run
+  scripts/bootstrap-standard-extensions.sh --repo /path/to/homeboy --extensions "rust" --dry-run
 USAGE
 }
 

@@ -4,75 +4,94 @@
  * External dependencies
  */
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
-function resolveManifestPath(options = {}) {
-	return options.manifestPath || process.env.HOMEBOY_WORDPRESS_HELPER_MANIFEST || '';
+/**
+ * Internal dependencies
+ */
+const { getWordPressHelperManifest } = require('./helper-manifest');
+
+const MANIFEST_ENV = 'HOMEBOY_WORDPRESS_HELPER_MANIFEST';
+const ROOT_ENV = 'HOMEBOY_WORDPRESS_EXTENSION_ROOT';
+const INSTALL_COMMAND = 'homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress';
+const { helperEnv } = getWordPressHelperManifest();
+
+function resolveManifest(options) {
+	if (options.manifestPath || process.env[MANIFEST_ENV]) {
+		return { path: path.resolve(options.manifestPath || process.env[MANIFEST_ENV]), source: options.manifestPath ? 'explicit' : MANIFEST_ENV };
+	}
+	if (process.env[ROOT_ENV]) {
+		return { path: path.resolve(process.env[ROOT_ENV], 'lib', 'helper-manifest.js'), source: ROOT_ENV };
+	}
+	const home = os.homedir();
+	const configRoot = process.env.HOMEBOY_CONFIG_ROOT;
+	const defaultRoot = process.platform === 'win32'
+		? path.join(process.env.APPDATA || home, 'homeboy')
+		: path.join(home, '.config', 'homeboy');
+	const root = configRoot?.trim() ? configRoot.replace(/^~(?=$|[/\\])/, () => home) : defaultRoot;
+	return { path: path.resolve(root, 'extensions', 'wordpress', 'lib', 'helper-manifest.js'), source: 'installed' };
 }
 
-function missingHandle(resolvedPath, reason) {
-	return {
-		path: resolvedPath || '',
-		module: null,
-		found: false,
-		reason,
-	};
+function setupHint({ stale = false, envVar } = {}) {
+	return `${stale ? 'Refresh a managed install with' : 'Install WordPress helpers with'}: ${INSTALL_COMMAND}${stale ? ' --replace' : ''}. `
+		+ `For a different checkout, set ${MANIFEST_ENV} to its lib/helper-manifest.js or set ${ROOT_ENV}.`
+		+ (envVar ? ` To override just this helper, set ${envVar} to its module path.` : '');
 }
 
 function loadWordPressHelperManifest(options = {}) {
-	const manifestPath = resolveManifestPath(options);
-	if (!manifestPath) {
-		return {
-			path: '',
-			manifest: null,
-			found: false,
-			reason: 'HOMEBOY_WORDPRESS_HELPER_MANIFEST is not set',
-		};
-	}
-
+	const resolved = resolveManifest(options);
+	const manifestPath = resolved.path;
+	const missing = (reason) => ({ ...resolved, manifest: null, found: false, reason });
 	if (!fs.existsSync(manifestPath)) {
-		return {
-			path: manifestPath,
-			manifest: null,
-			found: false,
-			reason: `WordPress helper manifest does not exist: ${manifestPath}`,
-		};
+		return missing(`WordPress helper manifest does not exist at ${manifestPath} (${resolved.source}). ${setupHint()}`);
 	}
 
-	const helperModule = require(manifestPath);
-	const manifest = typeof helperModule.getWordPressHelperManifest === 'function'
-		? helperModule.getWordPressHelperManifest()
-		: helperModule.WORDPRESS_HELPER_MANIFEST;
+	let manifest;
+	try {
+		const helperModule = require(manifestPath);
+		manifest = typeof helperModule.getWordPressHelperManifest === 'function'
+			? helperModule.getWordPressHelperManifest()
+			: helperModule.WORDPRESS_HELPER_MANIFEST;
+	} catch (error) {
+		throw new Error(`Could not load WordPress helper manifest at ${manifestPath} (${resolved.source}): ${error.message}. ${setupHint({ stale: true })}`, { cause: error });
+	}
 
 	if (!manifest || typeof manifest !== 'object') {
-		return {
-			path: manifestPath,
-			manifest: null,
-			found: false,
-			reason: `WordPress helper manifest module did not export a manifest: ${manifestPath}`,
-		};
+		return missing(`WordPress helper manifest module did not export a manifest: ${manifestPath}. ${setupHint({ stale: true })}`);
+	}
+
+	return { ...resolved, manifest, found: true, reason: '' };
+}
+
+function resolveHelper(name, options) {
+	if (typeof name !== 'string' || name.trim() === '') {
+		throw new TypeError('helper name must be a non-empty string');
+	}
+	const envVar = options.envVar || (Object.hasOwn(helperEnv, name) ? helperEnv[name] : '');
+	const explicit = options.override || (envVar && process.env[envVar]);
+	if (explicit) {
+		return { path: explicit, source: options.override ? 'explicit' : envVar, envVar };
+	}
+
+	const { manifest, path: manifestPath, reason, source } = loadWordPressHelperManifest(options);
+	const helperPath = manifest?.helpers && Object.hasOwn(manifest.helpers, name) ? manifest.helpers[name] : '';
+	if (typeof helperPath === 'string' && helperPath) {
+		return { path: helperPath, source, envVar, fromManifest: true };
 	}
 
 	return {
-		path: manifestPath,
-		manifest,
-		found: true,
-		reason: '',
+		path: '',
+		source,
+		envVar,
+		reason: manifest
+			? `WordPress helper "${name}" could not be resolved: ${manifestPath} (${source}) does not declare it; the install may be stale. ${setupHint({ stale: true, envVar })}`
+			: `${reason}${envVar ? ` To override just this helper, set ${envVar} to its module path.` : ''}`,
 	};
 }
 
 function wordpressHelperPath(name, options = {}) {
-	if (typeof name !== 'string' || name.trim() === '') {
-		throw new TypeError('helper name must be a non-empty string');
-	}
-
-	const explicit = options.override || (options.envVar ? process.env[options.envVar] : '');
-	if (explicit) {
-		return explicit;
-	}
-
-	const { manifest } = loadWordPressHelperManifest(options);
-	return manifest?.helpers?.[name] || '';
+	return resolveHelper(name, options).path;
 }
 
 function wordpressLibHelperPath(fileName, options = {}) {
@@ -89,37 +108,32 @@ function wordpressLibHelperPath(fileName, options = {}) {
 	return manifest?.extensionRoot ? path.join(manifest.extensionRoot, 'lib', fileName) : '';
 }
 
-function loadResolvedHelper(resolvedPath, options = {}) {
-	if (!resolvedPath) {
-		const handle = missingHandle('', 'WordPress helper path could not be resolved');
+function loadResolvedHelper(resolved, options) {
+	const { path: resolvedPath, source, envVar, fromManifest } = resolved;
+	if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+		const reason = resolved.reason || (resolvedPath
+			? `WordPress helper does not exist at ${resolvedPath} (${source}). ${setupHint({ stale: fromManifest, envVar })}`
+			: 'WordPress helper path could not be resolved');
 		if (options.required) {
-			throw new Error(handle.reason);
+			throw new Error(reason);
 		}
-		return handle;
+		return { path: resolvedPath, source, module: null, found: false, reason };
 	}
 
-	if (!fs.existsSync(resolvedPath)) {
-		const handle = missingHandle(resolvedPath, `WordPress helper does not exist: ${resolvedPath}`);
-		if (options.required) {
-			throw new Error(handle.reason);
-		}
-		return handle;
+	try {
+		return { path: resolvedPath, source, module: require(path.resolve(resolvedPath)), found: true, reason: '' };
+	} catch (error) {
+		throw new Error(`Could not load WordPress helper at ${resolvedPath} (${source}): ${error.message}`, { cause: error });
 	}
-
-	return {
-		path: resolvedPath,
-		module: require(resolvedPath),
-		found: true,
-		reason: '',
-	};
 }
 
 function loadWordPressHelper(name, options = {}) {
-	return loadResolvedHelper(wordpressHelperPath(name, options), options);
+	return loadResolvedHelper(resolveHelper(name, options), options);
 }
 
 function loadWordPressLibHelper(fileName, options = {}) {
-	return loadResolvedHelper(wordpressLibHelperPath(fileName, options), options);
+	const helperPath = wordpressLibHelperPath(fileName, options);
+	return loadResolvedHelper({ path: helperPath, source: 'legacy lib lookup' }, options);
 }
 
 module.exports = {

@@ -12,6 +12,8 @@ const {
 const manifest = getWordPressHelperManifest();
 
 assert.equal(manifest.version, 1);
+assert.equal(manifest.revision, 2);
+assert.equal(manifest.manifestPath, require.resolve('../lib/helper-manifest'));
 assert.deepEqual(manifest, WORDPRESS_HELPER_MANIFEST);
 assert.equal(manifest.extensionRoot, path.resolve(__dirname, '..'));
 
@@ -64,4 +66,14 @@ assert.equal(
 	manifest.helpers.fuzzManifestContracts,
 	path.resolve(__dirname, '..', 'lib', 'fuzz-manifest-contracts.js')
 );
+for (const [name, filename, envVar] of [
+	['wordpressFuzzManifestValidator', 'wordpress-fuzz-manifest-validator.js', 'HOMEBOY_WORDPRESS_FUZZ_MANIFEST_VALIDATOR'],
+	['wpCodeboxRecipeHelper', 'wp-codebox-recipe-helper.js', 'HOMEBOY_WP_CODEBOX_RECIPE_HELPER'],
+	['wpCodeboxArtifacts', 'wp-codebox-artifacts.js', 'HOMEBOY_WP_CODEBOX_ARTIFACT_HELPER'],
+	['wpCodeboxBrowserCoverage', 'wp-codebox-browser-coverage.js', 'HOMEBOY_WP_CODEBOX_BROWSER_COVERAGE_HELPER'],
+]) {
+	assert.equal(manifest.helpers[name], path.resolve(__dirname, '..', 'lib', filename));
+	assert.equal(manifest.helperEnv[name], envVar);
+	assert.doesNotThrow(() => require(manifest.helpers[name]));
+}
 console.log('helper manifest smoke passed');
