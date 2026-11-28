@@ -14,7 +14,7 @@ use homeboy_lab_contract::lab::transport_failure::provider_evidence_io_error;
 use super::session::{RunnerSession, RunnerStatusReport};
 use super::{Runner, RunnerKind};
 
-const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
+use homeboy_engine_primitives::content_hash::MAX_CALLER_DATA_BYTES;
 const FILE_TRANSFER_TRANSPORT: &str = "direct_ssh";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,12 +418,10 @@ fn private_evidence_snapshot(
     expected_sha256: &str,
     expected_size: u64,
 ) -> Result<tempfile::NamedTempFile> {
-    if expected_size > MAX_PROVIDER_EVIDENCE_BYTES {
+    if expected_size > MAX_CALLER_DATA_BYTES {
         return Err(Error::validation_invalid_argument(
             "provider_evidence",
-            format!(
-                "declared evidence exceeds the {MAX_PROVIDER_EVIDENCE_BYTES}-byte transport limit"
-            ),
+            format!("declared evidence exceeds the {MAX_CALLER_DATA_BYTES}-byte transport limit"),
             Some(local_path.to_string()),
             None,
         ));
@@ -576,7 +574,7 @@ mod content_addressed_evidence_tests {
     }
 
     #[test]
-    fn streams_the_64_mib_boundary_through_a_fixed_buffer() {
+    fn streams_a_64_mib_file_through_a_fixed_buffer() {
         let temp = tempfile::NamedTempFile::new().expect("temporary evidence");
         let chunk = [0x5au8; 64 * 1024];
         let mut file = std::fs::File::create(temp.path()).expect("create boundary fixture");
@@ -590,16 +588,16 @@ mod content_addressed_evidence_tests {
         let snapshot = private_evidence_snapshot(
             temp.path().to_str().expect("path"),
             &digest,
-            MAX_PROVIDER_EVIDENCE_BYTES,
+            64 * 1024 * 1024,
         )
-        .expect("64 MiB boundary is admitted");
+        .expect("64 MiB evidence is admitted");
         assert_eq!(
             snapshot
                 .as_file()
                 .metadata()
                 .expect("snapshot metadata")
                 .len(),
-            MAX_PROVIDER_EVIDENCE_BYTES
+            64 * 1024 * 1024
         );
     }
 }

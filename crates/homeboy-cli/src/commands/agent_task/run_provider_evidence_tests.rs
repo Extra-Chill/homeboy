@@ -48,6 +48,35 @@ fn streams_binary_artifacts_at_the_configured_limit_and_rejects_the_next_byte() 
     );
 }
 
+/// Provider evidence carries what a gate input can: a capture archive past
+/// the old 64 MiB evidence cap reaches the agent instead of the gate alone.
+#[test]
+fn projects_evidence_as_large_as_a_gate_input_may_be() {
+    let temp = tempfile::tempdir().expect("temporary workspace");
+    let source = temp.path().join("capture.tgz");
+    std::fs::File::create(&source)
+        .and_then(|file| file.set_len(65 * 1024 * 1024))
+        .expect("write 65 MiB capture");
+    let input = AgentTaskProviderEvidenceInput {
+        id: "capture".to_string(),
+        source: source
+            .canonicalize()
+            .expect("canonical source")
+            .display()
+            .to_string(),
+        include: Vec::new(),
+        exclude: Vec::new(),
+    };
+    let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit evidence");
+    let projected = project_admitted_provider_evidence_inputs_at(
+        &[input],
+        &admitted,
+        &temp.path().join("provider-evidence"),
+    )
+    .expect("project evidence past 64 MiB");
+    assert_eq!(projected[0]["size_bytes"], 65 * 1024 * 1024);
+}
+
 #[test]
 fn stages_declared_file_outside_candidate_and_reuses_controller_owned_blob() {
     let temp = tempfile::tempdir().expect("temporary workspace");

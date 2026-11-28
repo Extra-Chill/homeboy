@@ -547,7 +547,7 @@ pub(super) fn directory_evidence_plan(
         source.copy_path(),
         &input.include,
         &input.exclude,
-        &super::provider_evidence::DirectoryEvidenceLimits::production(MAX_PROVIDER_EVIDENCE_BYTES),
+        &super::provider_evidence::DirectoryEvidenceLimits::production(MAX_CALLER_DATA_BYTES),
     )?;
     verify_admitted_provider_evidence_source(source)?;
     Ok(plan)
@@ -793,7 +793,7 @@ pub(super) fn secure_provider_evidence_copy(
     source: &AdmittedProviderEvidenceSource,
     destination: &Path,
 ) -> homeboy::core::Result<(u64, String)> {
-    secure_provider_evidence_copy_with_limit(source, destination, MAX_PROVIDER_EVIDENCE_BYTES)
+    secure_provider_evidence_copy_with_limit(source, destination, MAX_CALLER_DATA_BYTES)
 }
 
 #[cfg(unix)]
@@ -1004,7 +1004,7 @@ pub(super) fn secure_provider_evidence_copy(
     source: &AdmittedProviderEvidenceSource,
     destination: &Path,
 ) -> homeboy::core::Result<(u64, String)> {
-    secure_provider_evidence_copy_with_limit(source, destination, MAX_PROVIDER_EVIDENCE_BYTES)
+    secure_provider_evidence_copy_with_limit(source, destination, MAX_CALLER_DATA_BYTES)
 }
 
 #[cfg(not(unix))]

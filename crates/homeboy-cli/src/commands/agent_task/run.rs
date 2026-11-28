@@ -38,7 +38,7 @@ pub(super) const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// Provider evidence is streamed into an immutable, digest-addressed projection.
 /// This ceiling bounds both controller disk use and Lab transport without putting
 /// fixture bytes in Cook command state or JSON output.
-pub(super) const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) use homeboy_engine_primitives::content_hash::MAX_CALLER_DATA_BYTES;
 pub(super) const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
 

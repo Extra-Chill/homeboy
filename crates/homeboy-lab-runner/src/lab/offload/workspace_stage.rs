@@ -930,7 +930,7 @@ fn materialize_agent_task_evidence_inputs_on_runner(
     Ok(entries)
 }
 
-const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
+use homeboy_engine_primitives::content_hash::MAX_CALLER_DATA_BYTES;
 const MAX_PROVIDER_EVIDENCE_DIRECTORY_ENTRIES: usize = 8_192;
 const MAX_PROVIDER_EVIDENCE_DIRECTORY_DEPTH: usize = 24;
 
@@ -1013,16 +1013,16 @@ fn plan_lab_directory_evidence(
             None,
         ));
     }
-    if declared.size_bytes > MAX_PROVIDER_EVIDENCE_BYTES
+    if declared.size_bytes > MAX_CALLER_DATA_BYTES
         || declared
             .entries
             .iter()
-            .any(|entry| entry.size_bytes > MAX_PROVIDER_EVIDENCE_BYTES)
+            .any(|entry| entry.size_bytes > MAX_CALLER_DATA_BYTES)
     {
         return Err(Error::validation_invalid_argument(
             "provider_evidence",
             format!(
-                "Lab directory evidence is {} bytes; the projection limit is {MAX_PROVIDER_EVIDENCE_BYTES} bytes",
+                "Lab directory evidence is {} bytes; the projection limit is {MAX_CALLER_DATA_BYTES} bytes",
                 declared.size_bytes
             ),
             Some(local_root.display().to_string()),
@@ -1151,10 +1151,10 @@ fn plan_lab_directory_evidence(
                 None,
             )
         })?;
-        if total > MAX_PROVIDER_EVIDENCE_BYTES {
+        if total > MAX_CALLER_DATA_BYTES {
             return Err(Error::validation_invalid_argument(
                 "provider_evidence",
-                format!("Lab directory evidence exceeds the {MAX_PROVIDER_EVIDENCE_BYTES}-byte projection limit"),
+                format!("Lab directory evidence exceeds the {MAX_CALLER_DATA_BYTES}-byte projection limit"),
                 Some(local_root.display().to_string()),
                 None,
             ));
@@ -1882,7 +1882,7 @@ mod tests {
         }
 
         let mut over_budget = declared.clone();
-        over_budget.size_bytes = MAX_PROVIDER_EVIDENCE_BYTES + 1;
+        over_budget.size_bytes = MAX_CALLER_DATA_BYTES + 1;
         let error = plan_lab_directory_evidence(temp.path(), &remote, &over_budget)
             .expect_err("over-budget lab projection");
         assert!(error.message.contains("projection limit"));

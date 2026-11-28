@@ -309,7 +309,7 @@ fn parse_gate_file(value: &str) -> Result<AgentTaskGateFile, String> {
     Ok(input)
 }
 
-pub(crate) const PROVIDER_EVIDENCE_DECLARATION: &str = "JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular file or directory): `--provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}'`. Optional `include` and `exclude` are relative globs for directories. Each file is limited to 64 MiB. A directory is one immutable projection that preserves relative paths and a tree digest; media files over 1 MiB are omitted unless included, and the selected tree must stay within 64 MiB.";
+pub(crate) const PROVIDER_EVIDENCE_DECLARATION: &str = "JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular file or directory): `--provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}'`. Optional `include` and `exclude` are relative globs for directories. Each file is limited to 1 GiB, the same limit as `--gate-input`. A directory is one immutable projection that preserves relative paths and a tree digest; media files over 1 MiB are omitted unless included, and the selected tree must stay within 1 GiB.";
 
 #[derive(Args, Debug, Clone, PartialEq)]
 pub struct VerifyGateArgs {
