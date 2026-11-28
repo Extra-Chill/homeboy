@@ -3,6 +3,8 @@
 //! Routes parsed subcommands to their handlers and provides the global
 //! `--runner` guidance surfaced when operators misuse the top-level flag.
 
+use std::path::Path;
+
 use homeboy::core::observation::ObservationStore;
 use homeboy::core::paths::PathRoots;
 use homeboy::core::Error;
@@ -139,6 +141,23 @@ impl RunsArgs {
 
     pub(crate) fn is_bundle_export(&self) -> bool {
         matches!(self.command, RunsCommand::Export(_))
+    }
+
+    pub(crate) fn artifact_destination_conflicts_with(&self, json_output: &Path) -> bool {
+        let RunsCommand::Artifact(args) = &self.command else {
+            return false;
+        };
+        let destination = match &args.command {
+            RunsArtifactCommand::Get(args) => args.output.as_deref(),
+            RunsArtifactCommand::GetHandle(args) => args.output.as_deref(),
+            _ => None,
+        };
+        let resolve = |path: &Path| {
+            let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+            let resolved = homeboy::core::engine::invocation::canonical_budget_path(&absolute);
+            homeboy::core::paths::normalize_local_path(resolved)
+        };
+        destination.is_some_and(|path| resolve(path) == resolve(json_output))
     }
 
     pub(crate) fn is_artifact_get(&self) -> bool {

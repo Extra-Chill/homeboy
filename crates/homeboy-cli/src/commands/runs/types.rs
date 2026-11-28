@@ -786,7 +786,12 @@ pub struct RunsArtifactGetArgs {
     #[arg(long)]
     pub runner: Option<String>,
     /// Destination file path. Defaults to the artifact name.
-    #[arg(long = "to", short = 'o', id = "artifact_destination")]
+    #[arg(
+        long = "to",
+        short = 'o',
+        id = "artifact_destination",
+        value_name = "PATH"
+    )]
     pub output: Option<PathBuf>,
     /// JSONPath selector(s) projected over the artifact-get result so callers
     /// extract only specific fields (e.g. `sha256`, `output_path`) instead of
@@ -802,7 +807,12 @@ pub struct RunsArtifactGetHandleArgs {
     /// Stable bounded opaque artifact handle emitted by `runs evidence`.
     pub handle: String,
     /// Destination file path. Defaults to the recorded artifact filename.
-    #[arg(long = "to", short = 'o', id = "artifact_destination")]
+    #[arg(
+        long = "to",
+        short = 'o',
+        id = "artifact_destination",
+        value_name = "PATH"
+    )]
     pub output: Option<PathBuf>,
     /// JSONPath selector(s) projected over the retrieval result.
     #[arg(long = "field", short = 'q', value_delimiter = ',')]

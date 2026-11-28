@@ -186,7 +186,8 @@ the current directory, never after a temporary source filename. JSON always
 reports an absolute `output_path`. The same destination flags apply to `get-handle`.
 `--output <file>` is reserved for the global structured JSON result, not artifact
 bytes; replace the former artifact `--output` spelling with `--to` or `-o`.
-Both files can be requested together, for example:
+Both files can be requested together, but an explicit artifact destination must
+be different from the JSON output path. For example:
 `homeboy runs artifact get-handle <handle> -o ./artifact.txt --output ./result.json`.
 
 `homeboy runs artifacts <run-id> --runner <runner-id>` queries a connected runner daemon for the run's artifact records from the controller machine. `homeboy runs artifact get <run-id> <artifact-id> --runner <runner-id>` pulls selected runner-side artifact bytes through that connection into a named local file, or into `--to` when provided, and reports the runner id plus source content path in JSON output. The Lab-oriented wrapper form `homeboy --runner <runner-id> runs artifact get <run-id> <artifact-id>` is accepted for the same fetch path. Use these commands when a controller-side agent has a run id and artifact id but should not SSH into the runner or know runner filesystem paths.

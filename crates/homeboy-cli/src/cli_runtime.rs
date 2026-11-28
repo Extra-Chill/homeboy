@@ -1413,6 +1413,24 @@ impl CliRuntime {
         };
         let mut cli = compiled.value;
         let command_provenance = compiled.provenance;
+        if let (Commands::Runs(runs), Some(json_path)) = (&cli.command, output_file.as_deref()) {
+            if runs.artifact_destination_conflicts_with(std::path::Path::new(json_path)) {
+                let error = crate::core::Error::validation_invalid_argument(
+                    "output",
+                    "--output and --to (-o) must name different files",
+                    Some(json_path.to_owned()),
+                    None,
+                );
+                // Do not emit the error to the conflicting path either.
+                output_runtime::emit_json_result_for_identity(
+                    Err(error),
+                    None,
+                    2,
+                    &command_identity,
+                );
+                return std::process::ExitCode::from(2);
+            }
+        }
         if let Err(error) = normalize_cook_step_identity(&mut cli, &mut normalized) {
             output_runtime::emit_json_result_for_identity(
                 Err(error),
