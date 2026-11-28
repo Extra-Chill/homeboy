@@ -3634,7 +3634,12 @@ pub fn record_provider_execution_terminal_with_model_in_store(
 ) -> Result<AgentTaskRunRecord> {
     if !matches!(
         state,
-        "succeeded" | "cancelled" | "timed_out" | "candidate_recoverable" | "failed"
+        "succeeded"
+            | "cancelled"
+            | "timed_out"
+            | "candidate_recoverable"
+            | "failed"
+            | "admission_refused"
     ) {
         return Err(Error::validation_invalid_argument(
             "state",

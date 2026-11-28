@@ -1103,7 +1103,8 @@ impl AgentTaskScheduleSupport {
         max_provider_executions: u32,
         max_provider_rotations: u32,
     ) -> bool {
-        rotation_index < policy.entries.len()
+        !Self::cargo_admission_refused(outcome)
+            && rotation_index < policy.entries.len()
             && rotations_used < max_provider_rotations as usize
             && attempt < max_provider_executions
             && attempt < policy.max_total_attempts()
@@ -1447,7 +1448,7 @@ impl AgentTaskScheduleSupport {
         outcome: &mut AgentTaskOutcome,
         attempts: &[AgentTaskProviderRotationAttempt],
     ) {
-        if attempts.len() < 2 {
+        if attempts.len() < 2 || Self::cargo_admission_refused(outcome) {
             return;
         }
         let rejections = attempts
@@ -1469,6 +1470,12 @@ impl AgentTaskScheduleSupport {
         });
     }
 
+    pub(super) fn cargo_admission_refused(outcome: &AgentTaskOutcome) -> bool {
+        outcome.diagnostics.iter().any(|diagnostic| {
+            crate::agent_task_provider::is_cargo_admission_failure(&diagnostic.class)
+        })
+    }
+
     /// Record the configured budget and the terminal constraint that stopped
     /// additional provider execution. This makes a timeout distinguishable from
     /// an exhausted same-provider, rotation, or total-execution budget.
@@ -1482,12 +1489,15 @@ impl AgentTaskScheduleSupport {
         if !outcome.metadata.is_object() {
             outcome.metadata = serde_json::json!({});
         }
-        let terminal_is_failure = !matches!(
-            outcome.status,
-            AgentTaskOutcomeStatus::Succeeded
-                | AgentTaskOutcomeStatus::NoOp
-                | AgentTaskOutcomeStatus::Cancelled
-        );
+        let admission_refused = Self::cargo_admission_refused(outcome);
+        let executions_used = executions_used.saturating_sub(u32::from(admission_refused));
+        let terminal_is_failure = !admission_refused
+            && !matches!(
+                outcome.status,
+                AgentTaskOutcomeStatus::Succeeded
+                    | AgentTaskOutcomeStatus::NoOp
+                    | AgentTaskOutcomeStatus::Cancelled
+            );
         // Only name a budget that was actually reached. A task that failed for
         // unrelated reasons must not carry an authoritative "execution budget
         // exhausted" diagnostic, which would send whoever reads it after the
@@ -1569,7 +1579,8 @@ impl AgentTaskScheduleSupport {
         let max_attempts_permits_attempt = (retry_max_attempts == 0
             && max_provider_executions != u32::MAX)
             || attempt < retry_max_attempts;
-        attempt < max_provider_executions
+        !Self::cargo_admission_refused(outcome)
+            && attempt < max_provider_executions
             && max_attempts_permits_attempt
             && attempt <= max_same_provider_retries
             && retry_budget_total
@@ -1740,6 +1751,55 @@ mod execution_budget_evidence_tests {
             outcome.metadata["execution_budget"]["exhausted"],
             Value::Null
         );
+    }
+
+    #[test]
+    fn shared_cargo_target_contention_after_rotation_is_not_exhaustion() {
+        let mut outcome = failed_outcome();
+        outcome.failure_classification = Some(AgentTaskFailureClassification::Capacity);
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: crate::agent_task_provider::CARGO_TARGET_CONTENTION.to_string(),
+            message: "shared Cargo target lease is held".to_string(),
+            data: serde_json::json!({ "pre_provider": true }),
+        });
+        let previous = AgentTaskProviderRotationAttempt {
+            attempt: 1,
+            rotation_index: 0,
+            backend: "test".to_string(),
+            selector: None,
+            model: None,
+            requested_model: None,
+            attempted_model: None,
+            candidate_producing_model: None,
+            status: AgentTaskOutcomeStatus::ProviderError,
+            failure_classification: Some(AgentTaskFailureClassification::Stalled),
+            summary: None,
+        };
+        let refused = AgentTaskProviderRotationAttempt {
+            attempt: 2,
+            rotation_index: 1,
+            status: outcome.status,
+            failure_classification: outcome.failure_classification,
+            ..previous.clone()
+        };
+
+        let attempts = [previous, refused];
+        AgentTaskScheduleSupport::attach_rotation_evidence(&mut outcome, &attempts);
+        AgentTaskScheduleSupport::attach_rotation_exhaustion_diagnostic(&mut outcome, &attempts);
+        AgentTaskScheduleSupport::attach_execution_budget_evidence(
+            &mut outcome,
+            &budget(2, 1, 0),
+            2,
+            1,
+            0,
+        );
+
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(
+            outcome.metadata["provider_rotation"]["attempts"][0]["failure_classification"],
+            "stalled"
+        );
+        assert_eq!(outcome.metadata["execution_budget"]["executions_used"], 1);
     }
 
     #[test]

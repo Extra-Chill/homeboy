@@ -1012,20 +1012,32 @@ pub(super) fn run_materialized_provider_command_once(
     env.retain(|(key, _)| key != "PI_CODING_AGENT_DIR");
     env.push(("PI_CODING_AGENT_DIR".into(), dir));
 
-    // The lease remains alive through the provider process. This lets provider
-    // attempts and controller gates share only the same compatibility-keyed
-    // Cargo output directory while preserving their isolated HOME/XDG roots.
-    let cargo_target = match provider_cargo_target(request, cwd.as_deref(), &env) {
+    // Hold admission for the provider lifetime (including target publication).
+    // The provider writes to a private target, not the shared warm cache.
+    let cargo_target = match provider_cargo_target(
+        run_id.unwrap_or(&execution.plan_id),
+        cwd.as_deref(),
+        &env,
+    ) {
         Ok(target) => target,
         Err(error) => {
+            let contention = matches!(error.details["reason"].as_str(), Some("contention" | "deadline_exhausted"));
             return failure_outcome(
                 request,
-                AgentTaskOutcomeStatus::ProviderError,
-                AgentTaskFailureClassification::InvalidInput,
-                "agent_task.cargo_cache_unavailable",
-                error.to_string(),
-                json!({ "provider": provider.id }),
-            )
+                AgentTaskOutcomeStatus::Failed,
+                if contention {
+                    AgentTaskFailureClassification::Capacity
+                } else {
+                    AgentTaskFailureClassification::ExecutionFailed
+                },
+                if contention {
+                    super::CARGO_TARGET_CONTENTION
+                } else {
+                    super::CARGO_CACHE_UNAVAILABLE
+                },
+                error.message,
+                json!({ "provider": provider.id, "pre_provider": true, "lease": error.details }),
+            );
         }
     };
     if let Some(target) = &cargo_target {
@@ -1902,7 +1914,7 @@ mod component_environment_tests {
 }
 
 fn provider_cargo_target(
-    _request: &AgentTaskExecutorRequest,
+    run_id: &str,
     cwd: Option<&Path>,
     environment: &[(String, String)],
 ) -> homeboy_core::Result<Option<homeboy_core::ManagedCargoTarget>> {
@@ -1916,10 +1928,10 @@ fn provider_cargo_target(
         return Ok(None);
     }
     let environment = environment.iter().cloned().collect();
-    homeboy_core::acquire_managed_cargo_target_for_environment(
+    homeboy_core::cleanup::admit_managed_cargo_provider(
         "agent-task-cargo",
+        run_id,
         cwd,
-        None,
         &environment,
     )
     .map(Some)

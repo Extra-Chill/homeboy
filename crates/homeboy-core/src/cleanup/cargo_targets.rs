@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,6 +15,7 @@ use crate::{Error, Result};
 
 pub const HOMEBOY_CARGO_TARGET_ROOT_ENV: &str = "HOMEBOY_CARGO_TARGET_ROOT";
 const LOCK_FILE: &str = ".homeboy-lock";
+const PROVIDER_ADMISSION_DIR: &str = ".provider-admission";
 const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
 const LAST_USED_FILE: &str = ".homeboy-last-used-ms";
@@ -115,6 +117,8 @@ pub struct ManagedCargoTarget {
     seed_ms: u128,
     seed_bytes: u64,
     _lease: Option<SharedCargoTargetLease>,
+    // Released after publication and the private lease have finished.
+    provider_admission: Option<File>,
 }
 
 /// The complete, non-secret compatibility surface used to select a shared
@@ -273,6 +277,7 @@ pub fn acquire_isolated_cargo_target(
         seed_ms: 0,
         seed_bytes: 0,
         _lease: Some(lease),
+        provider_admission: None,
     })
 }
 
@@ -304,18 +309,98 @@ pub fn acquire_managed_cargo_target_for_environment(
     explicit_target: Option<&str>,
     environment: &BTreeMap<String, String>,
 ) -> Result<ManagedCargoTarget> {
-    let declared = environment
-        .iter()
-        .filter(|(name, _)| cargo_compatibility_environment_name(name))
-        .map(|(name, value)| (name.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
-    let compatibility = cargo_target_compatibility(source_path, &declared);
+    let compatibility = cargo_target_compatibility_from_environment(source_path, environment);
     acquire_managed_cargo_target_for_compatibility(
         owner,
         source_path,
         explicit_target,
         &compatibility,
     )
+}
+
+/// Admit a provider before it starts, keyed by the same compatibility contract
+/// as its warm Cargo cache. The guard is separate from the cache publication
+/// lock: providers still build in private targets, and gates and cleanup may
+/// access the cache without waiting for a provider to exit.
+pub fn admit_managed_cargo_provider(
+    owner: &str,
+    run_id: &str,
+    source_path: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<ManagedCargoTarget> {
+    let compatibility = cargo_target_compatibility_from_environment(source_path, environment);
+    let root = shared_cargo_target_root()?;
+    let admission = try_cargo_provider_admission(&root, owner, &compatibility, run_id)?;
+    let mut target =
+        acquire_managed_cargo_target_for_compatibility(owner, source_path, None, &compatibility)?;
+    target.provider_admission = Some(admission);
+    Ok(target)
+}
+
+fn try_cargo_provider_admission(
+    root: &Path,
+    owner: &str,
+    compatibility: &CargoTargetCompatibility,
+    run_id: &str,
+) -> Result<File> {
+    let identity = format!("{owner}:{}", compatibility.identity());
+    let target = shared_store_dir(root, &identity);
+    // Keep stable lock inodes outside the stores that cache cleanup can remove.
+    let directory = root.join(PROVIDER_ADMISSION_DIR);
+    let lock_path = directory.join(content_hash::sha256_hex(identity.as_bytes()));
+    let error =
+        |operation, source| cargo_lease_io_error(&target, &lock_path, &identity, operation, source);
+    fs::create_dir_all(directory).map_err(|source| error("create admission directory", source))?;
+    // Serialize only the admission decision and holder record. A contender
+    // cannot read a half-written ID or one left by an earlier holder.
+    let open = |path: &Path| {
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+    };
+    let decision = open(&lock_path.with_extension("decision"))
+        .map_err(|source| error("open admission decision lock", source))?;
+    FileExt::lock_exclusive(&decision)
+        .map_err(|source| error("acquire admission decision lock", source))?;
+    let mut lock = open(&lock_path).map_err(|source| error("open admission lock", source))?;
+    let contention = match FileExt::try_lock_exclusive(&lock) {
+        Ok(true) => None,
+        Ok(false) => Some(fs4::lock_contended_error()),
+        Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => Some(source),
+        Err(source) => return Err(error("acquire admission lock", source)),
+    };
+    if let Some(source) = contention {
+        let holder = fs::read_to_string(&lock_path)
+            .ok()
+            .filter(|holder| !holder.trim().is_empty());
+        let mut error = error("acquire admission lock", source).with_retryable(true);
+        error.message = format!(
+            "{}; competing run: {}",
+            error.message,
+            holder.as_deref().unwrap_or("not yet recorded")
+        );
+        error.details["reason"] = json!("contention");
+        error.details["holder_run_id"] = json!(holder);
+        return Err(error);
+    }
+    lock.set_len(0)
+        .and_then(|()| lock.write_all(run_id.as_bytes()))
+        .map_err(|source| error("record admission holder", source))?;
+    Ok(lock)
+}
+
+fn cargo_target_compatibility_from_environment(
+    source_path: &Path,
+    environment: &BTreeMap<String, String>,
+) -> CargoTargetCompatibility {
+    let declared = environment
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    cargo_target_compatibility(source_path, &declared)
 }
 
 /// Acquire a candidate-private target. The caller must provide the content
@@ -405,6 +490,7 @@ fn acquire_candidate_cargo_target_in(
             path_size(lease.target_dir()).unwrap_or(0)
         },
         _lease: Some(lease),
+        provider_admission: None,
     })
 }
 
@@ -564,6 +650,7 @@ fn acquire_managed_cargo_target_for_compatibility_in_until(
         seed_bytes: path_size(lease.target_dir()).unwrap_or(0),
         promote_to: Some(base_dir),
         _lease: Some(lease),
+        provider_admission: None,
     })
 }
 
@@ -820,15 +907,18 @@ fn with_base_store_publication_lock<T>(
     let deadline = deadline.unwrap_or_else(|| Instant::now() + CARGO_TARGET_LEASE_WAIT);
     // Retention may reclaim the base store while a long run holds only its
     // private target. Re-create it so publication lands in a fresh store.
+    let lock_path = base_dir.join(LOCK_FILE);
+    let lease_error =
+        |operation, source| cargo_lease_io_error(base_dir, &lock_path, owner, operation, source);
     fs::create_dir_all(base_dir)
-        .map_err(|error| io_error(error, "create Cargo cache base store"))?;
+        .map_err(|source| lease_error("create Cargo cache base store", source))?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(base_dir.join(LOCK_FILE))
-        .map_err(|error| io_error(error, "open Cargo cache publication lock"))?;
+        .open(&lock_path)
+        .map_err(|source| lease_error("open Cargo cache publication lock", source))?;
     let started = Instant::now();
     let mut contention_polls = 0_u64;
     loop {
@@ -839,7 +929,7 @@ fn with_base_store_publication_lock<T>(
         } {
             Ok(true) => break,
             Ok(false) => contention_polls = contention_polls.saturating_add(1),
-            Err(error) => return Err(io_error(error, "lock Cargo cache publication")),
+            Err(source) => return Err(lease_error("lock Cargo cache publication", source)),
         }
         if Instant::now() >= deadline {
             return Err(cargo_target_publication_wait_error(
@@ -959,6 +1049,7 @@ fn acquire_explicit_cargo_target_in(
         seed_ms: 0,
         seed_bytes: 0,
         _lease: Some(lease),
+        provider_admission: None,
     })
 }
 
@@ -1107,15 +1198,17 @@ fn acquire_shared_cargo_target_in_until(
     cancellation_requested: impl Fn() -> bool,
 ) -> Result<SharedCargoTargetLease> {
     let target_dir = shared_store_dir(root, owner);
-    fs::create_dir_all(&target_dir)
-        .map_err(|error| io_error(error, "create shared Cargo target"))?;
+    let lock_path = target_dir.join(LOCK_FILE);
+    let error =
+        |operation, source| cargo_lease_io_error(&target_dir, &lock_path, owner, operation, source);
+    fs::create_dir_all(&target_dir).map_err(|source| error("create target directory", source))?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(target_dir.join(LOCK_FILE))
-        .map_err(|error| io_error(error, "open shared Cargo target lock"))?;
+        .open(&lock_path)
+        .map_err(|source| error("open lease lock", source))?;
     let started = Instant::now();
     loop {
         if cancellation_requested() {
@@ -1129,7 +1222,7 @@ fn acquire_shared_cargo_target_in_until(
         match FileExt::try_lock_shared(&lock) {
             Ok(true) => break,
             Ok(false) => {}
-            Err(error) => return Err(io_error(error, "lock shared Cargo target")),
+            Err(source) => return Err(error("acquire lease lock", source)),
         }
         if Instant::now() >= deadline {
             return Err(cargo_target_lease_wait_error(
@@ -1143,7 +1236,17 @@ fn acquire_shared_cargo_target_in_until(
             CARGO_TARGET_LEASE_POLL.min(deadline.saturating_duration_since(Instant::now())),
         );
     }
-    write_lifecycle(&target_dir, Some(owner), now)?;
+    write_lifecycle(&target_dir, Some(owner), now).map_err(|mut error| {
+        error.message = format!(
+            "record shared Cargo target lease `{owner}` at {}: {}",
+            target_dir.display(),
+            error.details["error"].as_str().unwrap_or(&error.message)
+        );
+        error.details["target_path"] = json!(target_dir);
+        error.details["lock_path"] = json!(lock_path);
+        error.details["lease_identity"] = json!(owner);
+        error
+    })?;
     Ok(SharedCargoTargetLease { target_dir, lock })
 }
 
@@ -1170,6 +1273,15 @@ fn cargo_target_lease_wait_error(
     .with_hint("Retry after the active Homeboy operation finishes.")
     .with_hint("If no operation is active, inspect and clean stale cache stores with `homeboy cleanup --include shared-cargo-targets --apply`.");
     error.details["owner"] = json!(owner);
+    error.details["lease_identity"] = json!(owner);
+    error.details["target_path"] = json!(target_dir);
+    if reason == "deadline_exhausted" {
+        let os_error = fs4::lock_contended_error().to_string();
+        error
+            .message
+            .push_str(&format!("; lease `{owner}`: {os_error}"));
+        error.details["os_error"] = json!(os_error);
+    }
     error.details["lock_path"] = json!(target_dir.join(LOCK_FILE));
     error.details["waited_ms"] = json!(waited.as_millis());
     error.details["reason"] = json!(reason);
@@ -1658,6 +1770,9 @@ fn evict_stale_shared_cargo_targets(
     let mut active_owners = Vec::new();
     let mut idle = Vec::new();
     for entry in entries.filter_map(|entry| entry.ok()) {
+        if entry.file_name() == PROVIDER_ADMISSION_DIR {
+            continue;
+        }
         let path = entry.path();
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
@@ -1722,9 +1837,11 @@ fn inventory(
     for entry in
         fs::read_dir(root).map_err(|error| io_error(error, "read shared Cargo target root"))?
     {
-        let path = entry
-            .map_err(|error| io_error(error, "read shared Cargo target entry"))?
-            .path();
+        let entry = entry.map_err(|error| io_error(error, "read shared Cargo target entry"))?;
+        if entry.file_name() == PROVIDER_ADMISSION_DIR {
+            continue;
+        }
+        let path = entry.path();
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| io_error(error, "stat shared Cargo target entry"))?;
         if metadata.file_type().is_symlink() {
@@ -1968,6 +2085,31 @@ fn path_size(path: &Path) -> Result<u64> {
     )
     .map(|result| result.usage.logical_bytes)
 }
+fn cargo_lease_io_error(
+    target: &Path,
+    lock_path: &Path,
+    identity: &str,
+    operation: &str,
+    source: std::io::Error,
+) -> Error {
+    let os_error = source.to_string();
+    let contention = source.kind() == std::io::ErrorKind::WouldBlock;
+    let mut error = io_error(source, operation).with_retryable(contention);
+    if contention {
+        error.details["reason"] = json!("contention");
+    }
+    error.message = format!(
+        "shared Cargo target lease `{identity}` at {}: {operation} ({}): {os_error}",
+        target.display(),
+        lock_path.display()
+    );
+    error.details["target_path"] = json!(target);
+    error.details["lock_path"] = json!(lock_path);
+    error.details["lease_identity"] = json!(identity);
+    error.details["os_error"] = json!(os_error);
+    error
+}
+
 fn io_error(error: std::io::Error, operation: &str) -> Error {
     Error::internal_io(error.to_string(), Some(operation.to_string()))
 }

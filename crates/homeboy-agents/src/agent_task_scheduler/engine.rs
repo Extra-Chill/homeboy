@@ -1202,6 +1202,9 @@ impl AgentTaskScheduler {
                             AgentTaskOutcomeStatus::Cancelled => "cancelled",
                             AgentTaskOutcomeStatus::Timeout => "timed_out",
                             AgentTaskOutcomeStatus::CandidateRecoverable => "candidate_recoverable",
+                            _ if AgentTaskScheduleSupport::cargo_admission_refused(&outcome) => {
+                                "admission_refused"
+                            }
                             _ => "failed",
                         };
                         let terminal = self.durable_lifecycle_store().and_then(|store| {

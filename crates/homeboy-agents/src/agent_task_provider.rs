@@ -60,6 +60,13 @@ mod workspace_types;
 #[cfg(test)]
 mod tests;
 
+pub(crate) const CARGO_TARGET_CONTENTION: &str = "agent_task.cargo_target_contention";
+pub(crate) const CARGO_CACHE_UNAVAILABLE: &str = "agent_task.cargo_cache_unavailable";
+
+pub(crate) fn is_cargo_admission_failure(class: &str) -> bool {
+    matches!(class, CARGO_TARGET_CONTENTION | CARGO_CACHE_UNAVAILABLE)
+}
+
 pub use admission::{
     AgentTaskProviderAdmissionAction, AgentTaskProviderAdmissionPlan,
     AgentTaskProviderAdmissionPredicate, AgentTaskProviderAdmissionRequest,
