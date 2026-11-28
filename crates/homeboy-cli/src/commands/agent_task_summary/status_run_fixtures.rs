@@ -49,7 +49,10 @@ fn agent_task_status_run_directories_preserve_recorded_cause_and_next_action() {
             let record: AgentTaskRunRecord = serde_json::from_slice(&std::fs::read(directory.join("record.json")).unwrap()).unwrap();
             let aggregate: AgentTaskAggregate = serde_json::from_slice(&std::fs::read(directory.join("aggregate.json")).unwrap()).unwrap();
             import_dispatch_result(&record, &aggregate);
-            assert!(store.aggregate_path(&record.run_id).exists());
+            assert_eq!(
+                store.read_aggregate(&record.run_id).unwrap().outcomes.len(),
+                aggregate.outcomes.len()
+            );
             let run_id = RunId::new(&record.run_id).unwrap();
             let run = service.run(&run_id).unwrap();
             let verdict = crate::commands::cook_verdict::cook_verdict(&run);
@@ -69,9 +72,6 @@ fn agent_task_status_run_directories_preserve_recorded_cause_and_next_action() {
             assert_eq!(listed.blocker, run.blocker);
             let review = service.review(&run_id, &Default::default()).unwrap();
             assert_eq!(review.resource.blocker, run.blocker);
-            // A free-standing cache must not override the atomic stored pair.
-            std::fs::write(store.aggregate_path(&record.run_id), b"{}").unwrap();
-            assert_eq!(service.run(&run_id).unwrap().blocker, run.blocker);
         }
     });
 }

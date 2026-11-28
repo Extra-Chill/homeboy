@@ -1,6 +1,4 @@
-use homeboy_agents::agent_task_lifecycle::{
-    record_completed_run, record_promotion, run_id_for_aggregate_path, status,
-};
+use homeboy_agents::agent_task_lifecycle::{record_completed_run, record_promotion, status};
 use homeboy_agents::agent_task_schedule::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_agents::agent_task_service::{
     recorded_promotion_history, recorded_promotion_report, recorded_promotion_report_typed,
@@ -42,16 +40,8 @@ fn aggregate_promotion_persists_a_restart_safe_idempotent_finalization_proof() {
     .expect("aggregate");
 
     let completed = record_completed_run(&plan, &aggregate, Some(run_id)).expect("completed run");
-    let aggregate_path = std::path::PathBuf::from(
-        completed
-            .aggregate_path
-            .as_deref()
-            .expect("durable aggregate path"),
-    );
-    assert_eq!(
-        run_id_for_aggregate_path(&aggregate_path).expect("aggregate owner"),
-        Some(run_id.to_string())
-    );
+    assert_eq!(completed.run_id, run_id);
+    assert!(completed.totals.is_some(), "durable aggregate projection");
 
     let promotion = json!({
         "schema": "homeboy/agent-task-promotion-report/v1",

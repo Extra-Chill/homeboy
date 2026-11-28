@@ -792,8 +792,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     phases.push(serde_json::json!({ "phase": "continuation_admission", "status": "passed", "reason": "deterministic_checks_passed" }));
     let promotion_preflight =
         if agent_task_service::cook_continuation_requires_model_provenance(&record) {
-            match agent_task_service::preflight_cook_promotion_for_observation_in_store(
-                &lifecycle_store,
+            match agent_task_service::preflight_cook_promotion_for_observation(
                 &options,
                 &run_id,
                 None,

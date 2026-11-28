@@ -1214,8 +1214,6 @@ pub struct AgentTaskCookAttemptReport {
     pub run_id: String,
     pub run_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub aggregate_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub promotion: Option<AgentTaskPromotionReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feedback: Option<AgentTaskCookLoopReport>,

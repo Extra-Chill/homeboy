@@ -172,8 +172,6 @@ pub struct AgentTaskDispatchReport {
     pub plan_id: String,
     pub state: RunExecutionState,
     pub plan_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aggregate_path: Option<String>,
     pub task_count: usize,
     pub queued: bool,
     /// Effective backend selection + source, mirrored into the report so logs and
@@ -460,7 +458,6 @@ fn dispatch_report(
         plan_id: record.plan_id.clone(),
         state: record.state(),
         plan_path: record.plan_path.clone(),
-        aggregate_path: record.aggregate_path.clone(),
         task_count: record.tasks.len(),
         queued,
         backend_selection,

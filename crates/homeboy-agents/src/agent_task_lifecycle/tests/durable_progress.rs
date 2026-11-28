@@ -650,24 +650,13 @@ fn oversize_pre_execution_failure_preserves_cause_and_terminal_record() {
         assert_eq!(record.state(), RunExecutionState::Failed);
         assert_eq!(record.metadata["pre_execution_failure"]["message"], message);
         assert_eq!(record.metadata["pre_execution_failure"]["details"], details);
-        let aggregate: AgentTaskAggregate = serde_json::from_slice(
-            &std::fs::read(store.aggregate_path(&run_id)).expect("aggregate file"),
-        )
-        .expect("aggregate");
+        let aggregate = store.read_aggregate(&run_id).expect("aggregate");
         let full_message = aggregate.events[0]
             .message
             .as_deref()
             .expect("full message");
         assert!(full_message.ends_with(&message));
         assert_eq!(aggregate.outcomes[0].outputs["details"], details);
-        assert_eq!(
-            store
-                .read_aggregate_readonly(&run_id)
-                .expect("authoritative aggregate")
-                .events[0]
-                .message,
-            aggregate.events[0].message,
-        );
         let (snapshot, mirrored) = store
             .read_record_with_aggregate_bounded(&run_id)
             .expect("status snapshot resolves externalized evidence");

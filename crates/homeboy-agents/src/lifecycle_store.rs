@@ -1,6 +1,5 @@
 use homeboy_lifecycle_contract::RunExecutionState;
 use std::fs;
-use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -16,9 +15,7 @@ use super::{
     AgentTaskTransitionConflict, AgentTaskTransitionError,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use homeboy_core::engine::local_files::{
-    write_json_file as write_json, write_json_file_owner_only as write_private_json,
-};
+use homeboy_core::engine::local_files::write_json_file_owner_only as write_private_json;
 use homeboy_core::observation::{
     ControlPlaneResourceProjection, ObservationStore, RunCursor as ObservationRunCursor,
     RunListFilter, RunMetadataRevision, RunRecord, RunStatus,
@@ -92,10 +89,6 @@ impl AgentTaskLifecycleStore {
 
     pub fn controller_plan_path(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("plan.json")
-    }
-
-    pub fn aggregate_path(&self, run_id: &str) -> PathBuf {
-        self.run_dir(run_id).join("aggregate.json")
     }
 
     /// Lock serializing a run's Lab handoff acceptance against expiry. Every
@@ -448,53 +441,16 @@ impl AgentTaskLifecycleStore {
         super::cook_effects::complete_cook_operation_in_store(self, run_id, operation_key, result)
     }
 
-    pub(crate) fn aggregate_source_exact(&self, run_id: &str) -> Result<(String, PathBuf)> {
-        let record = self.read_record(run_id)?;
-        record.aggregate_path.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "run_id",
-                format!(
-                    "agent-task run '{}' has no aggregate artifact yet",
-                    record.run_id
-                ),
-                Some(record.run_id.clone()),
-                None,
-            )
-        })?;
-        let path = self.aggregate_path(&record.run_id);
-        // The canonical local aggregate.json is the controller-owned, exact-bytes
-        // source (c138e12162) and stays preferred whenever it exists. But a run's
-        // record can outlive that file — retention sweeps, or a controller crash
-        // between writing the record and materializing the file — leaving the
-        // durable record pointing at an aggregate that genuinely is not on this
-        // installation's disk. Falling back to the SQLite-backed observation
-        // mirror in that case only, rather than propagating a plain IO error,
-        // keeps this accessor resolving whatever local evidence still exists
-        // instead of spelunking `record.aggregate_path`'s stored string, which
-        // may itself name a foreign installation's path (#7505).
-        match fs::metadata(&path) {
-            Ok(_) => {
-                let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
-                serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
-                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
-                })?;
-                let raw = String::from_utf8(raw).map_err(|error| {
-                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
-                })?;
-                Ok((raw, path))
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let aggregate = self.read_aggregate_readonly(&record.run_id)?;
-                let raw = serde_json::to_string(&aggregate).map_err(|error| {
-                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
-                })?;
-                Ok((raw, path))
-            }
-            Err(error) => Err(Error::internal_io(
+    /// The run's aggregate as the JSON source promotion and review consume,
+    /// serialized from the single aggregate store: the SQLite run row.
+    pub(crate) fn aggregate_source(&self, run_id: &str) -> Result<String> {
+        let aggregate = self.read_aggregate(run_id)?;
+        serde_json::to_string_pretty(&aggregate).map_err(|error| {
+            Error::internal_json(
                 error.to_string(),
-                Some(path.display().to_string()),
-            )),
-        }
+                Some(format!("serialize agent-task aggregate {run_id}")),
+            )
+        })
     }
 
     pub fn operation_claim(
@@ -659,30 +615,20 @@ impl AgentTaskLifecycleStore {
         Ok(plan)
     }
 
-    pub fn write_aggregate(&self, run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
-        let path = self.aggregate_path(run_id);
-        write_json(&path, aggregate)?;
-        Ok(path)
+    /// Replace the aggregate committed with an existing run row. Test
+    /// fixtures only: production commits an aggregate through the typed
+    /// aggregate projection transition, together with the record it projects.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn write_aggregate(&self, run_id: &str, aggregate: &AgentTaskAggregate) -> Result<()> {
+        let record = self.read_record(run_id)?;
+        self.write_record_with_aggregate(&record, Some(aggregate.clone()))
+            .map(|_| ())
     }
 
+    /// The single aggregate read: the aggregate committed with the run's
+    /// SQLite row. The observation database is opened read-only, so this never
+    /// initializes, migrates or re-enters lifecycle projection.
     pub fn read_aggregate(&self, run_id: &str) -> Result<AgentTaskAggregate> {
-        match read_mirrored_aggregate_in_store(self, run_id)? {
-            Some(aggregate) => Ok(aggregate),
-            None => read_json(&self.aggregate_path(run_id)),
-        }
-    }
-
-    pub fn read_aggregate_bounded(&self, run_id: &str) -> Result<AgentTaskAggregate> {
-        let path = self.aggregate_path(run_id);
-        let raw = read_aggregate_bytes_bounded_in_store(self, run_id)?;
-        serde_json::from_slice(&raw).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })
-    }
-
-    /// Observe only the aggregate mirrored in the authoritative SQLite row,
-    /// without initializing or migrating the observation database.
-    pub fn read_aggregate_readonly(&self, run_id: &str) -> Result<AgentTaskAggregate> {
         let observations = self.open_observation_readonly()?;
         let run = observations.get_run(run_id)?.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -692,23 +638,12 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
-        let run = resolve_aggregate_payloads(&observations, run)?;
-        let value = run
-            .metadata_json
-            .get("agent_task_aggregate")
-            .filter(|value| !value.is_null())
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "agent_task_aggregate",
-                    "authoritative observation has no mirrored agent-task aggregate",
-                    Some(run_id.to_string()),
-                    None,
-                )
-            })?;
-        serde_json::from_value(value.clone()).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("parse agent-task aggregate {}", run.id)),
+        aggregate_from_run(&resolve_aggregate_payloads(&observations, run)?)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!("agent-task run '{run_id}' has no aggregate artifact yet"),
+                Some(run_id.to_string()),
+                None,
             )
         })
     }
@@ -1266,8 +1201,7 @@ impl AgentTaskLifecycleStore {
     }
 
     /// Read one record and its mirrored aggregate from the same read-only
-    /// SQLite observation. A missing mirror is returned as `None`; callers must
-    /// not pair that record with the independently materialized aggregate cache.
+    /// SQLite observation. A run without an aggregate returns `None`.
     pub fn read_record_with_aggregate_bounded(
         &self,
         run_id: &str,
@@ -1346,7 +1280,6 @@ impl AgentTaskLifecycleStore {
                     transition: Some("import"),
                 },
             )?;
-            self.write_aggregate(&record.run_id, aggregate)?;
             Ok(committed)
         })?;
         self.project_terminal_record_after_unlock(&committed.run_id)?;
@@ -1498,10 +1431,12 @@ impl AgentTaskLifecycleStore {
                 serde_json::json!(homeboy_core::build_identity::current().display);
             // Rearming replaces the terminal record with the caller's queued
             // copy, so it commits only at the revision that copy was read at.
-            let committed = write_record_fenced(
+            // The synthetic pre-execution failure aggregate is dropped with it:
+            // it is no longer an execution result of the now-queued run (#13552).
+            write_record_fenced(
                 self,
                 &rebound,
-                read_mirrored_aggregate_in_store(self, &rebound.run_id)?,
+                None,
                 false,
                 true,
                 RecordWriteGuard {
@@ -1509,24 +1444,7 @@ impl AgentTaskLifecycleStore {
                     from: existing.state(),
                     transition: Some("rearm"),
                 },
-            )?;
-            // A pre-execution failure writes a synthetic failed aggregate for
-            // durable diagnostics. Once the zero-provider attempt is rearmed,
-            // that file is no longer an execution result. Leaving it behind
-            // lets the next detached-handoff write mirror the stale failure
-            // back into the now-queued record (#13552).
-            let aggregate_path = self.aggregate_path(&rebound.run_id);
-            match fs::remove_file(&aggregate_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(Error::internal_io(
-                        format!("remove rearmed pre-execution aggregate: {error}"),
-                        Some(aggregate_path.display().to_string()),
-                    ));
-                }
-            }
-            Ok(committed)
+            )
         })
     }
 
@@ -1815,7 +1733,7 @@ impl AgentTaskLifecycleStore {
         }
         let from = stored.state();
         let stored_aggregate = read_mirrored_aggregate_in_store(self, run_id)?;
-        let (next, aggregate, write_cache) = transition.apply(stored, stored_aggregate)?;
+        let (next, aggregate) = transition.apply(stored, stored_aggregate)?;
         let guard = RecordWriteGuard {
             expected_revision,
             from,
@@ -1824,7 +1742,7 @@ impl AgentTaskLifecycleStore {
         match write_record_guarded(
             self,
             &next,
-            aggregate.clone(),
+            aggregate,
             true,
             emit_events,
             RecordWriteFence::Revision(&guard),
@@ -1833,21 +1751,7 @@ impl AgentTaskLifecycleStore {
                 actual_revision,
                 actual_state,
             } => Ok(Err(conflict(actual_revision, actual_state))),
-            GuardedRecordWrite::Committed(committed) => {
-                if write_cache {
-                    #[cfg(test)]
-                    if INTERRUPT_AFTER_TERMINAL_COMMIT.replace(false) {
-                        return Err(Error::internal_io(
-                            "injected interruption after terminal lifecycle commit",
-                            Some(run_id.to_string()),
-                        ));
-                    }
-                    if let Some(aggregate) = aggregate.as_ref() {
-                        self.write_aggregate(run_id, aggregate)?;
-                    }
-                }
-                Ok(Ok(committed))
-            }
+            GuardedRecordWrite::Committed(committed) => Ok(Ok(committed)),
         }
     }
 
@@ -1907,8 +1811,6 @@ thread_local! {
     /// One-shot write failure owned by the test thread that armed it. A global
     /// atomic let unrelated parallel tests consume each other's fault (#11897).
     static FAIL_NEXT_RECORD_WRITE: Cell<bool> = const { Cell::new(false) };
-    /// One-shot post-commit failure owned by the test thread that armed it.
-    static INTERRUPT_AFTER_TERMINAL_COMMIT: Cell<bool> = const { Cell::new(false) };
 }
 
 /// A crashed notifier cannot release its provisional claim. A bounded lease
@@ -1958,72 +1860,12 @@ fn validate_managed_services(plan: &AgentTaskPlan) -> Result<()> {
 }
 
 #[cfg(test)]
-pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
+pub(super) fn write_aggregate(run_id: &str, aggregate: &AgentTaskAggregate) -> Result<()> {
     default_store()?.write_aggregate(run_id, aggregate)
 }
 
 pub(super) fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
     default_store()?.read_aggregate(run_id)
-}
-
-/// Maximum controller-local aggregate size accepted by a read-only inspection.
-///
-/// Aggregates are compact lifecycle projections, not artifact payloads. Keeping
-/// this cap below the general output limits makes a malformed or accidentally
-/// redirected aggregate fail as partial evidence rather than consuming an
-/// unbounded amount of memory in `status`, `evidence`, or `review`.
-pub(super) const DURABLE_AGGREGATE_MAX_BYTES: u64 = 2 * 1024 * 1024;
-
-/// Read the controller-owned aggregate without consulting the mirrored
-/// observation row. The reader checks metadata before allocating and takes one
-/// extra byte while reading to defend against a file changing after `metadata`.
-pub(super) fn read_aggregate_bounded(run_id: &str) -> Result<AgentTaskAggregate> {
-    default_store()?.read_aggregate_bounded(run_id)
-}
-
-fn read_aggregate_bytes_bounded_in_store(
-    store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<Vec<u8>> {
-    let path = store.aggregate_path(run_id);
-    let metadata = fs::metadata(&path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    if metadata.len() > DURABLE_AGGREGATE_MAX_BYTES {
-        let mut error = Error::internal_io(
-            format!(
-                "aggregate exceeds durable read size budget: {} bytes exceeds {} bytes",
-                metadata.len(),
-                DURABLE_AGGREGATE_MAX_BYTES
-            ),
-            Some(path.display().to_string()),
-        );
-        error.details = json!({ "reason_code": "durable_read.oversized" });
-        return Err(error);
-    }
-    let mut file = fs::File::open(&path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    let mut raw = Vec::with_capacity(metadata.len() as usize);
-    file.by_ref()
-        .take(DURABLE_AGGREGATE_MAX_BYTES + 1)
-        .read_to_end(&mut raw)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    if raw.len() as u64 > DURABLE_AGGREGATE_MAX_BYTES {
-        let mut error = Error::internal_io(
-            format!(
-                "aggregate exceeds durable read size budget while reading: more than {} bytes",
-                DURABLE_AGGREGATE_MAX_BYTES
-            ),
-            Some(path.display().to_string()),
-        );
-        error.details = json!({ "reason_code": "durable_read.oversized" });
-        return Err(error);
-    }
-    Ok(raw)
-}
-
-#[cfg(test)]
-pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
-    Ok(default_store()?.aggregate_path(run_id))
 }
 
 #[cfg(test)]
@@ -2043,11 +1885,6 @@ pub(super) fn mutate_record(
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn fail_next_record_write_for_test() {
     FAIL_NEXT_RECORD_WRITE.set(true);
-}
-
-#[cfg(test)]
-pub(super) fn interrupt_after_terminal_commit_for_test() {
-    INTERRUPT_AFTER_TERMINAL_COMMIT.set(true);
 }
 
 #[cfg(any(test, feature = "test-support"))]

@@ -1785,7 +1785,7 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
         assert_eq!(result.exit_code, 0);
         assert_eq!(record.state(), RunExecutionState::Succeeded);
         assert_eq!(record.tasks[0].state(), ControlPlaneState::Succeeded);
-        assert!(record.aggregate_path.is_some());
+        assert!(record.totals.is_some());
         assert_eq!(record.provider_executions_consumed(), 1);
         assert_eq!(record.lifecycle.provider_runtime.len(), 1);
         assert_eq!(
@@ -2267,7 +2267,7 @@ fn service_persists_timed_out_run_record_and_evidence_refs() {
         assert_eq!(record.state(), RunExecutionState::Failed);
         assert_eq!(record.tasks[0].state(), ControlPlaneState::TimedOut);
         assert_eq!(record.totals.as_ref().expect("totals").timed_out, 1);
-        assert!(record.aggregate_path.is_some());
+        assert!(record.totals.is_some());
         assert_eq!(record.provider_executions_consumed(), 1);
         assert_eq!(
             record.metadata["provider_executions"][0]["state"],
@@ -2487,7 +2487,7 @@ fn run_next_skips_missing_required_secret_before_claiming_and_runs_later_work() 
         assert_eq!(record.state(), RunExecutionState::Queued);
         assert_eq!(record.tasks[0].state(), ControlPlaneState::Queued);
         assert_eq!(record.lifecycle.execution.state, RunExecutionState::Queued);
-        assert!(record.aggregate_path.is_none());
+        assert!(record.totals.is_none());
         assert_eq!(
             lifecycle_status("run-next-b-eligible")
                 .expect("eligible record")

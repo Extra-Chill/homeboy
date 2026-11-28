@@ -1247,7 +1247,7 @@ fn a_succeeded_runner_result_without_an_aggregate_does_not_rerun_the_provider() 
         })
         .unwrap();
         let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
-        assert!(record.aggregate_path.is_none());
+        assert!(record.totals.is_none());
         assert_eq!(
             pre_artifact_interruption_phase(&record),
             PreArtifactInterruptionPhase::RunnerResultNotProjected
@@ -1317,7 +1317,7 @@ fn a_resource_guard_stop_before_the_aggregate_fails_the_attempt_without_transpor
         })
         .unwrap();
         let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
-        assert!(record.aggregate_path.is_none());
+        assert!(record.totals.is_none());
         assert_eq!(
             pre_artifact_interruption_phase(&record),
             PreArtifactInterruptionPhase::BeforeProviderStart
@@ -1350,7 +1350,7 @@ fn a_resource_guard_stop_before_the_aggregate_fails_the_attempt_without_transpor
 }
 
 #[test]
-fn pre_artifact_interruption_does_not_bypass_an_authoritative_aggregate_path() {
+fn pre_artifact_interruption_does_not_bypass_an_authoritative_aggregate_projection() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(
             "cook-pre-artifact-aggregate-authority",
@@ -1360,13 +1360,13 @@ fn pre_artifact_interruption_does_not_bypass_an_authoritative_aggregate_path() {
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
         agent_task_lifecycle::cancel_run(&run_id, Some("controller interrupted")).unwrap();
         agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
-            record.aggregate_path = Some("authoritative/aggregate.json".to_string());
+            record.totals = Some(Default::default());
         })
         .unwrap();
 
         let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
         assert!(record.state().is_terminal());
-        assert!(record.aggregate_path.is_some());
+        assert!(record.totals.is_some());
         assert!(agent_task_lifecycle::read_aggregate(&run_id).is_err());
     });
 }

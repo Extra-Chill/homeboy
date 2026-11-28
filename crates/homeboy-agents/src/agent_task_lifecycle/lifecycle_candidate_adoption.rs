@@ -499,7 +499,6 @@ pub fn candidate_adoption_recovery_outcome(
 ) -> Option<AgentTaskOutcome> {
     let expired_handoff = record.lab_handoff.as_ref().is_some_and(|handoff| {
         record.state() == RunExecutionState::Cancelled
-            && record.aggregate_path.is_none()
             && record.totals.is_none()
             && record.artifact_refs.is_empty()
             && record.provider_handles.is_empty()

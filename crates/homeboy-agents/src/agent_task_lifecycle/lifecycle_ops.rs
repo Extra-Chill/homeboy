@@ -67,7 +67,7 @@ pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
     outcome: AgentTaskOutcome,
-) -> Result<PathBuf> {
+) -> Result<()> {
     let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
     if plan.tasks.len() != 1
         || record.tasks.len() != 1
@@ -103,13 +103,9 @@ pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
         },
     };
     let mut recovered_record = record.clone();
-    let aggregate_path = lifecycle_store
-        .aggregate_path(&record.run_id)
-        .display()
-        .to_string();
-    apply_aggregate_to_record(&mut recovered_record, &plan, &aggregate, aggregate_path);
+    apply_aggregate_to_record(&mut recovered_record, &plan, &aggregate);
     lifecycle_store.project_terminal_aggregate(&recovered_record, record.state(), &aggregate)?;
-    Ok(lifecycle_store.aggregate_path(&record.run_id))
+    Ok(())
 }
 
 pub fn submit_plan(
@@ -4914,18 +4910,9 @@ fn converge_resolved_run_in_store(
     if !record.state().is_terminal() {
         let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
-            let aggregate_path = lifecycle_store
-                .aggregate_path(&record.run_id)
-                .display()
-                .to_string();
             let mut reconciled = record.clone();
             let projection_plan = aggregate_projection_plan(&controller_plan, &aggregate);
-            apply_aggregate_to_record(
-                &mut reconciled,
-                &projection_plan,
-                &aggregate,
-                aggregate_path,
-            );
+            apply_aggregate_to_record(&mut reconciled, &projection_plan, &aggregate);
 
             if reconciled != record {
                 let committed = if reconciled.state().is_terminal() {
@@ -5199,36 +5186,6 @@ pub(crate) fn sort_records_newest_first(records: &mut [AgentTaskRunRecord]) {
             .then_with(|| right.submitted_at.cmp(&left.submitted_at))
             .then_with(|| right.run_id.cmp(&left.run_id))
     });
-}
-
-/// Resolve an aggregate artifact back to its controller-owned durable run.
-/// Aggregate paths are passed to promotion commands after the controller has
-/// finished, so the path rather than a transient process-local identifier is
-/// the durable source identity.
-pub fn run_id_for_aggregate_path(path: &std::path::Path) -> Result<Option<String>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut matching_run_ids = lifecycle_store
-        .read_records()?
-        .into_iter()
-        .filter_map(|record| {
-            let aggregate_path = lifecycle_store.aggregate_path(&record.run_id);
-            let aggregate_path = aggregate_path.canonicalize().unwrap_or(aggregate_path);
-            (aggregate_path == path).then_some(record.run_id)
-        })
-        .collect::<Vec<_>>();
-    matching_run_ids.sort();
-    matching_run_ids.dedup();
-    match matching_run_ids.as_slice() {
-        [] => Ok(None),
-        [run_id] => Ok(Some(run_id.clone())),
-        _ => Err(Error::validation_invalid_argument(
-            "source",
-            "aggregate path is associated with multiple durable agent-task runs",
-            Some(path.display().to_string()),
-            None,
-        )),
-    }
 }
 
 pub fn run_record_exists(run_id: &str) -> Result<bool> {
@@ -6256,7 +6213,7 @@ fn durable_local_read_record_in_store(
         unavailable_sources: vec![AgentTaskDurableReadUnavailable {
             source: "aggregate",
             reason_code: "durable_read.authoritative_aggregate_absent",
-            detail: "The authoritative SQLite observation has no mirrored aggregate; aggregate.json was not consulted because it cannot be paired atomically with this record."
+            detail: "The authoritative SQLite observation has no aggregate for this record."
                 .to_string(),
         }],
     })
@@ -6295,7 +6252,7 @@ pub(crate) fn read_attempt_aggregate(run_id: &str) -> Result<AgentTaskAggregate>
 pub fn aggregate_source_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-) -> Result<(String, PathBuf)> {
+) -> Result<String> {
     let selected_run_id = match cook_index_in_store(lifecycle_store, run_id)
         .and_then(|_| select_cook_candidate_in_store(lifecycle_store, run_id))
     {
@@ -6317,20 +6274,9 @@ pub fn aggregate_source_in_store(
         false,
     )?
     .record;
-    record.aggregate_path.as_ref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            format!(
-                "agent-task run '{}' has no aggregate artifact yet",
-                record.run_id
-            ),
-            Some(record.run_id.clone()),
-            None,
-        )
-    })?;
-    // `record.run_id` is already resolved, so this exact read reloads the
-    // controller-owned aggregate file rather than the observation mirror.
-    lifecycle_store.aggregate_source_exact(&record.run_id)
+    // `record.run_id` is already resolved, so this is the store's own exact
+    // read rather than the alias-resolving wrapper.
+    lifecycle_store.aggregate_source(&record.run_id)
 }
 
 pub fn record_cook_attempt_in_store(
@@ -6847,17 +6793,14 @@ fn substantive_candidate_in_store(
     if record.metadata.get("superseded_by_run_id").is_some() {
         return None;
     }
-    let aggregate_path = record.aggregate_path?;
-    if !std::path::Path::new(&aggregate_path).exists() {
-        return None;
-    }
+    record.totals.as_ref()?;
     // Candidate substantiveness is projection-time eligibility input
     // (#14914): an initializing aggregate read here re-enters projection and
-    // recurses until the stack overflows. `read_aggregate_bounded` never opens
-    // an initializing observation store, matching the bounded record read above.
+    // recurses until the stack overflows. `read_aggregate` opens the
+    // observation store read-only, matching the bounded record read above.
     let aggregate = match lifecycle_store {
-        Some(store) => store.read_aggregate_bounded(run_id),
-        None => store::read_aggregate_bounded(run_id),
+        Some(store) => store.read_aggregate(run_id),
+        None => store::read_aggregate(run_id),
     };
     let Ok(aggregate) = aggregate else {
         return None;
@@ -7008,9 +6951,10 @@ pub(crate) fn resolve_run_id_in_store(
 
 /// Resolve a Cook ID to the attempt that owns the replayable candidate.
 ///
-/// File-backed selection stays authoritative. When `aggregate.json` is gone,
-/// the indexed substantive attempt is kept if its record still has the exact
-/// candidate or gate evidence, so a newer submit-only attempt cannot hide it.
+/// Aggregate-backed selection stays authoritative. When a run has no
+/// aggregate, the indexed substantive attempt is kept if its record still has
+/// the exact candidate or gate evidence, so a newer submit-only attempt cannot
+/// hide it.
 pub fn resolve_cook_reader_run_id_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -7097,16 +7041,12 @@ pub(crate) fn attempt_preserves_candidate_or_gate(
         return false;
     };
     if let Some(evidence) = &record.latest_executor_evidence {
-        let setup_failure = record
-            .aggregate_path
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|aggregate| aggregate.get("outcomes").and_then(Value::as_array).cloned())
-            .is_some_and(|outcomes| {
-                outcomes.iter().any(|outcome| {
-                    outcome["task_id"] == evidence.task_id
-                        && outcome["metadata"]["environment_setup_failure"] == true
+        let setup_failure = lifecycle_store
+            .read_aggregate(run_id)
+            .is_ok_and(|aggregate| {
+                aggregate.outcomes.iter().any(|outcome| {
+                    outcome.task_id == evidence.task_id
+                        && outcome.metadata["environment_setup_failure"] == true
                 })
             });
         if setup_failure && record.candidate.is_none() {

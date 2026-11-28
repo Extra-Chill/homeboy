@@ -4110,7 +4110,7 @@ mod tests {
                 status.metadata["pre_execution_failure"]["phase"],
                 "retry_preparation"
             );
-            assert!(status.aggregate_path.is_some());
+            assert!(status.totals.is_some());
         });
     }
 

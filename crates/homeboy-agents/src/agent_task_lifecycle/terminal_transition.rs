@@ -231,7 +231,7 @@ impl AgentTaskTransition {
         self,
         stored: AgentTaskRunRecord,
         stored_aggregate: Option<AgentTaskAggregate>,
-    ) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>, bool)> {
+    ) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
         match self {
             Self::Terminate { outcome, metadata } => {
                 if !outcome.is_terminal() || outcome == RunExecutionState::Unknown {
@@ -253,7 +253,7 @@ impl AgentTaskTransition {
                 }
                 record.updated_at = Some(now_timestamp());
                 set_run_state(&mut record, outcome);
-                Ok((record, stored_aggregate, false))
+                Ok((record, stored_aggregate))
             }
             Self::ProjectAggregate {
                 prepared,
@@ -268,7 +268,6 @@ impl AgentTaskTransition {
                 Ok((
                     keep_committed_cancellation(&stored, *prepared),
                     Some(*aggregate),
-                    true,
                 ))
             }
             Self::CommitRecord { prepared } => {
@@ -281,7 +280,6 @@ impl AgentTaskTransition {
                 Ok((
                     keep_committed_cancellation(&stored, *prepared),
                     stored_aggregate,
-                    false,
                 ))
             }
             Self::Annotate { prepared } => {
@@ -294,7 +292,7 @@ impl AgentTaskTransition {
                         &format!("an annotation cannot change {field}; commit a typed transition"),
                     ));
                 }
-                Ok((*prepared, stored_aggregate, false))
+                Ok((*prepared, stored_aggregate))
             }
             Self::Advance { kind, prepared } => {
                 validate_identity(&prepared, &stored, kind.name())?;
@@ -306,7 +304,7 @@ impl AgentTaskTransition {
                         &format!("{problem} (stored state {:?})", stored.state()),
                     ));
                 }
-                Ok((*prepared, stored_aggregate, false))
+                Ok((*prepared, stored_aggregate))
             }
         }
     }

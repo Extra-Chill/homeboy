@@ -918,7 +918,7 @@ fn compact_status_budget_keeps_failure_cause_over_candidate_projection() {
         "cook_id": "cook-cause",
         "status": "durable_failure",
         "durable_candidate": { "canonical_candidate": large },
-        "attempts": [{ "run_id": "run-cause", "aggregate_path": "x".repeat(COMPACT_STATUS_BYTE_LIMIT / 4) }],
+        "attempts": [{ "run_id": "x".repeat(COMPACT_STATUS_BYTE_LIMIT / 4) }],
         "failure_context": {
             "phase": "controller",
             "reason_code": "validation.invalid_argument",
@@ -944,7 +944,7 @@ fn compact_cook_report_enforces_final_byte_budget_after_all_projections() {
         "status": "durable_failure",
         "stop_reason": large,
         "terminal_phase": "promotion",
-        "attempts": (0..COMPACT_TASK_LIMIT).map(|index| json!({ "attempt": index, "run_id": format!("run-{index}"), "run_state": "failed", "aggregate_path": large })).collect::<Vec<_>>(),
+        "attempts": (0..COMPACT_TASK_LIMIT).map(|index| json!({ "attempt": index, "run_id": format!("run-{index}"), "run_state": large })).collect::<Vec<_>>(),
         "finalization": { "status": "blocked", "evidence": large },
         "selected_candidate": { "run_id": "run-budget", "reason": large },
         "failure_context": {

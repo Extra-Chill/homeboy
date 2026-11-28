@@ -288,7 +288,6 @@ fn disconnected_lab_notification_names_connect_then_regate() {
             attempt: 1,
             run_id: "run-1".into(),
             run_state: "candidate_recoverable".into(),
-            aggregate_path: None,
             promotion: Some(promotion),
             feedback: None,
         });

@@ -93,8 +93,7 @@ fn adoption_budget_failure_awaiting_review(
 /// aggregate is only tolerated when it is genuinely expected rather than a
 /// data-integrity problem (homeboy#15005).
 fn adopted_source_never_executed(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
-    record.aggregate_path.is_none()
-        && record.totals.is_none()
+    record.totals.is_none()
         && record.artifact_refs.is_empty()
         && record.provider_handles.is_empty()
         && record.latest_executor_evidence.is_none()
@@ -246,7 +245,7 @@ pub fn adopt_cook_candidate(
             None,
         ));
     }
-    let (source, source_path, recovery) =
+    let (source, recovery) =
         candidate_adoption_source_in_store(lifecycle_store, &record, &source_request)?;
     let (adoption_ai_model, ai_model_source) = match ai_model {
         Some(model) => (concrete_adoption_ai_model(&model)?, "candidate_input"),
@@ -320,7 +319,6 @@ pub fn adopt_cook_candidate(
                     attempt: adopted_attempt,
                     run_id: record.run_id.clone(),
                     run_state: format!("{:?}", record.state()),
-                    aggregate_path: record.aggregate_path.clone(),
                     promotion: persisted_promotion,
                     feedback: None,
                 }],
@@ -366,7 +364,6 @@ pub fn adopt_cook_candidate(
                 attempt: adopted_attempt,
                 run_id: record.run_id.clone(),
                 run_state: format!("{:?}", record.state()),
-                aggregate_path: record.aggregate_path.clone(),
                 promotion: Some(promotion),
                 feedback: Some(feedback),
             }],
@@ -467,7 +464,7 @@ pub fn adopt_cook_candidate(
                         AgentTaskPromotionRequest {
                             source,
                             source_run_id: Some(record.run_id.clone()),
-                            source_path,
+                            source_path: None,
                             source_worktree_path: Some(gate_workspace.clone()),
                             base_ref: Some(options.finalization.base.clone()),
                             task_base_sha: options.workspace.task_base_sha.clone(),
@@ -618,7 +615,6 @@ pub fn adopt_cook_candidate(
         attempt: adopted_attempt,
         run_id: record.run_id.clone(),
         run_state: format!("{:?}", record.state()),
-        aggregate_path: record.aggregate_path.clone(),
         promotion: Some(promotion.clone()),
         feedback: Some(feedback.clone()),
     };
@@ -1055,7 +1051,7 @@ pub(crate) fn candidate_adoption_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     source_request: &AgentTaskRequest,
-) -> Result<(String, Option<PathBuf>, Option<Value>)> {
+) -> Result<(String, Option<Value>)> {
     // The authenticated recovery marker is authoritative over a canonical
     // pre-execution aggregate, which exists only to record the transport error.
     if let Some(outcome) =
@@ -1069,15 +1065,11 @@ pub(crate) fn candidate_adoption_source_in_store(
                     Some("serialize candidate adoption recovery outcome".to_string()),
                 )
             })?,
-            None,
             Some(recovery),
         ));
     }
-    if let Ok((source, path)) = lifecycle_store.aggregate_source_exact(&record.run_id) {
-        return Ok((source, Some(path), None));
-    }
-    let (source, path) = promotion_source_in_store(lifecycle_store, &record.run_id)?;
-    Ok((source, path, None))
+    let source = promotion_source_in_store(lifecycle_store, &record.run_id)?;
+    Ok((source, None))
 }
 
 pub(crate) fn concrete_adoption_ai_model(value: &str) -> Result<String> {

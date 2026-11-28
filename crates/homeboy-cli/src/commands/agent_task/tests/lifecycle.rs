@@ -2357,7 +2357,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 .as_str()
                 .expect("specific cause")
                 .contains("Filesystem reserve shortfall"));
-            assert!(terminal.aggregate_path.is_some());
+            assert!(terminal.totals.is_some());
             assert_eq!(executions.load(Ordering::SeqCst), 0);
             let (idle, idle_exit) = run_next_queued(Arc::new(CapturingExecutor::default()))
                 .expect("failed admission is not automatically replayed");
@@ -3803,7 +3803,7 @@ fn cook_retry_run_recovers_a_historical_transport_recipe_after_zero_provider_exe
             retried["metadata"]["cook_controller_failure"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("aggregate.json"),
+                .contains("has no aggregate artifact yet"),
             "{retried:#?}"
         );
         assert_eq!(
@@ -6312,12 +6312,12 @@ fn run_plan_record_run_id_persists_running_status_before_executor_runs() {
         assert_eq!(observed.state(), RunExecutionState::Running);
         assert_eq!(observed.tasks[0].state(), ControlPlaneState::Running);
         assert_eq!(observed.metadata["runner_pid"], std::process::id());
-        assert!(observed.aggregate_path.is_none());
+        assert!(observed.totals.is_none());
 
         let completed = lifecycle_status(run_id).expect("completed status loaded");
         assert_eq!(completed.state(), RunExecutionState::Succeeded);
         assert_eq!(completed.tasks[0].state(), ControlPlaneState::Succeeded);
-        assert!(completed.aggregate_path.is_some());
+        assert!(completed.totals.is_some());
     });
 }
 

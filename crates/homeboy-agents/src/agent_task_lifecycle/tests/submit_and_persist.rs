@@ -3267,7 +3267,7 @@ fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transpo
 }
 
 #[test]
-fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retry_is_idempotent() {
+fn terminal_projection_is_reader_complete_after_commit_and_retry_is_idempotent() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         let mut record = record_detached_lab_run(DetachedLabRunRecord {
@@ -3301,22 +3301,15 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
         });
         aggregate.events[0].state = ControlPlaneState::CandidateRecoverable;
         let snapshot = terminal_child_snapshot(&aggregate);
-        store::interrupt_after_terminal_commit_for_test();
 
         reconcile_runner_job_snapshot(&mut record, &snapshot)
-            .expect_err("interruption after the committed envelope is surfaced");
+            .expect("terminal projection committed");
 
         assert_eq!(
             store::read_record("agent-task-disconnected-child")
                 .expect("committed controller projection")
                 .state(),
             RunExecutionState::CandidateRecoverable
-        );
-        assert!(
-            !store::aggregate_path(&record.run_id)
-                .expect("aggregate path")
-                .exists(),
-            "the injected fault must run before aggregate.json is cached"
         );
         let durable = durable_local_read(&record.run_id).expect("committed durable pair");
         let durable_aggregate = durable.aggregate.expect("mirrored aggregate");
@@ -3362,63 +3355,6 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
         assert_eq!(record.state(), RunExecutionState::CandidateRecoverable);
-        assert!(store::aggregate_path(&record.run_id)
-            .expect("aggregate path")
-            .exists());
-    });
-}
-
-#[test]
-fn terminal_projection_ignores_a_stale_aggregate_cache_after_commit() {
-    with_isolated_home(|_| {
-        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-        let mut record = record_detached_lab_run(DetachedLabRunRecord {
-            run_id: "agent-task-stale-terminal-cache",
-            runner_id: "homeboy-lab",
-            runner_job_id: "00000000-0000-0000-0000-000000000123",
-            remote_workspace: "/runner/workspace/repo",
-            remote_command: &command,
-        })
-        .expect("running proxy");
-        let committed_aggregate = succeeded_aggregate(&test_plan());
-        let mut stale_aggregate = committed_aggregate.clone();
-        stale_aggregate.outcomes[0].summary = Some("stale aggregate cache".to_string());
-        store::interrupt_after_terminal_commit_for_test();
-        let mut snapshot = terminal_child_snapshot(&committed_aggregate);
-        snapshot.events[0].data.as_mut().expect("lifecycle event")["identity"]
-            ["persisted_run_id"] = json!(record.run_id);
-        snapshot.events[0].data.as_mut().expect("lifecycle event")["identity"]["run_id"] =
-            json!(record.run_id);
-
-        reconcile_runner_job_snapshot(&mut record, &snapshot)
-            .expect_err("interruption precedes aggregate cache publication");
-        store::write_aggregate(&record.run_id, &stale_aggregate)
-            .expect("replace the missing cache with stale bytes");
-
-        assert_eq!(
-            store::read_aggregate_bounded(&record.run_id)
-                .expect("stale cache remains readable")
-                .outcomes[0]
-                .summary
-                .as_deref(),
-            Some("stale aggregate cache")
-        );
-        let durable = durable_local_read(&record.run_id).expect("committed durable pair");
-        assert_eq!(durable.record.state(), RunExecutionState::Succeeded);
-        let aggregate = durable.aggregate.expect("mirrored aggregate");
-        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
-        assert_eq!(aggregate.outcomes[0].summary.as_deref(), Some("ok"));
-        assert_eq!(
-            AgentTaskLifecycleStore::from_environment()
-                .expect("lifecycle store")
-                .read_aggregate_readonly(&record.run_id)
-                .expect("read-only admission follows SQLite")
-                .outcomes[0]
-                .summary
-                .as_deref(),
-            Some("ok")
-        );
-        assert!(durable.unavailable_sources.is_empty());
     });
 }
 
@@ -3913,14 +3849,6 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
             .join("agent-task-runs")
             .join("cook-lab-predispatch")
             .join("status.json");
-        std::fs::remove_file(
-            homeboy_core::paths::homeboy_data()
-                .expect("homeboy data")
-                .join("agent-task-runs")
-                .join("cook-lab-predispatch")
-                .join("aggregate.json"),
-        )
-        .expect("aggregate file removed");
         let mirrored_log = logs("cook-lab-predispatch").expect("mirrored logs loaded");
         let mirrored_artifacts =
             artifacts("cook-lab-predispatch").expect("mirrored artifacts loaded");
@@ -3962,12 +3890,10 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
     });
 }
 
-/// A completed run's aggregate is readable as the attempt aggregate, and its
-/// aggregate path maps back to the run that owns it.
+/// A completed run's aggregate is readable as the attempt aggregate.
 #[test]
 fn record_completed_run_indexes_its_attempt_aggregate() {
     with_isolated_home(|_| {
-        let lifecycle_store = test_lifecycle_store();
         let plan = test_plan();
         let record = record_completed_run(&plan, &succeeded_aggregate(&plan), Some("run-complete"))
             .expect("recorded");
@@ -3978,11 +3904,6 @@ fn record_completed_run_indexes_its_attempt_aggregate() {
                 .expect("attempt aggregate")
                 .plan_id,
             plan.plan_id
-        );
-        assert_eq!(
-            run_id_for_aggregate_path(&lifecycle_store.aggregate_path(&record.run_id))
-                .expect("aggregate path lookup"),
-            Some(record.run_id.clone())
         );
     });
 }
@@ -4041,7 +3962,7 @@ fn submitted_run_can_be_loaded_marked_running_and_completed() {
             ControlPlaneState::Succeeded
         );
         assert_eq!(durable_status.totals, Some(aggregate.totals.clone()));
-        assert!(completed.aggregate_path.is_some());
+        assert!(completed.totals.is_some());
     }
 }
 

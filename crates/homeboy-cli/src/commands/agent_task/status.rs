@@ -519,7 +519,6 @@ fn compact_cook_candidate_projection(run_id: &str) -> Value {
                 "run_id": snapshot.record.run_id,
                 "state": snapshot.record.state(),
                 "task_count": snapshot.record.tasks.len(),
-                "aggregate_path": snapshot.record.aggregate_path,
                 "outcome_count": outcome_count,
                 "provider_execution_count": provider_execution_count,
                 "artifact_count": artifact_count,

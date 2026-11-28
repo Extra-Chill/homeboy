@@ -2,7 +2,6 @@ use chrono::Utc;
 use homeboy_control_plane_contract::ControlPlaneState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::agent_task::{

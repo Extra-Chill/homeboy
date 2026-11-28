@@ -6,7 +6,6 @@
   "submitted_at":"2026-10-19T13:18:00Z",
   "updated_at":"2026-10-19T14:18:01Z",
   "plan_path":"plan.json",
-  "aggregate_path":"aggregate.json",
   "metadata":{
     "cook_id":"cook-publication-fixture",
     "cook_progress":{"phase":"terminal", "terminal_status":"failed", "terminal_success":false, "exit_code":1},

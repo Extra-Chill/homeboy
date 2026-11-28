@@ -123,9 +123,10 @@ fn stale_persisted_status_reads_back_derived_from_outcomes() {
         "JSON keeps the derived status"
     );
     stale["status"] = json!("failed");
-    let aggregate_path = store.aggregate_path(run_id);
-    fs::create_dir_all(aggregate_path.parent().expect("run dir")).expect("run dir");
-    fs::write(&aggregate_path, serde_json::to_vec(&stale).expect("bytes")).expect("write");
+    let stale: AgentTaskAggregate = serde_json::from_value(stale).expect("stale aggregate");
+    store
+        .write_aggregate(run_id, &stale)
+        .expect("store stale aggregate");
 
     let read = store.read_aggregate(run_id).expect("read aggregate");
     assert_eq!(read.status(), RunExecutionState::Succeeded);

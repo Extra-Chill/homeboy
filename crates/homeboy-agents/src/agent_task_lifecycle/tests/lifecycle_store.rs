@@ -245,10 +245,7 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
         "right-plan"
     );
     assert_eq!(left.read_aggregate(run_id).unwrap().plan_id, "left-plan");
-    assert_eq!(
-        right.read_aggregate_bounded(run_id).unwrap().plan_id,
-        "right-plan"
-    );
+    assert_eq!(right.read_aggregate(run_id).unwrap().plan_id, "right-plan");
     assert_eq!(left.read_cook_index(cook_id).unwrap().latest_run_id, run_id);
     assert_eq!(
         right.read_cook_index(cook_id).unwrap().attempts[0].attempt,

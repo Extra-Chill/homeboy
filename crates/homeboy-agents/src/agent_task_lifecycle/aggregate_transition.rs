@@ -35,12 +35,8 @@ pub(crate) fn apply_aggregate_transition_in_store(
             aggregate,
         )?;
     }
-    let aggregate_path = lifecycle_store
-        .aggregate_path(&record.run_id)
-        .display()
-        .to_string();
     let decided_from = record.state();
-    apply_aggregate_to_record(record, plan, aggregate, aggregate_path);
+    apply_aggregate_to_record(record, plan, aggregate);
     // Compare-and-swap at the revision this record was read at: a stale
     // projection can no longer replace a terminal decision it never saw (#15718).
     lifecycle_store.project_terminal_aggregate(record, decided_from, aggregate)?;

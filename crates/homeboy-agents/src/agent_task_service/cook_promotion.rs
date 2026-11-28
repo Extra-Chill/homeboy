@@ -140,13 +140,12 @@ fn replacement_component_workspace(
 pub(crate) fn promotion_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
-) -> Result<(String, Option<PathBuf>)> {
-    match lifecycle_store.aggregate_source_exact(run_id) {
-        Ok((raw, path)) => Ok((raw, Some(path))),
+) -> Result<String> {
+    match lifecycle_store.aggregate_source(run_id) {
+        Ok(raw) => Ok(raw),
         Err(aggregate_error) => {
             let record = lifecycle_store.read_record(run_id)?;
             recover_executor_outcome_source(lifecycle_store, &record, &aggregate_error)
-                .map(|(raw, path)| (raw, Some(path)))
         }
     }
 }
@@ -175,9 +174,7 @@ pub fn promotion_replay_guidance(requested_id: &str) -> Value {
         .map(preserved_gate_evidence)
         .unwrap_or(Value::Null);
     if let Some(record) = record.as_ref() {
-        if lifecycle_store
-            .aggregate_source_exact(&record.run_id)
-            .is_ok()
+        if lifecycle_store.aggregate_source(&record.run_id).is_ok()
             || executor_outcome_available(&lifecycle_store, record)
         {
             let command = replay_promotion_command(requested_id, &resolved, record);
@@ -197,7 +194,7 @@ pub fn promotion_replay_guidance(requested_id: &str) -> Value {
         }
     }
     let aggregate_error = lifecycle_store
-        .aggregate_source_exact(&resolved)
+        .aggregate_source(&resolved)
         .err()
         .unwrap_or_else(|| {
             Error::validation_invalid_argument(
@@ -364,7 +361,7 @@ fn promotion_reconstruction_error(
             "cause": recovery_error.message,
             "cause_details": recovery_error.details,
             "aggregate_error": aggregate_error.to_string(),
-            "remediation": "retain or restore aggregate.json or the observation mirror key agent_task_aggregate, or the referenced executor-result evidence, before promotion",
+            "remediation": "retain or restore the run's aggregate key agent_task_aggregate, or the referenced executor-result evidence, before promotion",
         }),
     )
 }
@@ -373,24 +370,16 @@ fn aggregate_transport_report(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Vec<Value> {
-    let path = lifecycle_store.aggregate_path(run_id);
     let mirror_error = lifecycle_store
-        .read_aggregate_readonly(run_id)
+        .read_aggregate(run_id)
         .err()
         .map(|error| error.message);
-    vec![
-        json!({
-            "transport": "aggregate.json",
-            "key": path.display().to_string(),
-            "available": path.is_file(),
-        }),
-        json!({
+    vec![json!({
             "transport": "observation_mirror",
             "key": "agent_task_aggregate",
             "available": mirror_error.is_none(),
             "detail": mirror_error,
-        }),
-    ]
+    })]
 }
 
 fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
@@ -420,7 +409,7 @@ fn recover_executor_outcome_source(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate_error: &Error,
-) -> Result<(String, PathBuf)> {
+) -> Result<String> {
     let (task_id, path) = match record
         .latest_executor_evidence
         .as_ref()
@@ -535,7 +524,7 @@ fn recover_executor_outcome_source(
         record,
         outcome,
     )?;
-    lifecycle_store.aggregate_source_exact(&record.run_id)
+    lifecycle_store.aggregate_source(&record.run_id)
 }
 
 fn missing_promotion_source_error(
@@ -550,7 +539,7 @@ fn missing_promotion_source_error(
             "run_id": run_id,
             "aggregate_error": aggregate_error.to_string(),
             "executor_evidence_error": recovery_error,
-            "remediation": "retain or restore aggregate.json or the referenced executor-result evidence before promotion",
+            "remediation": "retain or restore the run's aggregate or the referenced executor-result evidence before promotion",
         }),
     )
 }
@@ -575,7 +564,7 @@ pub(crate) fn promote_attempt_in_store(
     options: &CookRequest,
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
-    let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
+    let source = promotion_source_in_store(lifecycle_store, run_id)?;
     let selected_task_id = selected_candidate_task_id_in_store(lifecycle_store, run_id)?;
     let artifact_id = None;
     let repository_integrity_evidence =
@@ -588,7 +577,7 @@ pub(crate) fn promote_attempt_in_store(
                 AgentTaskPromotionRequest {
                     source,
                     source_run_id: Some(run_id.to_string()),
-                    source_path,
+                    source_path: None,
                     source_worktree_path: component_workspace_path(options)?
                         .or_else(|| options.workspace.source_worktree_path.clone()),
                     base_ref: Some(options.finalization.base.clone()),
@@ -801,8 +790,7 @@ pub(crate) fn continuation_candidate_refusal(
     result.err().map(|error| error.message)
 }
 
-pub fn preflight_cook_promotion_for_observation_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+pub fn preflight_cook_promotion_for_observation(
     options: &CookRequest,
     run_id: &str,
     artifact_id: Option<&str>,
@@ -867,7 +855,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
     let promotion_options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some(run_id.to_string()),
-        source_path: Some(lifecycle_store.aggregate_path(run_id)),
+        source_path: None,
         source_worktree_path: component_workspace_path(options)?
             .or_else(|| options.workspace.source_worktree_path.clone()),
         base_ref: Some(options.finalization.base.clone()),
@@ -1030,8 +1018,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     None,
                 )
             })?;
-            let (source, source_path) =
-                persisted_promotion_source_in_store(lifecycle_store, &promotion, run_id)?;
+            let source = persisted_promotion_source_in_store(lifecycle_store, &promotion, run_id)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
             let resumed = crate::agent_task_promotion::with_gate_supervision(
                 cook_gate_supervision(lifecycle_store, options, run_id),
@@ -1040,7 +1027,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                         AgentTaskPromotionRequest {
                             source,
                             source_run_id: Some(run_id.to_string()),
-                            source_path,
+                            source_path: None,
                             source_worktree_path: component_workspace_path(options)?
                                 .or_else(|| options.workspace.source_worktree_path.clone()),
                             base_ref: Some(options.finalization.base.clone()),
@@ -1954,8 +1941,7 @@ fn verify_replacement_gates_owned(
         .or_else(|| original.provenance.pointer("/resume_inputs"));
     // The persisted candidate, not the mutable Cook selection, owns this
     // replay. A later retry may have an empty aggregate (or a different task).
-    let (source, source_path) =
-        persisted_promotion_source_in_store(lifecycle_store, &original, run_id)?;
+    let source = persisted_promotion_source_in_store(lifecycle_store, &original, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let original_value = serde_json::to_value(&original)
@@ -1994,7 +1980,7 @@ fn verify_replacement_gates_owned(
                         AgentTaskPromotionRequest {
                             source,
                             source_run_id: Some(run_id.to_string()),
-                            source_path,
+                            source_path: None,
                             // Candidate identity remains rooted at the persisted promotion target.
                             // The corrected gate workspace is passed separately below.
                             source_worktree_path: None,
@@ -2230,7 +2216,7 @@ pub(crate) fn persisted_promotion_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     promotion: &AgentTaskPromotionReport,
     fallback_run_id: &str,
-) -> Result<(String, Option<PathBuf>)> {
+) -> Result<String> {
     // Promotions persisted before the owning attempt was recorded have no
     // source run; they can only belong to the run being resumed.
     let owner = promotion
@@ -2238,8 +2224,8 @@ pub(crate) fn persisted_promotion_source_in_store(
         .run_id
         .as_deref()
         .unwrap_or(fallback_run_id);
-    let (source, path) = promotion_source_in_store(lifecycle_store, owner)?;
-    Ok((bind_persisted_promotion_artifact(source, promotion)?, path))
+    let source = promotion_source_in_store(lifecycle_store, owner)?;
+    bind_persisted_promotion_artifact(source, promotion)
 }
 
 fn bind_persisted_promotion_artifact(
@@ -4170,8 +4156,7 @@ fn cook_attempt_execution_in_store(
     // this attempt as never having produced a real outcome, so an attempt
     // that genuinely executed keeps reading its authoritative outcome
     // (homeboy#15005).
-    let never_executed = record.aggregate_path.is_none()
-        && record.totals.is_none()
+    let never_executed = record.totals.is_none()
         && record.artifact_refs.is_empty()
         && record.provider_handles.is_empty()
         && record.latest_executor_evidence.is_none()
