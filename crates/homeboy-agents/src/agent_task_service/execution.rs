@@ -1150,7 +1150,12 @@ fn consume_claimed_continuation(
     let recipe = match store.load_recipe(&cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
-            claim.fail(&redacted_continuation_failure(&error))?;
+            super::cook_recipe::settle_continuation(
+                claim,
+                super::cook_recipe::ContinuationDecision::Fail(redacted_continuation_failure(
+                    &error,
+                )),
+            )?;
             skipped.push(continuation_skip(run_id, None, false, error));
             return Ok(unclaimed_continuation_result(skipped));
         }
@@ -1163,7 +1168,10 @@ fn consume_claimed_continuation(
     if let Err(error) = super::cook_attempt_transport(&recipe, &run_id, false, dispatcher)
         .and_then(|transport| super::cook_attempt_request(&recipe, &run_id, &transport))
     {
-        claim.fail(&redacted_continuation_failure(&error))?;
+        super::cook_recipe::settle_continuation(
+            claim,
+            super::cook_recipe::ContinuationDecision::Fail(redacted_continuation_failure(&error)),
+        )?;
         skipped.push(continuation_skip(
             run_id,
             dispatcher_kind,

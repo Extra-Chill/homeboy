@@ -2073,9 +2073,7 @@ fn supervise_terminal_cook_worker(
     progress: serde_json::Value,
 ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
     use crate::agents::agent_task_provider::structured_error::read_runtime_stream_tail;
-    use crate::agents::agent_task_service::{
-        CookContinuationState, ScheduledContinuationGate, WorkJobStep,
-    };
+    use crate::agents::agent_task_service::WorkJobStep;
     use homeboy::core::process::ProcessIdentityState;
 
     let to_checkpoint = |request: &TerminalCookJobRequest| {
@@ -2142,23 +2140,14 @@ fn supervise_terminal_cook_worker(
     }
 
     let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let wait = match store.scheduled_continuation_gate(&request.cook_id, &request.run_id) {
-        ScheduledContinuationGate::RetryAfter(wait) => Some(wait.min(TERMINAL_COOK_RETRY_POLL_MAX)),
-        // A worker spawned before its checkpoint was persisted (or another
-        // consumer) owns the claim. Observe; never start a second consumer.
-        ScheduledContinuationGate::HeldByLiveOwner => Some(TERMINAL_COOK_WORKER_POLL),
-        ScheduledContinuationGate::Settled(CookContinuationState::Completed) => {
-            return Ok(WorkJobStep::Complete(
-                serde_json::json!({ "claimed": false, "completed": true }),
-            ));
-        }
-        ScheduledContinuationGate::Settled(state) => {
-            announce_failed_terminal_continuation(&store, &request);
-            return Err(Error::internal_unexpected(format!(
-                "terminal Cook continuation is {state:?} without a claim"
-            )));
-        }
-        ScheduledContinuationGate::Ready => None,
+    let wait = match crate::agents::agent_task_service::terminal_cook_supervision_step(
+        &store,
+        &request.cook_id,
+        &request.run_id,
+    )? {
+        Some(WorkJobStep::Complete(result)) => return Ok(WorkJobStep::Complete(result)),
+        Some(WorkJobStep::Continue { wait, .. }) => Some(wait),
+        None => None,
     };
     if let Some(wait) = wait {
         return Ok(WorkJobStep::Continue {
@@ -2324,65 +2313,14 @@ fn run_terminal_cook_continuation(
     checkpoint: serde_json::Value,
     progress: serde_json::Value,
 ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
-    use crate::agents::agent_task_service::{
-        CookContinuationState, ScheduledContinuationClaim, WorkJobStep,
-    };
-
     let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let claim = match store.claim_scheduled_continuation_for(&request.cook_id, &request.run_id)? {
-        ScheduledContinuationClaim::Claimed(claim) => *claim,
-        // A retryable failure spaced its next automatic attempt. Keep this job
-        // supervising the durable continuation until the deadline passes
-        // instead of failing it, which would leave the candidate stranded
-        // (#15831).
-        ScheduledContinuationClaim::RetryAfter(wait) => {
-            return Ok(WorkJobStep::Continue {
-                checkpoint,
-                progress,
-                wait: wait.min(TERMINAL_COOK_RETRY_POLL_MAX),
-            });
-        }
-        ScheduledContinuationClaim::Unavailable => {
-            // A second consumer can own the continuation while this WorkJob is
-            // recovered. Only a completed claim is a completed job; an active
-            // claim must remain supervised until that consumer settles its
-            // durable state.
-            let state = crate::agents::agent_task_service::continuation_state_in_store(
-                &store,
-                &request.cook_id,
-                &request.run_id,
-            )?;
-            return match state {
-                CookContinuationState::Pending | CookContinuationState::Claimed => {
-                    Ok(WorkJobStep::Continue {
-                        checkpoint,
-                        progress,
-                        wait: Duration::from_millis(250),
-                    })
-                }
-                CookContinuationState::Completed => Ok(WorkJobStep::Complete(
-                    serde_json::json!({ "claimed": false, "completed": true }),
-                )),
-                CookContinuationState::Failed => {
-                    announce_failed_terminal_continuation(&store, request);
-                    Err(Error::internal_unexpected(format!(
-                        "terminal Cook continuation is {state:?} without a claim"
-                    )))
-                }
-                CookContinuationState::Absent => Err(Error::internal_unexpected(format!(
-                    "terminal Cook continuation is {state:?} without a claim"
-                ))),
-            };
-        }
-    };
-    // The Cook pass's own report names why it stopped (failing gates, a
-    // refused promotion); keep its declared failure so a nonzero pass never
-    // reaches the continuation record as a bare exit status.
-    let mut pass_failure: Option<serde_json::Value> = None;
-    let outcome = store.consume_claimed_with_dispatcher(
-        claim,
+    crate::agents::agent_task_service::run_terminal_cook_continuation(
+        &store,
+        &request.cook_id,
+        &request.run_id,
         &reconstruct_cook_attempt_dispatcher,
         |cook_id, run_id| {
+            let mut pass_failure = None;
             let executor = Arc::new(
                 crate::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
             );
@@ -2406,116 +2344,16 @@ fn run_terminal_cook_continuation(
                         )
                     });
                 }
-                (result.exit_code, result.value.disposition)
+                (
+                    result.exit_code,
+                    result.value.disposition,
+                    pass_failure.take(),
+                )
             })
         },
-    );
-    let failure = match outcome {
-        Ok(0) => {
-            if crate::agents::agent_task_service::continuation_state_in_store(
-                &store,
-                &request.cook_id,
-                &request.run_id,
-            )? != CookContinuationState::Completed
-            {
-                return Ok(WorkJobStep::Continue {
-                    checkpoint,
-                    progress,
-                    wait: TERMINAL_COOK_WORKER_POLL,
-                });
-            }
-            return Ok(WorkJobStep::Complete(serde_json::json!({
-                "claimed": true,
-                "cook_id": request.cook_id,
-                "run_id": request.run_id,
-                "exit_code": 0,
-            })));
-        }
-        Ok(exit_code) => terminal_continuation_exit_error(exit_code, pass_failure),
-        Err(error) => error,
-    };
-    let state = crate::agents::agent_task_service::continuation_state_in_store(
-        &store,
-        &request.cook_id,
-        &request.run_id,
-    )?;
-    terminal_continuation_failure_step(state, failure, || {
-        announce_failed_terminal_continuation(&store, request);
-    })
-}
-
-/// The failure of a Cook pass that exited nonzero, naming the cause its report
-/// declared. Without one the message still carries the exit status.
-fn terminal_continuation_exit_error(exit_code: i32, failure: Option<serde_json::Value>) -> Error {
-    let cause = failure
-        .as_ref()
-        .and_then(|failure| failure["message"].as_str())
-        .map(str::trim)
-        .filter(|message| !message.is_empty());
-    let mut error = Error::internal_unexpected(match cause {
-        Some(cause) => {
-            format!("terminal Cook continuation exited with status {exit_code}: {cause}")
-        }
-        None => format!("terminal Cook continuation exited with status {exit_code}"),
-    });
-    error.details["exit_code"] = serde_json::json!(exit_code);
-    if let Some(failure) = failure {
-        error.details["failure"] = failure;
-    }
-    error
-}
-
-/// Upper bound on one supervised wait while a continuation retry is backed
-/// off, so cancellation stays responsive during a long deadline.
-const TERMINAL_COOK_RETRY_POLL_MAX: Duration = Duration::from_secs(5);
-
-/// Settle this work job after its claimed continuation did not finish.
-///
-/// The consumer has already transitioned the durable continuation. A retryable
-/// failure leaves it `pending` under a new generation with a spaced retry
-/// deadline, and that generation derives its own work intent, so this job
-/// completes and hands the retry over. Failing it instead surfaced as an opaque
-/// `ValidationInvalidArgument` work job while the Cook silently stayed
-/// `candidate_recoverable` (#15831). A terminally failed continuation is
-/// announced before the job fails, so the stop is never silent.
-fn terminal_continuation_failure_step(
-    state: crate::agents::agent_task_service::CookContinuationState,
-    failure: Error,
-    announce_failed: impl FnOnce(),
-) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
-    use crate::agents::agent_task_service::{CookContinuationState, WorkJobStep};
-
-    match state {
-        CookContinuationState::Pending => Ok(WorkJobStep::Complete(serde_json::json!({
-            "claimed": true,
-            "retry_scheduled": true,
-            "error_code": failure.code.as_str(),
-            "message": failure.message,
-        }))),
-        CookContinuationState::Failed => {
-            announce_failed();
-            Err(failure)
-        }
-        _ => Err(failure),
-    }
-}
-
-fn announce_failed_terminal_continuation(
-    store: &crate::agents::agent_task_service::CookRecipeStore,
-    request: &TerminalCookJobRequest,
-) {
-    let diagnostic = crate::agents::agent_task_service::failed_continuation_diagnostic_in_store(
-        store,
-        &request.run_id,
+        checkpoint,
+        progress,
     )
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| "cook continuation failed".to_string());
-    crate::agents::agent_task_notify::cook_continuation_failed(
-        &request.cook_id,
-        &request.run_id,
-        &diagnostic,
-    );
 }
 
 fn terminal_cook_work_submission(

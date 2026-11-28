@@ -1919,7 +1919,7 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
             WorkJobStep::Continue { checkpoint: ref next, wait, .. }
                 if *next == checkpoint
                     && wait > std::time::Duration::from_millis(250)
-                    && wait <= TERMINAL_COOK_RETRY_POLL_MAX
+                    && wait <= crate::agents::agent_task_service::TERMINAL_COOK_RETRY_POLL_MAX
         ));
 
         // An explicit operator claim ignores the automatic backoff.
