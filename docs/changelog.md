@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.501.2] - 2026-11-28
+
+### Fixed
+- inherit extension build environments and retry staging stat races
+- stop scanning every repository worktree when publishing an aggregate
+- count only commands that can change a Cook as friction interventions
+
 ## [0.501.1] - 2026-11-28
 
 ### Fixed
