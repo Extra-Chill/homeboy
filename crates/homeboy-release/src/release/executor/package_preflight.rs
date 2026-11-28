@@ -10,6 +10,10 @@ use homeboy_core::component::{
 };
 use homeboy_core::error::{Error, Result};
 
+mod build_ignore;
+
+use self::build_ignore::BuildIgnore;
+
 /// Run the package guards that must complete before release preparation mutates
 /// the checkout. The versioned package itself is built once by the final
 /// `package` step, after the release commit exists.
@@ -31,7 +35,7 @@ pub(crate) fn should_validate_package_completeness(skip_build_validation: bool) 
 }
 
 /// Confirm that the durable artifacts produced by the final package step
-/// include every tracked runtime file in the configured release scope.
+/// include every tracked runtime file in scope that is not excluded by `.buildignore`.
 pub(crate) fn validate_package_completeness(
     component: &Component,
     component_path: &Path,
@@ -226,7 +230,7 @@ fn package_completeness_error(
             "checked_artifact_type": "zip"
         }).to_string()),
         Some(vec![
-            "Update the release.package action so this artifact includes every mapped tracked runtime file, or add an explicit `scopes.package` exclude for intentional omissions (e.g. source compiled into a shipped build output). A `scopes.release` exclude also hides those paths from releasable-commit detection.".to_string(),
+            "Update the release.package action so this artifact includes every mapped tracked runtime file. For intentional omissions (e.g. source compiled into a shipped build output), use `.buildignore` if your packager reads it, or add a `scopes.package` exclude. A `scopes.release` exclude also hides those paths from releasable-commit detection.".to_string(),
         ]),
     ))
 }
@@ -253,6 +257,7 @@ fn tracked_runtime_files(component: &Component, component_path: &Path) -> Result
     }
 
     let scope = release_scope(component);
+    let build_ignore = BuildIgnore::load(component_path)?;
     Ok(output
         .stdout
         .split(|byte| *byte == 0)
@@ -261,7 +266,7 @@ fn tracked_runtime_files(component: &Component, component_path: &Path) -> Result
         .map(|path| normalize_archive_path(&path))
         .filter(|path| runtime_candidate(path))
         .filter(|path| !homeboy_owned_metadata(path) || explicitly_included(path, &scope))
-        .filter(|path| scope_allows(path, &scope))
+        .filter(|path| scope_allows(path, &scope) && !build_ignore.excludes(path))
         .collect())
 }
 
@@ -466,6 +471,59 @@ mod tests {
             validate_package_completeness(&component, repo.path(), &artifacts)
                 .expect("release- or package-scope excluded runtime file should not fail");
         }
+    }
+
+    #[test]
+    fn package_completeness_honors_buildignore_without_exempting_compiled_assets() {
+        let repo = tempfile::tempdir().expect("repo");
+        for (path, contents) in [
+            (".buildignore", "# Vite inputs\nsrc/\n"),
+            ("plugin.php", "<?php\n"),
+            ("src/ContactForm.tsx", "import './ContactForm.css';\n"),
+            ("src/ContactForm.css", "/* input */\n"),
+            ("assets/contact-form.css", "/* output */\n"),
+        ] {
+            let file = repo.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).expect("fixture dir");
+            std::fs::write(file, contents).expect("fixture file");
+        }
+        run_git(repo.path(), &["init"]);
+        run_git(
+            repo.path(),
+            &["add", "--", ".buildignore", "plugin.php", "src", "assets"],
+        );
+        let artifact_path = repo.path().join("package.zip");
+        let artifacts = zip_artifacts("package.zip");
+        let mut component = test_component(repo.path());
+        let coverage = PackageCoverageConfig {
+            artifact: "package.zip".to_string(),
+            artifact_match: PackageCoverageArtifactMatch::Exact,
+            source_roots: vec![".".to_string()],
+            archive_root: "plugin".to_string(),
+        };
+
+        let complete_entries = [
+            ("plugin/plugin.php", "<?php\n"),
+            ("plugin/assets/contact-form.css", "/* output */\n"),
+        ];
+        for mappings in [vec![], vec![coverage]] {
+            component.release.package_coverage = mappings;
+            write_zip(&artifact_path, &complete_entries);
+            validate_package_completeness(&component, repo.path(), &artifacts)
+                .expect("excluded source CSS is not required in the ZIP");
+
+            write_zip(&artifact_path, &[("plugin/plugin.php", "<?php\n")]);
+            let error = validate_package_completeness(&component, repo.path(), &artifacts)
+                .expect_err("compiled CSS is still required in the ZIP");
+            assert!(error.message.contains("missing 1 tracked runtime file"));
+            assert!(error.message.contains("assets/contact-form.css"));
+        }
+
+        std::fs::remove_file(repo.path().join(".buildignore")).expect("remove buildignore");
+        write_zip(&artifact_path, &complete_entries);
+        let error = validate_package_completeness(&component, repo.path(), &artifacts)
+            .expect_err("unexcluded CSS still requires coverage even when built assets ship");
+        assert!(error.message.contains("src/ContactForm.css"));
     }
 
     #[test]
