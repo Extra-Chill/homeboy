@@ -83,10 +83,32 @@ fn action(
         },
     };
     let ack = crate::orchestration::execute_action_from_current_environment(id, &request)?;
-    Ok((
-        ack.result.data,
-        i32::from(ack.outcome == ControlPlaneActionOutcome::Failed),
-    ))
+    let mut result = ack.result.data;
+    let failed = ack.outcome == ControlPlaneActionOutcome::Failed;
+    if failed {
+        // Refused control-plane actions can have an empty payload. Retain the
+        // acknowledgement's concrete refusal instead of returning an empty result.
+        if !result.is_object() {
+            result = serde_json::json!({});
+        }
+        if result.get("failure").is_none() {
+            if let Some(message) = ack.message {
+                result["failure"] = serde_json::json!({
+                    "code": "agent_task.recover_action_refused",
+                    "message": message,
+                });
+            }
+        }
+    } else if action == ControlPlaneAction::Retry {
+        // The retry action reserves a daemon-scheduled successor and returns
+        // its identity nested under `record`, not the recovery source id.
+        if let Some(run_id) = result.pointer("/record/run_id").cloned() {
+            result["run_id"] = run_id;
+            result["state"] = serde_json::to_value(ack.resource.state)
+                .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+        }
+    }
+    Ok((result, i32::from(failed)))
 }
 pub fn adopt(
     id: &str,

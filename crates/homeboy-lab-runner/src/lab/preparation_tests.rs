@@ -37,37 +37,41 @@ fn unreachable_runner_falls_back_for_default_and_errors_for_explicit_selection()
     assert!(err.message.contains("could not connect runner"));
 }
 
+const PREFLIGHT_HEALTH: &str = r#"{"freshness":{"fresh":true,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"active_jobs":0,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#;
+
+fn preflight_describe_body(count: usize, queued: bool) -> String {
+    let jobs = if queued {
+        serde_json::json!([{
+            "runner_id": "lab", "job_id": "queued-job", "operation": "runner.exec",
+            "source": "daemon", "kind": "runner", "status": "queued", "command": "fixture",
+            "started_at_ms": 0, "elapsed_ms": 0
+        }])
+    } else {
+        serde_json::json!([])
+    };
+    serde_json::json!({"success": true, "data": {"body": {
+        "schema": homeboy_runner_contract::RUNNER_SERVICE_OBSERVATION_SCHEMA,
+        "lease_id": "lease-fresh", "freshness": {
+            "fresh": true, "restartable": false, "lease_id": "lease-fresh", "pid": 1467759,
+            "daemon_build_identity": "homeboy 0.0.0+test", "active_jobs": count, "repair_plan": []
+        },
+        "active_runner_job_count": count, "active_runner_jobs": jobs, "stale_runner_jobs": []
+    }}})
+    .to_string()
+}
+
 #[test]
-fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this_preflight() {
-    use std::io::{Read, Write};
+fn successful_auto_connect_reprobes_count_skew_and_admits_queued_work() {
     use std::net::TcpListener;
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
     let address = listener.local_addr().expect("daemon address");
     let daemon = std::thread::spawn(move || {
-        for (path, body) in [
-            (
-                "/health",
-                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
-            ),
-            (
-                "/jobs",
-                r#"{"success":true,"data":{"body":{"active_runner_jobs":[],"stale_runner_jobs":[]}}}"#,
-            ),
-        ] {
-            let (mut stream, _) = listener.accept().expect("daemon request");
-            let mut request = [0; 4096];
-            let length = stream.read(&mut request).expect("read request");
-            assert!(String::from_utf8_lossy(&request[..length])
-                .starts_with(&format!("GET {path} HTTP/1.1")));
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
-                    )
-                    .as_bytes(),
-                )
-                .expect("daemon response");
+        let inconsistent = preflight_describe_body(0, true);
+        let queued = preflight_describe_body(1, true);
+        for body in [&inconsistent, &inconsistent, &queued] {
+            serve_preflight_probe(&listener, "/health", PREFLIGHT_HEALTH);
+            serve_preflight_probe(&listener, "/runner/describe", body);
         }
     });
     let mut stale_projection = connected_direct_status("lab", None);
@@ -92,7 +96,7 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,
-        // Status is stale; admission must use the matching fresh health count.
+        // Status is stale; admission must use the current typed snapshot.
         active_jobs: 1,
         termination_evidence: None,
         repair_plan: Vec::new(),
@@ -107,21 +111,36 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         source: LabRunnerSelectionSource::Explicit,
         mode: RunnerTunnelMode::DirectSsh,
     };
-    let (availability, admitted) = preflight_lab_runner_availability_from_status_with_transport(
-        &selection,
-        |_| Ok(stale_projection.clone()),
-        Some(1),
-        Some(&connect),
-        true,
+    let mut observations = 0;
+    let (availability, admitted) = homeboy_core::substrate_wait::wait_through(
+        "Lab handoff",
+        std::time::Duration::from_secs(10),
+        || false,
+        |error, _| {
+            observations += 1;
+            assert_eq!(error.retryable, Some(true));
+            assert!(error.message.contains("count and job identities disagree"));
+        },
+        || {
+            preflight_lab_runner_availability_from_status_with_transport(
+                &selection,
+                |_| Ok(stale_projection.clone()),
+                Some(2),
+                Some(&connect),
+                true,
+            )
+        },
     )
     .expect("successful connect remains authoritative for this preflight");
+    assert_eq!(observations, 2);
 
     daemon.join().expect("daemon");
     assert!(admitted.connected);
     assert_eq!(admitted.active_job_state, RunnerActiveJobState::Available);
+    assert_eq!(admitted.active_job_count, 1);
     assert!(
         availability.accepts_jobs,
-        "typed /jobs probe admits the workload"
+        "health's zero count does not block admission"
     );
     assert_eq!(
         admitted.session.expect("session").local_url.as_deref(),
@@ -176,9 +195,19 @@ fn mixed_or_differing_tunnel_evidence_is_rejected_before_endpoint_probing() {
 }
 
 #[cfg(unix)]
+fn serve_preflight_probe(listener: &std::net::TcpListener, path: &str, body: &str) {
+    use std::io::{Read, Write};
+    let (mut stream, _) = listener.accept().expect("daemon request");
+    let mut request = [0; 4096];
+    let length = stream.read(&mut request).expect("read request");
+    assert!(
+        String::from_utf8_lossy(&request[..length]).starts_with(&format!("GET {path} HTTP/1.1"))
+    );
+    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}").as_bytes()).expect("daemon response");
+}
+
 #[test]
 fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_and_cleanup() {
-    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
@@ -187,30 +216,12 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
     let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
     let address = listener.local_addr().expect("daemon address");
     let daemon = std::thread::spawn(move || {
-        for (path, body) in [
-            (
-                "/health",
-                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
-            ),
-            (
-                "/jobs",
-                r#"{"success":true,"data":{"body":{"active_runner_jobs":[],"stale_runner_jobs":[]}}}"#,
-            ),
-        ] {
-            let (mut stream, _) = listener.accept().expect("daemon request");
-            let mut request = [0; 4096];
-            let length = stream.read(&mut request).expect("read request");
-            assert!(String::from_utf8_lossy(&request[..length])
-                .starts_with(&format!("GET {path} HTTP/1.1")));
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
-                    )
-                    .as_bytes(),
-                )
-                .expect("daemon response");
-        }
+        serve_preflight_probe(&listener, "/health", PREFLIGHT_HEALTH);
+        serve_preflight_probe(
+            &listener,
+            "/runner/describe",
+            &preflight_describe_body(0, false),
+        );
     });
     let tunnel = Arc::new(Mutex::new(None));
     let session = Arc::new(Mutex::new(None));
