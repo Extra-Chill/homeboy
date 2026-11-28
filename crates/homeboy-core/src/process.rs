@@ -872,18 +872,79 @@ pub fn install_terminate_handler(stop: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
+/// Stop flags subscribed to the process-wide SIGINT handler.
+static SHUTDOWN_SUBSCRIBERS: std::sync::Mutex<Vec<Arc<AtomicBool>>> =
+    std::sync::Mutex::new(Vec::new());
+/// Whether the single `ctrlc` handler for this process is installed.
+static SHUTDOWN_HANDLER_INSTALLED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
 /// Install the SIGINT (Ctrl-C) stop handler via `ctrlc`.
 ///
-/// `ctrlc` replaces the SIGINT disposition, so call this before any local
-/// child is spawned: the process-group cleanup handler installed on first
-/// spawn chains to it, while installing this afterwards would drop the
-/// cleanup handler's SIGINT bookkeeping. `daemon serve` installs it first.
+/// `ctrlc` allows one handler per process, so this installs it once and
+/// fans SIGINT out to every subscribed `stop` flag. Later callers in the same
+/// process (for example an in-process attached `runner exec` inside a Cook
+/// or `daemon serve`) subscribe instead of failing with "Ctrl-C signal
+/// handler already registered".
+///
+/// `ctrlc` replaces the SIGINT disposition, so the first call should happen
+/// before any local child is spawned: the process-group cleanup handler
+/// installed on first spawn chains to it, while installing this afterwards
+/// would drop the cleanup handler's SIGINT bookkeeping. `daemon serve`
+/// installs it first.
 pub fn install_shutdown_handler(stop: Arc<AtomicBool>, context: &str) -> Result<()> {
-    let context = context.to_string();
-    ctrlc::set_handler(move || {
-        stop.store(true, Ordering::SeqCst);
-    })
-    .map_err(|err| Error::internal_unexpected(format!("install {context} signal handler: {err}")))
+    let mut installed = SHUTDOWN_HANDLER_INSTALLED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !*installed {
+        ctrlc::set_handler(|| {
+            let subscribers = SHUTDOWN_SUBSCRIBERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for stop in subscribers.iter() {
+                stop.store(true, Ordering::SeqCst);
+            }
+        })
+        .map_err(|err| {
+            Error::internal_unexpected(format!("install {context} signal handler: {err}"))
+        })?;
+        *installed = true;
+    }
+    let mut subscribers = SHUTDOWN_SUBSCRIBERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !subscribers
+        .iter()
+        .any(|existing| Arc::ptr_eq(existing, &stop))
+    {
+        subscribers.push(stop);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod shutdown_handler_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_shutdown_handler_installs_subscribe_instead_of_failing() {
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+
+        install_shutdown_handler(first.clone(), "first").expect("first install");
+        install_shutdown_handler(second.clone(), "second")
+            .expect("second install must subscribe, not fail with MultipleHandlers");
+        install_shutdown_handler(second.clone(), "second again").expect("re-install is a no-op");
+
+        let subscribers = SHUTDOWN_SUBSCRIBERS.lock().unwrap();
+        assert!(subscribers.iter().any(|s| Arc::ptr_eq(s, &first)));
+        assert_eq!(
+            subscribers
+                .iter()
+                .filter(|s| Arc::ptr_eq(s, &second))
+                .count(),
+            1
+        );
+    }
 }
 
 /// Capture the process group created for an isolated child before exposing it
