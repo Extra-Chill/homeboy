@@ -1923,10 +1923,10 @@ fn runner_jobs_until(
     runner_jobs_with_client(runner_id, session, &client, timeout)
 }
 
-struct DirectRunnerObservation {
-    freshness: DaemonFreshnessReport,
-    active_jobs: Vec<ActiveRunnerJobSummary>,
-    stale_jobs: Vec<ActiveRunnerJobSummary>,
+pub(crate) struct DirectRunnerObservation {
+    pub(crate) freshness: DaemonFreshnessReport,
+    pub(crate) active_jobs: Vec<ActiveRunnerJobSummary>,
+    pub(crate) stale_jobs: Vec<ActiveRunnerJobSummary>,
 }
 
 pub(crate) const PRE_DESCRIBE_CAPABILITY_MISSING: &str = "runner_observation_capability_missing";
@@ -2144,16 +2144,23 @@ fn parse_direct_runner_observation(
         .map_err(|error| {
             Error::internal_unexpected(format!("invalid runner freshness observation: {error}"))
         })?;
-    if freshness.lease_id.as_deref() != body["lease_id"].as_str()
-        || body["active_runner_job_count"].as_u64() != Some(active_jobs.len() as u64)
-        || freshness.active_jobs != active_jobs.len()
-    {
+    if freshness.lease_id.as_deref() != body["lease_id"].as_str() {
         return Err(Error::validation_invalid_argument(
             "runner_observation",
-            "runner observation count and job identities disagree",
+            "runner freshness lease does not match the observed service lease",
             Some(runner_id.to_string()),
             None,
         ));
+    }
+    if body["active_runner_job_count"].as_u64() != Some(active_jobs.len() as u64)
+        || freshness.active_jobs != active_jobs.len()
+    {
+        let mut error = crate::observation_health::observation_unavailable_error(format!(
+            "runner `{runner_id}` observation count and job identities disagree: freshness={}, declared={}, observed={}",
+            freshness.active_jobs, body["active_runner_job_count"], active_jobs.len(),
+        ));
+        error.details["transient"] = Value::Bool(true);
+        return Err(error);
     }
     Ok(DirectRunnerObservation {
         freshness,
@@ -2162,21 +2169,17 @@ fn parse_direct_runner_observation(
     })
 }
 
-/// Probe typed jobs through a direct daemon endpoint whose ownership was
-/// already verified by an operation-scoped caller.
-pub(crate) fn probe_verified_direct_daemon_jobs(
+/// Read capacity and job identities from one lease-bound snapshot after an
+/// operation-scoped caller has verified the direct endpoint.
+pub(crate) fn probe_verified_direct_daemon_observation(
     runner_id: &str,
     session: &RunnerSession,
-) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
-    if session.local_url.is_none() {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            "verified runner connect has no direct daemon endpoint for typed job admission",
-            Some(runner_id.to_string()),
-            None,
-        ));
-    }
-    runner_jobs(runner_id, session)
+) -> Result<DirectRunnerObservation> {
+    describe_direct_runner_until(
+        runner_id,
+        session,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+    )
 }
 
 /// Re-probe the typed health endpoint before a one-operation admission relies

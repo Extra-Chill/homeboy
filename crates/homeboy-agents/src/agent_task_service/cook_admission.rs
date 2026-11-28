@@ -111,11 +111,34 @@ pub(super) enum PreProviderRetry {
     Stop,
 }
 
-/// The one Cook transport-retry decision (#18454). A replacement only buys a
-/// fresh connection, so it is reserved for retryable runner-side and transport
-/// classes. A resource-guard stop and caller input (`validation.*`) fail the
-/// same way on any connection and are never replaced. The recorded failure's
-/// class decides, so resuming a durably failed attempt reads its real cause.
+/// Durable evidence is stronger than an exit code: only a failed attempt
+/// with no provider or remote owner may be automatically replaced.
+pub(super) fn durable_transient_pre_execution_failure(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    let failure = &record.metadata["pre_execution_failure"];
+    record.state() == homeboy_lifecycle_contract::RunExecutionState::Failed
+        && failure["retryable"] == true
+        && failure["failure_classification"] == "transient"
+        && failure["provider_executions_consumed"] == 0
+        // Older controllers reported this specific observation skew as invalid
+        // input. Other validation failures still require operator correction.
+        && failure["error_code"].as_str().is_some_and(|code| {
+            !code.starts_with("validation.")
+                || failure["details"]["observation_unavailable"] == true
+                || (failure["phase"] == "lab_handoff_preacceptance"
+                    && failure["message"].as_str().is_some_and(|message| {
+                        message.contains("verified daemon reports")
+                            && message.contains("but typed /jobs exposed")
+                    }))
+        })
+        && super::cook_recipe::has_unambiguous_zero_execution(record)
+        && !record.metadata["lab_pre_execution_circuit"].is_object()
+        && homeboy_runner_contract::find_resource_guard_stop(&record.metadata).is_none()
+}
+
+/// Replace retryable runner-side and transport failures, not deterministic
+/// input or resource-guard refusals (#18454).
 pub(super) fn pre_provider_retry(
     error: &Error,
     failure: &PreExecutionFailureDetails,
@@ -430,7 +453,7 @@ pub(super) fn claim_pre_artifact_interruption_retry_with_stores(
         })?
     };
     let operation_key = pre_artifact_interruption_operation_key(run_id);
-    let replacement_run_id = replace_semantic_attempt.then(|| format!("{run_id}-transport-retry"));
+    let replacement_run_id = replace_semantic_attempt.then(|| next_transport_retry_run_id(run_id));
     let recipe_next_attempt = |required_run_id: Option<&str>, require_plan_match: bool| {
         recipe_store.load_recipe(cook_id).map(|recipe| {
             recipe

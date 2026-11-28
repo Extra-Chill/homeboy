@@ -1032,7 +1032,11 @@ pub(super) fn run_cook_spine(
         // A lost controller watch must adopt the existing daemon result, not
         // consume another provider attempt or retain the transport failure.
         agent_task_lifecycle::recover_disconnected_runner_in_store(lifecycle_store, &run_id)?;
-        let needs_execution = cook_attempt_needs_execution_with_store(lifecycle_store, &run_id);
+        let recorded_transient_failure = lifecycle_store
+            .read_record(&run_id)
+            .is_ok_and(|record| durable_transient_pre_execution_failure(&record));
+        let needs_execution = !recorded_transient_failure
+            && cook_attempt_needs_execution_with_store(lifecycle_store, &run_id);
         if needs_execution {
             // The local detached launcher persists this fence before spawn.
             // Recheck immediately before this attempt can publish provider work.
@@ -1586,7 +1590,20 @@ pub(super) fn run_cook_spine(
                     promotion: None,
                     feedback: None,
                 });
-                let retry = pre_provider_retry(&error, &pre_execution_failure);
+                let retry = if record
+                    .as_ref()
+                    .is_some_and(durable_transient_pre_execution_failure)
+                    && (!transient_infrastructure_failure(&error)
+                        || error.details["observation_unavailable"] == true
+                            && error.details.get("substrate_waited_seconds").is_some())
+                {
+                    // A durable transient refusal (including one reported as
+                    // validation) gets a bounded replacement. Do not restart
+                    // an exhausted admission wait on the same run.
+                    PreProviderRetry::Replace
+                } else {
+                    pre_provider_retry(&error, &pre_execution_failure)
+                };
                 let transient = retry == PreProviderRetry::Wait;
                 if retry == PreProviderRetry::Stop {
                     return Ok(pre_execution_failure_report(
@@ -1776,6 +1793,39 @@ pub(super) fn run_cook_spine(
                 exit_code,
                 invocation_latest_run_id: Some(&run_id),
             }));
+        }
+        if durable_transient_pre_execution_failure(&record)
+            && transport_retry_available(store, &cook_id, attempt, 0)?
+        {
+            // A resumed or detached attempt can publish its failure aggregate
+            // before the Cook sees it. Replay the recipe, not that aggregate.
+            agent_task_lifecycle::admit_lab_pre_execution_replay(&record, &plan)?;
+            if let Some((_, next_run_id)) = claim_pre_artifact_interruption_retry_with_stores(
+                (store, lifecycle_store),
+                &cook_id,
+                attempt,
+                &run_id,
+                &plan,
+                true,
+            )? {
+                materialize_cook_attempt_with_stores(
+                    store,
+                    lifecycle_store,
+                    &cook_id,
+                    &next_run_id,
+                    &plan,
+                )?;
+                attempts.push(AgentTaskCookAttemptReport {
+                    attempt,
+                    run_id,
+                    run_state: format!("{:?}", record.state()),
+                    promotion: None,
+                    feedback: None,
+                });
+                run_id = next_run_id;
+                next_plan = Some(plan);
+                continue;
+            }
         }
         let persisted_terminal_promotion =
             if super::CookDelivery::from_run_metadata(&record.metadata)

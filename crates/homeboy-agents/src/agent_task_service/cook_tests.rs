@@ -6347,6 +6347,12 @@ fn lab_pre_execution_retry_preserves_admitted_placement_and_accepts_projected_st
         });
         recipes.persist_recipe(&recipe).unwrap();
         agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
+            let failure = &mut record.metadata["pre_execution_failure"];
+            failure["phase"] = serde_json::json!("lab_handoff_preacceptance");
+            failure["error_code"] = serde_json::json!("validation.invalid_argument");
+            failure["message"] = serde_json::json!(
+                "verified daemon reports 0 active job(s), but typed /jobs exposed 17"
+            );
             record.metadata["execution_placement_decision"] = serde_json::json!({
                 "decision_id": "original-lab-placement",
                 "policy_id": "lab-route-contract", "policy_revision": "v1",
@@ -6364,15 +6370,22 @@ fn lab_pre_execution_retry_preserves_admitted_placement_and_accepts_projected_st
             super::super::CookRecoveryStep::Retry
         );
         crate::agent_task_service::retry_admission(&options.identity.initial_run_id).unwrap();
-        let retry = crate::agent_task_service::retry(
-            &options.identity.initial_run_id,
-            crate::agent_task_service::AgentTaskRetryOptions::default(),
+        let (recovery, exit) = crate::recovery_action::execute(
+            &options.identity.cook_id,
+            serde_json::from_value(serde_json::json!({})).unwrap(),
         )
-        .expect("the projected retry is accepted on the controller");
+        .expect("recover performs the projected retry on the controller");
+        assert_eq!(exit, 0, "{recovery}");
+        let successor = recovery["run_id"].as_str().unwrap();
+        assert_ne!(successor, options.identity.initial_run_id);
         // Read back the durable reservation, as a restarted controller would;
         // placement must not depend on the retry caller's process-local route.
         let store = test_lifecycle_store();
-        let reserved = store.read_record(&retry.record.run_id).unwrap();
+        let reserved = store.read_record(successor).unwrap();
+        assert_eq!(
+            reserved.metadata["retry_of"],
+            options.identity.initial_run_id
+        );
         let intent = crate::agent_task_service::current_execution_intent(&store, &reserved)
             .unwrap()
             .unwrap();
@@ -6382,7 +6395,7 @@ fn lab_pre_execution_retry_preserves_admitted_placement_and_accepts_projected_st
             Some("homeboy-lab")
         );
         assert_eq!(
-            retry.record.metadata["cook_retry_placement"],
+            reserved.metadata["cook_retry_placement"],
             recipe.promotion_transport["attempt_dispatch"]
         );
     });
@@ -7747,7 +7760,17 @@ fn pre_provider_retry_replaces_only_runner_side_losses() {
         "busy",
         Value::Null,
     );
+    let count_drift = Error::new(
+        homeboy_core::ErrorCode::InternalUnexpected,
+        "runner admission snapshot counts disagree",
+        serde_json::json!({
+            "transient": true, "observation_unavailable": true,
+            "substrate_waited_seconds": 1800,
+        }),
+    )
+    .with_retryable(true);
     let cases = [
+        ("count-drift", count_drift, PreProviderRetry::Wait),
         ("dead-lease", dead_lease, PreProviderRetry::Replace),
         (
             "replaced-daemon",
@@ -7791,6 +7814,11 @@ fn pre_provider_retry_replaces_only_runner_side_losses() {
 
             let base = format!("{cook_id}-attempt-1");
             let run_ids = dispatcher.dispatched_run_ids.lock().unwrap().clone();
+            if name == "count-drift" {
+                assert!(durable_transient_pre_execution_failure(
+                    &agent_task_lifecycle::exact_record(&base).unwrap()
+                ));
+            }
             if expected == PreProviderRetry::Stop {
                 assert_eq!(
                     report.value.status.as_str(),

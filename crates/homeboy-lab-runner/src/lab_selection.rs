@@ -837,6 +837,17 @@ pub(super) fn authoritative_status_for_preflight_with_transport(
     connect_authority: Option<&RunnerConnectReport>,
     loopback_transport: bool,
 ) -> Result<RunnerStatusReport> {
+    if observation_unavailable(&status) {
+        // The status probe can observe drift before the operation-scoped
+        // connect check runs. Preserve it as a wait, not an identity refusal.
+        let reason = status.active_job_error.as_ref().map_or_else(
+            || "runner job observation is unavailable".to_string(),
+            |error| error.message.clone(),
+        );
+        return Err(transient_connect_refusal(
+            crate::observation_health::observation_unavailable_error(reason),
+        ));
+    }
     let Some(connect_authority) = connect_authority else {
         return Ok(status);
     };
@@ -968,22 +979,25 @@ pub(super) fn authoritative_status_for_preflight_with_transport(
             None,
         ));
     }
-    let (active_jobs, stale_jobs) = crate::connection::probe_verified_direct_daemon_jobs(
+    // Health proves identity, not workload capacity: restart-safe queued jobs
+    // need not block daemon replacement. Use one typed admission snapshot for
+    // both the count and the job identities instead of comparing two endpoints.
+    let observation = crate::connection::probe_verified_direct_daemon_observation(
         &connect_authority.runner_id,
         session,
     )?;
-    let daemon_active_jobs = health.freshness.active_jobs;
-    if daemon_active_jobs != active_jobs.len() {
+    if !observation.freshness.fresh
+        || observation.freshness.pid != health.pid
+        || observation.freshness.daemon_build_identity != health.build_identity
+    {
         return Err(Error::validation_invalid_argument(
             "runner",
-            format!(
-                "verified daemon reports {daemon_active_jobs} active job(s), but typed /jobs exposed {}",
-                active_jobs.len()
-            ),
+            "runner observation did not match the verified daemon health identity",
             Some(connect_authority.runner_id.clone()),
             None,
         ));
     }
+    let (active_jobs, stale_jobs) = (observation.active_jobs, observation.stale_jobs);
     status.connected = true;
     status.state = super::RunnerSessionState::Connected;
     status.active_job_count = active_jobs.len();
@@ -1324,7 +1338,9 @@ pub(super) fn prepare_lab_runner_for_offload_with(
             )
             .map_err(|error| {
                 if retryable {
-                    transient_connect_refusal(error)
+                    let mut error = transient_connect_refusal(error);
+                    error.details["observation_unavailable"] = serde_json::Value::Bool(true);
+                    error
                 } else {
                     error
                 }
