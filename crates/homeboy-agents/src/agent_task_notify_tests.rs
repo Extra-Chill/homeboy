@@ -245,7 +245,7 @@ fn non_recoverable_failure_never_offers_recover() {
 fn terminal_notification_names_skipped_provider_routes() {
     let mut route_note_report = report("no_changes", None);
     route_note_report.provider_route_notes = vec![
-        "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie credential pool key, then retry.)"
+        "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the configured provider credentials, then retry.)"
             .to_string(),
         "xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)"
             .to_string(),
@@ -480,28 +480,22 @@ fn seed_run_with_route(run_id: &str, destination: &str) {
 }
 
 #[test]
-fn gate_admission_failure_reaches_session_once_with_receipt() {
+fn gate_admission_failure_reaches_transport_once_with_receipt() {
     homeboy_core::test_support::with_isolated_home(|home| {
-        let sender = home.path().join("session-sender.sh");
-        let calls = home.path().join("session-calls");
+        let sender = home.path().join("transport.sh");
+        let calls = home.path().join("transport-calls");
         std::fs::write(
             &sender,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" \"$HOMEBOY_NOTIFY_PAYLOAD\" >> '{}'\nprintf '%s\\n' '{{\"status\":\"delivered\",\"receipt\":{{\"exit_code\":0}}}}'\n",
                 calls.display()
             ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&sender, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../extensions/discord/scripts/notify.mjs");
-        let sender_env = format!("HOMEBOY_SESSION_SEND_COMMAND={}", sender.display());
-        install_transport(
-            "extension",
-            vec!["env", &sender_env, "node", script.to_str().unwrap()],
-        );
-        seed_run_with_route("admission-run", "discord:v1:thread:123456789012345678");
+        install_transport("extension", vec![sender.to_str().unwrap()]);
+        seed_run_with_route("admission-run", "sample:v1:thread:42");
         let mut failed = report("pre_execution_failure", None);
         failed.cook_id = "admission-cook".to_string();
         failed.latest_run_id = Some("admission-run".to_string());
@@ -510,7 +504,10 @@ fn gate_admission_failure_reaches_session_once_with_receipt() {
         cook_terminal(&failed, None, 1);
         let observed = std::fs::read_to_string(calls)
             .unwrap_or_else(|error| panic!("{error}: {:?}", latest_delivery("admission-cook")));
-        assert_eq!(observed.matches("--thread").count(), 1);
+        assert_eq!(
+            observed.matches("--route\nsample:v1:thread:42\n").count(),
+            1
+        );
         assert!(observed.contains("gate admission rejected: runner unavailable"));
         assert!(
             observed.contains("needs attention"),
@@ -518,7 +515,6 @@ fn gate_admission_failure_reaches_session_once_with_receipt() {
         );
         let delivery = latest_delivery("admission-cook");
         assert_eq!(delivery["status"], "delivered");
-        assert_eq!(delivery["transport_result"]["delivery_mode"], "session");
         assert_eq!(delivery["transport_result"]["receipt"]["exit_code"], 0);
     });
 }
@@ -1243,7 +1239,7 @@ fn notification_text_bounds_preserve_words_and_first_sentence() {
 }
 
 #[test]
-fn discord_notification_payload_fixtures() {
+fn cook_notification_payload_fixtures() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut cases = Vec::new();
         for (name, status, title) in [
@@ -1270,7 +1266,7 @@ fn discord_notification_payload_fixtures() {
         retry.title = Some(terminal_work::retry_title("cook-abc", Some("studio"), 2, 3));
         cases.push(json!({"name": "retry", "payload": retry}));
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../extensions/discord/tests/fixtures/notify-payloads.json");
+            .join("tests/fixtures/notify-payloads.json");
         let json = format!("{}\n", serde_json::to_string_pretty(&cases).unwrap());
         if std::env::var_os("UPDATE_NOTIFY_FIXTURES").is_some() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

@@ -488,10 +488,10 @@ mod tests {
             let prompt = home.path().join("prompt.txt");
             std::fs::write(&prompt, "Fix it.").unwrap();
             let route = home.path().join("route.txt");
-            std::fs::write(&route, "discord:v1:thread:1").unwrap();
+            std::fs::write(&route, "sample:v1:thread:1").unwrap();
             let input_refs = serde_json::json!([
                 { "kind": "prompt", "path": prompt, "sha256": digest(b"Fix it."), "argv_token": "homeboy-admission-ref:0:p" },
-                { "kind": "notification-route", "path": route, "sha256": digest(b"discord:v1:thread:1"), "argv_token": "homeboy-admission-ref:1:r" },
+                { "kind": "notification-route", "path": route, "sha256": digest(b"sample:v1:thread:1"), "argv_token": "homeboy-admission-ref:1:r" },
             ]);
             let manifest_path = home.path().join("manifest.json");
             let manifest = serde_json::to_vec(&input_refs).unwrap();

@@ -407,7 +407,11 @@ mod tests {
                 "http",
                 "http://127.0.0.1:8080/health",
             ),
-            ("systemd:kimaki.service", "systemd", "kimaki.service"),
+            (
+                "systemd:sample-worker.service",
+                "systemd",
+                "sample-worker.service",
+            ),
         ];
         for (raw, kind, target) in cases {
             assert_eq!(
@@ -428,10 +432,10 @@ mod tests {
     #[test]
     fn systemctl_show_parser_extracts_unit_state_fields() {
         let fields = parse_systemctl_show(
-            "Id=kimaki.service\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=1234\n",
+            "Id=sample-worker.service\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=1234\n",
         );
 
-        assert_eq!(fields.get("Id"), Some(&"kimaki.service".to_string()));
+        assert_eq!(fields.get("Id"), Some(&"sample-worker.service".to_string()));
         assert_eq!(fields.get("ActiveState"), Some(&"active".to_string()));
         assert_eq!(fields.get("MainPID"), Some(&"1234".to_string()));
     }

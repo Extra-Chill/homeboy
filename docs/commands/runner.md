@@ -18,6 +18,10 @@ Pressure JSON retains the existing numeric fields and adds `units`: PSI fields a
 
 `runner` manages durable execution backends. SSH runners are a capability on a `homeboy server` record, so the common Lab flow uses one ID for the machine and its runner. Local runners remain standalone because they describe this machine rather than an SSH server. Both storage shapes share the same runner capability contract: workspace root, settings, environment, secret references, resources, and policy.
 
+Put integration-specific executables on the runner user's `PATH` (or install
+or link them into `~/.local/bin`). Homeboy does not discover private bin
+directories for individual integrations.
+
 Each controller allows one runner per machine; a second registration is refused at connect with `runner.machine_already_registered`.
 
 Runner configuration separates printable environment from secrets:

@@ -25,7 +25,7 @@ pub(crate) fn durable_cook_identity_lines(cook_id: Option<&str>, run_id: &str) -
 
 /// Print the durable identity block unconditionally.
 ///
-/// Deliberately not TTY-gated. The clients that most need this — agent/Discord
+/// Deliberately not TTY-gated. The clients that most need this — agent/chat
 /// bridges, CI, and anything invoking Homeboy as a tool call — are exactly the
 /// non-TTY callers that a TTY-gated status line silently skips, which is how an
 /// interrupted Lab Cook ended up with no reported task identity at all (#10419).
@@ -371,7 +371,7 @@ pub(crate) fn detached_cook_route_less_warning(
         })
         .unwrap_or_default();
     Some(format!(
-        "cook: detached notification route is route-less;{resolver}{missing}. The Homeboy process can resolve only caller context available to its installed resolver; an active Discord thread is not inferred from extension readiness. To return terminal updates, invoke Cook with `--notification-transport <transport> --notification-route <route>` (or set `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE` in the Homeboy process environment); inspect this Cook with `homeboy agent-task status <cook-id>`",
+        "cook: detached notification route is route-less;{resolver}{missing}. The Homeboy process can resolve only caller context available to its installed resolver; an active chat thread is not inferred from extension readiness. To return terminal updates, invoke Cook with `--notification-transport <transport> --notification-route <route>` (or set `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE` in the Homeboy process environment); inspect this Cook with `homeboy agent-task status <cook-id>`",
     ))
 }
 

@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn cook_pi_reads_only_the_adapter_session_path() {
         let artifacts = tempfile::tempdir().unwrap();
-        let fixture = include_str!("fixtures/pi-roadie-session.jsonl");
+        let fixture = include_str!("fixtures/pi-session.jsonl");
         std::fs::write(artifacts.path().join("task-id-pi-session.jsonl"), fixture).unwrap();
         assert_eq!(
             session_served_models(artifacts.path(), "task / id"),

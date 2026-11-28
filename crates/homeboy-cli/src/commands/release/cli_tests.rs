@@ -52,7 +52,7 @@ fn release_envelope_flags_compose_on_both_sides_of_inspection_subcommands() {
             "homeboy",
             "release",
             "--notification-transport",
-            "slack",
+            "sample",
             "--notification-route",
             "release-room",
             "readiness",
@@ -67,7 +67,7 @@ fn release_envelope_flags_compose_on_both_sides_of_inspection_subcommands() {
             "list",
             "homeboy",
             "--notification-transport",
-            "slack",
+            "sample",
             "--notification-route",
             "release-room",
         ]

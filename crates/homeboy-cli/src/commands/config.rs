@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn missing_pointer_is_typed_and_lists_nearby_paths() {
         let config = serde_json::json!({
-            "notifications": { "default_transport": "discord" },
+            "notifications": { "default_transport": "sample" },
         });
 
         let error = missing_pointer_error(&config, "/notifications/default_transprot");
@@ -599,7 +599,7 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("config parent")).expect("config dir");
             std::fs::write(
                 path,
-                r#"{"notifications":{"default_transport":"discord.run-completion"}}"#,
+                r#"{"notifications":{"default_transport":"sample.run-completion"}}"#,
             )
             .expect("config file");
 
@@ -607,10 +607,7 @@ mod tests {
                 .expect("file-backed pointer read");
             assert_eq!(file.source.as_deref(), Some("file"));
             assert!(file.path.is_some());
-            assert_eq!(
-                file.value,
-                Some(serde_json::json!("discord.run-completion"))
-            );
+            assert_eq!(file.value, Some(serde_json::json!("sample.run-completion")));
 
             let (builtin, _) = show_pointer(false, "/defaults/deploy/scp_flags")
                 .expect("builtin-backed pointer read");

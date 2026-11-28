@@ -758,7 +758,7 @@ pub(super) fn readiness(
     } else if let Some(error) = probe_error {
         ("transient_failure", "model_list_probe_interrupted", true, format!("Retry the bounded Pi model catalog probe; the local runtime process was temporarily unavailable. {error}"))
     } else if listing.to_ascii_lowercase().contains("no models available") || routes.is_empty() {
-        ("auth_failure", "no_models_available", false, format!("Log in to a provider for Pi agent directory {dir}, or point PI_CODING_AGENT_DIR at an agent dir that has one."))
+        ("auth_failure", "no_models_available", false, format!("Refresh the provider credentials configured for this route in Pi agent directory {dir}, or select an authenticated directory with provider_config.pi_agent_dir or PI_CODING_AGENT_DIR."))
     } else if !model.is_empty() && !model.contains('/') {
         let candidates = routes
             .iter()

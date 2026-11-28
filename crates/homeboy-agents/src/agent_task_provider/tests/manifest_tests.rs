@@ -566,7 +566,7 @@ fn pi_backend_spawns_pi_directly_without_node_or_stdin_request() {
     let observed = temp.path().join("observed");
     std::fs::write(&pi, format!(r#"#!/bin/sh
 if [ "$1" = --version ]; then echo 'pi 1.0'; exit; fi
-if [ "$1" = --list-models ]; then echo 'roadie test'; exit; fi
+if [ "$1" = --list-models ]; then echo 'sample-provider test'; exit; fi
 printf '%s\n' "$@" > '{}'
 if read input; then exit 77; fi
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","stopReason":"stop","content":[{{"type":"text","text":"Native Pi completed."}}]}}}}'
@@ -576,7 +576,7 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","stopReason
     let (mut request, _) = request("native-pi", String::new());
     let provider = discovery::discover_agent_task_executor_providers().remove(0);
     request.executor.backend = "pi".into();
-    request.executor.config = json!({"command":pi,"model":"roadie/test"});
+    request.executor.config = json!({"command":pi,"model":"sample-provider/test"});
     request.workspace.root = Some(temp.path().display().to_string());
     std::fs::write(temp.path().join("report.txt"), "retained report").unwrap();
     request.artifact_declarations = vec![serde_json::from_value(
@@ -611,5 +611,5 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","stopReason
     );
     let observed = std::fs::read_to_string(observed).unwrap();
     assert!(observed.starts_with("--mode\njson\n--session\n"));
-    assert!(observed.contains("native-pi-pi-session.jsonl\n--model\nroadie/test\n"));
+    assert!(observed.contains("native-pi-pi-session.jsonl\n--model\nsample-provider/test\n"));
 }

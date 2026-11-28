@@ -918,14 +918,16 @@ processes start. Compact `agent-task status` includes `execution_location` as
 Pi is Cook's coding backend. Backend selection uses `--backend`, then Homeboy
 config `agent_task.default_backend`, then the built-in `pi` backend. Built-in
 selection reports `source: builtin`; component settings and extension manifests
-do not select the default backend. Pi routes bill through the Roadie
-credential pool with a per-runner client key, so the reference rotation uses
-pool-backed `roadie/<rotation>` models:
+do not select the default backend. Use a provider-qualified model listed by
+`pi --list-models` in the route's Pi agent directory. Pi reads provider
+credentials from that directory, selected by `provider_config.pi_agent_dir`
+or `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). For example, replace
+`provider/model` below with an available model:
 
 ```bash
 homeboy config set /agent_task/default_backend pi
 homeboy config set /agent_task/rotation \
-  '{"entries":[{"backend":"pi","model":"roadie/anthropic-claude-sonnet-5-5"}]}' --json
+  '{"entries":[{"backend":"pi","model":"provider/model"}]}' --json
 homeboy agent-task providers --validate-readiness
 ```
 
@@ -1148,8 +1150,8 @@ homeboy agent-task review "$run_id" \
   arrays for apply candidates, completed with `--to-worktree` when supplied.
 - `transport.chat_state_required: false`, making Homeboy the source of truth.
 
-This is the terminal/daemon-owned review surface for fleet cooking. Kimaki or any
-other chat UI should submit, poll, render, and call these commands rather than
+This is the terminal/daemon-owned review surface for fleet cooking. A chat UI
+should submit, poll, render, and call these commands rather than
 owning scheduling, state, artifacts, reconciliation, or promotion.
 
 ## Provider Capacity

@@ -939,7 +939,7 @@ mod tests {
                     { "type": "port.snapshot", "port": 3000 },
                     { "type": "http.poll", "url": "http://127.0.0.1:3000/health", "assert-status": 200 },
                     { "type": "http.egress", "host": "api.example.com", "capture": "headers" },
-                    { "type": "cmd.run", "command": "kimaki", "args": ["--help"] }
+                    { "type": "cmd.run", "command": "sample-worker", "args": ["--help"] }
                 ]
             }"#,
         )
@@ -979,7 +979,7 @@ mod tests {
         assert!(matches!(
             &workload.trace_probes()[6],
             TraceProbeConfig::CmdRun { command, args }
-                if command == "kimaki" && args == &vec!["--help".to_string()]
+                if command == "sample-worker" && args == &vec!["--help".to_string()]
         ));
         let workload_without_probes: WorkloadSpec =
             serde_json::from_str(r#"{"path":"/tmp/no-probes.trace.mjs"}"#).expect("parse workload");

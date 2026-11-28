@@ -878,7 +878,7 @@ fn agent_task_status_truncates_only_at_word_boundaries() {
 fn agent_task_capacity_names_lab_runner_and_slots() {
     let payload = serde_json::json!({
         "schema": "homeboy/agent-task-capacity/v1",
-        "routes": [{"backend": "roadie", "model": "subagent"}],
+        "routes": [{"backend": "sample-provider", "model": "subagent"}],
         "lab_routes": [{"runner_id": "lab-a", "active_slots": 2, "free_slots": 3}]
     });
     let summary = render_capacity_summary(&payload).unwrap();
@@ -2151,7 +2151,7 @@ mod tests {
             "state": "succeeded",
             "task_count": 1,
             "provider_route_notes": [
-                "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie credential pool key, then retry.)",
+                "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the configured provider credentials, then retry.)",
                 "xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)"
             ]
         });
@@ -2160,7 +2160,7 @@ mod tests {
 
         let summary = summary.expect("cook summary renders");
         assert!(
-            summary.contains("Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie credential pool key, then retry.)\n"),
+            summary.contains("Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the configured provider credentials, then retry.)\n"),
             "{summary}"
         );
         assert!(

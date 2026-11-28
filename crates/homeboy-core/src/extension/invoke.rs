@@ -1040,8 +1040,8 @@ mod tests {
     #[test]
     fn build_settings_json_includes_nested_homeboy_json_extension_settings() {
         let component: Component = serde_json::from_value(serde_json::json!({
-            "id": "roadie",
-            "local_path": "/tmp/roadie",
+            "id": "sample-component",
+            "local_path": "/tmp/sample-component",
             "extensions": {
                 "sample-runtime": {
                     "settings": {

@@ -99,9 +99,7 @@ pub fn quote_path(path: &str) -> String {
 /// (the node-bin loop prepends, so node bins resolve first here).
 pub fn remote_shell_path_preamble() -> &'static str {
     concat!(
-        "export PATH=\"$HOME/.local/bin:$HOME/.",
-        "car",
-        "go/bin:$HOME/.kimaki/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; ",
+        "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}\"; ",
         "for d in \"$HOME\"/.local/opt/node-*/bin \"$HOME\"/.nvm/versions/node/*/bin; do ",
         "[ -d \"$d\" ] && PATH=\"$d:$PATH\"; done; export PATH"
     )

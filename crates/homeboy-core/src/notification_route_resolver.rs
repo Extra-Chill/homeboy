@@ -612,17 +612,17 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let _transport = crate::test_support::EnvVarGuard::set(
                 "HOMEBOY_NOTIFICATION_TRANSPORT",
-                "discord.run-completion",
+                "sample.run-completion",
             );
             let _route = crate::test_support::EnvVarGuard::set(
                 "HOMEBOY_NOTIFICATION_ROUTE",
-                "discord:v1:thread:1",
+                "sample:v1:thread:1",
             );
             let resolved = resolve_from_cli_or_env_with_evidence(None, None)
                 .expect("a propagated route stays usable where its transport is not installed");
             assert_eq!(
                 resolved.route.map(|route| route.transport),
-                Some("discord.run-completion".to_string())
+                Some("sample.run-completion".to_string())
             );
         });
     }
@@ -644,13 +644,13 @@ mod tests {
     fn explicit_resolution_reports_manifest_load_failure_instead_of_unknown_transport() {
         crate::test_support::with_isolated_home(|_| {
             let root = crate::paths::extensions().unwrap();
-            let discord = root.join("discord");
-            std::fs::create_dir_all(&discord).unwrap();
-            let manifest = discord.join("discord.json");
+            let sample = root.join("sample");
+            std::fs::create_dir_all(&sample).unwrap();
+            let manifest = sample.join("sample.json");
             std::fs::write(&manifest, "{not json").unwrap();
             for route in [None, Some("opaque")] {
                 let error =
-                    resolve_from_cli_or_env_with_evidence(Some("discord"), route).unwrap_err();
+                    resolve_from_cli_or_env_with_evidence(Some("sample"), route).unwrap_err();
                 assert_eq!(error.details["catalog_root"], root.to_str().unwrap());
                 assert!(error.message.contains("manifest_json_malformed"));
                 assert!(error.message.contains(manifest.to_str().unwrap()));
@@ -660,16 +660,16 @@ mod tests {
                     "invalid"
                 );
             }
-            std::fs::write(&manifest, r#"{"name":"Discord","version":"1.0.0","notification_transports":[{"id":"discord.run-completion","command":["true"]}]}"#).unwrap();
-            let resolved = resolve_from_cli_or_env_with_evidence(Some("discord"), Some("opaque"))
+            std::fs::write(&manifest, r#"{"name":"Sample","version":"1.0.0","notification_transports":[{"id":"sample.run-completion","command":["true"]}]}"#).unwrap();
+            let resolved = resolve_from_cli_or_env_with_evidence(Some("sample"), Some("opaque"))
                 .expect("repairing the same catalog restores admission");
-            assert_eq!(resolved.route.unwrap().transport, "discord.run-completion");
+            assert_eq!(resolved.route.unwrap().transport, "sample.run-completion");
             // A broken unrelated extension does not block an installed transport.
             std::fs::create_dir_all(root.join("other")).unwrap();
             std::fs::write(root.join("other/other.json"), "{not json").unwrap();
-            let resolved = resolve_from_cli_or_env_with_evidence(Some("discord"), Some("opaque"))
-                .expect("an unrelated broken manifest leaves discord admissible");
-            assert_eq!(resolved.route.unwrap().transport, "discord.run-completion");
+            let resolved = resolve_from_cli_or_env_with_evidence(Some("sample"), Some("opaque"))
+                .expect("an unrelated broken manifest leaves sample admissible");
+            assert_eq!(resolved.route.unwrap().transport, "sample.run-completion");
         });
     }
 
@@ -679,14 +679,14 @@ mod tests {
             let root = crate::paths::extensions().unwrap();
             for route in [None, Some("opaque")] {
                 let error =
-                    resolve_from_cli_or_env_with_evidence(Some("discord"), route).unwrap_err();
+                    resolve_from_cli_or_env_with_evidence(Some("sample"), route).unwrap_err();
                 assert!(error.message.contains("catalog is empty"));
                 assert_eq!(error.details["catalog_root"], root.to_str().unwrap());
             }
             std::fs::create_dir_all(root.parent().unwrap()).unwrap();
             std::fs::write(&root, "not a directory").unwrap();
             let error =
-                resolve_from_cli_or_env_with_evidence(Some("discord"), Some("opaque")).unwrap_err();
+                resolve_from_cli_or_env_with_evidence(Some("sample"), Some("opaque")).unwrap_err();
             assert_eq!(error.details["catalog_root"], root.to_str().unwrap());
             assert!(error.details["load_error"]
                 .as_str()

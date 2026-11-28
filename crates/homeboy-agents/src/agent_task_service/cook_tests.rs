@@ -13162,9 +13162,9 @@ fn dispatch_acceptance_receipt_is_awaited_and_terminal_attempts_stop_the_wait() 
 /// A Cook continuation that already holds a promoted candidate must not
 /// fast-forward its destination to the original base pin: the candidate was
 /// verified on the destination's recorded HEAD, and moving it made
-/// finalization refuse "candidate changed after promotion" (roadie#5 on
-/// extrachill.com). Without a tracked candidate the behind-destination path
-/// is unchanged and still reports the ancestry error for non-native targets.
+/// finalization refuse "candidate changed after promotion". Without a tracked
+/// candidate, the behind-destination path still reports the ancestry error for
+/// non-native targets.
 #[test]
 fn tracked_candidate_destination_is_not_converged_to_a_newer_pinned_base() {
     homeboy_core::test_support::with_isolated_home(|_| {
