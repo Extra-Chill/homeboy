@@ -115,8 +115,8 @@ mod tests {
             None,
         );
         component.deployment_provider = Some(DeploymentProviderAttachment {
-            extension: "cloudflare-workers".to_string(),
-            provider: "cloudflare-workers.deploy".to_string(),
+            extension: "fixture-extension".to_string(),
+            provider: "fixture-extension.deploy".to_string(),
             contract: None,
             policy: Some(serde_json::json!({ "repository": "shared" })),
         });
@@ -171,7 +171,7 @@ mod tests {
             server_route_disclosure(&dual_deliverable_component(), &project(None), &config(None))
                 .expect("a dual-deliverable route must be disclosed");
         assert!(disclosure.contains("this project selects no provider target"));
-        assert!(disclosure.contains("'cloudflare-workers.deploy'"));
+        assert!(disclosure.contains("'fixture-extension.deploy'"));
         assert!(disclosure.contains("--target provider"));
 
         let overridden = server_route_disclosure(
