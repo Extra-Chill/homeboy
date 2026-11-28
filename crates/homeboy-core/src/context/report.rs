@@ -717,10 +717,13 @@ fn build_actionable_next_steps(
         ));
     }
 
-    if Path::new("CLAUDE.md").exists() || Path::new("AGENTS.md").exists() {
-        next_steps.push(
-            "Read CLAUDE.md for repo-specific guidance. Run `homeboy self docs commands/commands-index` for all commands.".to_string(),
-        );
+    if let Some(guidance) = ["AGENTS.md", "CLAUDE.md"]
+        .into_iter()
+        .find(|file| Path::new(file).is_file())
+    {
+        next_steps.push(format!(
+            "Read {guidance} for repo-specific guidance. Run `homeboy self docs commands/commands-index` for all commands."
+        ));
     }
 
     let cli_extensions: Vec<_> = all_extensions

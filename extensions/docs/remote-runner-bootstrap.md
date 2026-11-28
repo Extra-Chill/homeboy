@@ -12,12 +12,12 @@ Use this page as the canonical bootstrap path for machines such as Homeboy Lab.
 Install these extension IDs on general-purpose runners:
 
 ```text
-nodejs rust wordpress go swift
+nodejs rust wordpress go swift discord managed-preview cloudflare-workers
 ```
 
-This set covers the official project-type extensions in this repository. A
-special-purpose runner may install fewer extensions, but the runner should only
-advertise or receive workloads for extension IDs that are present on that host.
+This set includes the general-purpose project, notification, preview, and
+deployment extensions. A special-purpose runner may install fewer extensions,
+but should only receive workloads for extension IDs present on that host.
 
 ## Bootstrap A Remote Runner
 
@@ -101,7 +101,7 @@ Use local path installs only while actively developing an extension on that
 machine:
 
 ```bash
-homeboy extension install ./homeboy-extensions/rust
+homeboy extension install ./homeboy/extensions/rust
 ```
 
 Local path installs are linked installs. The active extension code is whatever
@@ -140,7 +140,7 @@ should use the canonical GitHub URL.
 ```bash
 scripts/bootstrap-standard-extensions.sh \
     --target example-runner \
-    --repo /home/operator/src/homeboy-extensions \
+    --repo /home/operator/src/homeboy \
     --extensions "rust"
 ```
 
@@ -155,6 +155,9 @@ ssh example-runner 'homeboy extension show rust'
 ssh example-runner 'homeboy extension show wordpress'
 ssh example-runner 'homeboy extension show go'
 ssh example-runner 'homeboy extension show swift'
+ssh example-runner 'homeboy extension show discord'
+ssh example-runner 'homeboy extension show managed-preview'
+ssh example-runner 'homeboy extension show cloudflare-workers'
 ```
 
 For a real offload check, run a Homeboy command for a component that requires one

@@ -6,6 +6,7 @@
   "exports": {
     ".": "./index.js"
   },
+  "files": ["scripts/lib/wp-codebox-test-result-adapters.sh"],
   "engines": {
     "node": ">=18.12.0"
   }

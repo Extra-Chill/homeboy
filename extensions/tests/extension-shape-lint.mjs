@@ -36,7 +36,6 @@ const allowedTopLevelDirs = new Set([
   '.ci',
   '.claude',
   '.datamachine',
-  'datamachine-agent-ci',
   'defaults',
   'docs',
   'scripts',
@@ -77,7 +76,11 @@ function assertRelativeFile(extensionId, relativePath, source) {
 
 function walk(value, visit, keyPath = []) {
   if (Array.isArray(value)) {
-    value.forEach((item, index) => walk(item, visit, [...keyPath, String(index)]));
+    value.forEach((item, index) => {
+      const itemPath = [...keyPath, String(index)];
+      visit(String(index), item, itemPath);
+      walk(item, visit, itemPath);
+    });
     return;
   }
 
@@ -291,23 +294,46 @@ function validateExtension(extensionId) {
     }
   }
 
+  validateScriptReferences(extensionId, manifest);
+}
+
+function validateScriptReferences(packageDir, manifest) {
   for (const [scriptName, scriptPath] of Object.entries(manifest.scripts || {})) {
     if (typeof scriptPath === 'string') {
-      assertRelativeFile(extensionId, scriptPath, `scripts.${scriptName}`);
+      assertRelativeFile(packageDir, scriptPath, `scripts.${scriptName}`);
     }
   }
 
   walk(manifest, (key, value, keyPath) => {
-    if (key === 'extension_script' && typeof value === 'string') {
-      assertRelativeFile(extensionId, value, keyPath.join('.'));
+    if (typeof value !== 'string') {
+      return;
     }
-
-    if ((key === 'setup_command' || key === 'ready_check' || key === 'run_command' || key === 'command') && typeof value === 'string') {
-      for (const relativePath of extractExtensionPathCommands(value)) {
-        assertRelativeFile(extensionId, relativePath, keyPath.join('.'));
-      }
+    const source = keyPath.join('.');
+    if (key === 'extension_script' || key === 'detect_script' || (key === 'script' && value.startsWith('scripts/'))) {
+      assertRelativeFile(packageDir, value, source);
+    }
+    for (const relativePath of extractExtensionPathCommands(value)) {
+      assertRelativeFile(packageDir, relativePath, source);
     }
   });
+}
+
+function validateRuntimePackage(packageDir) {
+  const manifest = readJson(path.join(rootDir, packageDir, 'package.json'));
+  if (!manifest) {
+    return;
+  }
+  if (typeof manifest.main === 'string') {
+    assertRelativeFile(packageDir, manifest.main, 'main');
+  }
+  for (const [name, target] of Object.entries(manifest.exports || {})) {
+    if (typeof target === 'string') {
+      assertRelativeFile(packageDir, target, `exports.${name}`);
+    }
+  }
+  for (const file of manifest.files || []) {
+    assertRelativeFile(packageDir, file, 'files');
+  }
 }
 
 // Homeboy adds only `homeboy.json` to a consumer repository (Extra-Chill/homeboy#16143).
@@ -342,7 +368,7 @@ const retiredConsumerFileContracts = [
 
 const scannedTextExtensions = new Set([
   '.sh', '.bash', '.js', '.mjs', '.cjs', '.ts', '.php', '.py', '.rs', '.go', '.swift',
-  '.json', '.md', '.txt', '.yml', '.yaml', '.toml',
+  '.json', '.md', '.txt', '.yml', '.yaml', '.toml', '.ps1', '.xml',
 ]);
 
 function listExtensionTextFiles(dir) {
@@ -361,14 +387,66 @@ function listExtensionTextFiles(dir) {
   return files;
 }
 
-function validateConsumerRepoFiles(extensionId) {
+const scriptExtensions = new Set(['.sh', '.bash', '.js', '.mjs', '.cjs', '.php', '.py', '.ps1']);
+const runtimePackageDir = 'wordpress/wp-codebox-runtime';
+
+function validateScriptInventory(extensionId, files) {
+  // A script can be declared in a manifest, invoked by another file, or
+  // documented as a manual entry point. Its own contents and release history
+  // are not evidence of a caller. Smoke tests have separate self-check wiring.
+  const scripts = new Set();
+  const byName = new Map();
+  for (const file of files.keys()) {
+    const relative = path.relative(path.join(rootDir, extensionId), file);
+    const packageRelative = path.relative(path.join(rootDir, runtimePackageDir), file);
+    if (!relative.startsWith(`scripts${path.sep}`) && !packageRelative.startsWith(`scripts${path.sep}`)) {
+      continue;
+    }
+    const name = path.basename(file);
+    const ext = path.extname(name);
+    if (!scriptExtensions.has(ext) || /(?:[-.]smoke|\.test)\.[^.]+$|^test-publish-/.test(name)) {
+      continue;
+    }
+    scripts.add(file);
+    byName.set(name, [...(byName.get(name) || []), file]);
+  }
+
+  const referenced = new Set();
+  for (const [file, text] of files) {
+    if (/^changelog\.md$/i.test(path.basename(file))) {
+      continue;
+    }
+    const names = [
+      ...Array.from(text.matchAll(/[\w-]+(?:\.[\w-]+)+/g), ([name]) => name),
+      // Node relative imports and Python imports can omit the extension.
+      ...Array.from(text.matchAll(/["']\.{1,2}\/(?:[\w./-]+\/)?([\w-]+)["']/g), ([, stem]) => `${stem}.js`),
+      ...Array.from(text.matchAll(/^\s*(?:from|import)\s+([\w]+)\b/gm), ([, stem]) => `${stem}.py`),
+    ];
+    for (const name of names) {
+      for (const script of byName.get(name) || []) {
+        if (script !== file) {
+          referenced.add(script);
+        }
+      }
+    }
+  }
+  for (const script of scripts) {
+    if (!referenced.has(script)) {
+      const relative = path.relative(path.join(rootDir, extensionId), script);
+      fail(`${extensionId}: undeclared script ${relative}; reference it from its manifest or caller, document manual use, or remove it`);
+    }
+  }
+}
+
+function validateExtensionFiles(extensionId) {
   const extensionDir = path.join(rootDir, extensionId);
   if (!fs.existsSync(extensionDir)) {
     return;
   }
-  for (const file of listExtensionTextFiles(extensionDir)) {
+  const files = new Map(listExtensionTextFiles(extensionDir).map((file) => [file, fs.readFileSync(file, 'utf8')]));
+  validateScriptInventory(extensionId, files);
+  for (const [file, text] of files) {
     const relative = path.relative(rootDir, file).split(path.sep).join('/');
-    const text = fs.readFileSync(file, 'utf8');
     for (const contract of retiredConsumerFileContracts) {
       if (text.includes(contract)) {
         fail(`${relative}: references retired consumer-repo declaration ${contract}; declare it in homeboy.json extension settings`);
@@ -396,8 +474,11 @@ for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
 
 for (const extensionId of extensionIds) {
   validateExtension(extensionId);
-  validateConsumerRepoFiles(extensionId);
+  validateExtensionFiles(extensionId);
 }
+
+// The old agent-runtimes tree was retired. WP Codebox ships with WordPress.
+validateRuntimePackage(runtimePackageDir);
 
 if (failures.length > 0) {
   console.error('Extension shape lint failed:');

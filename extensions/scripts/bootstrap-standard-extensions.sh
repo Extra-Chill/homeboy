@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_REPO="https://github.com/Extra-Chill/homeboy-extensions"
-DEFAULT_EXTENSIONS="nodejs rust wordpress go swift"
+DEFAULT_REPO="https://github.com/Extra-Chill/homeboy"
+DEFAULT_EXTENSIONS="nodejs rust wordpress go swift discord managed-preview cloudflare-workers"
 
 TARGET=""
 REPO="$DEFAULT_REPO"
@@ -12,7 +12,7 @@ DRY_RUN=0
 REPLACE_EXISTING=0
 
 usage() {
-    cat <<'USAGE'
+    cat <<USAGE
 Usage: scripts/bootstrap-standard-extensions.sh [options]
 
 Install the standard Homeboy extension set locally or on a Homeboy runner.
@@ -20,9 +20,9 @@ Install the standard Homeboy extension set locally or on a Homeboy runner.
 Options:
   --target <runner-id>        Runner ID such as example-runner. Omit for local bootstrap.
   --extensions "<ids>"       Space-separated extension IDs to install.
-                             Default: nodejs rust wordpress go swift.
+                             Default: $DEFAULT_EXTENSIONS.
   --repo <url-or-path>        Extension monorepo URL or path.
-                             Default: https://github.com/Extra-Chill/homeboy-extensions.
+                             Default: $DEFAULT_REPO.
   --homeboy <command>         Homeboy executable on the target.
                               Default: homeboy.
   --replace-existing          Replace existing extension installs with managed
@@ -34,7 +34,7 @@ Options:
 Examples:
   scripts/bootstrap-standard-extensions.sh --target example-runner
   scripts/bootstrap-standard-extensions.sh --target operator@example-runner --extensions "nodejs rust wordpress"
-  scripts/bootstrap-standard-extensions.sh --repo /path/to/homeboy-extensions --extensions "rust" --dry-run
+  scripts/bootstrap-standard-extensions.sh --repo /path/to/homeboy --extensions "rust" --dry-run
 USAGE
 }
 
@@ -124,17 +124,13 @@ if [ -n "$TARGET" ]; then
     fi
 
     printf '%s\n' "$REMOTE_SCRIPT_CONTENT" | "$CONTROLLER_HOMEBOY_BIN" "${RUNNER_ARGS[@]}"
-    exit $?
-fi
-
-if [ "$DRY_RUN" -eq 1 ]; then
+elif [ "$DRY_RUN" -eq 1 ]; then
     printf '# Target: local\n'
     printf "HOMEBOY_BIN='%s'\n" "$HOMEBOY_BIN"
     printf "REPO='%s'\n" "$REPO"
     printf "EXTENSIONS='%s'\n" "$EXTENSIONS"
     printf "REPLACE_EXISTING='%s'\n" "$REPLACE_EXISTING"
     printf '%s\n' "$REMOTE_SCRIPT_CONTENT"
-    exit 0
+else
+    printf '%s\n' "$REMOTE_SCRIPT_CONTENT" | HOMEBOY_BIN="$HOMEBOY_BIN" REPO="$REPO" EXTENSIONS="$EXTENSIONS" REPLACE_EXISTING="$REPLACE_EXISTING" bash
 fi
-
-printf '%s\n' "$REMOTE_SCRIPT_CONTENT" | HOMEBOY_BIN="$HOMEBOY_BIN" REPO="$REPO" EXTENSIONS="$EXTENSIONS" REPLACE_EXISTING="$REPLACE_EXISTING" bash

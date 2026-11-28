@@ -48,8 +48,10 @@ jobs:
       max-parallel: 1
       matrix:
         path:
+          - extensions/cloudflare-workers
           - extensions/discord
           - extensions/go
+          - extensions/managed-preview
           - extensions/nodejs
           - extensions/rust
           - extensions/ssh-checkout-deploy

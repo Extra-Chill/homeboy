@@ -210,6 +210,7 @@
       "node tests/wordpress-route-latency-smoke.js",
       "node tests/wordpress-runtime-surface-discovery-smoke.js",
       "node tests/wordpress-runtime-task-planner-smoke.js",
+      "node ../tests/architectural-boundary-contract.mjs",
       "node tests/wordpress-surface-types-smoke.js",
       "node tests/wordpress-visual-attribution-smoke.js",
       "node tests/wordpress-workload-profile-smoke.js",

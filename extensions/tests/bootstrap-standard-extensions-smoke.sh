@@ -21,6 +21,7 @@ case "$1 $2" in
     "extension install") exit 0 ;;
     "extension show") exit 0 ;;
     "extension list") printf 'nodejs\nrust\n' ; exit 0 ;;
+    "runner exec") cat; exit "${HOMEBOY_FAKE_RUNNER_EXIT:-0}" ;;
     *) cat ;;
 esac
 FAKE
@@ -120,6 +121,21 @@ if ! cmp -s "$EXPECTED_LOG" "$LOG_FILE"; then
     sed 's/^/  /' "$EXPECTED_LOG" >&2
     echo "Actual:" >&2
     sed 's/^/  /' "$LOG_FILE" >&2
+    exit 1
+fi
+
+: > "$LOG_FILE"
+HOMEBOY_FAKE_LOG="$LOG_FILE" "$SCRIPT" --homeboy "$FAKE_HOMEBOY" >/dev/null
+for id in nodejs rust wordpress go swift discord managed-preview cloudflare-workers; do
+    grep -Fx "extension install https://github.com/Extra-Chill/homeboy --id $id" "$LOG_FILE" >/dev/null
+    grep -Fx "extension show $id" "$LOG_FILE" >/dev/null
+done
+
+runner_status=0
+HOMEBOY_CONTROLLER_BIN="$FAKE_HOMEBOY" HOMEBOY_FAKE_LOG="$LOG_FILE" HOMEBOY_FAKE_RUNNER_EXIT=42 \
+    "$SCRIPT" --target local >/dev/null || runner_status=$?
+if [ "$runner_status" -ne 42 ]; then
+    echo "Targeted bootstrap hid the runner failure: $runner_status" >&2
     exit 1
 fi
 
