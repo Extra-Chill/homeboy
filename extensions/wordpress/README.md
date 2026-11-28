@@ -800,21 +800,17 @@ temporary request profiler.
 
 ### Helper manifest consumers
 
-Installed WordPress extensions expose helper paths through
-`HOMEBOY_WORDPRESS_HELPER_MANIFEST`. Node/ESM workloads can consume that
-manifest without copying `createRequire()` boilerplate:
+Install with `homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress`.
+Use the [WordPress helper discovery contract](../docs/extensions/wordpress.md#wordpress-helper-discovery-for-node-workloads)
+to find the installed manifest without npm aliases. Resolve modules by their
+named `helpers` entries, not by joining filenames to the extension root.
 
-```js
-import helperConsumer from 'homeboy-extension-wordpress/wordpress-helper-consumer';
-
-const { loadWordPressHelper, loadWordPressLibHelper } = helperConsumer;
-const { path: profilerPath, module: profiler } = loadWordPressHelper('requestProfiler');
-const { module: pageProfiler } = loadWordPressLibHelper('page-profiler.js', { required: true });
-```
-
-The loader returns stable handles shaped as `{ path, module, found, reason }`.
-Missing optional helpers return `module: null`; pass `{ required: true }` to fail
-with a diagnostic error.
+If you already import `homeboy-extension-wordpress/wordpress-helper-consumer`,
+call `loadWordPressHelper('pageProfiler', { required: true })` to use that same
+contract. The loader returns `{ path, module, found, reason, source }`, where
+`source` identifies a standard install, an explicit option, or an environment
+override. Missing optional helpers return `module: null`; `required: true`
+turns their diagnostic into an error.
 
 Request-profiler JSONL rows can be compacted for benchmark artifacts with
 `summarizeWordPressRequestProfilerRows(rows, options)`. The summary groups rows

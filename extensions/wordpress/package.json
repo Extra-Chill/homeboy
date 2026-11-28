@@ -67,6 +67,7 @@
     "./wordpress-fuzz-campaign": "./lib/wordpress-fuzz-campaign.js",
     "./wordpress-dependency-materialization-recipes": "./lib/wordpress-dependency-materialization-recipes.js",
     "./wp-codebox-browser-metrics": "./lib/wp-codebox-browser-metrics.js",
+    "./wp-codebox-browser-coverage": "./lib/wp-codebox-browser-coverage.js",
     "./wp-codebox-visual-compare": "./lib/wp-codebox-visual-compare.js",
     "./wordpress-visual-attribution": "./lib/wordpress-visual-attribution.js",
     "./wordpress-codebox-visual-parity-workload": "./lib/wordpress-codebox-visual-parity-workload.mjs",
