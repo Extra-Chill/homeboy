@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.15] - 2026-11-28
+
+### Fixed
+- inherit extension build environments and retry staging stat races
+
 ## [1.37.14] - 2026-11-28
 
 ### Fixed
