@@ -74,12 +74,7 @@ fn recover_rearms_gate_feedback_promotion_refused_before_apply() {
             .unwrap();
         std::fs::write(target.join("tracked.txt"), "operator residue\n").unwrap();
         let refusal = promote_or_load_attempt_in_store(&store, &options, &run).unwrap_err();
-        // Replay the pre-upgrade shape, including its unmarked diagnostic.
-        let mut diagnostic = crate::agent_task_service::cook::bounded_error_diagnostic(&refusal);
-        diagnostic["details"]
-            .as_object_mut()
-            .unwrap()
-            .remove("promotion_pre_apply_refusal");
+        let diagnostic = crate::agent_task_service::cook::bounded_error_diagnostic(&refusal);
         agent_task_lifecycle::record_cook_controller_failure_in_store(&store, &run, &diagnostic)
             .unwrap();
         let recipes = CookRecipeStore::from_current_data_root().unwrap();
@@ -90,7 +85,7 @@ fn recover_rearms_gate_feedback_promotion_refused_before_apply() {
             .claim_continuation_for(&options.identity.cook_id, &run)
             .unwrap()
             .unwrap()
-            .complete()
+            .fail(&refusal.message)
             .unwrap();
         git_output(
             &target,

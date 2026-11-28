@@ -645,8 +645,13 @@ impl CookRecipeStore {
         if !state.recoverable && state.phase != agent_task_lifecycle::CookRunPhase::Succeeded {
             return Ok(());
         }
-        if lifecycle_continuation_state(lifecycle_continuation(&record))
-            != CookContinuationState::Absent
+        if continuation_decision(
+            &record,
+            ContinuationEvent::Schedule {
+                stranded: false,
+                explicit_recovery: false,
+            },
+        ) != ContinuationDecision::Rearm
         {
             return Ok(());
         }
@@ -689,8 +694,7 @@ impl CookRecipeStore {
                     return false;
                 }
                 let now = agent_task_lifecycle::now_timestamp();
-                value["state"] = serde_json::json!("completed");
-                value["completed_at"] = serde_json::json!(now);
+                apply_continuation_decision(&mut value, ContinuationDecision::Complete);
                 value["settled_by"] = serde_json::json!("terminal_cook_pass");
                 record
                     .ensure_metadata_object()
@@ -2220,30 +2224,6 @@ fn lifecycle_continuation(record: &agent_task_lifecycle::AgentTaskRunRecord) -> 
     record.metadata.get(LIFECYCLE_CONTINUATION_KEY)
 }
 
-/// Pre-apply refusals never acquired promotion authority. Interpret legacy
-/// Completed rows as failed too, but never reopen an applied promotion.
-fn rearmable_promotion_refusal(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
-    if record
-        .metadata
-        .pointer("/cook_delivery/artifacts/promotion")
-        .is_some()
-    {
-        return false;
-    }
-    let Some(failure) = record.metadata.get("cook_controller_failure") else {
-        return false;
-    };
-    failure.pointer("/details/promotion_pre_apply_refusal") == Some(&Value::Bool(true))
-        || failure
-            .get("message")
-            .and_then(Value::as_str)
-            .is_some_and(|message| {
-                message.contains("gate_feedback_candidate_baseline")
-                    && message
-                        .contains("candidate worktree differs from the adopted immutable commit")
-            })
-}
-
 /// The one claimability rule shared by the daemon gate and the claim, so a
 /// supervisor never spawns a worker that cannot claim. A Cook another live
 /// controller drives is not claimable: its driver owns every transition and
@@ -2302,12 +2282,17 @@ pub(crate) fn stranded_continuation_job(
     store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<String> {
-    if lifecycle_continuation_state(lifecycle_continuation(record))
-        != CookContinuationState::Pending
-    {
-        return None;
-    }
-    terminal_scheduler_job(store, record)
+    let job = terminal_scheduler_job(store, record)?;
+    (continuation_decision(
+        record,
+        ContinuationEvent::Schedule {
+            stranded: true,
+            explicit_recovery: false,
+        },
+    ) == ContinuationDecision::Rearm
+        && lifecycle_continuation_state(lifecycle_continuation(record))
+            == CookContinuationState::Pending)
+        .then_some(job)
 }
 
 fn terminal_scheduler_job(
@@ -2360,9 +2345,9 @@ fn enqueue_lifecycle_continuation(
                 record.metadata.pointer("/cook_continuation_scheduler/job_id").and_then(Value::as_str) == Some(job)
             });
         let rearming = rearm_failed || stranded;
-        if state != CookContinuationState::Absent
-            && !(rearming && matches!(state, CookContinuationState::Failed | CookContinuationState::Pending))
-        {
+        if continuation_decision(record, ContinuationEvent::Schedule {
+            stranded, explicit_recovery: rearm_failed,
+        }) != ContinuationDecision::Rearm {
             return false;
         }
         let now = agent_task_lifecycle::now_timestamp();
@@ -2387,7 +2372,7 @@ fn enqueue_lifecycle_continuation(
                 .and_then(|value| value.get("retries"))
                 .cloned()
                 .unwrap_or(serde_json::json!(continuation.retries));
-            rearm_for_retry(&mut value);
+            apply_continuation_decision(&mut value, ContinuationDecision::Retry);
         }
         if rearming {
             record.ensure_metadata_object().remove("cook_continuation_scheduler");
@@ -2686,23 +2671,37 @@ fn claim_lifecycle_record(
     }))
 }
 
-/// Return a claim to `pending` for its next generation, or terminalize it once
-/// the retry budget is spent.
-fn rearm_for_retry(value: &mut Value) {
-    let retries = value
-        .get("retries")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .saturating_add(1);
-    value["retries"] = serde_json::json!(retries);
-    value["generation"] =
-        serde_json::json!(value["generation"].as_u64().unwrap_or(0).saturating_add(1));
-    if retries > MAX_CONTINUATION_RETRIES as u64 {
-        value["state"] = serde_json::json!("failed");
-        value["diagnostic"] = serde_json::json!("cook continuation retry budget exhausted");
-    } else {
-        value["state"] = serde_json::json!("pending");
-        value[CONTINUATION_RETRY_AT_KEY] = serde_json::json!(continuation_retry_deadline(retries));
+/// Materialize a decision in the locked durable continuation. All retry
+/// paths spend the same budget and advance the same generation.
+fn apply_continuation_decision(value: &mut Value, decision: ContinuationDecision) {
+    match decision {
+        ContinuationDecision::Complete => {
+            value["state"] = serde_json::json!("completed");
+            value["completed_at"] = serde_json::json!(agent_task_lifecycle::now_timestamp());
+        }
+        ContinuationDecision::Fail(reason) => {
+            value["state"] = serde_json::json!("failed");
+            value["diagnostic"] = serde_json::json!(reason);
+        }
+        ContinuationDecision::Retry => {
+            let retries = value
+                .get("retries")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .saturating_add(1);
+            value["retries"] = serde_json::json!(retries);
+            value["generation"] =
+                serde_json::json!(value["generation"].as_u64().unwrap_or(0).saturating_add(1));
+            if retries > MAX_CONTINUATION_RETRIES as u64 {
+                value["state"] = serde_json::json!("failed");
+                value["diagnostic"] = serde_json::json!("cook continuation retry budget exhausted");
+            } else {
+                value["state"] = serde_json::json!("pending");
+                value[CONTINUATION_RETRY_AT_KEY] =
+                    serde_json::json!(continuation_retry_deadline(retries));
+            }
+        }
+        ContinuationDecision::Rearm | ContinuationDecision::Keep => {}
     }
 }
 
@@ -2722,35 +2721,34 @@ fn transition_lifecycle_continuation(
         {
             return false;
         }
-        let now = agent_task_lifecycle::now_timestamp();
         match transition {
             LifecycleContinuationTransition::Complete => {
-                value["state"] = serde_json::json!("completed");
-                value["completed_at"] = serde_json::json!(now);
+                apply_continuation_decision(&mut value, ContinuationDecision::Complete);
             }
-            LifecycleContinuationTransition::Retry => rearm_for_retry(&mut value),
+            LifecycleContinuationTransition::Retry => {
+                apply_continuation_decision(&mut value, ContinuationDecision::Retry)
+            }
             LifecycleContinuationTransition::RetryWithDiagnostic(diagnostic) => {
-                let retries = value
-                    .get("retries")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-                    .saturating_add(1);
-                value["retries"] = serde_json::json!(retries);
-                value["generation"] =
-                    serde_json::json!(value["generation"].as_u64().unwrap_or(0).saturating_add(1));
-                if retries > MAX_CONTINUATION_RETRIES as u64 {
-                    value["state"] = serde_json::json!("failed");
-                    value["diagnostic"] = serde_json::json!(
+                apply_continuation_decision(&mut value, ContinuationDecision::Retry);
+                // Abandoned workers are immediately claimable, unlike spaced
+                // automatic retries of a completed pass.
+                value
+                    .as_object_mut()
+                    .expect("continuation object")
+                    .remove(CONTINUATION_RETRY_AT_KEY);
+                value["diagnostic"] = if value["state"] == "failed" {
+                    serde_json::json!(
                         "cook continuation retry budget exhausted after an abandoned worker"
-                    );
+                    )
                 } else {
-                    value["state"] = serde_json::json!("pending");
-                    value["diagnostic"] = serde_json::json!(diagnostic);
-                }
+                    serde_json::json!(diagnostic)
+                };
             }
             LifecycleContinuationTransition::Fail(diagnostic) => {
-                value["state"] = serde_json::json!("failed");
-                value["diagnostic"] = serde_json::json!(diagnostic);
+                apply_continuation_decision(
+                    &mut value,
+                    ContinuationDecision::Fail(diagnostic.to_owned()),
+                );
             }
         }
         let claim = value.as_object_mut().expect("continuation object");
@@ -2770,32 +2768,6 @@ fn transition_lifecycle_continuation(
             "Cook continuation claim is no longer owned by this consumer",
         ))
     }
-}
-
-// The ambient `rearm_failed_terminal_continuation()` shim that used to sit
-// here is gone. It had no callers and was reachable only through the
-// `agent_tasks::lifecycle` facade, which nothing outside the crate used (#7505).
-
-/// [`rearm_failed_terminal_continuation`] against explicitly injected durable
-/// roots.
-///
-/// The rearm and the controller-failure clear are one operation across two
-/// store kinds: the queue entry hangs off the recipe store's data root while
-/// the cause lives in the lifecycle record. Both are parameters so the caller
-/// pairs them; resolving either one here would let a rearm recorded in one home
-/// leave the stale cause standing in the other (#7505).
-#[cfg(test)]
-fn rearm_failed_terminal_continuation_in_store(
-    store: &CookRecipeStore,
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    cook_id: &str,
-    run_id: &str,
-) -> Result<bool> {
-    let rearmed = store.enqueue_terminal_continuation_with_recovery(cook_id, run_id, true)?;
-    if rearmed && agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, run_id)? {
-        agent_task_lifecycle::clear_cook_controller_failure_in_store(lifecycle_store, run_id)?;
-    }
-    Ok(rearmed)
 }
 
 pub struct CookContinuationClaim {
@@ -2882,14 +2854,7 @@ fn observe_continuation_state(
             {
                 return Ok(CookContinuationState::Pending);
             }
-            return Ok(
-                if state == CookContinuationState::Completed && rearmable_promotion_refusal(&record)
-                {
-                    CookContinuationState::Failed
-                } else {
-                    state
-                },
-            );
+            return Ok(state);
         }
     }
     Ok(CookContinuationState::Absent)
@@ -2970,9 +2935,14 @@ pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
         let Some(mut continuation) = lifecycle_continuation(record).cloned() else {
             return false;
         };
-        let state = lifecycle_continuation_state(Some(&continuation));
-        if !(state == CookContinuationState::Failed
-            || (state == CookContinuationState::Completed && rearmable_promotion_refusal(record)))
+        if continuation_decision(
+            record,
+            ContinuationEvent::Schedule {
+                stranded: false,
+                explicit_recovery: true,
+            },
+        ) != ContinuationDecision::Rearm
+            || lifecycle_continuation_state(Some(&continuation)) != CookContinuationState::Failed
             || continuation.get("cook_id").and_then(Value::as_str) != Some(cook_id)
         {
             return false;
@@ -3340,6 +3310,109 @@ pub fn consume_claimed_with_dispatcher(
     default_store()?.consume_claimed_with_dispatcher(claim, dispatcher, execute)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ContinuationDecision {
+    Complete,
+    Retry,
+    Fail(String),
+    Rearm,
+    Keep,
+}
+
+enum ContinuationEvent<'a> {
+    Pass(&'a Result<(i32, CookDisposition)>),
+    Schedule {
+        stranded: bool,
+        explicit_recovery: bool,
+    },
+}
+
+/// Decide from the pass and the authoritative row, regardless of who noticed
+/// the work. Scheduling never revives failed work without operator authority.
+fn continuation_decision(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    event: ContinuationEvent<'_>,
+) -> ContinuationDecision {
+    match event {
+        ContinuationEvent::Schedule {
+            stranded,
+            explicit_recovery,
+        } => match lifecycle_continuation_state(lifecycle_continuation(record)) {
+            CookContinuationState::Absent => ContinuationDecision::Rearm,
+            CookContinuationState::Failed if explicit_recovery => ContinuationDecision::Rearm,
+            CookContinuationState::Pending if stranded || explicit_recovery => {
+                ContinuationDecision::Rearm
+            }
+            _ => ContinuationDecision::Keep,
+        },
+        ContinuationEvent::Pass(result) => match result {
+            Err(error) if error.retryable == Some(true) => ContinuationDecision::Retry,
+            Err(error) => ContinuationDecision::Fail(error.message.clone()),
+            Ok((0, disposition)) => {
+                if record
+                    .metadata
+                    .pointer("/cook_delivery/artifacts/promotion")
+                    .is_none()
+                    && record
+                        .metadata
+                        .pointer("/cook_controller_failure/details/promotion_pre_apply_refusal")
+                        == Some(&Value::Bool(true))
+                {
+                    ContinuationDecision::Fail(
+                        record.metadata["cook_controller_failure"]["message"]
+                            .as_str()
+                            .unwrap_or("promotion refused before apply")
+                            .to_owned(),
+                    )
+                } else if disposition.is_terminal()
+                    || super::CookDelivery::from_run_metadata(&record.metadata)
+                        .is_some_and(|delivery| delivery.blocker.is_some())
+                {
+                    ContinuationDecision::Complete
+                } else {
+                    ContinuationDecision::Retry
+                }
+            }
+            Ok((exit_code, _)) => {
+                let reason =
+                    if let Some(diagnostic) = record.metadata.get("cook_controller_failure") {
+                        diagnostic["message"]
+                            .as_str()
+                            .unwrap_or("Cook controller failure")
+                            .to_owned()
+                    } else if let Some(blocker) =
+                        super::CookDelivery::from_run_metadata(&record.metadata)
+                            .and_then(|delivery| delivery.blocker)
+                            .filter(|blocker| {
+                                blocker.code == super::CookDeliveryBlockerCode::PublishRefused
+                            })
+                    {
+                        format!("{}: {}", blocker.code.as_str(), blocker.message)
+                    } else {
+                        format!("Cook continuation exited unsuccessfully with status {exit_code}")
+                    };
+                ContinuationDecision::Fail(reason)
+            }
+        },
+    }
+}
+
+/// The only claim settlement owner. Callers supply the observed pass outcome;
+/// claim fencing, retry spacing and budgets remain lifecycle-owned.
+pub(super) fn settle_continuation(
+    claim: ClaimedCookContinuation,
+    decision: ContinuationDecision,
+) -> Result<()> {
+    match decision {
+        ContinuationDecision::Complete => claim.complete(),
+        ContinuationDecision::Retry => claim.retry(),
+        ContinuationDecision::Fail(reason) => claim.fail(&reason),
+        ContinuationDecision::Rearm | ContinuationDecision::Keep => Err(
+            Error::internal_unexpected("non-settlement continuation decision"),
+        ),
+    }
+}
+
 /// Settle a claimed continuation around one identity-only Cook pass. The
 /// claim is validated through the same loader [`CookService::advance`] uses,
 /// so a transport or recipe that cannot advance fails or retries the claim
@@ -3353,59 +3426,58 @@ fn consume_claimed_with_dispatcher_policy(
     let lifecycle_store = store.lifecycle_store();
     let cook_id = claim.continuation().cook_id.clone();
     let run_id = claim.continuation().run_id.clone();
-    let recipe = match store.load_recipe(&cook_id) {
-        Ok(recipe) => recipe,
-        Err(error) => {
-            claim.fail(&error.message)?;
-            return Err(error);
+    // Validate once, then feed every pre-pass failure to the same settlement
+    // owner. Recipe identity/transport failures remain permanent; request and
+    // reconciliation failures retain their declared retryability.
+    let preparation = (|| -> std::result::Result<(), (Error, bool)> {
+        let recipe = store
+            .load_recipe(&cook_id)
+            .map_err(|error| (error, false))?;
+        if !recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.run_id == run_id)
+        {
+            return Err((
+                Error::validation_invalid_argument(
+                    "cook_continuation.run_id",
+                    "claimed continuation is not declared by the durable cook recipe",
+                    Some(run_id.clone()),
+                    None,
+                ),
+                false,
+            ));
         }
-    };
-    if !recipe
-        .attempts
-        .iter()
-        .any(|attempt| attempt.run_id == run_id)
-    {
-        let error = Error::validation_invalid_argument(
-            "cook_continuation.run_id",
-            "claimed continuation is not declared by the durable cook recipe",
-            Some(run_id),
-            None,
-        );
-        claim.fail(&error.message)?;
+        let transport = cook_attempt_transport(&recipe, &run_id, false, dispatcher)
+            .map_err(|error| (error, false))?;
+        cook_attempt_request(&recipe, &run_id, &transport).map_err(|error| {
+            let retry = error.retryable == Some(true);
+            (error, retry)
+        })?;
+        if agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, &run_id)
+            .map_err(|error| (error, true))?
+        {
+            reconcile_recipe_attempt_for_continuation_in_stores(
+                store,
+                &lifecycle_store,
+                &recipe,
+                &run_id,
+            )
+            .map_err(|error| {
+                let retry = error.retryable == Some(true);
+                (error, retry)
+            })?;
+        }
+        Ok(())
+    })();
+    if let Err((error, retry)) = preparation {
+        let decision = if retry {
+            ContinuationDecision::Retry
+        } else {
+            ContinuationDecision::Fail(error.message.clone())
+        };
+        settle_continuation(claim, decision)?;
         return Err(error);
-    }
-    let transport = match cook_attempt_transport(&recipe, &run_id, false, dispatcher) {
-        Ok(transport) => transport,
-        Err(error) => {
-            claim.fail(&error.message)?;
-            return Err(error);
-        }
-    };
-    match cook_attempt_request(&recipe, &run_id, &transport) {
-        Ok(_) => {}
-        Err(error) if error.retryable == Some(true) => {
-            claim.retry()?;
-            return Err(error);
-        }
-        Err(error) => {
-            claim.fail(&error.message)?;
-            return Err(error);
-        }
-    }
-    if agent_task_lifecycle::run_record_exists_in_store(&lifecycle_store, &run_id)? {
-        if let Err(error) = reconcile_recipe_attempt_for_continuation_in_stores(
-            store,
-            &lifecycle_store,
-            &recipe,
-            &run_id,
-        ) {
-            if error.retryable == Some(true) {
-                claim.retry()?;
-            } else {
-                claim.fail(&error.message)?;
-            }
-            return Err(error);
-        }
     }
     lifecycle_store.mutate_record(&run_id, |record| {
         let progress = record
@@ -3415,70 +3487,28 @@ fn consume_claimed_with_dispatcher_policy(
         super::CookOutcome::write(&mut record.metadata, None) || progress
     })?;
     let execution = execute(&cook_id, &run_id);
-    match execution {
-        Ok((0, disposition)) => {
-            let current = lifecycle_store.read_record(&claim.continuation().run_id)?;
-            let terminal = disposition.is_terminal()
-                || super::CookDelivery::from_run_metadata(&current.metadata)
-                    .is_some_and(|delivery| delivery.blocker.is_some());
-            if rearmable_promotion_refusal(&current) {
-                let diagnostic = current.metadata["cook_controller_failure"]["message"]
+    let current = lifecycle_store.read_record(&run_id)?;
+    let decision = continuation_decision(&current, ContinuationEvent::Pass(&execution));
+    // Preserve the controller's structured cause for the supervising work job.
+    let controller_error = execution
+        .as_ref()
+        .ok()
+        .filter(|(code, _)| *code != 0)
+        .and_then(|_| current.metadata.get("cook_controller_failure"))
+        .map(|diagnostic| {
+            Error::new(
+                homeboy_core::ErrorCode::InternalUnexpected,
+                diagnostic["message"]
                     .as_str()
-                    .unwrap_or("promotion refused before apply");
-                claim.fail(diagnostic)?;
-            } else if terminal {
-                claim.complete()?;
-            } else {
-                claim.retry()?;
-            }
-            Ok(0)
-        }
-        Ok((exit_code, _)) => {
-            // Cook reports controller errors as non-zero results. Preserve the
-            // recorded cause rather than reducing it to an anonymous status.
-            let diagnostic = lifecycle_store
-                .read_record(&claim.continuation().run_id)?
-                .metadata
-                .get("cook_controller_failure")
-                .cloned();
-            if let Some(diagnostic) = diagnostic {
-                let message = diagnostic["message"]
-                    .as_str()
-                    .unwrap_or("Cook controller failure");
-                claim.fail(message)?;
-                return Err(Error::new(
-                    homeboy_core::ErrorCode::InternalUnexpected,
-                    message,
-                    diagnostic.clone(),
-                ));
-            }
-            // A refused publication is deterministic: another generation would
-            // re-run the same gates and be refused again (#16441).
-            let refusal = lifecycle_store
-                .read_record(&claim.continuation().run_id)
-                .ok()
-                .and_then(|record| super::CookDelivery::from_run_metadata(&record.metadata))
-                .and_then(|delivery| delivery.blocker)
-                .filter(|blocker| blocker.code == super::CookDeliveryBlockerCode::PublishRefused);
-            match refusal {
-                Some(blocker) => {
-                    claim.fail(&format!("{}: {}", blocker.code.as_str(), blocker.message))?
-                }
-                None => claim.fail(&format!(
-                    "Cook continuation exited unsuccessfully with status {exit_code}"
-                ))?,
-            }
-            Ok(exit_code)
-        }
-        Err(error) if error.retryable == Some(true) => {
-            claim.retry()?;
-            Err(error)
-        }
-        Err(error) => {
-            claim.fail(&error.message)?;
-            Err(error)
-        }
+                    .unwrap_or("Cook controller failure"),
+                diagnostic.clone(),
+            )
+        });
+    settle_continuation(claim, decision)?;
+    if let Some(error) = controller_error {
+        return Err(error);
     }
+    execution.map(|(code, _)| code)
 }
 
 fn recipe_value_error(field: &'static str) -> impl FnOnce(serde_json::Error) -> Error {
@@ -3678,6 +3708,141 @@ mod tests {
     };
     use homeboy_control_plane_contract::ControlPlaneState;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn continuation_decision_agrees_across_consumer_sweep_and_recovery() {
+        for (name, exit, retryable, refusal, stranded, expected) in [
+            (
+                "success",
+                0,
+                false,
+                false,
+                false,
+                CookContinuationState::Completed,
+            ),
+            (
+                "retryable failure",
+                1,
+                true,
+                false,
+                false,
+                CookContinuationState::Pending,
+            ),
+            (
+                "refused promotion",
+                0,
+                false,
+                true,
+                false,
+                CookContinuationState::Failed,
+            ),
+            (
+                "failed gate",
+                1,
+                false,
+                false,
+                false,
+                CookContinuationState::Failed,
+            ),
+            (
+                "stranded claim",
+                0,
+                false,
+                false,
+                true,
+                CookContinuationState::Pending,
+            ),
+        ] {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let store = CookRecipeStore::new(context.path_roots());
+            store.persist_recipe(&recipe()).unwrap();
+            store.enqueue_terminal_continuation("cook", "run").unwrap();
+            let lifecycle = store.lifecycle_store();
+            let claim = store
+                .claim_continuation_for("cook", "run")
+                .unwrap()
+                .unwrap();
+            if stranded {
+                drop(claim);
+            } else {
+                let result = store.consume_claimed_with_dispatcher(claim, &|_| Ok(None), |_, _| {
+                    if refusal {
+                        lifecycle.mutate_record("run", |record| {
+                            record.ensure_metadata_object().insert(
+                                "cook_controller_failure".into(),
+                                serde_json::json!({"message": "promotion refused before apply",
+                                    "details": {"promotion_pre_apply_refusal": true}}),
+                            );
+                            true
+                        })?;
+                    }
+                    if retryable {
+                        let mut error = Error::internal_unexpected("temporary failure");
+                        error.retryable = Some(true);
+                        Err(error)
+                    } else {
+                        Ok((exit, CookDisposition::Terminal))
+                    }
+                });
+                assert_eq!(result.is_err(), retryable, "{name}");
+            }
+            assert_eq!(
+                continuation_state_in_store(&store, "cook", "run").unwrap(),
+                expected,
+                "{name}: consumer"
+            );
+            let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+                lifecycle.observation_db_path(),
+            )
+            .unwrap();
+            let dead = jobs.create("table-continuation");
+            jobs.cancel(dead.id, "worker stopped").unwrap();
+            lifecycle
+                .mutate_record("run", |record| {
+                    agent_task_lifecycle::set_run_state(
+                        record,
+                        homeboy_lifecycle_contract::RunExecutionState::Succeeded,
+                    );
+                    record.metadata["cook_continuation_scheduler"] =
+                        serde_json::json!({"status": "scheduled", "job_id": dead.id.to_string()});
+                    true
+                })
+                .unwrap();
+            let generation = lifecycle.read_record("run").unwrap().metadata["cook_continuation"]
+                ["generation"]
+                .as_u64()
+                .unwrap_or(0);
+            let mut scheduled = 0;
+            super::super::reconcile::reconcile_stranded_terminal_cooks(&lifecycle, |_| {
+                scheduled += 1;
+                let replacement = jobs.create("table-replacement");
+                Ok(serde_json::json!({"scheduled": true, "job_id": replacement.id.to_string()}))
+            })
+            .unwrap();
+            assert_eq!(
+                continuation_state_in_store(&store, "cook", "run").unwrap(),
+                expected,
+                "{name}: sweep"
+            );
+            assert_eq!(
+                scheduled,
+                usize::from(expected == CookContinuationState::Pending),
+                "{name}: scheduled"
+            );
+            assert_eq!(
+                lifecycle.read_record("run").unwrap().metadata["cook_continuation"]["generation"]
+                    .as_u64()
+                    .unwrap_or(0),
+                generation + u64::from(expected == CookContinuationState::Pending)
+            );
+            store.schedule_recovery_continuation("cook", "run").unwrap();
+            assert_eq!(
+                continuation_state_in_store(&store, "cook", "run").unwrap(),
+                expected,
+                "{name}: recovery"
+            );
+        }
+    }
 
     /// A lifecycle store reached through a Cook recipe store must serialize on
     /// the same lifecycle lock as the lifecycle store that owns the records.
@@ -5654,13 +5819,9 @@ mod tests {
             &serde_json::json!({ "code": "controller.failure", "message": "stale" }),
         )
         .expect("persist controller failure");
-        assert!(rearm_failed_terminal_continuation_in_store(
-            &store,
-            &lifecycle_store,
-            "cook",
-            "run"
-        )
-        .unwrap());
+        assert!(store
+            .enqueue_terminal_continuation_with_recovery("cook", "run", true)
+            .unwrap());
         assert_eq!(
             continuation_state_in_store(&store, "cook", "run").unwrap(),
             CookContinuationState::Pending
@@ -5688,13 +5849,9 @@ mod tests {
             continuation_state_in_store(&store, "cook", "run").unwrap(),
             CookContinuationState::Completed
         );
-        assert!(!rearm_failed_terminal_continuation_in_store(
-            &store,
-            &lifecycle_store,
-            "cook",
-            "run"
-        )
-        .unwrap());
+        assert!(!store
+            .enqueue_terminal_continuation_with_recovery("cook", "run", true)
+            .unwrap());
     }
 
     #[test]
@@ -5962,13 +6119,9 @@ mod tests {
             .expect("failure diagnostic")
             .contains("status 7"));
 
-        assert!(rearm_failed_terminal_continuation_in_store(
-            &store,
-            &lifecycle_store,
-            "cook",
-            "run"
-        )
-        .unwrap());
+        assert!(store
+            .enqueue_terminal_continuation_with_recovery("cook", "run", true)
+            .unwrap());
         assert_eq!(
             continuation_state_in_store(&store, "cook", "run").unwrap(),
             CookContinuationState::Pending
@@ -6037,7 +6190,7 @@ mod tests {
     #[test]
     fn rearmed_continuation_from_an_older_runtime_is_consumed() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
+        let (store, _lifecycle_store) = rooted_stores(&context);
         let mut historical = recipe();
         historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
         store.persist_recipe(&historical).unwrap();
@@ -6048,7 +6201,8 @@ mod tests {
             .fail("wrong controller runtime")
             .unwrap();
 
-        rearm_failed_terminal_continuation_in_store(&store, &lifecycle_store, "cook", "run")
+        store
+            .enqueue_terminal_continuation_with_recovery("cook", "run", true)
             .unwrap();
         let claim = store
             .claim_continuation_for("cook", "run")

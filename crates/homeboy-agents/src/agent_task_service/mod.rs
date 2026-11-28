@@ -43,6 +43,7 @@ mod cook_delivery_artifacts;
 mod cook_summary;
 pub(crate) use cook_summary::cook_summary_in_store;
 pub use cook_summary::{cook_summary, cook_summary_for_run};
+mod cook_continuation;
 mod cook_lineage;
 pub(crate) mod cook_pre_execution;
 mod cook_prior_candidate;
@@ -88,6 +89,7 @@ pub use cook_activity::{worktree_files_changed, CookActivityProbe, CookProviderA
 pub use cook_adoption::*;
 pub use cook_baseline::*;
 pub use cook_budget::*;
+pub use cook_continuation::*;
 pub use cook_delivery::publication_receipt;
 #[cfg(any(test, feature = "test-support"))]
 pub use cook_delivery::test_support::*;
