@@ -133,11 +133,21 @@ require_shared_install_helper() {
     exit 1
 }
 
+run_composer_install() (
+    cd "$PROJECT_PATH" || exit 1
+    # Lockless installs resolve dependencies and can write a lockfile even if
+    # installation fails. Keep vendor/ but leave the release source lockless.
+    if [ ! -e composer.lock ] && [ ! -L composer.lock ]; then
+        trap 'rm -f -- composer.lock' EXIT
+    fi
+    composer install --no-interaction --prefer-dist
+)
+
 run_install() {
     local ran=0
     if has_composer; then
         echo "Installing WordPress PHP dependencies with composer" >&2
-        (cd "$PROJECT_PATH" && composer install --no-interaction --prefer-dist)
+        run_composer_install
         ran=1
     fi
     if has_package_json; then

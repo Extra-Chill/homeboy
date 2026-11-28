@@ -41,10 +41,21 @@ cat >"$PROJECT_DIR/package-lock.json" <<'JSON'
 }
 JSON
 
+printf '/vendor/\n' >"$PROJECT_DIR/.gitignore"
+git -C "$PROJECT_DIR" init -q
+git -C "$PROJECT_DIR" add .gitignore composer.json package.json package-lock.json
+git -C "$PROJECT_DIR" -c user.name=Fixture -c user.email=fixture@example.com commit -qm 'Lockless WordPress component'
+
 cat >"$BIN_DIR/composer" <<'SH'
 #!/usr/bin/env bash
+set -euo pipefail
 printf '%s\n' "$*" >>"${HOMEBOY_FAKE_COMPOSER_LOG:?}"
-exit 0
+if [ ! -e composer.lock ]; then
+    printf '%s\n' '{"packages":[]}' >composer.lock
+fi
+mkdir -p vendor
+touch vendor/autoload.php
+exit "${HOMEBOY_FAKE_COMPOSER_EXIT:-0}"
 SH
 cat >"$BIN_DIR/npm" <<'SH'
 #!/usr/bin/env bash
@@ -100,7 +111,7 @@ expect('phpunit/phpunit', '11.5.2', '153d0531b9f7e883c5053160cad6dd5ac28140b3');
 if (byName.php.locked_version !== undefined) throw new Error('platform requirement php must not report a locked version');
 if (!status.lockfiles.includes('composer.lock')) throw new Error('composer.lock not listed');
 NODE
-rm -f "$PROJECT_DIR/composer.lock"
+mv "$PROJECT_DIR/composer.lock" "$TMP_DIR/existing.lock"
 
 command_json="$("$ROOT_DIR/scripts/deps/deps-runner.sh" install-command)"
 COMMAND_JSON="$command_json" ROOT_DIR="$ROOT_DIR" node <<'NODE'
@@ -111,7 +122,22 @@ if (JSON.stringify(plan.command) !== JSON.stringify(expected)) {
 }
 NODE
 
+assert_clean_worktree() {
+    local changes
+    changes="$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=all)"
+    if [ -n "$changes" ]; then
+        printf 'expected a clean release worktree, got:\n%s\n' "$changes" >&2
+        exit 1
+    fi
+}
+
+# Mirror release preflight: hydrate through the deps provider, then check that
+# the source is still clean even though Composer generated a lockfile.
+assert_clean_worktree
 "$ROOT_DIR/scripts/deps/deps-runner.sh" install >/dev/null
+assert_clean_worktree
+test ! -e "$PROJECT_DIR/composer.lock"
+test -f "$PROJECT_DIR/vendor/autoload.php"
 if [ "$(cat "$HOMEBOY_FAKE_COMPOSER_LOG")" != "install --no-interaction --prefer-dist" ]; then
     echo "expected composer install command" >&2
     exit 1
@@ -120,6 +146,24 @@ if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci --no-audit --no-fund" ]; then
     echo "expected npm ci command" >&2
     exit 1
 fi
+
+# Composer can write the lockfile before hitting an install failure. Keep its
+# exit status and leave the source clean on that path too.
+install_status=0
+HOMEBOY_FAKE_COMPOSER_EXIT=42 "$ROOT_DIR/scripts/deps/deps-runner.sh" install >/dev/null || install_status=$?
+test "$install_status" -eq 42
+assert_clean_worktree
+test ! -e "$PROJECT_DIR/composer.lock"
+
+# Existing lockfiles belong to the component, even when untracked.
+cp "$TMP_DIR/existing.lock" "$PROJECT_DIR/composer.lock"
+"$ROOT_DIR/scripts/deps/deps-runner.sh" install >/dev/null
+cmp "$TMP_DIR/existing.lock" "$PROJECT_DIR/composer.lock"
+git -C "$PROJECT_DIR" add composer.lock
+git -C "$PROJECT_DIR" -c user.name=Fixture -c user.email=fixture@example.com commit -qm 'Track Composer lockfile'
+"$ROOT_DIR/scripts/deps/deps-runner.sh" install >/dev/null
+cmp "$TMP_DIR/existing.lock" "$PROJECT_DIR/composer.lock"
+assert_clean_worktree
 
 node <<'NODE'
 const fs = require('fs');
