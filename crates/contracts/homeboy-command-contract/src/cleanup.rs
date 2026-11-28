@@ -43,13 +43,13 @@ pub struct CleanupArgs {
     #[arg(long, value_name = "DAYS")]
     pub runtime_tmp_managed_older_than_days: Option<u64>,
 
-    /// Override the configured maximum number of resources inspected per pass.
+    /// Override the per-pass scan limit and cap each default detail collection.
     #[arg(long, value_name = "N")]
     pub limit: Option<i64>,
 
     /// Include every candidate and retained-resource detail in the inspected page.
     /// Default output keeps representative detail within the shared response budget.
-    #[arg(long)]
+    #[arg(long, visible_alias = "verbose")]
     pub full: bool,
 
     /// Continue a bounded shared-store or controller-scratch inventory from its cursor.
@@ -117,12 +117,15 @@ pub struct CleanupJobArgs {
 
 #[derive(Args, Debug, PartialEq, Eq)]
 pub struct CleanupRetainedStorageArgs {
-    /// Maximum largest-byte examples to return. The report always aggregates all inspected sources.
-    #[arg(long, default_value_t = 20)]
+    /// Maximum rows per detail collection. Totals always cover all inspected sources.
+    #[arg(long, default_value_t = 20, value_parser = parse_positive_usize)]
     pub limit: usize,
     /// Continue largest-byte examples after this deterministic reference token.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "verbose")]
     pub cursor: Option<String>,
+    /// Show all inspected lifecycle rows, aggregate keys, and filesystem detail.
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 #[derive(Args, Debug, PartialEq, Eq)]
@@ -145,14 +148,17 @@ pub struct CleanupArtifactsArgs {
     /// Sort artifact candidates before reporting or applying cleanup.
     #[arg(long, value_enum, default_value = "discovery")]
     pub sort: CleanupArtifactsSortArg,
-    /// Limit artifact candidates reported or removed after sorting. A positive
-    /// limit ensures a continuation always makes progress.
+    /// Limit artifact candidates reported or removed, and cap each default detail collection.
+    /// A positive limit ensures a continuation always makes progress.
     #[arg(
         long,
         value_name = "N",
         value_parser = parse_positive_usize
     )]
     pub limit: Option<usize>,
+    /// Include all detail from the inspected artifact page.
+    #[arg(long, visible_alias = "full")]
+    pub verbose: bool,
     /// Resume repository-worktree artifact inventory at the cursor returned by
     /// an earlier bounded pass.
     #[arg(long, value_name = "CURSOR")]

@@ -2225,7 +2225,8 @@ fn repository_artifact_cursor(
         .transpose()
 }
 
-fn artifact_cleanup_apply_command(
+/// Render an artifact cleanup invocation with its original scope and cursor.
+pub fn artifact_cleanup_apply_command(
     options: &ArtifactCleanupOptions,
     cursor: Option<&ArtifactCleanupCursor>,
 ) -> String {
