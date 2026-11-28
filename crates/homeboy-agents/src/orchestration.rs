@@ -5280,6 +5280,11 @@ fn unmaterialized_admission_blocker(
     Option<ControlPlaneAdmissionRetry>,
     Option<ControlPlaneBlockerDaemon>,
 )> {
+    // Once a live step leaves the queue, its current wait (if any) is
+    // authoritative, not the readiness snapshot taken at submission.
+    if record.state() != RunExecutionState::Queued && record.has_live_execution_step_owner() {
+        return None;
+    }
     let state = admission.get("state")?.as_str()?.trim();
     if !matches!(
         state,
@@ -10188,6 +10193,36 @@ mod tests {
         );
         // A live admission is rearmed by continuing the run, not a Cook step.
         assert_eq!(resume.reason, "resume");
+    }
+
+    #[test]
+    fn live_execution_step_only_projects_submission_blocker_while_queued() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.set_state_for_test(RunExecutionState::Queued);
+        let metadata = record.metadata.as_object_mut().unwrap();
+        metadata.remove("cook_controller_failure");
+        metadata.extend(crate::agent_task_lifecycle::execution_step_owner_fixture(
+            "cook",
+        ));
+        record.metadata["unmaterialized_cook_admission"] = json!({
+            "state": "blocked_runner_unavailable",
+            "reason": "daemon_freshness_unavailable",
+        });
+
+        let queued = project_record(&record, None, None).expect("project queued step");
+        assert_eq!(queued.phase.as_deref(), Some("admission"));
+        let blocker = queued.blocker.expect("admission blocker");
+        assert_eq!(blocker.code.as_deref(), Some("blocked_runner_unavailable"));
+        assert_eq!(
+            blocker.reason.as_deref(),
+            Some("daemon_freshness_unavailable")
+        );
+
+        record.set_state_for_test(RunExecutionState::Running);
+        assert!(record.has_live_execution_step_owner());
+        let running = project_record(&record, None, None).expect("project running step");
+        assert_eq!(running.phase.as_deref(), Some("promotion_gates"));
+        assert!(running.blocker.is_none(), "{:?}", running.blocker);
     }
 
     #[test]
