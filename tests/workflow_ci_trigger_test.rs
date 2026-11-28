@@ -150,3 +150,61 @@ fn prepare_hands_a_freshly_cut_tag_to_downstream_publication() {
     let outputs = mark_prepared_outputs("true", "");
     assert!(outputs.contains("prepared=true"), "{outputs}");
 }
+
+fn run_failed_sha_cache_cleanup(list_exit: &str) -> std::process::Output {
+    let workflow = release_workflow();
+    let step = workflow["jobs"]["clear-failure"]["steps"]
+        .as_sequence()
+        .expect("clear-failure declares steps")
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Clear failed SHA cache"))
+        .expect("clear-failure declares a cache cleanup step");
+    let prefix = step["env"]["CACHE_KEY_PREFIX"]
+        .as_str()
+        .expect("cache cleanup declares its key prefix")
+        .replace("${{ github.ref_name }}", "main");
+    let script = step["run"].as_str().expect("cache cleanup is a run script");
+    let mock = r#"
+gh() {
+  case "$1 $2" in
+    'cache list')
+      [[ "$*" == "cache list --repo example/project --key release-last-failed-main- --json id --jq .[].id" ]] || return 99
+      if [[ "$LIST_EXIT" != 0 ]]; then return "$LIST_EXIT"; fi
+      printf '123\n456\n'
+      ;;
+    'cache delete')
+      printf '%s\n' "$*"
+      # Simulate the first entry disappearing after the list call.
+      [[ "$3" != 123 ]]
+      ;;
+    *) return 98 ;;
+  esac
+}
+"#;
+    let dir = tempfile::tempdir().expect("tempdir without a checkout");
+    std::process::Command::new("bash")
+        .args(["-e", "-c", &format!("{mock}\n{script}")])
+        .current_dir(dir.path())
+        .env("GITHUB_REPOSITORY", "example/project")
+        .env("CACHE_KEY_PREFIX", prefix)
+        .env("LIST_EXIT", list_exit)
+        .output()
+        .expect("run cache cleanup in bash")
+}
+
+#[test]
+fn release_cache_cleanup_uses_repository_context_and_tolerates_absent_entries() {
+    let output = run_failed_sha_cache_cleanup("0");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("delete calls are UTF-8"),
+        "cache delete 123 --repo example/project\ncache delete 456 --repo example/project\n"
+    );
+}
+
+#[test]
+fn release_cache_cleanup_fails_when_listing_fails() {
+    let output = run_failed_sha_cache_cleanup("42");
+    assert_eq!(output.status.code(), Some(42), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
