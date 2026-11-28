@@ -1,20 +1,24 @@
 //! Runtime-derived command documentation.
 
+use std::fmt::Write;
+
 use clap::Command;
 
 pub(crate) fn generated_command_index(command: &Command) -> String {
-    let mut commands = documented_subcommands(command)
-        .into_iter()
-        .map(|command| command.get_name().to_string())
-        .collect::<Vec<_>>();
-    commands.sort_unstable();
+    let mut commands = documented_subcommands(command);
+    commands.sort_unstable_by_key(|command| command.get_name());
 
     let mut out = String::from(
         "# Commands index\n\n\
          This index is generated on demand from the command surface in this Homeboy build.\n\n",
     );
     for command in commands {
-        out.push_str(&format!("- [{command}]({command}.md)\n"));
+        let name = command.get_name();
+        let _ = write!(out, "- [{name}]({name}.md)");
+        if let Some(about) = command.get_about() {
+            let _ = write!(out, " — {about}");
+        }
+        out.push('\n');
     }
     out.push_str(
         "\nRun `homeboy <command> --help` for the current argument and subcommand surface. \
