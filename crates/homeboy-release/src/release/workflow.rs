@@ -363,6 +363,8 @@ fn run_command_with_workspace_inner(
     };
 
     if options.dry_run {
+        let mut options = options;
+        super::execution_plan::infer_protected_head(&component, &input.component_id, &mut options)?;
         if let Some(result) = prepared_tag_publish_recovery_result(
             &input,
             &component,
@@ -590,10 +592,7 @@ fn run_command_with_workspace_inner(
     let protected_prepare = input.pipeline.protected_branch && !input.pipeline.head;
     let continuation_command = protected_prepare.then(|| {
         if release_step_exit == 0 {
-            format!(
-                "homeboy release {} --protected-branch --head --apply",
-                input.component_id
-            )
+            format!("homeboy release {} --head --apply", input.component_id)
         } else {
             format!(
                 "homeboy release {} --protected-branch --apply",
@@ -893,9 +892,15 @@ fn prepared_release_pr_resume_intent(
     {
         return Err(Error::validation_invalid_argument(
             "protected-branch",
-            format!("prepared release branch '{}' already has tag '{}'", expected_branch, tag),
+            format!(
+                "prepared release branch '{}' already has tag '{}'",
+                expected_branch, tag
+            ),
             Some(tag),
-            Some(vec!["Use --protected-branch --head only after the release pull request is normally merged.".to_string()]),
+            Some(vec![
+                "Use --head --apply from the release pull request's merge or squash commit."
+                    .to_string(),
+            ]),
         ));
     }
     let subject = std::process::Command::new("git")

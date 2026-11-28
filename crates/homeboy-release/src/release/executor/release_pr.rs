@@ -62,13 +62,20 @@ pub(crate) fn require_merged_release_pr(
     base: &str,
     head: &str,
 ) -> Result<()> {
+    let commit = homeboy_core::git::get_head_commit(&component.local_path)?;
+    // Listing by head ref also works when the release branch has been deleted.
     let output = Command::new("gh")
         .args([
             "pr",
-            "view",
+            "list",
+            "--state",
+            "merged",
+            "--base",
+            base,
+            "--head",
             head,
             "--json",
-            "state,baseRefName,headRefName",
+            "state,baseRefName,headRefName,isCrossRepository,mergeCommit",
         ])
         .current_dir(&component.local_path)
         .output()
@@ -82,12 +89,17 @@ pub(crate) fn require_merged_release_pr(
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
             Some(head.to_string()),
-            Some(vec![
-                "Merge the release PR normally, then retry --protected-branch --head.".to_string(),
-            ]),
+            Some(vec![MERGE_HINT.to_string()]),
         ));
     }
-    let pr: ReleasePr = serde_json::from_slice(&output.stdout).map_err(|error| {
+    verify_merged_release_pr(&output.stdout, base, head, &commit)
+}
+
+const MERGE_HINT: &str =
+    "Merge the release PR, check out its merge or squash commit, then retry --head --apply.";
+
+fn verify_merged_release_pr(output: &[u8], base: &str, head: &str, commit: &str) -> Result<()> {
+    let prs: Vec<ReleasePr> = serde_json::from_slice(output).map_err(|error| {
         Error::validation_invalid_argument(
             "protected-branch",
             format!("cannot read release PR state: {error}"),
@@ -95,28 +107,74 @@ pub(crate) fn require_merged_release_pr(
             None,
         )
     })?;
-    if pr.state == "MERGED" && pr.base_ref_name == base && pr.head_ref_name == head {
+    if prs.iter().any(|pr| {
+        pr.state == "MERGED"
+            && !pr.is_cross_repository
+            && pr.base_ref_name == base
+            && pr.head_ref_name == head
+            && pr
+                .merge_commit
+                .as_ref()
+                .is_some_and(|merge| merge.oid == commit)
+    }) {
         return Ok(());
     }
     Err(Error::validation_invalid_argument(
         "protected-branch",
         format!(
-            "release PR must be merged from '{}' into '{}'; found state '{}' from '{}' into '{}'",
-            head, base, pr.state, pr.head_ref_name, pr.base_ref_name
+            "HEAD {commit} is not the merged commit of a release PR from '{head}' into '{base}'"
         ),
         Some(head.to_string()),
-        Some(vec![
-            "Merge the release PR normally, then retry --protected-branch --head.".to_string(),
-        ]),
+        Some(vec![MERGE_HINT.to_string()]),
     ))
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReleasePr {
-    #[serde(rename = "state")]
     state: String,
-    #[serde(rename = "baseRefName")]
     base_ref_name: String,
-    #[serde(rename = "headRefName")]
     head_ref_name: String,
+    is_cross_repository: bool,
+    merge_commit: Option<MergeCommit>,
+}
+
+#[derive(Deserialize)]
+struct MergeCommit {
+    oid: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_merged_release_pr;
+
+    #[test]
+    fn head_release_requires_a_merged_pr_for_the_version_and_default_branch() {
+        for (state, base, head, fork, accepted) in [
+            ("MERGED", "trunk", "release/v1.2.3", false, true),
+            ("OPEN", "trunk", "release/v1.2.3", false, false),
+            ("MERGED", "develop", "release/v1.2.3", false, false),
+            ("MERGED", "trunk", "release/v1.2.2", false, false),
+            ("MERGED", "trunk", "release/v1.2.3", true, false),
+        ] {
+            let output = serde_json::json!([{
+                "state": state,
+                "baseRefName": base,
+                "headRefName": head,
+                "isCrossRepository": fork,
+                "mergeCommit": { "oid": "merge-sha" },
+            }]);
+            assert_eq!(
+                verify_merged_release_pr(
+                    output.to_string().as_bytes(),
+                    "trunk",
+                    "release/v1.2.3",
+                    "merge-sha",
+                )
+                .is_ok(),
+                accepted,
+                "{output}"
+            );
+        }
+    }
 }

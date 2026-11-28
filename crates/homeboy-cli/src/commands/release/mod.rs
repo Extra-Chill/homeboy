@@ -203,14 +203,15 @@ pub struct ReleaseExecuteArgs {
     #[arg(long)]
     retag: bool,
 
-    /// Finish the release pipeline for an already-versioned, already-tagged HEAD.
-    /// Skips changelog/version/git mutation steps and runs package, GitHub Release,
-    /// publish, cleanup, and post-release hooks against the tag pointing at HEAD.
+    /// Finish a release at its tagged commit or verified release PR merge commit.
+    /// Skips version bumps and changelog edits. Tags HEAD if it is the verified
+    /// merge or squash commit of an untagged release PR, then runs packaging,
+    /// publishing, cleanup, and post-release hooks.
     #[arg(long)]
     head: bool,
 
     /// Prepare a release pull request instead of directly updating the default branch.
-    /// Run again with --head after GitHub has normally merged the release PR.
+    /// After the PR merges, check out its merge or squash commit and run --head --apply.
     #[arg(long)]
     protected_branch: bool,
 

@@ -49,6 +49,11 @@ pub(crate) fn run_with_plan(
         options.pipeline.protected_branch_resume,
     )?;
     workspace_options.path_override = Some(workspace.component.local_path.clone());
+    super::execution_plan::infer_protected_head(
+        &workspace.component,
+        component_id,
+        &mut workspace_options,
+    )?;
     let checkout_guard =
         super::checkout_guard::ReleaseCheckoutGuard::capture(&workspace.component)?;
 

@@ -172,6 +172,23 @@ pub(super) fn execute_plan_steps_at_source(
     Ok(run.stopped)
 }
 
+/// Preserve ordinary tagged-HEAD finalization. If the version-derived tag is
+/// missing locally, the only supported tag creation path is a verified release
+/// PR merge. A tag already pointing elsewhere is not a missing tag.
+pub(super) fn infer_protected_head(
+    component: &Component,
+    component_id: &str,
+    options: &mut ReleaseOptions,
+) -> Result<()> {
+    if options.pipeline.head && !options.pipeline.protected_branch {
+        let version = super::version::read_component_version(component)?.version;
+        let scope = super::scope::ReleaseScope::resolve(component, component_id)?;
+        options.pipeline.protected_branch =
+            !git::tag_exists_locally(&component.local_path, &scope.tag_name(&version))?;
+    }
+    Ok(())
+}
+
 fn initial_release_state(
     component: &Component,
     component_id: &str,
@@ -197,6 +214,7 @@ fn initial_release_state(
         return Ok(ReleaseState {
             version: Some(version_info.version),
             tag: Some(expected_tag),
+            notes: read_current_release_notes(component)?,
             ..ReleaseState::default()
         });
     }
@@ -782,6 +800,130 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn head_release_tags_the_exact_release_pr_merge_or_squash_commit() {
+        use crate::release::types::ReleaseCommandInput;
+        use homeboy_core::test_support::{with_isolated_home, EnvVarGuard};
+        use std::os::unix::fs::PermissionsExt;
+
+        with_isolated_home(|home| {
+            let gh = home.path().join("gh");
+            std::fs::write(
+                &gh,
+                "#!/bin/sh\n[ \"$1 $2\" = 'pr list' ] || exit 1\ncat .git/release-pr.json\n",
+            )
+            .expect("write gh fixture");
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
+                .expect("make gh executable");
+            let path = std::env::var_os("PATH").expect("PATH");
+            let path = std::env::join_paths(
+                std::iter::once(home.path().to_path_buf()).chain(std::env::split_paths(&path)),
+            )
+            .expect("fixture PATH");
+            let _path = EnvVarGuard::set("PATH", path);
+
+            for merge_method in ["--no-ff", "--squash"] {
+                let (remote, checkout) = release_repo_with_remote_tag("1.2.2", "v1.2.2");
+                let dir = checkout.path();
+                run_in(dir, &["git", "switch", "-c", "release/v1.2.3"]);
+                std::fs::write(dir.join("plugin.php"), "<?php\n/*\nVersion: 1.2.3\n*/\n")
+                    .expect("write bumped version");
+                run_in(dir, &["git", "commit", "-am", "release: v1.2.3"]);
+                run_in(dir, &["git", "switch", "main"]);
+                run_in(
+                    dir,
+                    &[
+                        "git",
+                        "merge",
+                        merge_method,
+                        "--no-commit",
+                        "release/v1.2.3",
+                    ],
+                );
+                run_in(dir, &["git", "commit", "-m", "Merge release PR"]);
+                let path = dir.to_str().expect("checkout path");
+                let merged = homeboy_core::git::get_head_commit(path).expect("merge commit");
+                run_in(
+                    dir,
+                    &["git", "commit", "--allow-empty", "-m", "main advanced"],
+                );
+                run_in(dir, &["git", "push", "origin", "main"]);
+                let advanced = homeboy_core::git::get_head_commit(path).expect("advanced commit");
+                run_in(dir, &["git", "branch", "-D", "release/v1.2.3"]);
+                std::fs::write(
+                    dir.join(".git/release-pr.json"),
+                    serde_json::json!([{
+                        "state": "MERGED",
+                        "baseRefName": "main",
+                        "headRefName": "release/v1.2.3",
+                        "isCrossRepository": false,
+                        "mergeCommit": { "oid": merged },
+                    }])
+                    .to_string(),
+                )
+                .expect("write PR fixture");
+
+                let input = ReleaseCommandInput {
+                    component_id: "fixture".to_string(),
+                    path_override: Some(path.to_string()),
+                    skip_checks: true,
+                    skip_github_release: true,
+                    pipeline: ReleasePipelineOptions {
+                        head: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let tag_commit = || homeboy_core::git::remote_tag_commit(path, "v1.2.3").unwrap();
+                let err = crate::release::workflow::run_command(input.clone())
+                    .expect_err("a later commit with the same version must not be tagged");
+                assert!(err.message.contains("is not the merged commit"), "{err:?}");
+                assert_eq!(tag_commit(), None);
+
+                // Keep the checkout attached and behind origin/main: finalization
+                // must not fast-forward away from the verified merge commit.
+                run_in(dir, &["git", "reset", "--hard", &merged]);
+                let (preview, exit) = crate::release::workflow::run_command(ReleaseCommandInput {
+                    dry_run: true,
+                    ..input.clone()
+                })
+                .expect("preview finalization");
+                assert_eq!(exit, 0, "{merge_method}: {preview:?}");
+                assert!(preview
+                    .plan
+                    .unwrap()
+                    .plan
+                    .steps
+                    .iter()
+                    .any(|step| step.id == "git.tag"));
+                assert!(!homeboy_core::git::tag_exists_locally(path, "v1.2.3").unwrap());
+                assert_eq!(tag_commit(), None);
+
+                // The first run tags the merge; a retry uses the tagged-HEAD
+                // path and must still finalize the same commit.
+                for _ in 0..2 {
+                    let (result, exit) = crate::release::workflow::run_command(input.clone())
+                        .unwrap_or_else(|err| panic!("{merge_method}: {err:?}"));
+                    assert_eq!(exit, 0, "{merge_method}: {result:?}");
+                    assert_eq!(result.status, "released");
+                    assert_eq!(tag_commit().as_deref(), Some(merged.as_str()));
+                }
+                assert_eq!(homeboy_core::git::get_head_commit(path).unwrap(), merged);
+                assert_eq!(
+                    homeboy_core::git::run_git(
+                        remote.path(),
+                        &["rev-parse", "refs/heads/main"],
+                        "remote main"
+                    )
+                    .unwrap()
+                    .trim(),
+                    advanced,
+                );
+            }
+        });
+    }
+
     fn release_repo_with_remote_tag(
         version: &str,
         tag: &str,
@@ -821,6 +963,7 @@ mod tests {
             checkout.path().join("homeboy.json"),
             r#"{
                 "id": "fixture",
+                "changelog_target": "CHANGELOG.md",
                 "scripts": {
                     "lint": ["sh -c 'printf lint >> .preflight-scripts; touch generated-by-script'"],
                     "test": ["sh -c 'printf test >> .preflight-scripts; touch generated-by-script'"],
@@ -832,6 +975,11 @@ mod tests {
             }"#,
         )
         .expect("write homeboy config");
+        std::fs::write(
+            checkout.path().join("CHANGELOG.md"),
+            format!("## [{version}]\n\n- Fixture release\n"),
+        )
+        .expect("write changelog");
         run_in(checkout.path(), &["git", "add", "."]);
         run_in(
             checkout.path(),
