@@ -58,15 +58,35 @@ fn ci_pull_request_trigger_includes_edited_activity_type() {
     );
 }
 
-fn gate_action_revision(workflow: &Value, job: &str) -> String {
+fn gate_action_step<'a>(workflow: &'a Value, job: &str) -> &'a Value {
     workflow["jobs"][job]["steps"]
         .as_sequence()
         .unwrap_or_else(|| panic!("{job} declares steps"))
         .iter()
-        .filter_map(|step| step["uses"].as_str())
-        .find_map(|uses| uses.strip_prefix("Extra-Chill/homeboy-action@"))
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("Extra-Chill/homeboy-action@"))
+        })
         .unwrap_or_else(|| panic!("{job} runs the Homeboy Action"))
-        .to_string()
+}
+
+fn gate_action_revision<'a>(workflow: &'a Value, job: &str) -> &'a str {
+    gate_action_step(workflow, job)["uses"]
+        .as_str()
+        .and_then(|uses| uses.strip_prefix("Extra-Chill/homeboy-action@"))
+        .expect("the Homeboy Action has a revision")
+}
+
+#[test]
+fn release_test_gate_requires_full_suite_without_a_push_base() {
+    let workflow = release_workflow();
+    let inputs = &gate_action_step(&workflow, "gate-test")["with"];
+    assert_eq!(inputs["commands"].as_str(), Some("review test"));
+    assert_eq!(inputs["scope"].as_str(), Some("full"));
+    // The action appends explicit args even in full scope, so they must not
+    // reintroduce --changed-since or any other test selector.
+    assert_eq!(inputs["args"].as_str(), Some("--skip-lint"));
 }
 
 // Release lint/test gates must execute one reviewed Homeboy Action revision.
