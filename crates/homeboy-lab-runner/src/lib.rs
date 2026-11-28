@@ -1188,28 +1188,19 @@ fn retry_admission_candidate(
             );
         }
     }
-    result
-        .map(|mut candidate| {
-            if !candidate.connected || candidate.unverified_daemon {
-                candidate.admission_remediation =
-                    Some(format!("homeboy runner connect {runner_id}"));
-            }
-            candidate
-        })
-        .map_err(|error| {
-            let message = format!(
-                "blocked_runner_unavailable: {error}; run homeboy runner connect {runner_id}"
-            );
-            // Keep the probe's typed code so admission can tell a lost
-            // transport from a definitive refusal.
-            let mut blocker = Error::new(error.code, message, serde_json::Value::Null);
-            blocker.details = serde_json::json!({
-                "classification": "blocked_runner_unavailable",
-                "runner": runner_id,
-                "recovery_command": format!("homeboy runner connect {runner_id}"),
-            });
-            blocker
-        })
+    result.map_err(|error| {
+        let message =
+            format!("blocked_runner_unavailable: {error}; run homeboy runner connect {runner_id}");
+        // Keep the probe's typed code so admission can tell a lost
+        // transport from a definitive refusal.
+        let mut blocker = Error::new(error.code, message, serde_json::Value::Null);
+        blocker.details = serde_json::json!({
+            "classification": "blocked_runner_unavailable",
+            "runner": runner_id,
+            "recovery_command": format!("homeboy runner connect {runner_id}"),
+        });
+        blocker
+    })
 }
 
 fn observe_lab_runner_admission_candidate(
@@ -1281,6 +1272,10 @@ fn lab_runner_admission_candidate(
         capacity,
         stale_daemon: admission_warning.is_some(),
         unverified_daemon,
+        freshness_observation_unavailable: status
+            .daemon_freshness
+            .as_ref()
+            .is_none_or(|freshness| freshness.is_observation_unavailable()),
         admission_fresh: lab::offload::metadata::lab_runner_admission_refusal(
             status,
             exact_version,
@@ -1408,9 +1403,10 @@ fn lab_runner_readiness_from_candidates(
             .all(DefaultLabRunnerCandidate::readiness_unobserved)
     {
         LabRunnerReadinessState::ReadinessUnobserved
-    } else if candidates.iter().any(|candidate| {
-        candidate.stale_daemon || (!candidate.admission_fresh && !candidate.unverified_daemon)
-    }) {
+    } else if candidates
+        .iter()
+        .any(DefaultLabRunnerCandidate::has_stale_daemon)
+    {
         LabRunnerReadinessState::Stale
     } else if reasons
         .iter()
@@ -1429,26 +1425,27 @@ fn lab_runner_readiness_from_candidates(
             candidates
                 .iter()
                 .map(|candidate| {
-                    // A connected runner without attributable daemon freshness
-                    // (unverified lease) recovers by reconnecting, not by
-                    // re-reading the same unverified status.
-                    if candidate.admission_fresh {
-                        format!("homeboy runner status {}", candidate.id)
-                    } else {
+                    if !candidate.connected
+                        || (!candidate.admission_fresh
+                            && !candidate.freshness_observation_unavailable)
+                    {
                         format!("homeboy runner connect {}", candidate.id)
+                    } else {
+                        format!("homeboy runner status {}", candidate.id)
                     }
                 })
                 .collect()
         }
         LabRunnerReadinessState::Stale => candidates
             .iter()
-            .filter(|candidate| {
-                candidate.stale_daemon
-                    || (!candidate.admission_fresh && !candidate.unverified_daemon)
-            })
+            .filter(|candidate| candidate.has_stale_daemon())
             .map(|candidate| {
                 candidate.admission_remediation.clone().unwrap_or_else(|| {
-                    format!("homeboy runner doctor {} --scope lab-offload", candidate.id)
+                    if !candidate.admission_fresh && !candidate.freshness_observation_unavailable {
+                        format!("homeboy runner connect {}", candidate.id)
+                    } else {
+                        format!("homeboy runner doctor {} --scope lab-offload", candidate.id)
+                    }
                 })
             })
             .collect(),
@@ -1483,6 +1480,8 @@ struct DefaultLabRunnerCandidate {
     /// generation. It is not proof of staleness, but missing lease identity
     /// still fails closed through `admission_fresh`.
     unverified_daemon: bool,
+    /// An absent or incomplete freshness probe is not a completed lease check.
+    freshness_observation_unavailable: bool,
     admission_fresh: bool,
     admission_failure_reason: Option<String>,
     admission_remediation: Option<String>,
@@ -1503,6 +1502,13 @@ struct DefaultLabRunnerReadiness {
 const UNVERIFIED_DAEMON_SELECTION_PENALTY: i32 = 50;
 
 impl DefaultLabRunnerCandidate {
+    fn has_stale_daemon(&self) -> bool {
+        self.stale_daemon
+            || (!self.admission_fresh
+                && !self.unverified_daemon
+                && !self.freshness_observation_unavailable)
+    }
+
     fn availability(&self) -> RunnerAvailability {
         let mut availability = RunnerAvailability::from_status_parts(
             self.id.clone(),
@@ -1558,6 +1564,7 @@ impl DefaultLabRunnerCandidate {
         self.connected
             && !self.stale_daemon
             && self.admission_remediation.is_none()
+            && (self.admission_fresh || self.freshness_observation_unavailable)
             && !availability.accepts_jobs
             && !availability.reasons.is_empty()
             && availability
@@ -2337,6 +2344,7 @@ mod tests {
             capacity: None,
             stale_daemon: false,
             unverified_daemon: false,
+            freshness_observation_unavailable: false,
             admission_fresh: true,
             admission_failure_reason: None,
             admission_remediation: None,
@@ -2635,16 +2643,43 @@ mod tests {
 
     #[test]
     fn admission_refresh_classifies_unobserved_and_absent_evidence() {
-        let mut unobserved_candidate = default_lab_candidate("unobserved", true);
-        unobserved_candidate.admission_fresh = false;
-        let unobserved =
-            lab_runner_readiness_from_refresh_observations(None, vec![Ok(unobserved_candidate)])
-                .expect("unobserved freshness remains classified");
+        let mut status = skewed_runner_status(patch_drift_version());
+        status.active_job_state = RunnerActiveJobState::Unavailable;
+        let mut unavailable = status.daemon_freshness.take().unwrap();
+        unavailable.fresh = false;
+        unavailable.lease_id = None;
+        unavailable.stale_reason_code =
+            Some(homeboy_core::daemon::DaemonStaleReasonCode::ObservationUnavailable);
+        let policy = test_policy(Some(1), false);
+
+        for freshness in [None, Some(unavailable)] {
+            status.daemon_freshness = freshness;
+            let candidate = lab_runner_admission_candidate(&status.runner_id, &status, &policy);
+            let unobserved =
+                lab_runner_readiness_from_refresh_observations(None, vec![Ok(candidate)])
+                    .expect("unobserved freshness remains classified");
+            assert_eq!(
+                unobserved.state,
+                LabRunnerReadinessState::ReadinessUnobserved
+            );
+            assert!(unobserved.available_runner_ids.is_empty());
+            for reason in TRANSIENT_READINESS_REASONS {
+                assert!(unobserved.reasons.iter().any(|reported| reported == reason));
+            }
+            assert_eq!(
+                unobserved.remediation_commands,
+                ["homeboy runner status homeboy-lab"]
+            );
+        }
+
+        status.connected = false;
+        status.state = RunnerSessionState::Disconnected;
+        let disconnected = runner_readiness_for_status(&status, &policy);
+        assert_eq!(disconnected.state, LabRunnerReadinessState::Disconnected);
         assert_eq!(
-            unobserved.state,
-            LabRunnerReadinessState::ReadinessUnobserved
+            disconnected.remediation_commands,
+            ["homeboy runner connect homeboy-lab"]
         );
-        assert_eq!(unobserved.reasons, ["daemon_freshness_unavailable"]);
 
         let absent = lab_runner_readiness_from_refresh_observations(None, Vec::new())
             .expect("an empty bounded inventory is an absence observation");
@@ -2760,13 +2795,22 @@ mod tests {
             ["homeboy runner refresh-homeboy version-mismatch"]
         );
 
-        let mut lease_missing = default_lab_candidate("lease-missing", true);
-        lease_missing.admission_fresh = false;
-        lease_missing.unverified_daemon = true;
-        let lease_missing = lab_runner_readiness_from_candidates(None, vec![lease_missing]);
+        let mut status = skewed_runner_status(patch_drift_version());
+        let mut stale_status = status.clone();
+        stale_status.daemon_freshness.as_mut().unwrap().fresh = false;
+        let policy = test_policy(Some(1), false);
+        let stale_lease = runner_readiness_for_status(&stale_status, &policy);
+        assert_eq!(stale_lease.state, LabRunnerReadinessState::Stale);
+        assert_eq!(
+            stale_lease.remediation_commands,
+            ["homeboy runner connect homeboy-lab"]
+        );
+
+        status.daemon_freshness.as_mut().unwrap().lease_id = None;
+        let lease_missing = runner_readiness_for_status(&status, &policy);
         assert_eq!(
             lease_missing.state,
-            LabRunnerReadinessState::ReadinessUnobserved
+            LabRunnerReadinessState::ConnectedIneligible
         );
         assert!(lease_missing.available_runner_ids.is_empty());
         assert!(lease_missing
@@ -2774,7 +2818,7 @@ mod tests {
             .contains(&"daemon_freshness_unavailable".to_string()));
         assert_eq!(
             lease_missing.remediation_commands,
-            ["homeboy runner status lease-missing"]
+            ["homeboy runner connect homeboy-lab"]
         );
 
         let mut full = default_lab_candidate("full", true);
