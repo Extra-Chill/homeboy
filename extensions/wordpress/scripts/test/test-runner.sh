@@ -446,8 +446,8 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
 
 show_usage() {
     cat <<'EOF'
-Usage: homeboy test <component-id> [-- --file <path>]
-       homeboy test <component-id> [-- --host-smoke-file <tests/...-smoke.php>]
+Usage: homeboy review test <component-id> [-- --file <path>]
+       homeboy review test <component-id> [-- --host-smoke-file <tests/...-smoke.php>]
 
 Options passed after `--` are handled by the WordPress extension runner:
   --file <path>             Run one test file, routed by file type.

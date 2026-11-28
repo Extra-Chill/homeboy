@@ -6,7 +6,7 @@ fi
 
 set -euo pipefail
 
-# Node.js build runner for `homeboy build`.
+# Node.js build runner for `homeboy review build`.
 #
 # Detection order:
 #   1. HOMEBOY_NODE_BUILD_COMMAND env var (full override)

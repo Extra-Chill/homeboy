@@ -38,8 +38,8 @@ output by directory name.
 Enable sccache through extension settings or the environment:
 
 ```bash
-HOMEBOY_RUST_SCCACHE=1 homeboy test my-rust-component
-HOMEBOY_RUST_SCCACHE=1 homeboy lint my-rust-component
+HOMEBOY_RUST_SCCACHE=1 homeboy review test my-rust-component
+HOMEBOY_RUST_SCCACHE=1 homeboy review lint my-rust-component
 HOMEBOY_RUST_SCCACHE=1 homeboy bench my-rust-component
 ```
 
@@ -64,7 +64,7 @@ Linker acceleration is explicit because linker availability and compatibility
 vary by host:
 
 ```bash
-HOMEBOY_RUST_LINKER=mold homeboy test my-rust-component
+HOMEBOY_RUST_LINKER=mold homeboy review test my-rust-component
 HOMEBOY_RUST_LINKER=lld homeboy bench my-rust-component
 ```
 
@@ -141,8 +141,9 @@ Two invocation details differ from shard replay on purpose:
 For local iteration, use the narrowest command that proves the change:
 
 ```bash
-HOMEBOY_RUST_SCCACHE=1 homeboy lint my-rust-component --step fmt
-HOMEBOY_RUST_SCCACHE=1 homeboy test my-rust-component --skip-lint -- --lib
+# From the component checkout, check formatting without running the full lint gate.
+cargo fmt --all -- --check
+HOMEBOY_RUST_SCCACHE=1 homeboy review test my-rust-component --skip-lint -- --lib
 HOMEBOY_RUST_SCCACHE=1 HOMEBOY_RUST_LINKER=mold homeboy bench my-rust-component --scenario rust-warm-build --iterations 5
 ```
 

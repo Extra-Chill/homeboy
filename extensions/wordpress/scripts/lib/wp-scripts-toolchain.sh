@@ -61,7 +61,7 @@
 # project at `<extension_path>/toolchains/wp-scripts/`, NOT in
 # `<extension_path>/node_modules` alongside the extension's own lint tooling
 # (wordpress/package.json pins `eslint` 9.x + `@wordpress/eslint-plugin` for
-# `homeboy lint`'s flat-config ESLint runner; @wordpress/scripts pins its own
+# `homeboy review lint`'s flat-config ESLint runner; @wordpress/scripts pins its own
 # `eslint` 8.x for classic-config `wp-scripts lint-js`). A single shared
 # node_modules tree hoists one `eslint` to the top level; `wp-scripts
 # lint-js` resolves `eslint` via the `resolve-bin` package, which is itself

@@ -9,7 +9,7 @@ source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
 DEPENDENCY_HELPER="${HOMEBOY_WORDPRESS_DEPENDENCY_HELPER:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
 # shellcheck source=../lib/validation-dependencies.sh
 source "${DEPENDENCY_HELPER}"
-# Standalone `homeboy lint` runs do not export HOMEBOY_RUNTIME_SIDECAR_WRITER;
+# Standalone `homeboy review lint` runs do not export HOMEBOY_RUNTIME_SIDECAR_WRITER;
 # fall back to the co-located direct-invocation copy so the sidecar writer is
 # available outside a release run (homeboy-extensions#1415).
 SIDECAR_WRITER_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_SIDECAR_WRITER sidecar-writer.sh)"
@@ -1304,7 +1304,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
             echo ""
             echo "WARNING: PHPStan parallel worker failure persisted after single-process retry."
             echo "         Skipping static analysis for this run (homeboy-extensions#207)."
-            echo "         To force analysis: HOMEBOY_PHPSTAN_THREADS=1 homeboy test <component>"
+            echo "         To force analysis: HOMEBOY_PHPSTAN_THREADS=1 homeboy review test <component>"
             echo "         If the issue reproduces reliably, please report environment details"
             echo "         (OS, PHP version, PHPStan version, component size) on the tracking issue."
             exit 0
@@ -1739,7 +1739,7 @@ if [ "$full_exit" -ne 0 ] && \
         echo ""
         echo "WARNING: PHPStan parallel worker failure persisted after single-process retry."
         echo "         Skipping static analysis for this run (homeboy-extensions#207)."
-        echo "         To force analysis: HOMEBOY_PHPSTAN_THREADS=1 homeboy test <component>"
+        echo "         To force analysis: HOMEBOY_PHPSTAN_THREADS=1 homeboy review test <component>"
         echo "         If the issue reproduces reliably, please report environment details"
         echo "         (OS, PHP version, PHPStan version, component size) on the tracking issue."
         exit 0

@@ -32,8 +32,8 @@ CORE_RUNTIME_DIR="${HOMEBOY_CORE_DIR}/crates/homeboy-core/src/extension/runtime"
 # The test runner chain (test-runner.sh -> test-runner-wp-codebox.sh) sources the
 # core runtime helpers and hard-requires their HOMEBOY_RUNTIME_* env vars. The
 # shared-core fallbacks were removed in homeboy-extensions e0f604a4, so direct
-# (non-`homeboy test`) invocations must point those vars at the core helpers,
-# matching the bench/build smokes. `homeboy test` exports these automatically.
+# (non-`homeboy review test`) invocations must point those vars at the core helpers,
+# matching the bench/build smokes. `homeboy review test` exports these automatically.
 RUNNER_PRELUDE_HELPER="${HOMEBOY_RUNTIME_RUNNER_PRELUDE:-${CORE_RUNTIME_DIR}/runner-prelude.sh}"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:-${CORE_RUNTIME_DIR}/resolve-context.sh}"
 RUNNER_STEPS_HELPER="${HOMEBOY_RUNTIME_RUNNER_STEPS:-${CORE_RUNTIME_DIR}/runner-steps.sh}"

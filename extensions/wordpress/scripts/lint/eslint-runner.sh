@@ -233,7 +233,7 @@ if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
     fi
 
     echo ""
-    echo "Fix-only mode: skipping validation (run 'homeboy lint' separately to validate)"
+    echo "Fix-only mode: skipping validation (run 'homeboy review lint' separately to validate)"
     exit 0
 fi
 

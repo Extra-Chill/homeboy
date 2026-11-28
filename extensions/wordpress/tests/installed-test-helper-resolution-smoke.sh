@@ -47,7 +47,9 @@ HOMEBOY_COMPONENT_PATH="${FIXTURE_ROOT}/component" \
 HOMEBOY_SHARED_LIB_DIR="${FIXTURE_ROOT}/extensions/scripts/lib" \
 HOMEBOY_RUNTIME_RUNNER_PRELUDE="${FIXTURE_ROOT}/runner-prelude.sh" \
 HOMEBOY_RUNTIME_SETTINGS_HELPER="$SETTINGS_HELPER" \
-    bash "${FIXTURE_ROOT}/extensions/wordpress/scripts/test/test-runner.sh" --help >/dev/null
+    bash "${FIXTURE_ROOT}/extensions/wordpress/scripts/test/test-runner.sh" --help > "${FIXTURE_ROOT}/test-runner-help.txt"
+grep -F 'homeboy review test <component-id> [-- --file <path>]' "${FIXTURE_ROOT}/test-runner-help.txt"
+grep -F 'homeboy review test <component-id> [-- --host-smoke-file <tests/...-smoke.php>]' "${FIXTURE_ROOT}/test-runner-help.txt"
 
 printf '%s\n' 'OK (1 test, 1 assertion)' > "${FIXTURE_ROOT}/phpunit-output.txt"
 HOMEBOY_EXTENSION_PATH="${FIXTURE_ROOT}/extensions/wordpress" \
