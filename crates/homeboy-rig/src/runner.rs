@@ -444,9 +444,9 @@ pub fn run_check_groups_with_settings(
 
 /// Run rig-owned setup required before timed bench workloads.
 ///
-/// Missing `bench_prepare` pipelines are a no-op so existing rigs keep their
-/// previous bench behavior. Declared steps fail fast because workload timing
-/// must not start when dependency/bootstrap preparation is incomplete.
+/// Materialize dependencies before requirement or pipeline preparation. Rigs
+/// without any declared preparation remain a no-op, and failed steps prevent
+/// later setup and workload execution.
 pub fn run_bench_prepare(
     rig: &RigSpec,
     settings: &[(String, String)],
@@ -454,23 +454,35 @@ pub fn run_bench_prepare(
     // Boundary: one bench prepare is one unit of work (#7505).
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let state_store = RigStateStore::in_roots(&roots);
-    let prepare_requirements = run_prepare_requirement_steps(rig, "bench_prepare", settings)?;
-    if !rig.pipeline.contains_key("bench_prepare") && prepare_requirements.steps.is_empty() {
+    let phase = "bench_prepare";
+    // Persist dependency step outcomes and cache evidence on a completed rig
+    // run, without creating an observation for rigs that have no dependencies.
+    let observer = if rig.requirements.dependency_materialization.is_empty() {
+        None
+    } else {
+        RigRunObserver::start(rig, phase, &roots)
+    };
+    let execute = || {
+        let mut outcome = run_dependency_materialization_steps(rig, phase, settings);
+        if outcome.is_success() {
+            let requirements = run_prepare_requirement_steps(rig, phase, settings)?;
+            outcome = merge_prepare_outcomes(phase, outcome, requirements);
+        }
+        if outcome.is_success() && rig.pipeline.contains_key(phase) {
+            let pipeline = run_pipeline_with_settings(&state_store, rig, phase, true, settings)?;
+            outcome = merge_prepare_outcomes(phase, outcome, pipeline);
+        }
+        Ok(outcome)
+    };
+    let result = match observer.as_ref() {
+        Some(observer) => observer.with_command_context(execute),
+        None => execute(),
+    };
+    RigRunObserver::finish(observer.as_ref(), rig, result.as_ref().ok(), &result);
+    let outcome = result?;
+    if outcome.steps.is_empty() && !rig.pipeline.contains_key(phase) {
         return Ok(None);
     }
-
-    let pipeline_outcome =
-        if prepare_requirements.is_success() && rig.pipeline.contains_key("bench_prepare") {
-            run_pipeline_with_settings(&state_store, rig, "bench_prepare", true, settings)?
-        } else {
-            PipelineOutcome {
-                name: "bench_prepare".to_string(),
-                steps: Vec::new(),
-                passed: 0,
-                failed: 0,
-            }
-        };
-    let outcome = merge_prepare_outcomes("bench_prepare", prepare_requirements, pipeline_outcome);
     Ok(Some(BenchPrepareReport {
         rig_id: rig.id.clone(),
         success: outcome.is_success(),
@@ -498,11 +510,10 @@ pub fn run_fuzz_prepare(
 
     // Dependency-cache evidence must belong to a real, completed run rather
     // than depending on a caller to have installed a rig observer.
-    let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let observer = RigRunObserver::start(rig, "fuzz_prepare", &roots);
     let execute = || {
         let dependency_outcome =
-            run_dependency_materialization_steps(rig, "fuzz_prepare", settings)?;
+            run_dependency_materialization_steps(rig, "fuzz_prepare", settings);
         let pipeline_outcome =
             if dependency_outcome.is_success() && rig.pipeline.contains_key("fuzz_prepare") {
                 run_pipeline_with_settings(&state_store, rig, "fuzz_prepare", true, settings)?
@@ -545,7 +556,7 @@ fn run_dependency_materialization_steps(
     rig: &RigSpec,
     phase: &str,
     settings: &[(String, String)],
-) -> Result<PipelineOutcome> {
+) -> PipelineOutcome {
     let mut steps = Vec::new();
     let mut passed = 0;
     let mut failed = 0;
@@ -580,12 +591,12 @@ fn run_dependency_materialization_steps(
         }
     }
 
-    Ok(PipelineOutcome {
+    PipelineOutcome {
         name: phase.to_string(),
         steps,
         passed,
         failed,
-    })
+    }
 }
 
 fn materialize_dependency_step(
@@ -599,7 +610,9 @@ fn materialize_dependency_step(
 
     let cache = DependencyMaterializationCache::new(rig, step, settings)?;
     if let Some(cache) = cache.as_ref() {
-        if matches!(cache.restore()?, CacheResult::Hit { .. }) {
+        if matches!(cache.restore()?, CacheResult::Hit { .. })
+            && dependency_outputs_satisfied(rig, step)
+        {
             return Ok(());
         }
     }
@@ -670,7 +683,11 @@ fn dependency_outputs_satisfied(
     rig: &RigSpec,
     step: &super::DependencyMaterializationStepSpec,
 ) -> bool {
-    missing_dependency_outputs(rig, step).is_empty()
+    !step.expected_outputs.is_empty()
+        && step
+            .expected_outputs
+            .iter()
+            .all(|output| missing_dependency_output(rig, step, output).is_none())
 }
 
 fn missing_dependency_outputs(
@@ -680,22 +697,28 @@ fn missing_dependency_outputs(
     step.expected_outputs
         .iter()
         .filter(|output| output.required)
-        .filter_map(|output| {
-            let path = resolve_dependency_output_path(rig, step, &output.path);
-            let ok = match output.kind {
-                DependencyMaterializationOutputKind::File => path.is_file(),
-                DependencyMaterializationOutputKind::Dir => path.is_dir(),
-                DependencyMaterializationOutputKind::Path => path.exists(),
-            };
-            (!ok).then(|| {
-                format!(
-                    "{} does not exist: {}",
-                    output_kind_label(output.kind),
-                    path.display()
-                )
-            })
-        })
+        .filter_map(|output| missing_dependency_output(rig, step, output))
         .collect()
+}
+
+fn missing_dependency_output(
+    rig: &RigSpec,
+    step: &super::DependencyMaterializationStepSpec,
+    output: &super::DependencyMaterializationOutputSpec,
+) -> Option<String> {
+    let path = resolve_dependency_output_path(rig, step, &output.path);
+    let ok = match output.kind {
+        DependencyMaterializationOutputKind::File => path.is_file(),
+        DependencyMaterializationOutputKind::Dir => path.is_dir(),
+        DependencyMaterializationOutputKind::Path => path.exists(),
+    };
+    (!ok).then(|| {
+        format!(
+            "{} does not exist: {}",
+            output_kind_label(output.kind),
+            path.display()
+        )
+    })
 }
 
 pub(crate) fn resolve_dependency_output_path(
@@ -1600,7 +1623,7 @@ impl RigRunObserver {
         let resources = match self.command.as_str() {
             "up" if status == RunStatus::Pass => super::expand::expand_resources(rig),
             "up" => super::expand::expand_resources(rig),
-            "check" | "fuzz_prepare" => super::expand::expand_resources(rig),
+            "check" | "bench_prepare" | "fuzz_prepare" => super::expand::expand_resources(rig),
             "down" => self
                 .state_store
                 .load(&rig.id)
@@ -1633,8 +1656,10 @@ impl RigRunObserver {
             "up" if status == RunStatus::Pass => ResourceLifecycleResourceStatus::Active,
             "up" => ResourceLifecycleResourceStatus::Failed,
             "check" => ResourceLifecycleResourceStatus::Declared,
-            "fuzz_prepare" if status == RunStatus::Pass => ResourceLifecycleResourceStatus::Active,
-            "fuzz_prepare" => ResourceLifecycleResourceStatus::Failed,
+            "bench_prepare" | "fuzz_prepare" if status == RunStatus::Pass => {
+                ResourceLifecycleResourceStatus::Active
+            }
+            "bench_prepare" | "fuzz_prepare" => ResourceLifecycleResourceStatus::Failed,
             "down" if status == RunStatus::Pass => ResourceLifecycleResourceStatus::Cleaned,
             "down" => ResourceLifecycleResourceStatus::CleanupPending,
             _ => return,

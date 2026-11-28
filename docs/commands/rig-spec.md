@@ -39,7 +39,7 @@ touching component checkouts.
 | `services` | object | No | Map of service ID to `ServiceSpec`. |
 | `symlinks` | array | No | List of `SymlinkSpec` entries. |
 | `shared_paths` | array | No | List of dependency paths the rig may borrow from another checkout. |
-| `requirements` | object | No | Typed preconditions evaluated by `rig check`: `executables`, `filesystem_assertions`, `dependency_materialization`, `broker_targets`, and extension-owned `extensions` entries. See [`requirements`](#requirements). |
+| `requirements` | object | No | Typed rig preconditions and setup contracts: `executables`, `filesystem_assertions`, `dependency_materialization`, `broker_targets`, and extension-owned `extensions` entries. See [`requirements`](#requirements). |
 | `resources` | object | No | Resource declarations used by active-run leases. |
 | `pipeline` | object | No | Map of pipeline name to `PipelineStep[]`. |
 | `bench` | object | No | Rig-pinned benchmark component/default-baseline settings. |
@@ -916,6 +916,19 @@ Executable requirements try each `env` / `env_aliases` variable in order, then
 resolve `executable` from `PATH` (or as a path when it contains a separator).
 Filesystem assertions take `kind` `path` (default, anything that exists), `file`,
 or `dir`, and resolve relative paths against `cwd` when set.
+
+`bench --rig` runs `requirements.dependency_materialization` once per rig run,
+before requirement preparation commands, the `bench_prepare` pipeline, and the
+workload. A step uses its declared `cwd` or defaults to its component's
+resolved path. Lab uses runner-materialized component paths for both command
+execution and output checks. Relative `expected_outputs` are resolved against
+the step's working directory.
+
+If a step declares outputs and all of them already match their declared kinds,
+Homeboy skips its command or provider. A verified cache restore can also satisfy
+the output contract. Missing required outputs or a failed command stop the bench
+with a `workspace_setup` error and step-level details. Scenario listing does not
+run preparation.
 
 ## Variable Expansion
 

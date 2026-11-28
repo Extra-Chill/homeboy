@@ -63,11 +63,7 @@ fn prepare_rig_bench_context(
     )?;
     if let Some(prepare) = rig::run_bench_prepare(&spec, &prepare_settings)? {
         if !prepare.success {
-            return Err(homeboy::core::Error::rig_pipeline_failed(
-                &spec.id,
-                "bench_prepare",
-                bench_prepare_failure_message(&prepare),
-            ));
+            return Err(bench_prepare_failure(&prepare));
         }
     }
     let snapshot = rig::snapshot_state(&declared_spec);
@@ -87,6 +83,18 @@ fn report_rig_source(source: &rig::RigSourceContext) {
             evidence.rig_id, evidence.package_root, evidence.freshness
         );
     }
+}
+
+fn bench_prepare_failure(prepare: &BenchPrepareReport) -> homeboy::core::Error {
+    let mut error = homeboy::core::Error::rig_pipeline_failed(
+        &prepare.rig_id,
+        &prepare.pipeline.name,
+        bench_prepare_failure_message(prepare),
+    )
+    .with_hint("Fix the failed rig setup step in the effective workspace, then retry the bench.");
+    error.details["classification"] = serde_json::json!("workspace_setup");
+    error.details["pipeline"] = serde_json::json!(&prepare.pipeline);
+    error
 }
 
 fn bench_prepare_failure_message(prepare: &BenchPrepareReport) -> String {
