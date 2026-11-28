@@ -107,8 +107,8 @@ pub use cook_recipe::*;
 pub use cook_recovery::{
     cook_recovery_delegation, ensure_recover_failure_contract, is_store_contention,
     is_store_contention_message, plan_cook_recovery, plan_cook_recovery_recorded,
-    prepare_admitted_recovery_continuation, recover_cook, recovers_as_run,
-    with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
+    prepare_admitted_recovery_continuation, published_feedback_admission, recover_cook,
+    recovers_as_run, with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
     CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport, CookRecoveryRequest,
     CookRecoveryStep, CookRegateInputs, CookReplaceGatesRequest, CookReplacementProof,
     COOK_RECOVERY_SCHEMA, RECOVER_UNDECLARED_FAILURE_CODE, STORE_BUSY_CODE,

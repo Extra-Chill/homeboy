@@ -5529,6 +5529,53 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
 }
 
 #[test]
+fn terminal_success_with_operator_feedback_admits_budgeted_revision() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-published-feedback-revision";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+        options.retry_policy.max_attempts = 2;
+        super::super::persist_initial_recipe(&options).unwrap();
+        super::super::materialize_initial_cook_attempt(&options).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
+            record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Succeeded);
+            record.lifecycle.execution.state = record.state().into();
+        })
+        .unwrap();
+        let store =
+            crate::agent_task_feedback::CookFeedbackStore::from_current_data_root().unwrap();
+        store
+            .submit(
+                cook_id,
+                "candidate",
+                "reviewer",
+                "pr",
+                "Fix the regression",
+                "review-1",
+            )
+            .unwrap();
+        super::super::retry_admission(&options.identity.initial_run_id)
+            .expect("a successful terminal candidate with feedback admits a revision");
+        let retry = super::super::retry(
+            &options.identity.initial_run_id,
+            super::super::AgentTaskRetryOptions::default(),
+        )
+        .unwrap();
+        let recipe = super::super::load_recipe(cook_id).unwrap();
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
+        assert_eq!(
+            recipe.attempts[1].plan.tasks[0].inputs["cook_loop"]["operator_feedback"],
+            true
+        );
+        let error = super::super::published_feedback_admission(cook_id);
+        // No publication receipt: ordinary Cook feedback needs no GitHub probe.
+        assert!(error.is_ok());
+        assert!(store.list(cook_id).unwrap()[0].consumed_at.is_none());
+    });
+}
+
+#[test]
 fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-provider-route-override";

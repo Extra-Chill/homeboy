@@ -1381,6 +1381,14 @@ policies are `summary-only` (default), `redacted`, `no-detail`, and
 `full-evidence`. Visible gate failures continue to provide full deterministic
 evidence to the agent.
 
+`homeboy agent-task cook-feedback <cook> --file feedback.md` records operator
+findings and invokes recovery when a revision is admissible. For a terminal,
+published Cook with an open PR, this reserves another attempt in the same Cook,
+keeps its destination and publication recipe, and returns the recovery receipt.
+The provider receives pending feedback at dispatch; normal gates and publication
+still apply. Exhausted attempt budgets and closed or merged PRs refuse feedback
+with a replacement Cook command rather than silently storing unactionable work.
+
 When a promotion's gates fail, Cook converts the promotion report and the
 original `AgentTaskRequest` into a provider-neutral feedback decision
 (`homeboy/agent-task-cook-feedback-report/v1`) and runs the retry itself. Continue

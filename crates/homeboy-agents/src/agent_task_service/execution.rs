@@ -2401,8 +2401,12 @@ fn retryable_cook_attempt(
             .is_some_and(|selection| {
                 selection.run_id == source.run_id && selection.selected_candidate_sha.is_none()
             });
-    let source_is_retryable =
-        retryable_pre_execution_failure || failed_provider_without_candidate || acceptance_repair;
+    let operator_revision = source.state().is_terminal()
+        && crate::agent_task_feedback::has_pending(lifecycle_store, cook_id);
+    let source_is_retryable = retryable_pre_execution_failure
+        || failed_provider_without_candidate
+        || acceptance_repair
+        || operator_revision;
     if replaces_source_attempt
         && !recipe
             .attempts
@@ -2581,6 +2585,30 @@ fn retryable_cook_attempt(
         ));
     }
     let mut plan = source_recipe_attempt.plan.clone();
+    if operator_revision {
+        let promotion =
+            super::persisted_promotion_for_attempt_in_store(lifecycle_store, &source.run_id)?;
+        for task in &mut plan.tasks {
+            if let Some(root) = promotion
+                .as_ref()
+                .and_then(|report| report.provenance["worktree_path"].as_str())
+            {
+                task.workspace.mode = crate::agent_task::AgentTaskWorkspaceMode::Existing;
+                task.workspace.root = Some(root.to_string());
+                task.executor.remap_workspace_root(root);
+            }
+            if !task.inputs.is_object() {
+                task.inputs = serde_json::json!({});
+            }
+            // Keep the destination binding and publication recipe. The next
+            // provider starts from the delivered branch, not an old artifact.
+            task.inputs["cook_loop"] = serde_json::json!({
+                "source_run_id": source.run_id,
+                "operator_feedback": true,
+            });
+            task.policy.grant_workspace_read_tool();
+        }
+    }
     if acceptance_repair {
         let feedback = source.metadata["acceptance_repair"]["feedback"]
             .as_str()

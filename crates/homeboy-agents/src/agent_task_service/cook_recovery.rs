@@ -1233,7 +1233,16 @@ fn plan_cook_recovery_for_cook(id: &str, live_probes: bool) -> Result<CookRecove
     let status = agent_task_lifecycle::CookRunState::of(&record)
         .status
         .to_string();
-    let step = if let Some(pr) = published_pull_request(&record) {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let pending_feedback = crate::agent_task_feedback::has_pending(&store, &recipe.cook_id);
+    let step = if pending_feedback && published_pull_request(&record).is_some() {
+        match published_feedback_admission(&recipe.cook_id)
+            .and_then(|()| super::retry_admission(&run_id))
+        {
+            Ok(()) => CookRecoveryStep::Retry,
+            Err(error) => CookRecoveryStep::none(error.message),
+        }
+    } else if let Some(pr) = published_pull_request(&record) {
         // A recorded publication is the Cook's delivery, whatever gate or
         // continuation status the attempt last recorded: re-running gates or
         // continuing would only redo delivered work.
@@ -1303,6 +1312,79 @@ fn refuse_regate_over_live_gate(run_id: &str, cook_id: &str) -> Result<()> {
         "status_command": watch,
     });
     Err(error)
+}
+
+/// Refuse published review revisions before recording feedback when the PR
+/// cannot be updated or the durable Cook budget has no successor slot.
+pub fn published_feedback_admission(id: &str) -> Result<()> {
+    let key = resolve_cook_key(id)?;
+    let recipe = super::load_recipe(&key)?;
+    let run_id = super::resolve_cook_continuation_run_id(&key)?;
+    let record = agent_task_lifecycle::exact_record(&run_id)?;
+    let Some(pr) = published_pull_request(&record) else {
+        return Ok(());
+    };
+    let destination = recipe.finalization["to_worktree"].as_str().unwrap_or("");
+    let replacement = format!(
+        "homeboy agent-task cook --to-worktree {} --prompt @feedback.md",
+        homeboy_core::error::posix_quote_arg(destination)
+    );
+    let refuse = |reason: String| {
+        Error::validation_invalid_argument(
+            "cook_feedback",
+            format!("{reason}. Start a new Cook instead: {replacement}"),
+            Some(id.to_string()),
+            Some(vec![replacement.clone()]),
+        )
+    };
+    let maximum = recipe.retry_budget["max_attempts"].as_u64().unwrap_or(0);
+    if recipe
+        .attempts
+        .iter()
+        .map(|attempt| u64::from(attempt.attempt))
+        .max()
+        .unwrap_or(0)
+        >= maximum
+    {
+        return Err(refuse("The Cook attempt budget is exhausted".to_string()));
+    }
+    let output = std::process::Command::new("gh")
+        .args(["pr", "view", &pr, "--json", "state"])
+        .output()
+        .map_err(|error| refuse(format!("Could not inspect published PR: {error}")))?;
+    if !output.status.success() {
+        return Err(refuse(format!(
+            "Could not inspect published PR: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let state: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| refuse(format!("Invalid published PR response: {error}")))?;
+    published_feedback_pr_state(&state).map_err(refuse)
+}
+
+fn published_feedback_pr_state(state: &Value) -> std::result::Result<(), String> {
+    if state["state"] == "OPEN" {
+        Ok(())
+    } else {
+        Err(format!("Published PR is {}", state["state"]))
+    }
+}
+
+#[cfg(test)]
+mod published_feedback_tests {
+    use super::*;
+
+    #[test]
+    fn only_open_prs_admit_review_revisions() {
+        assert!(published_feedback_pr_state(&serde_json::json!({"state": "OPEN"})).is_ok());
+        for state in ["MERGED", "CLOSED", "UNKNOWN"] {
+            let error =
+                published_feedback_pr_state(&serde_json::json!({"state": state})).unwrap_err();
+            assert!(error.contains(state));
+        }
+        assert!(published_feedback_pr_state(&Value::Null).is_err());
+    }
 }
 
 /// The pull request a publication receipt proves the attempt is published as
@@ -1779,10 +1861,13 @@ fn recover_cook_once(
             CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
                 // A fresh provider attempt never starts from a pre-patched
                 // destination (#16292).
-                super::cook_attempt_workspace::prepare_fresh_attempt_workspace_for_cook(
-                    &report.cook_id,
-                    run_id,
-                )?;
+                let record = agent_task_lifecycle::exact_record(run_id)?;
+                if published_pull_request(&record).is_none() {
+                    super::cook_attempt_workspace::prepare_fresh_attempt_workspace_for_cook(
+                        &report.cook_id,
+                        run_id,
+                    )?;
+                }
                 performer.retry(run_id)?
             }
             CookRecoveryStep::Reconcile => performer.reconcile(run_id)?,
