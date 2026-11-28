@@ -1,10 +1,10 @@
 # Pi response identity fixture
 
-`pi-roadie-session.jsonl` contains the header and first two assistant message
+`pi-session.jsonl` contains the header and first two assistant message
 records from a real Pi 1.4.0 Cook session on 2026-10-23. The requested route was
 `cook-heavy`; the provider returned `gpt-6.1-sol` in the response model metadata.
-The cwd is sanitized and content is replaced with a deliberately false model
-self-report. Response metadata, usage and message framing are preserved.
+The working directory and provider ID are sanitized. The text is a deliberately
+false model self-report. Model metadata, usage and message framing are preserved.
 
 Pi's Anthropic adapter maps `message_start.message.model` to
 `AssistantMessage.responseModel` when it differs from the requested model.

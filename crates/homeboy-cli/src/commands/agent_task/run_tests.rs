@@ -897,7 +897,7 @@ fn detached_route_less_warning_names_only_safe_resolver_diagnostics() {
     let warning = detached_cook_route_less_warning(&resolution).expect("warning");
     assert!(warning.contains("generic.completed"));
     assert!(warning.contains("CALLER_THREAD_ID"));
-    assert!(warning.contains("active Discord thread is not inferred"));
+    assert!(warning.contains("active chat thread is not inferred"));
     assert!(warning.contains("--notification-transport <transport> --notification-route <route>"));
     assert!(warning.contains("HOMEBOY_NOTIFICATION_TRANSPORT"));
     assert!(!warning.contains("opaque-destination"));

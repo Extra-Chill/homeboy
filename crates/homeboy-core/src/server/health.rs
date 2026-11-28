@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn parse_service_status_reads_name_state_and_activity() {
         for (line, name, status, active) in [
-            ("kimaki:active", "kimaki", "active", true),
+            ("sample-worker:active", "sample-worker", "active", true),
             ("php8.4-fpm:inactive", "php8.4-fpm", "inactive", false),
             ("mysql:failed", "mysql", "failed", false),
         ] {
@@ -573,12 +573,14 @@ up 10 days, 3 hours
 ---MEMORY---
 Mem:          7.6Gi       2.2Gi       3.1Gi       0.0Ki       2.3Gi       5.1Gi
 ---SERVICES---
-kimaki:active
+sample-worker:active
 nginx:active
 mysql:failed
 ";
-        let health =
-            parse_health_output(output, &["kimaki".into(), "nginx".into(), "mysql".into()]);
+        let health = parse_health_output(
+            output,
+            &["sample-worker".into(), "nginx".into(), "mysql".into()],
+        );
 
         assert_eq!(health.uptime.as_deref(), Some("10 days, 3 hours"));
         let load = health.load.unwrap();

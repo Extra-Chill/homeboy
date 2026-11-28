@@ -22,12 +22,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Home-relative bin directories placed ahead of everything else, in order.
-///
-/// These entries are language- and product-specific (`.cargo/bin` is Rust,
-/// `.kimaki/bin` is one particular third-party product) and do not belong in a
-/// generic orchestrator. They stay because removing them would silently break
-/// every host that depends on today's behavior.
-const HOME_PREPEND_DIRS: &[&str] = &[".local/bin", ".cargo/bin", ".kimaki/bin"];
+/// Integration-specific tool directories belong on the caller's `PATH`.
+const HOME_PREPEND_DIRS: &[&str] = &[".local/bin", ".cargo/bin"];
 
 /// Home-relative Node install roots and the child-name prefix each requires.
 /// Every matching `<child>/bin` is added after [`HOME_PREPEND_DIRS`], newest
@@ -321,13 +317,18 @@ mod tests {
         let home = tmp.path().join("home");
         let local_bin = home.join(".local/bin");
         let cargo_bin = home.join(".cargo/bin");
-        let kimaki_bin = home.join(".kimaki/bin");
         let local_node = home.join(".local/opt/node-v24.13.1-linux-x64/bin");
         let nvm_node = home.join(".nvm/versions/node/v20.0.0/bin");
-        for dir in [&local_bin, &cargo_bin, &kimaki_bin, &local_node, &nvm_node] {
+        let inherited_extra = home.join(".sample-integration/bin");
+        for dir in [
+            &local_bin,
+            &cargo_bin,
+            &local_node,
+            &nvm_node,
+            &inherited_extra,
+        ] {
             fs::create_dir_all(dir).expect("bin");
         }
-        let inherited_extra = tmp.path().join("inherited/bin");
         let inherited = std::env::join_paths([
             PathBuf::from("/usr/bin"),
             inherited_extra.clone(),
@@ -339,20 +340,14 @@ mod tests {
         let parts = std::env::split_paths(&path).collect::<Vec<_>>();
 
         assert_eq!(
-            &parts[..5],
-            &[
-                local_bin.clone(),
-                cargo_bin,
-                kimaki_bin,
-                local_node,
-                nvm_node
-            ]
+            &parts[..4],
+            &[local_bin.clone(), cargo_bin, local_node, nvm_node]
         );
         let usr_bin = parts
             .iter()
             .position(|part| part == &PathBuf::from("/usr/bin"))
             .expect("system dir present");
-        assert!(usr_bin >= 5, "user tools precede system dirs");
+        assert!(usr_bin >= 4, "user tools precede system dirs");
         assert_eq!(
             parts.last(),
             Some(&inherited_extra),

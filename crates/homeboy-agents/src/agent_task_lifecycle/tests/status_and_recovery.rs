@@ -2745,7 +2745,7 @@ fn durable_aggregate_read_returns_within_the_readonly_sqlite_contention_budget()
         // The contract is "one read-only busy budget, then a classified busy
         // refusal", not a wall-clock number: SQLite's busy timeout sums its
         // requested sleeps, which overshoot by a host-dependent amount
-        // (macOS timer slack), so an absolute bound measured the host. Each
+        // (macOS timer coalescing), so an absolute bound measured the host. Each
         // contended read-only step waits exactly one budget and then fails,
         // so the bound holds iff the first contended step — the Cook-alias
         // lookup in front of the record — reports busy and the read stops

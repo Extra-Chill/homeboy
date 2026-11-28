@@ -117,7 +117,7 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub component_overrides: HashMap<String, ProjectComponentOverrides>,
 
-    /// Service names to check in fleet health status (e.g. ["kimaki", "php8.4-fpm", "nginx"]).
+    /// Service names to check in fleet health status (e.g. ["sample-worker", "php8.4-fpm", "nginx"]).
     /// These are checked via `systemctl is-active <name>` on the remote server.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<String>,

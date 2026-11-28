@@ -423,20 +423,20 @@ mod tests {
     fn dangling_extension_warning_emits_relink_and_uninstall_actions() {
         let mut result = base_upgrade_result();
         result.extension_skips.push(upgrade::ExtensionUpgradeSkip {
-            extension_id: "discord".to_string(),
+            extension_id: "sample".to_string(),
             reason: "WARNING: linked target is missing; relink or uninstall this extension"
                 .to_string(),
             recovery_commands: vec![
-                "homeboy extension relink discord <path>".to_string(),
-                "homeboy extension uninstall discord".to_string(),
+                "homeboy extension relink sample <path>".to_string(),
+                "homeboy extension uninstall sample".to_string(),
             ],
         });
 
         let lines = extension_warning_lines(&result);
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].contains("discord"));
-        assert!(lines[1].contains("extension relink discord"));
-        assert!(lines[2].contains("extension uninstall discord"));
+        assert!(lines[0].contains("sample"));
+        assert!(lines[1].contains("extension relink sample"));
+        assert!(lines[2].contains("extension uninstall sample"));
     }
 
     fn base_upgrade_result() -> upgrade::UpgradeResult {

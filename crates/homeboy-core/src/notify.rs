@@ -427,7 +427,7 @@ pub(crate) fn declared_transport<'a>(
         })
         .collect();
     // An exact id wins; otherwise accept the unambiguous short alias, the
-    // id prefix before its first `.` (for example `discord`).
+    // id prefix before its first `.` (for example `sample`).
     let exact: Vec<_> = transports
         .iter()
         .filter(|(_, transport)| transport.id == id)
@@ -664,21 +664,21 @@ mod tests {
             .unwrap()
         };
         let extensions = vec![manifest(&[
-            "discord.run-completion",
-            "slack.post",
-            "slack.thread",
+            "sample.run-completion",
+            "secondary.post",
+            "secondary.thread",
         ])];
 
-        let (_, exact) = declared_transport(&extensions, "discord.run-completion").unwrap();
-        assert_eq!(exact.id, "discord.run-completion");
-        let (_, alias) = declared_transport(&extensions, "discord").unwrap();
-        assert_eq!(alias.id, "discord.run-completion");
+        let (_, exact) = declared_transport(&extensions, "sample.run-completion").unwrap();
+        assert_eq!(exact.id, "sample.run-completion");
+        let (_, alias) = declared_transport(&extensions, "sample").unwrap();
+        assert_eq!(alias.id, "sample.run-completion");
 
-        for rejected in ["slack", "teams"] {
+        for rejected in ["secondary", "unknown"] {
             let error = declared_transport(&extensions, rejected).unwrap_err();
             assert!(
                 error.message.contains(
-                    "installed transport ids: discord.run-completion, slack.post, slack.thread"
+                    "installed transport ids: sample.run-completion, secondary.post, secondary.thread"
                 ),
                 "{}",
                 error.message
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn event_argv_keeps_opaque_route_as_one_value() {
-        let route = NotificationRoute::new("discord.run-completion", "thread 42; opaque").unwrap();
+        let route = NotificationRoute::new("sample.run-completion", "thread 42; opaque").unwrap();
         let event = NotifyEvent::run_completed_with_route("run-123", "pass", Some(&route));
         assert_eq!(
             event.argv(),
@@ -702,7 +702,7 @@ mod tests {
                 "--body",
                 "Run run-123 finished with status pass",
                 "--transport",
-                "discord.run-completion",
+                "sample.run-completion",
                 "--route",
                 "thread 42; opaque"
             ]

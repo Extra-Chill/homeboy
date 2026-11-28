@@ -533,7 +533,7 @@ async function testTruncation() {
 
 async function testRenderingFidelity() {
   const schema = 'homeboy/notification-payload/v1';
-  const fixtures = JSON.parse(fs.readFileSync(path.join(extensionPath, 'tests/fixtures/notify-payloads.json'), 'utf8'));
+  const fixtures = JSON.parse(fs.readFileSync(path.join(extensionPath, '../../crates/homeboy-agents/tests/fixtures/notify-payloads.json'), 'utf8'));
   const expectedOutput = {
   "success": "✅ [homeboy#123](<https://github.example/Extra-Chill/homeboy/pull/123>) Fix notifications\n[Closes homeboy#100](<https://github.example/Extra-Chill/homeboy/issues/100>) · Model: gpt-6.1-sol · Gates: 1/1 passed",
   "attention": "⚠️ studio: Work on Studio draft PR and resolve all of the… — needs attention\nStop reason: Lint failed. · Gates: lint failed\nnext: `homeboy agent-task diagnose cook-abc`",

@@ -1449,12 +1449,12 @@ mod tests {
                         },
                         crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
                             backend: Some("pi".to_string()),
-                            model: Some("roadie/subagent".to_string()),
+                            model: Some("sample-provider/subagent".to_string()),
                             ..Default::default()
                         },
                         crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
                             backend: Some("pi".to_string()),
-                            model: Some("roadie/fallback".to_string()),
+                            model: Some("sample-provider/fallback".to_string()),
                             ..Default::default()
                         },
                     ],
@@ -1463,11 +1463,14 @@ mod tests {
             ));
 
         assert_eq!(route.backend, "pi");
-        assert_eq!(route.model.as_deref(), Some("roadie/subagent"));
+        assert_eq!(route.model.as_deref(), Some("sample-provider/subagent"));
         assert!(route.rotation_selected_initial);
         let remaining = route.rotation.expect("rotation").entries;
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].model.as_deref(), Some("roadie/fallback"));
+        assert_eq!(
+            remaining[0].model.as_deref(),
+            Some("sample-provider/fallback")
+        );
     }
 
     #[test]

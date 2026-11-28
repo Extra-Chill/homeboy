@@ -1754,7 +1754,7 @@ fn durable_finalization_publishes_green_candidate_despite_failed_runtime_history
     // runtime that produced the candidate stays Failed (it timed out after
     // producing it). The candidate and its bound gate receipts authorize
     // publication on their own.
-    let mut timed_out = successful_lifecycle("roadie/cook-heavy");
+    let mut timed_out = successful_lifecycle("sample-provider/cook-heavy");
     timed_out.provider_runtime[0].state = ProviderRuntimeState::Failed;
     // An authenticated all-successful provider recovery stays eligible.
     let mut partial = successful_lifecycle("openai/gpt-5.6-terra");

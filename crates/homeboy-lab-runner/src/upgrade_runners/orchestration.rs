@@ -444,7 +444,7 @@ mod manifest_preflight_tests {
             let stdout = match call_count {
                 0 => {
                     assert_eq!(options.command, ["homeboy", "extension", "list"]);
-                    r#"{"success":true,"data":{"entities":[{"id":"discord","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}]}}"#
+                    r#"{"success":true,"data":{"entities":[{"id":"sample","error":"manifest_deserialize_incompatible","diagnostic":"The extension manifest does not match the supported schema."},{"id":"rust","core_compatibility":{"requires_homeboy":">=2.0.0"}}]}}"#
                 }
                 _ => {
                     panic!("legacy-incompatible extension must not be queried by the legacy binary")

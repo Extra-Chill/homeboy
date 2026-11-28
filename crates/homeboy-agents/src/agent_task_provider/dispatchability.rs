@@ -1503,13 +1503,13 @@ mod tests {
     fn rotation_failure_names_every_route_cause_remediation_and_host() {
         let routes = vec![
             skipped_route(
-                "roadie/cook-heavy",
+                "sample-provider/cook-heavy",
                 "runtime_unavailable",
                 "runtime_unavailable: deterministic_incompatibility: model_not_available",
-                Some("Select a model available in Pi agent directory /home/op/.roadie/pi-agent."),
+                Some("Select a model available in Pi agent directory /home/op/.pi/agent."),
             ),
             skipped_route(
-                "roadie/sol",
+                "sample-provider/sol",
                 "credentials_unusable",
                 "provider-owned authentication or its runtime is revoked or unusable (auth_failure: no_models_available)",
                 None,
@@ -1520,9 +1520,9 @@ mod tests {
 
         assert_eq!(
             detail,
-            "roadie/cook-heavy: runtime_unavailable: deterministic_incompatibility: model_not_available; \
-             roadie/sol: provider-owned authentication or its runtime is revoked or unusable (auth_failure: no_models_available). \
-             Remediation: Select a model available in Pi agent directory /home/op/.roadie/pi-agent. \
+            "sample-provider/cook-heavy: runtime_unavailable: deterministic_incompatibility: model_not_available; \
+             sample-provider/sol: provider-owned authentication or its runtime is revoked or unusable (auth_failure: no_models_available). \
+             Remediation: Select a model available in Pi agent directory /home/op/.pi/agent. \
              (readiness evaluated on host `controller-1`)"
         );
         assert_eq!(

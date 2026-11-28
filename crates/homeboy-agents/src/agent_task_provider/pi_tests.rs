@@ -139,11 +139,11 @@ fn message_durations_are_summed_by_role_and_tool() {
 #[test]
 fn prompt_session_and_model_contract() {
     let temp = tempfile::tempdir().unwrap();
-    let request = json!({"task_id":"a/b", "instructions":"é".repeat(60 * 1024), "executor":{"model":"roadie/test"}, "output_declarations":[{"name":"review_form","required":true}]});
+    let request = json!({"task_id":"a/b", "instructions":"é".repeat(60 * 1024), "executor":{"model":"sample-provider/test"}, "output_declarations":[{"name":"review_form","required":true}]});
     let args = args(&request, temp.path(), vec!["--mode".into(), "json".into()]).unwrap();
     assert_eq!(args[2], "--session");
     assert!(args[3].ends_with("a-b-pi-session.jsonl"));
-    assert_eq!(&args[4..6], ["--model", "roadie/test"]);
+    assert_eq!(&args[4..6], ["--model", "sample-provider/test"]);
     let instructions = std::fs::read_to_string(temp.path().join("a-b-pi-instructions.md")).unwrap();
     assert!(instructions.contains("Output declarations:"));
     assert!(instructions.contains("review_form"));
@@ -185,13 +185,17 @@ fn bounded_readiness_classifies_fake_pi() {
     );
     let timeout = std::time::Duration::from_secs(2);
     for (model, catalog, reason) in [
-        ("roadie/test", "roadie test", ""),
-        ("test", "roadie test", "model_not_qualified"),
-        ("other/test", "roadie test", "model_not_available"),
-        ("roadie/test", "No models available", "no_models_available"),
+        ("sample-provider/test", "sample-provider test", ""),
+        ("test", "sample-provider test", "model_not_qualified"),
+        ("other/test", "sample-provider test", "model_not_available"),
+        (
+            "sample-provider/test",
+            "No models available",
+            "no_models_available",
+        ),
     ] {
         let result = readiness(
-            &json!({"command":fake.command,"model":model}),
+            &json!({"command":fake.command,"model":model,"pi_agent_dir":"/example/pi-agent"}),
             &[("CATALOG".into(), catalog.into())],
             timeout,
             None,
@@ -201,7 +205,16 @@ fn bounded_readiness_classifies_fake_pi() {
         assert_eq!(result.ready, reason.is_empty());
         assert!(!result.cache_key.is_empty());
         if reason == "model_not_qualified" {
-            assert_eq!(result.identity["candidates"], json!(["roadie/test"]));
+            assert_eq!(
+                result.identity["candidates"],
+                json!(["sample-provider/test"])
+            );
+        }
+        if reason == "no_models_available" {
+            assert_eq!(result.classification, "auth_failure");
+            assert!(result.remediation.contains("/example/pi-agent"));
+            assert!(result.remediation.contains("provider_config.pi_agent_dir"));
+            assert!(result.remediation.contains("PI_CODING_AGENT_DIR"));
         }
     }
     let result = readiness(&fake.config(), &[], std::time::Duration::ZERO, None).unwrap();

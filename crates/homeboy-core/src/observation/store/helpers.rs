@@ -507,7 +507,7 @@ pub(crate) const SQLITE_READ_ONLY_TIMEOUT: std::time::Duration =
 /// wall-clock time.
 ///
 /// SQLite's built-in `busy_timeout` sums its *requested* sleeps, not elapsed
-/// time. Sleeps overshoot (macOS timer slack adds ~10%), so a nominal 10s wait
+/// time. Sleeps overshoot (macOS timer coalescing adds ~10%), so a nominal 10s wait
 /// really lasts longer and can outlive a competing writer it was meant to give
 /// up on. This handler checks the real deadline before every sleep.
 pub(crate) fn install_control_plane_busy_wait(connection: &rusqlite::Connection) -> Result<()> {

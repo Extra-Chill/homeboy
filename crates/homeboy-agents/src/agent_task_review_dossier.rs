@@ -3276,9 +3276,9 @@ mod tests {
 
     #[test]
     fn disclosure_names_served_model_from_real_pi_response_fixture() {
-        // Real Roadie response metadata; assistant text was replaced with a
+        // Captured Pi response metadata; assistant text was replaced with a
         // false self-report to prove disclosure ignores agent-written text.
-        let session = include_str!("agent_task_provider/fixtures/pi-roadie-session.jsonl");
+        let session = include_str!("agent_task_provider/fixtures/pi-session.jsonl");
         let served = crate::agent_task_provider::pi_response::served_models(session.as_bytes());
         assert_eq!(served, ["gpt-6.1-sol"]);
         let aggregate = serde_json::from_value(serde_json::json!({

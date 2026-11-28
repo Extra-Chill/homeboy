@@ -21,7 +21,7 @@ const NOTE_MAX_CHARS: usize = 200;
 /// dispatch, prefixed once with the model that actually ran. For example:
 ///
 /// ```text
-/// Ran on roadie/openai-gpt-6-luna; roadie/anthropic-claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie pool client key, then retry.)
+/// Ran on sample-provider/openai-gpt-6-luna; sample-provider/anthropic-claude-sonnet-5-5 skipped: credentials_unusable (Refresh the configured provider credentials, then retry.)
 /// xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)
 /// ```
 pub(crate) fn provider_route_notes(
@@ -157,7 +157,7 @@ mod tests {
                         "reset_at": null,
                         "classification": "credentials",
                         "retryable": true,
-                        "remediation": "Refresh the Roadie credential pool key, then retry.",
+                        "remediation": "Refresh the configured provider credentials, then retry.",
                         "cache_identity": null,
                         "provider_identity": null,
                     }],
@@ -200,7 +200,7 @@ mod tests {
         let notes = provider_route_notes(&record, Some(&plan_with_skips()));
         assert_eq!(
             notes,
-            vec!["Ran on openai/gpt-6-luna; pi/anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the Roadie credential pool key, then retry.)"
+            vec!["Ran on openai/gpt-6-luna; pi/anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the configured provider credentials, then retry.)"
                 .to_string()]
         );
     }

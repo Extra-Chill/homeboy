@@ -9,7 +9,7 @@ fn renewing_cook_owner_blocks_until_expiry_and_replays_completion() {
         .submit_plan_with_runtime_admission(&test_plan(), run, |_| Ok(json!({})))
         .unwrap();
     // The heartbeat renews every lease/3, so each renewal has two thirds of
-    // the lease as scheduling slack. A sub-second lease left ~200ms of slack,
+    // the lease as scheduling margin. A sub-second lease left ~200ms of headroom,
     // which a loaded CI runner can exceed and expire a live owner.
     let lease = std::time::Duration::from_secs(3);
     let ClaimOutcome::Acquired(owner) =

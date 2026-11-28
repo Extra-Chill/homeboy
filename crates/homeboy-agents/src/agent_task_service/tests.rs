@@ -1268,8 +1268,8 @@ fn materialized_attempt_inherits_cook_notification_route() {
         let parent = "routed-cook";
         let child = "routed-cook-attempt-1";
         let route = homeboy_core::notification_route::NotificationRoute {
-            transport: "discord.run-completion".to_string(),
-            route: "discord:v1:thread:16179".to_string(),
+            transport: "sample.run-completion".to_string(),
+            route: "sample:v1:thread:16179".to_string(),
         };
         agent_task_lifecycle::prepare_unmaterialized_cook_admission(
             parent,
@@ -1314,8 +1314,8 @@ fn attempt_keeps_its_own_notification_route_over_the_cook_route() {
         let parent = "own-route-cook";
         let child = "own-route-cook-attempt-1";
         let route = |thread: &str| homeboy_core::notification_route::NotificationRoute {
-            transport: "discord.run-completion".to_string(),
-            route: format!("discord:v1:thread:{thread}"),
+            transport: "sample.run-completion".to_string(),
+            route: format!("sample:v1:thread:{thread}"),
         };
         agent_task_lifecycle::prepare_unmaterialized_cook_admission(
             parent,

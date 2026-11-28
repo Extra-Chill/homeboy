@@ -3893,20 +3893,20 @@ mod runner_source_upgrade_tests {
             std::fs::create_dir_all(&extensions).expect("extensions directory");
             std::os::unix::fs::symlink(
                 home.path().join("removed-extension-worktree"),
-                extensions.join("discord"),
+                extensions.join("sample"),
             )
             .expect("dangling extension link");
 
             assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
             let warnings = orphan_extension_warnings();
             assert_eq!(warnings.len(), 1);
-            assert_eq!(warnings[0].extension_id, "discord");
+            assert_eq!(warnings[0].extension_id, "sample");
             assert!(warnings[0].reason.contains("WARNING"));
             assert_eq!(
                 warnings[0].recovery_commands,
                 vec![
-                    "homeboy extension relink discord <path>",
-                    "homeboy extension uninstall discord"
+                    "homeboy extension relink sample <path>",
+                    "homeboy extension uninstall sample"
                 ]
             );
         });

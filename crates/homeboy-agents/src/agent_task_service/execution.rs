@@ -4216,7 +4216,7 @@ mod tests {
     /// Submission stamps the submitting caller's `client_context` from the
     /// ambient `HOMEBOY_CALLER_CONTEXT`/`HOMEBOY_REQUESTER`. A Cook retry
     /// prepared without it, or submitted by a different session, is the same
-    /// work; before this, every Cook retry from a Roadie session failed with
+    /// work; before this, every Cook retry from an external session failed with
     /// "reserved controller plan differs from the frozen retry preparation".
     #[test]
     fn retry_identity_ignores_the_submitting_caller_context() {
@@ -4225,11 +4225,11 @@ mod tests {
         for (expected, observed) in [
             (
                 Value::Null,
-                json!({"client_context": {"caller_context": "roadie:session:b"}}),
+                json!({"client_context": {"caller_context": "sample:session:b"}}),
             ),
             (
-                json!({"client_context": {"caller_context": "roadie:session:a"}, "repo": "r"}),
-                json!({"client_context": {"requester": "discord:user:1"}, "repo": "r"}),
+                json!({"client_context": {"caller_context": "sample:session:a"}, "repo": "r"}),
+                json!({"client_context": {"requester": "sample:user:1"}, "repo": "r"}),
             ),
         ] {
             let mut expected_plan = prepared.clone();
