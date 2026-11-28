@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.501.0] - 2026-11-28
+
+### Added
+- publish incomplete candidates with operator acceptance evidence
+
+### Changed
+- centralize continuation decisions and work-job settlement
+
+### Fixed
+- honor successful terminal outcomes without exit codes
+- continue published Cooks after operator feedback
+
 ## [0.500.3] - 2026-11-28
 
 ### Changed
