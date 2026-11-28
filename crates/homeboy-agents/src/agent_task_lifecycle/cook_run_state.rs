@@ -190,12 +190,7 @@ pub(crate) fn reads_stale(record: &AgentTaskRunRecord) -> bool {
     if record.runner_job_id().is_some() && record.has_fresh_update() {
         return false;
     }
-    classify_liveness(
-        record,
-        chrono::Utc::now(),
-        &SupervisorJobs::for_record(record),
-    )
-    .is_reconcilable()
+    classify_liveness(record, chrono::Utc::now(), &SupervisorJobs::default()).is_reconcilable()
 }
 
 pub(crate) fn classify_liveness(
@@ -627,10 +622,10 @@ impl CookRunState {
     }
 
     /// Classify `record`. This is the only place a Cook run's phase,
-    /// terminality and recoverability are decided.
+    /// terminality and recoverability are decided. Daemon supervisor evidence
+    /// is unavailable unless the caller supplies it to `of_at`.
     pub fn of(record: &AgentTaskRunRecord) -> Self {
-        let jobs = SupervisorJobs::for_record(record);
-        Self::of_at(record, chrono::Utc::now(), &jobs)
+        Self::of_at(record, chrono::Utc::now(), &SupervisorJobs::default())
     }
 
     pub(crate) fn of_at(

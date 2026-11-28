@@ -128,16 +128,6 @@ pub(crate) struct SupervisorJobs {
 }
 
 impl SupervisorJobs {
-    pub(crate) fn for_record(record: &AgentTaskRunRecord) -> Self {
-        if record.metadata["local_cook_supervisor"]["job_type"].as_str()
-            == Some(homeboy_core::daemon::step_job::STEP_JOB_TYPE)
-        {
-            Self::read()
-        } else {
-            Self::default()
-        }
-    }
-
     pub(crate) fn for_record_in_roots(
         record: &AgentTaskRunRecord,
         roots: &homeboy_core::paths::PathRoots,

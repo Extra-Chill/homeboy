@@ -26,7 +26,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
 ) -> ControlPlaneActionEligibilityReport {
     let jobs = match roots {
         Some(roots) => super::run_owner::SupervisorJobs::for_record_in_roots(record, roots),
-        None => super::run_owner::SupervisorJobs::for_record(record),
+        None => super::run_owner::SupervisorJobs::default(),
     };
     let state =
         CookRunState::of_at(record, chrono::Utc::now(), &jobs).with_cook_index_fence(fenced);
