@@ -2237,7 +2237,8 @@ esac
             assert_eq!(status, DependencyHydrationStatus::Succeeded);
             assert_eq!(install_count(), 2);
             // A workspace's members get outputs the adapter does not declare.
-            let package = r#"{"name":"fixture","workspaces":["packages/*"],"dependencies":{"dep":"1.0.0"}}"#;
+            let package =
+                r#"{"name":"fixture","workspaces":["packages/*"],"dependencies":{"dep":"1.0.0"}}"#;
             hydrate_with("lock-v3", package);
             let (status, ..) = hydrate_with("lock-v3", package);
             assert_eq!(status, DependencyHydrationStatus::Succeeded);
