@@ -96,7 +96,7 @@ pub struct DynamicSetArgs {
     #[arg(long, value_name = "BASE64")]
     pub base64: Option<String>,
 
-    /// Replace these fields instead of merging arrays
+    /// Replace these fields instead of merging them
     #[arg(long, value_name = "FIELD")]
     pub replace: Vec<String>,
 }

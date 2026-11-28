@@ -168,7 +168,7 @@ Options:
 
 - `--json <JSON>`: JSON object to merge into config (supports `@file` and `-` for stdin)
 - `--base64 <BASE64_JSON>`: Base64-encoded JSON object for shell-sensitive payloads
-- `--replace <field>`: replace array fields instead of union (repeatable)
+- `--replace <field>`: replace the supplied field instead of merging it (repeatable)
 
 Notes:
 
