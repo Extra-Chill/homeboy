@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +9,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(repoRoot, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const runtimePackage = require(path.join(repoRoot, 'wordpress', 'lib', 'wp-codebox-runtime-contract-source.js'));
-const wpCodeboxPackageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'wordpress', 'package.json'), 'utf8'));
+// Resolve the public subpaths from inside the package using Node's self-reference.
+const requireWordPress = createRequire(path.join(repoRoot, 'wordpress', 'package.json'));
 
 assert.equal(runtimePackage.runtimeContractManifest().schema, 'wp-codebox/runtime-contract-manifest/v1');
 
@@ -22,7 +22,8 @@ const stableWpCodeboxConsumerExports = [
 	'./wp-codebox-runtime-readiness',
 ];
 for (const exportName of stableWpCodeboxConsumerExports) {
-	assert.ok(wpCodeboxPackageJson.exports[exportName], `${exportName} stays exported for runtime consumers`);
+	const specifier = exportName === '.' ? 'homeboy-extension-wordpress' : `homeboy-extension-wordpress/${exportName.slice(2)}`;
+	requireWordPress(specifier);
 }
 
 const wordpressPackage = await import(path.join(repoRoot, 'wordpress/index.js'));

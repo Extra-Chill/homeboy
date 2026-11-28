@@ -256,11 +256,3 @@ ${HOMEBOY_RUNNER_HARNESS_EXIT_TRAPS:-}
 EOF
     exit "$status"
 }
-
-homeboy_runner_harness_note_failure() {
-    local label="$1"
-    local exit_code="$2"
-    if [ "$exit_code" -ne 0 ]; then
-        FAILED_STEP="${label} (exit ${exit_code})"
-    fi
-}

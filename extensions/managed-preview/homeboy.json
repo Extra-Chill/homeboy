@@ -1,5 +1,6 @@
 {
   "id": "managed-preview",
+  "changelog_target": "docs/CHANGELOG.md",
   "version_targets": [
     {
       "file": "managed-preview.json",

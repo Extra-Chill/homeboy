@@ -92,7 +92,7 @@ then
 fi
 if [ "$NEEDS_WP_CODEBOX_ADAPTER" -eq 1 ]; then
     if [ -z "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
-        WP_CODEBOX_ADAPTERS_HELPER="${SCRIPT_DIR}/../../wp-codebox-runtime/scripts/lib/test-result-adapters.sh"
+        WP_CODEBOX_ADAPTERS_HELPER="${SCRIPT_DIR}/../../wp-codebox-runtime/scripts/lib/wp-codebox-test-result-adapters.sh"
     fi
     if [ -n "$WP_CODEBOX_ADAPTERS_HELPER" ] && [ -f "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
         # shellcheck source=/dev/null
