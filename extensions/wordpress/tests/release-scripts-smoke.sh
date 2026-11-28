@@ -90,7 +90,11 @@ chmod +x "${STUB_BIN_DIR}/gh"
 # when build/<slug>.zip exists.
 # ---------------------------------------------------------------------------
 mkdir -p build
-echo "fake-zip-bytes" > build/test-plugin.zip
+printf '%s\n' '<?php' '/* Plugin Name: Test Plugin' ' * Version: 1.0.0' ' */' > test-plugin.php
+mkdir -p test-plugin
+cp test-plugin.php test-plugin/
+zip -q build/test-plugin.zip test-plugin/test-plugin.php
+rm -rf test-plugin
 cat > homeboy.json <<'JSON'
 {
   "id": "test-plugin",
@@ -109,7 +113,8 @@ JSON
 # WordPress build harness (which needs composer, node, plugin headers, …).
 PACKAGE_SCRIPT_DIR="$(mktemp -d -t homeboy-wp-release-pkg.XXXXXX)"
 trap 'rm -rf "${WORK_DIR}" "${PACKAGE_SCRIPT_DIR}"' EXIT
-mkdir -p "${PACKAGE_SCRIPT_DIR}/scripts/build" "${PACKAGE_SCRIPT_DIR}/scripts/release"
+mkdir -p "${PACKAGE_SCRIPT_DIR}/scripts/build" "${PACKAGE_SCRIPT_DIR}/scripts/release" "${PACKAGE_SCRIPT_DIR}/scripts/lib"
+cp "${EXTENSION_PATH}/scripts/lib/package-entrypoint.sh" "${PACKAGE_SCRIPT_DIR}/scripts/lib/"
 cat > "${PACKAGE_SCRIPT_DIR}/scripts/build/build.sh" <<'STUB'
 #!/usr/bin/env bash
 if ! printf '%s' "${HOMEBOY_SETTINGS_JSON:-}" | jq -e '.build_nested_packages == false' >/dev/null; then
@@ -119,7 +124,7 @@ fi
 echo "stub build" >&2
 STUB
 chmod +x "${PACKAGE_SCRIPT_DIR}/scripts/build/build.sh"
-cp "${PACKAGE_SH}" "${PACKAGE_SCRIPT_DIR}/scripts/release/package.sh"
+cp "${PACKAGE_SH}" "${EXTENSION_PATH}/scripts/release/verify-artifact-version.sh" "${PACKAGE_SCRIPT_DIR}/scripts/release/"
 chmod +x "${PACKAGE_SCRIPT_DIR}/scripts/release/package.sh"
 
 stub_output="$(HOMEBOY_COMPONENT_ID=test-plugin "${PACKAGE_SCRIPT_DIR}/scripts/release/package.sh" 2>/dev/null)" || stub_output=""
@@ -159,7 +164,8 @@ fi
 # ---------------------------------------------------------------------------
 PROFILE_SCRIPT_DIR="$(mktemp -d -t homeboy-wp-release-profiles.XXXXXX)"
 trap 'rm -rf "${WORK_DIR}" "${STUB_BIN_DIR}" "${PACKAGE_SCRIPT_DIR}" "${PROFILE_SCRIPT_DIR}"' EXIT
-mkdir -p "${PROFILE_SCRIPT_DIR}/scripts/build" "${PROFILE_SCRIPT_DIR}/scripts/release"
+mkdir -p "${PROFILE_SCRIPT_DIR}/scripts/build" "${PROFILE_SCRIPT_DIR}/scripts/release" "${PROFILE_SCRIPT_DIR}/scripts/lib"
+cp "${EXTENSION_PATH}/scripts/lib/package-entrypoint.sh" "${PROFILE_SCRIPT_DIR}/scripts/lib/"
 cat > "${PROFILE_SCRIPT_DIR}/scripts/build/build.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -203,6 +209,7 @@ cat > "${PROFILE_DIR}/homeboy.json" <<'JSON'
 }
 JSON
 
+printf '%s\n' '<?php' '/* Plugin Name: Profile Plugin' ' * Version: 1.0.0' ' */' > "${PROFILE_DIR}/profile-plugin.php"
 PROFILE_PAYLOAD='{"release":{"version":"1.0.0","component_id":"profile-plugin"}}'
 PROFILE_LOG="${PROFILE_DIR}/profile-invocations.log"
 
@@ -267,6 +274,7 @@ cat > "${DEFAULT_DIR}/homeboy.json" <<'JSON'
 }
 JSON
 
+cp "${PROFILE_DIR}/profile-plugin.php" "${DEFAULT_DIR}/"
 DEFAULT_LOG="${DEFAULT_DIR}/profile-invocations.log"
 set +e
 default_out="$(
@@ -315,6 +323,7 @@ while IFS='|' read -r case_name case_value case_grep; do
   [[ -n "${case_name}" ]] || continue
 
   REJECT_DIR="$(mktemp -d -t homeboy-wp-release-reject.XXXXXX)"
+  cp "${PROFILE_DIR}/profile-plugin.php" "${REJECT_DIR}/"
   REJECT_LOG="${REJECT_DIR}/invocations.log"
   jq -n --argjson value "${case_value}" \
     '{extensions:{wordpress:{settings:{build_nested_packages:false, additional_package_profiles:$value}}}}' \
@@ -442,6 +451,30 @@ else
   else
     echo "OK: publish.sh skips branch mirror when release_latest_branch is unset"
   fi
+fi
+
+# Source metadata overrides the wrapper-named companion during publish.
+mkdir -p "${HAPPY_DIR}/source"
+cat > "${HAPPY_DIR}/source/homeboy.json" <<'JSON'
+{"version_targets":[{"file":"canonical.php"}]}
+JSON
+printf '%s\n' '<?php' '/* Plugin Name: Canonical' ' * Version: 1.0.0' ' */' > "${HAPPY_DIR}/source/canonical.php"
+python3 -c "
+import zipfile
+with zipfile.ZipFile('${HAPPY_DIR}/build/happy-plugin.zip', 'w') as z:
+  z.writestr('happy-plugin/happy-plugin.php', '<?php\n/* Plugin Name: Companion\n * Version: 9.0.0\n */')
+  z.writestr('happy-plugin/canonical.php', '<?php\n/* Plugin Name: Canonical\n * Version: 1.0.0\n */')
+"
+if publish_out="$(
+  cd "${HAPPY_DIR}" &&
+  PATH="${STUB_BIN_DIR}:${PATH}" GITHUB_REPOSITORY="example/happy-plugin" \
+  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"happy-plugin","source_path":"source"}}' \
+    "${PUBLISH_SH}" 2>&1
+)"; then
+  echo "OK: publish.sh verifies the source-selected entrypoint"
+else
+  echo "FAIL: publish.sh ignored source entrypoint metadata: ${publish_out}" >&2
+  failures=$((failures + 1))
 fi
 
 # ---------------------------------------------------------------------------
