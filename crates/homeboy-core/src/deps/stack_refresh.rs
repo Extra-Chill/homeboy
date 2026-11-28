@@ -31,6 +31,8 @@ pub enum DependencyStackEdgeRefreshState {
     /// The edge could not be checked; never reported as current.
     Unresolvable,
     Held,
+    /// In-release refresh left the pin unchanged because the range was breaking or unknown.
+    SkippedUnsafeRange,
     /// The edge was behind but a step of its update path failed.
     Failed,
 }
@@ -202,6 +204,26 @@ pub fn stack_refresh_for_component(
     dry_run: bool,
     install: bool,
 ) -> Result<DependencyStackRefreshResult> {
+    refresh_stack(component, path, dry_run, install, false)
+}
+
+/// Refresh only inspectable, nonbreaking ranges. Breaking or unknown ranges
+/// are reported as skipped before running any update steps for those edges.
+pub fn stack_refresh_nonbreaking_for_component(
+    component: &Component,
+    path: &Path,
+    dry_run: bool,
+) -> Result<DependencyStackRefreshResult> {
+    refresh_stack(component, path, dry_run, true, true)
+}
+
+fn refresh_stack(
+    component: &Component,
+    path: &Path,
+    dry_run: bool,
+    install: bool,
+    nonbreaking_only: bool,
+) -> Result<DependencyStackRefreshResult> {
     let outdated = stack_outdated_for_component(component, path)?;
 
     let mut declared_edges: BTreeMap<String, DependencyStackEdge> = BTreeMap::new();
@@ -225,6 +247,7 @@ pub fn stack_refresh_for_component(
             sequence + 1,
             dry_run,
             install,
+            nonbreaking_only,
         ));
     }
 
@@ -271,6 +294,7 @@ fn refresh_edge(
     sequence: usize,
     dry_run: bool,
     install: bool,
+    nonbreaking_only: bool,
 ) -> DependencyStackEdgeRefreshResult {
     let mut result = DependencyStackEdgeRefreshResult {
         upstream: status.upstream.clone(),
@@ -367,6 +391,11 @@ fn refresh_edge(
         result.failure = Some("behind edge resolved no newest version".to_string());
         return result;
     };
+
+    if nonbreaking_only && result.breaking != Some(false) {
+        result.state = DependencyStackEdgeRefreshState::SkippedUnsafeRange;
+        return result;
+    }
 
     if let Some(lock) = &edge.lock {
         let write = super::stack_source::version_file_path(path, &lock.path).and_then(|target| {

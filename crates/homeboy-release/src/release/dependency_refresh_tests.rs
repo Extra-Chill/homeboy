@@ -396,21 +396,92 @@ fn dependency_refresh_current_leaves_plan_unchanged() {
 }
 
 #[test]
-fn dependency_refresh_breaking_and_unknown_block_without_mutation() {
-    for newest in ["2.0.0", "1.0.1"] {
+fn dependency_refresh_breaking_and_unknown_release_pinned_versions() {
+    for (newest, reason) in [
+        ("2.0.0", "major version changes"),
+        ("1.0.1", "could not be fetched"),
+    ] {
         let (temp, options) = fixture("1.0.0", newest);
+        let path = temp.path().join("downstream");
         if newest == "1.0.1" {
             git(
                 &temp.path().join("upstream"),
                 &["tag", "-d", "engine-v1.0.0"],
             );
         }
-        let error = super::planner::plan("downstream", &options).unwrap_err();
+        let assert_reports_skip = |warnings: &[String]| {
+            assert!(
+                warnings.iter().any(|warning| {
+                    warning.contains(&format!(
+                        "Skipped dependency refresh for fixture/engine (1.0.0 -> {newest})"
+                    )) && warning.contains(reason)
+                }),
+                "{warnings:?}"
+            );
+        };
+        let plan = super::planner::plan("downstream", &options).unwrap();
         assert!(
-            error.message.contains("breaking or unknown"),
-            "{}",
-            error.message
+            !plan.enabled(),
+            "skipped refresh alone must not trigger a release"
         );
-        assert!(git(&temp.path().join("downstream"), &["status", "--porcelain"]).is_empty());
+        assert_reports_skip(&plan.plan.warnings);
+
+        let remote = temp.path().join("remote.git");
+        git(
+            temp.path(),
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        git(
+            &path,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(path.join("fix.txt"), "unrelated fix\n").unwrap();
+        git(&path, &["add", "fix.txt"]);
+        git(&path, &["commit", "-qm", "fix: unrelated fix"]);
+        git(&path, &["push", "-u", "--tags", "origin", "main"]);
+        let mut options = ReleaseOptions {
+            bump_type: "patch".into(),
+            dry_run: false,
+            skip_checks: true,
+            skip_deps_hydration: true,
+            skip_github_release: true,
+            ..options
+        };
+        options.bump_policy.bump_type_explicit = true;
+        options.pipeline.skip_publish = true;
+        let roots = homeboy_core::paths::PathRoots::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            temp.path().join("artifacts"),
+        );
+        let (plan, run, _) =
+            super::orchestrator::run_with_plan(&roots, "downstream", &options).unwrap();
+        assert_eq!(run.result.status, ReleaseStepStatus::Success, "{run:?}");
+        assert_reports_skip(&run.result.warnings);
+        assert!(!plan
+            .plan
+            .steps
+            .iter()
+            .any(|step| matches!(step.id.as_str(), "deps.stack.refresh" | "post_refresh.test")));
+        for file in ["deps.lock", "deps.manifest"] {
+            assert_eq!(git(&remote, &["show", &format!("v0.1.1:{file}")]), "1.0.0");
+        }
+        let changelog = git(&remote, &["show", "v0.1.1:CHANGELOG.md"]);
+        assert!(changelog.contains("unrelated fix"), "{changelog}");
+        assert!(!changelog.contains("Update fixture/engine"), "{changelog}");
     }
+}
+
+#[test]
+fn dependency_refresh_unresolvable_source_still_blocks_release() {
+    let (temp, options) = fixture("1.0.0", "1.0.1");
+    git(
+        &temp.path().join("upstream"),
+        &["tag", "-d", "engine-v1.0.0", "engine-v1.0.1"],
+    );
+    let error = super::planner::plan("downstream", &options).unwrap_err();
+    assert!(
+        error.message.contains("fixture/engine unresolvable"),
+        "{error:?}"
+    );
 }

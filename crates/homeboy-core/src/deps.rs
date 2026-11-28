@@ -32,8 +32,9 @@ pub use dependency_graph::{
 };
 pub use stack_refresh::{
     release_range_breaking_verdict, stack_refresh, stack_refresh_for_component,
-    DependencyStackBreakingVerdict, DependencyStackEdgeRefreshResult,
-    DependencyStackEdgeRefreshState, DependencyStackRefreshResult,
+    stack_refresh_nonbreaking_for_component, DependencyStackBreakingVerdict,
+    DependencyStackEdgeRefreshResult, DependencyStackEdgeRefreshState,
+    DependencyStackRefreshResult,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
