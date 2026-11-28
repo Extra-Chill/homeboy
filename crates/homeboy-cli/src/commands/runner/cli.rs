@@ -464,7 +464,7 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         exit_code: Option<i32>,
     },
-    /// Inspect or follow a runner daemon job stream
+    /// Inspect runner jobs with `homeboy runner job list <runner-id>`; follow logs or cancel a job
     Job {
         #[command(subcommand)]
         command: RunnerJobCommand,

@@ -230,7 +230,7 @@ pub enum Commands {
     Refactor(refactor::RefactorArgs),
     /// Manage local dev rigs (reproducible multi-component environments)
     Rig(rig::RigArgs),
-    /// Manage local and SSH execution runners
+    /// Manage local and SSH execution runners; inspect their jobs with `runner job list`
     Runner(runner::RunnerArgs),
     /// Inspect sealed source-package admissibility without staging resources
     Source(source::SourceArgs),

@@ -760,9 +760,9 @@ its event stream; `--follow` keeps polling until the job reaches a terminal stat
 and prints newly observed events as they arrive. Use this when a controller exits
 after dispatching runner work and you need to inspect the already-started job.
 
-`job list` defaults to a compact table of live daemon jobs. Use `--all` to
-include observed terminal jobs, and `--json` for the structured response,
-including the live job count.
+Use `homeboy runner job list <runner-id>` (singular `job`, not `runner jobs`)
+for a compact table of live daemon jobs. Use `--all` to include observed terminal
+jobs, and `--json` for the structured response, including the live job count.
 
 `cancel` requests cancellation for a queued or running durable runner daemon job
 through the connected runner daemon.

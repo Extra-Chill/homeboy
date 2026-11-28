@@ -3760,6 +3760,12 @@ fn try_augment_clap_error(
 /// generic runner surface and deliberately require discovery before selecting
 /// a runner ID.
 fn command_domain_hints(unrecognized: &str, parent_command: &str) -> Option<Vec<String>> {
+    if parent_command == "runner" && unrecognized == "jobs" {
+        return Some(vec![
+            "List runner jobs with `homeboy runner job list <runner-id>`".to_string(),
+        ]);
+    }
+
     if !parent_command.is_empty()
         || !(unrecognized.eq_ignore_ascii_case("lab")
             || homeboy::core::engine::text::levenshtein(&unrecognized.to_lowercase(), "runner")
@@ -3828,35 +3834,21 @@ fn extract_unrecognized_from_error(e: &clap::Error) -> Option<String> {
 fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
     use clap::error::ContextKind;
 
-    // clap 4.x: look for Usage context which contains "homeboy <command> ...".
-    for (kind, value) in e.context() {
-        if matches!(kind, ContextKind::Usage) {
-            let usage = value.to_string();
-            // Format: "Usage: homeboy <command> [OPTIONS] ...".
-            if let Some(rest) = usage.strip_prefix("Usage: homeboy ") {
-                // Get first word after "homeboy ".
-                if let Some(cmd) = rest.split_whitespace().next() {
-                    // Skip if it's a placeholder like "[OPTIONS]" or "<COMMAND>".
-                    if !cmd.starts_with('[') && !cmd.starts_with('<') {
-                        return Some(cmd.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback: parse from error message which includes usage.
-    let msg = e.to_string();
-    if let Some(start) = msg.find("Usage: homeboy ") {
-        let rest = &msg[start + 15..];
-        if let Some(cmd) = rest.split_whitespace().next() {
-            if !cmd.starts_with('[') && !cmd.starts_with('<') {
-                return Some(cmd.to_string());
-            }
-        }
-    }
-
-    Some(String::new())
+    let usage = e
+        .context()
+        .find_map(|(kind, value)| matches!(kind, ContextKind::Usage).then(|| value.to_string()))
+        .unwrap_or_else(|| e.to_string());
+    let parent = usage
+        .lines()
+        .find_map(|line| line.strip_prefix("Usage: homeboy "))
+        .unwrap_or_default();
+    Some(
+        parent
+            .split_whitespace()
+            .take_while(|word| !word.starts_with(['[', '<']))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 #[cfg(test)]
@@ -5834,6 +5826,21 @@ mod tests {
                 "{command}: {output}"
             );
         }
+    }
+
+    #[test]
+    fn runner_jobs_typo_points_to_job_list() {
+        let err = build_augmented_command(&[], &ExtensionCliHealth::default())
+            .try_get_matches_from(["homeboy", "runner", "jobs"])
+            .expect_err("jobs is not a runner subcommand");
+        let output = try_augment_clap_error(&err, &ExtensionCliHealth::default())
+            .expect("runner jobs should have a replacement hint");
+        assert!(output.contains("homeboy runner job list <runner-id>"));
+
+        let err = build_augmented_command(&[], &ExtensionCliHealth::default())
+            .try_get_matches_from(["homeboy", "runner", "broker", "jobs"])
+            .expect_err("jobs is not a broker subcommand");
+        assert!(try_augment_clap_error(&err, &ExtensionCliHealth::default()).is_none());
     }
 
     #[test]
