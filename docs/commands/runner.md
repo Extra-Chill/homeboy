@@ -551,6 +551,11 @@ replacement. The lease-bound stop rechecks the startup ownership token and job
 store before every signal. Active work, PID/lease drift, and ambiguous listener
 ownership remain fail-closed.
 
+Explicit live-lease adoption can attach to a stale daemon if it is reachable,
+its endpoint probes succeed, and the lease, PID, and build identity still
+match. If final revalidation fails, connect reports the failed check without
+publishing a new session.
+
 When a remote daemon is dead, or its state record is missing, `runner connect`
 starts its successor. The successor's owner lock refuses a still-live holder,
 and its startup recovery reconciles every job the dead generation left in its
