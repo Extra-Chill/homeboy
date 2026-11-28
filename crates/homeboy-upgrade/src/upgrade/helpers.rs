@@ -126,6 +126,13 @@ pub fn run_upgrade_with_operation(
         return run_targeted_runner_upgrade(method_override, runner_targets);
     }
 
+    if let Some(warning) = std::env::var_os("PATH")
+        .as_deref()
+        .and_then(super::planning::path_shadowing_warning)
+    {
+        eprintln!("[upgrade] {warning}");
+    }
+
     let mut operation = UpgradeOperation::start_durable("homeboy upgrade")?;
     let upgrade_result = run_controller_upgrade_with_operation(
         force,
