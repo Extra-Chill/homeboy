@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.500.1] - 2026-11-28
+
+### Changed
+- avoid repeated process scans in admission history setup
+
+### Fixed
+- make partial publication retry-safe and expose partial success
+- warn about lint overlap and separate local admission timing
+- flag committed evidence notes during publication
+- surface disconnected Lab gates as blocked with recovery guidance
+- bound artifact markers and surface generic diagnoses
+- reconstruct and rearm stranded terminal continuations
+
 ## [0.500.0] - 2026-11-27
 
 ### Added
