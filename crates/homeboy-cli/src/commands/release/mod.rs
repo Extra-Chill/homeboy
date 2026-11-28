@@ -44,7 +44,9 @@ impl ReleaseArgs {
     /// from every other release invocation (JSON envelope).
     pub(crate) fn into_markdown_changelog(self) -> Result<changelog::ChangelogArgs, Self> {
         match self.command {
-            Some(ReleaseSubcommand::Changelog(args)) if changelog::is_show_markdown(&args) => {
+            Some(ReleaseSubcommand::Changelog(args))
+                if self.execute.components.is_empty() && changelog::is_show_markdown(&args) =>
+            {
                 Ok(args)
             }
             command => Err(Self {
@@ -75,6 +77,22 @@ enum ReleaseSubcommand {
     Resolve(ResolveArgs),
     /// Inspect retained portable release-readiness evidence
     Readiness(ReleaseReadinessArgs),
+}
+
+impl ReleaseSubcommand {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Candidate(_) => "candidate",
+            Self::Changes(_) => "changes",
+            Self::Changelog(_) => "changelog",
+            Self::Version(_) => "version",
+            Self::ArtifactSourceAuthority(_) => "artifact-source-authority",
+            Self::Contains(_) => "contains",
+            Self::Gap(_) => "gap",
+            Self::Resolve(_) => "resolve",
+            Self::Readiness(_) => "readiness",
+        }
+    }
 }
 
 #[derive(Args)]
@@ -533,7 +551,40 @@ impl ReleaseExecuteArgs {
     }
 }
 
+fn validate_helper_position(args: &ReleaseArgs) -> homeboy::core::Result<()> {
+    let Some((component, rest)) = args.execute.components.split_first() else {
+        return Ok(());
+    };
+    let helper = rest
+        .iter()
+        .map(String::as_str)
+        .find(|name| ReleaseSubcommand::has_subcommand(name) || *name == "help")
+        // An intervening option can make clap recognize a subcommand even
+        // after it has already collected positional components.
+        .or_else(|| args.command.as_ref().map(ReleaseSubcommand::name));
+    let Some(helper) = helper else {
+        return Ok(());
+    };
+    let invocation = match helper {
+        "version" | "changelog" => format!("{helper} show {component}"),
+        "readiness" => format!("readiness list {component}"),
+        "contains" => format!("contains {component} <commit>"),
+        "candidate" => format!("candidate {component} --sha <SHA> --from-artifacts <DIR> --version <VERSION>"),
+        "artifact-source-authority" => format!("artifact-source-authority {component} --dir <DIR> --tag <TAG> --version <VERSION> --commit <SHA>"),
+        "resolve" => "resolve <repository> --prefix <tag-prefix>".to_string(),
+        "help" => "--help".to_string(),
+        _ => format!("{helper} {component}"),
+    };
+    Err(homeboy::core::Error::invalid_argument_for(
+        "components",
+        format!("Release helper '{helper}' must come before component IDs"),
+        helper,
+    )
+    .with_hint(format!("Try: homeboy release {invocation}")))
+}
+
 pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
+    validate_helper_position(&args)?;
     eprintln!("[release] stage: dispatching subcommand");
     match args.command {
         Some(ReleaseSubcommand::Candidate(args)) => {

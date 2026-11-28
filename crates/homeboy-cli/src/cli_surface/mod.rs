@@ -223,6 +223,9 @@ pub enum Commands {
     /// Git operations for components
     Git(git::GitArgs),
     /// Plan release workflows
+    #[command(
+        override_usage = "homeboy release [OPTIONS] [COMPONENTS]...\n       homeboy release [OPTIONS] <COMMAND>"
+    )]
     Release(release::ReleaseArgs),
     /// Run scoped lint + test umbrella against PR-style changes
     Review(review::ReviewArgs),
