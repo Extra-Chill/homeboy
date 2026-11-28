@@ -204,7 +204,9 @@ impl AgentTaskReviewRepro {
         let meaning = match self {
             Self::None => "no repro gate was declared, so these gates do not prove the issue",
             Self::Verified => "the repro gate failed on base and passed on the candidate",
-            Self::OperatorVerified => "the operator attested that the remaining acceptance passed on this candidate",
+            Self::OperatorVerified => {
+                "the operator attested that the remaining acceptance passed on this candidate"
+            }
             Self::FailedOnCandidate => {
                 "the repro gate did not both fail on base and pass on the candidate"
             }

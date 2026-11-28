@@ -888,7 +888,9 @@ pub trait CookRecoveryPerformer {
             return super::cook_promotion::publish_partial_cook(run_id, request, preflight);
         }
         if request.evidence.is_some() {
-            return super::cook_promotion::publish_operator_verified_cook(run_id, request, preflight);
+            return super::cook_promotion::publish_operator_verified_cook(
+                run_id, request, preflight,
+            );
         }
         let value = super::recover_cook_pr_with_review_form(
             run_id,

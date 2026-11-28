@@ -130,10 +130,11 @@ pub fn cook_proved_task(
 ) -> bool {
     matches!(
         dossier.repro,
-        Some(crate::agent_task_review_dossier::AgentTaskReviewRepro::Verified
-            | crate::agent_task_review_dossier::AgentTaskReviewRepro::OperatorVerified)
-    )
-        && !dossier.has_undelivered_items()
+        Some(
+            crate::agent_task_review_dossier::AgentTaskReviewRepro::Verified
+                | crate::agent_task_review_dossier::AgentTaskReviewRepro::OperatorVerified
+        )
+    ) && !dossier.has_undelivered_items()
         && dossier.completion
             == Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete)
 }

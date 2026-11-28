@@ -3138,9 +3138,11 @@ fn terminal_form_title(
 
 #[path = "cook_partial_publication.rs"]
 mod partial_publication;
-pub(super) use partial_publication::{publish_partial_cook, publish_operator_verified_cook};
+pub(super) use partial_publication::{publish_operator_verified_cook, publish_partial_cook};
 #[cfg(test)]
-pub(super) use partial_publication::{publish_partial_cook_with, publish_operator_verified_cook_with};
+pub(super) use partial_publication::{
+    publish_operator_verified_cook_with, publish_partial_cook_with,
+};
 
 /// Recover publication from the durable Cook recipe and applied promotion.
 pub fn recover_cook_pr(
@@ -3850,19 +3852,26 @@ fn cook_review_dossier_with_stores_and_review_form(
         successful_run_id,
         &terminal_form,
     )?;
-    let operator_verified = lifecycle_store.read_record(successful_run_id)?.metadata
+    let operator_verified = lifecycle_store
+        .read_record(successful_run_id)?
+        .metadata
         .get("operator_acceptance")
         .and_then(|attestation| attestation.get("promotion"))
         == serde_json::to_value(promotion).ok().as_ref();
     let repro = if operator_verified && promotion.applied_with_passing_verdict() {
         crate::agent_task_review_dossier::AgentTaskReviewRepro::OperatorVerified
-    } else { super::cook_repro::candidate_repro_verdict(
-        &options.gates.repro,
-        // The base repro result is recorded on the Cook before dispatch (#17653).
-        super::cook_repro::recorded_repro_base_evidence(lifecycle_store, &options.identity.cook_id)
+    } else {
+        super::cook_repro::candidate_repro_verdict(
+            &options.gates.repro,
+            // The base repro result is recorded on the Cook before dispatch (#17653).
+            super::cook_repro::recorded_repro_base_evidence(
+                lifecycle_store,
+                &options.identity.cook_id,
+            )
             .as_ref(),
-        verification_promotion,
-    ) };
+            verification_promotion,
+        )
+    };
     let mut evidence: Vec<AgentTaskReviewEvidence> = terminal_form
         .evidence
         .iter()
@@ -4057,13 +4066,16 @@ fn cook_review_dossier_with_stores_and_review_form(
             } else {
                 terminal_form.delivery.clone()
             },
-        ).into_iter().map(|mut item| {
+        )
+        .into_iter()
+        .map(|mut item| {
             if operator_verified {
                 item.status = homeboy_control_plane_contract::CookDeliveryItemStatus::Delivered;
                 item.reason = None;
             }
             item
-        }).collect(),
+        })
+        .collect(),
         completion,
     })
 }

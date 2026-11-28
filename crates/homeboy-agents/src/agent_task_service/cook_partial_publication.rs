@@ -40,10 +40,9 @@ pub(crate) fn publish_operator_verified_cook_with<B: AgentTaskPrFinalizationBack
         .filter(|promotion| {
             promotion.applied_with_passing_verdict()
                 && !promotion.deterministic_gates.is_empty()
-                && promotion
-                    .deterministic_gates
-                    .iter()
-                    .all(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Succeeded)
+                && promotion.deterministic_gates.iter().all(|gate| {
+                    gate.status == crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+                })
         })
         .ok_or_else(|| invalid("operator acceptance requires passing candidate gates"))?;
     let aggregate = store.read_aggregate(&id)?;
