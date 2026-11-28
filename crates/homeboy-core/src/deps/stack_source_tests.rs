@@ -156,6 +156,43 @@ fn version_file_npm_refresh_and_dry_run() {
 }
 
 #[test]
+fn in_release_refresh_skips_unknown_npm_range_without_changing_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = dir.path().join("pin");
+    std::fs::write(&pin, "1.0.0\n").unwrap();
+    let component = consumer(dir.path(), serde_json::json!({"npm":"@org/tool"}), false);
+    let server = fixture(vec![("200 OK", r#"{"dist-tags":{"latest":"1.0.1"}}"#)]);
+    let result = super::stack_refresh::stack_refresh_nonbreaking_for_component(
+        &component,
+        dir.path(),
+        false,
+    )
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(result.updated_count, 0);
+    let edge = &result.edges[0];
+    assert_eq!(
+        edge.state,
+        DependencyStackEdgeRefreshState::SkippedUnsafeRange
+    );
+    assert_eq!(edge.breaking, None);
+    assert_eq!(
+        edge.breaking_reasons,
+        ["npm source does not declare an inspectable commit range"]
+    );
+    assert_eq!(std::fs::read_to_string(&pin).unwrap(), "1.0.0\n");
+
+    // The standalone command still applies the bump and reports an unsafe range.
+    let server = fixture(vec![("200 OK", r#"{"dist-tags":{"latest":"1.0.1"}}"#)]);
+    let result = stack_refresh_for_component(&component, dir.path(), false, true).unwrap();
+    server.join().unwrap();
+    assert!(result.breaking);
+    assert_eq!(result.updated_count, 1);
+    assert_eq!(std::fs::read_to_string(pin).unwrap(), "1.0.1\n");
+}
+
+#[test]
 fn breaking_only_policy_does_not_hold_majors_and_npm_ignores_it() {
     for (from, latest, breaking) in [
         ("0.9.3", "0.10.0", Some(true)),

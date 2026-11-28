@@ -105,7 +105,12 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
         }
     }
     let refresh = if component.release.refresh_dependencies && !options.pipeline.head {
-        Some(super::dependency_refresh::preview(&component)?)
+        let refresh = super::dependency_refresh::preview(&component)?;
+        for message in super::dependency_refresh::skip_messages(&refresh) {
+            homeboy_core::log_status!("release", "{}", message);
+            warnings.push(message);
+        }
+        Some(refresh)
     } else {
         None
     };
@@ -160,12 +165,13 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
             guard_stale_primary_at_head(component_id, &release_scope.git_root, tag)?;
         }
 
-        if let Some(skip_plan) = release_skip_plan(
+        if let Some(mut skip_plan) = release_skip_plan(
             component_id,
             options,
             semver_recommendation.clone(),
             release_already_at_head.as_deref().filter(|_| !has_refresh),
         ) {
+            skip_plan.plan.warnings.extend(warnings);
             return Ok(skip_plan);
         }
     }

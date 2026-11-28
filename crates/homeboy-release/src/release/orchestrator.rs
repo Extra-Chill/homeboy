@@ -207,6 +207,7 @@ fn run_with_plan_inner(
     })?;
 
     let mut run = finalize(component_id, results);
+    run.result.warnings.clone_from(&release_plan.plan.warnings);
     restore_checkout_after_failed_run(checkout_guard, &mut run)?;
 
     Ok((release_plan, run))

@@ -42,7 +42,7 @@ Opt in per component in `homeboy.json`:
 
 Before computing the next version, release previews the same implementation as
 `homeboy deps stack refresh`, using the component's declared `dependency_stack`.
-Each behind edge contributes `Update <package> to <version>` to the generated
+Each refreshed edge contributes `Update <package> to <version>` to the generated
 changelog. Nonbreaking updates alone are releasable (patch by default), even
 when HEAD is the previous release tag. Existing commit-derived bumps still apply.
 With no behind edges, release planning is unchanged.
@@ -60,10 +60,13 @@ creating a tag. With no behind edges, no extra test step is added.
 The release rechecks its preview before applying; changed upstream resolution
 requires replanning. `--dry-run` only previews and never runs update commands.
 
-**Safety policy:** breaking (`true`) or unknown (`null`) refresh verdicts stop
-release with the dependency and reason, regardless of `--bump`. Update and review
-those ranges separately before releasing. Unresolvable or failed edges also
-block release. Refresh is not run in `--head` or prepared-release resume mode.
+**Safety policy:** release skips dependency updates with breaking (`true`) or
+unknown (`null`) range verdicts. It keeps those versions pinned and reports each
+skip and its reason in the release output and logs. Skipped updates do not trigger
+a release on their own; review them separately in the dependency-refresh PR.
+Unresolvable or failed edges still block release. This policy does not change
+`homeboy deps stack refresh`. In-release refresh does not run in `--head` or
+prepared-release resume mode.
 
 ## Options
 
