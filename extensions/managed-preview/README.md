@@ -2,7 +2,7 @@
 
 `managed-preview` contains provider command helpers for Homeboy managed service previews.
 
-Homeboy core owns the generic lifecycle contract: start a local service, supervise an optional backend command, record logs, and expose a `homeboy/preview-url/v1` artifact. This extension owns provider command glue that can be used with Homeboy's generic `--public-tunnel-backend command` seam.
+Homeboy core owns the generic lifecycle contract: start a local service, supervise an optional backend command, record logs, and expose a `homeboy/preview-url/v1` artifact. This extension ships helper scripts, not automatically discovered trace helpers or preview backends. Run the preflight script explicitly and pass the backend script to Homeboy's `--public-tunnel-backend command` option.
 
 ## Browser Trace Public Preview Preflight
 

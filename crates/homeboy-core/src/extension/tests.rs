@@ -211,10 +211,6 @@ fn extension_manifest_accepts_real_extension_fixture_shapes() {
             "wordpress",
             include_str!("../../../../tests/fixtures/extension_manifests/wordpress.json"),
         ),
-        (
-            "managed-preview",
-            include_str!("../../../../tests/fixtures/extension_manifests/managed-preview.json"),
-        ),
     ] {
         let mut manifest: ExtensionManifest = serde_json::from_str(raw)
             .unwrap_or_else(|err| panic!("{fixture_id} manifest should parse: {err}"));
@@ -225,6 +221,40 @@ fn extension_manifest_accepts_real_extension_fixture_shapes() {
         assert_eq!(manifest.id, fixture_id);
         assert!(!manifest.name.is_empty());
     }
+}
+
+#[test]
+fn managed_preview_ships_helpers_without_manifest_registrations() {
+    let manifest: ExtensionManifest = serde_json::from_str(include_str!(
+        "../../../../extensions/managed-preview/managed-preview.json"
+    ))
+    .expect("bundled managed-preview manifest should parse");
+
+    assert!(manifest.extra.is_empty(), "{:?}", manifest.extra);
+    assert!(manifest.trace.is_none());
+}
+
+#[test]
+fn cloudflare_workers_ships_a_cli_command_without_a_deployment_provider() {
+    let manifest: ExtensionManifest = serde_json::from_str(include_str!(
+        "../../../../extensions/cloudflare-workers/cloudflare-workers.json"
+    ))
+    .expect("bundled cloudflare-workers manifest should parse");
+
+    assert!(manifest.deployment_providers.is_empty());
+    assert_eq!(
+        manifest.cli.expect("CLI declaration").tool,
+        "cloudflare-worker-deploy"
+    );
+    assert_eq!(
+        manifest
+            .executable
+            .expect("extension run adapter")
+            .runtime
+            .run_command
+            .as_deref(),
+        Some("node {{extension_path}}/scripts/cloudflare-worker-deploy.mjs {{args}}")
+    );
 }
 
 #[test]

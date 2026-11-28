@@ -213,14 +213,9 @@ pub struct ExtensionManifest {
     /// in this workspace. Extra-Chill/homeboy-extensions#2565 removed that set
     /// at the source.
     ///
-    /// Two things deliberately stayed, and the distinction matters: no reader
-    /// *here* is not the same as no reader *anywhere*.
-    /// `dependency_materialization_recipes` (51 lines) is still inert to core
-    /// but is asserted on by the WordPress extension's own smoke tests.
-    /// managed-preview's `browser_trace_helpers` and `preview_backends` have no
-    /// reader in this workspace or in the extensions repo, which makes their
-    /// inertness an unprovable negative from here rather than a demonstrated
-    /// one — so they were left alone.
+    /// No reader in core does not necessarily mean no reader elsewhere:
+    /// `dependency_materialization_recipes` is asserted on by the WordPress
+    /// extension's own smoke tests.
     ///
     /// A key that core is meant to act on belongs on a typed field, where its
     /// absence of a reader is a compile-time fact rather than something a grep
