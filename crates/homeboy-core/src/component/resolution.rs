@@ -946,26 +946,34 @@ fn portable_component_for_checkout(
     checkout_path: &Path,
     registered: &Component,
 ) -> Result<Component> {
-    let manifest_path = checkout_path.join("homeboy.json");
-    let Some(discovered) = try_discover_from_portable(checkout_path)? else {
-        // A registration whose primary checkout does not own its manifest is
-        // machine-local metadata, not checkout-owned configuration: another
-        // checkout of the repository cannot be expected to carry it. Keep that
-        // behavior for legacy consumers; otherwise a target manifest is required.
-        if is_repository_level_checkout(checkout_path)
-            || !checkout_owns_manifest(Path::new(&registered.local_path))?
-        {
-            let mut component = registered.clone();
-            component.local_path = checkout_path.to_string_lossy().to_string();
-            resolve_remote_path_at(config_root, &mut component);
-            return Ok(component);
-        }
+    let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
+    let (manifest_checkout, discovered) = if let Some(discovered) =
+        try_discover_from_portable(checkout_path)?
+    {
+        (checkout_path, discovered)
+    } else if is_repository_level_checkout(checkout_path)
+        || !checkout_owns_manifest(&registered_path)?
+    {
+        // Preserve repository-level targets and machine-local registrations.
+        let mut component = registered.clone();
+        component.local_path = checkout_path.to_string_lossy().to_string();
+        resolve_remote_path_at(config_root, &mut component);
+        return Ok(component);
+    } else if task_checkout_predates_manifest(checkout_path, &registered_path)? {
+        // Borrow the controller's configuration without writing it into the candidate.
+        (
+            registered_path.as_path(),
+            try_discover_from_portable(&registered_path)?.ok_or_else(|| {
+                Error::internal_unexpected("controller manifest disappeared during resolution")
+            })?,
+        )
+    } else {
         return Err(Error::validation_invalid_argument(
             "homeboy.json",
             format!(
                 "Matched checkout for component '{}' has no portable manifest at {}",
                 component_id,
-                manifest_path.display()
+                checkout_path.join("homeboy.json").display()
             ),
             Some(checkout_path.to_string_lossy().to_string()),
             Some(vec![
@@ -979,7 +987,7 @@ fn portable_component_for_checkout(
             "component_id",
             format!(
                 "Matched checkout manifest at {} declares component id '{}' instead of '{}'",
-                manifest_path.display(),
+                manifest_checkout.join("homeboy.json").display(),
                 discovered.id,
                 component_id
             ),
@@ -991,12 +999,59 @@ fn portable_component_for_checkout(
     }
 
     let portable =
-        read_portable_config(checkout_path)?.expect("portable discovery read the manifest");
+        read_portable_config(manifest_checkout)?.expect("portable discovery read the manifest");
     let mut component = overlay_portable_component_config(registered, portable)?;
     component.id = component_id.to_string();
     component.local_path = checkout_path.to_string_lossy().to_string();
     resolve_remote_path_at(config_root, &mut component);
     Ok(component)
+}
+
+/// A stale task base may borrow its controller manifest, but a clone with a
+/// matching remote (or even an unmanaged linked worktree) cannot. Check the
+/// current tree and the shared base so deleting a manifest is not a fallback.
+fn task_checkout_predates_manifest(checkout: &Path, controller: &Path) -> Result<bool> {
+    let (Some(root), Some(source)) = (detect_git_root(checkout), detect_git_root(controller))
+    else {
+        return Ok(false);
+    };
+    let (Ok(root), Ok(source), Ok(checkout)) = (
+        root.canonicalize(),
+        source.canonicalize(),
+        checkout.canonicalize(),
+    ) else {
+        return Ok(false);
+    };
+    if root == source
+        || !same_git_common_dir(&source, &root)
+        || rebase_registered_path_to_checkout(controller, &root) != checkout
+    {
+        return Ok(false);
+    }
+    let Ok(relative) = checkout.strip_prefix(&root) else {
+        return Ok(false);
+    };
+    let manifest = relative.join("homeboy.json");
+    let Some(manifest) = manifest.to_str() else {
+        return Ok(false);
+    };
+    let Some(controller_head) = crate::git::output_optional(&source, &["rev-parse", "HEAD"]) else {
+        return Ok(false);
+    };
+    let Some(base) = crate::git::output_optional(&root, &["merge-base", "HEAD", &controller_head])
+    else {
+        return Ok(false);
+    };
+    let lacks_manifest = |revision| {
+        crate::git::output_optional_bytes(
+            &root,
+            &["--literal-pathspecs", "ls-tree", revision, "--", manifest],
+        )
+        .is_some_and(|entries| entries.is_empty())
+    };
+    Ok(lacks_manifest("HEAD")
+        && lacks_manifest(&base)
+        && crate::worktree::is_registered_task_checkout(&root, &source)?)
 }
 
 /// Whether `checkout`'s `homeboy.json` is configuration the repository owns.

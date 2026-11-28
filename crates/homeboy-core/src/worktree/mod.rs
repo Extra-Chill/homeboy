@@ -112,6 +112,26 @@ pub fn verify_linked_worktree_root(path: &Path) -> Result<PathBuf> {
     store_ops::verify_linked_worktree_root(path)
 }
 
+/// Whether `root` is an active native task worktree recorded for this source.
+/// Read the atomically published records without taking the registry lock:
+/// component resolution also runs while task worktree creation holds it.
+pub(crate) fn is_registered_task_checkout(root: &Path, source: &Path) -> Result<bool> {
+    let (records, _) = store_ops::scan_registry(&metadata_dir()?)?;
+    Ok(records.into_iter().any(|record| {
+        record.state == TaskWorktreeState::Active
+            && Path::new(&record.worktree_path)
+                .canonicalize()
+                .as_deref()
+                .ok()
+                == Some(root)
+            && Path::new(&record.source_checkout)
+                .canonicalize()
+                .as_deref()
+                .ok()
+                == Some(source)
+    }) && verify_linked_worktree_root(root).is_ok())
+}
+
 /// Retire residue records from the native task-worktree registry.
 ///
 /// A tombstone whose path is gone and that no live process claims is residue.

@@ -11950,6 +11950,118 @@ fn cook_promotion_finalization_resolves_review_profile_via_recorded_component_id
     });
 }
 
+#[test]
+fn cook_publishes_task_worktree_that_predates_controller_manifest() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        use homeboy_core::{component, deps, worktree};
+
+        let repo = tempfile::tempdir().unwrap();
+        let primary = repo.path().join("fixture");
+        std::fs::create_dir(&primary).unwrap();
+        let git = |path: &std::path::Path, args: &[&str]| git_output(path, args).unwrap();
+        git(&primary, &["init", "-b", "main"]);
+        git(&primary, &["config", "user.name", "Test"]);
+        git(&primary, &["config", "user.email", "test@example.com"]);
+        std::fs::write(primary.join("tracked.txt"), "base\n").unwrap();
+        git(&primary, &["add", "tracked.txt"]);
+        git(&primary, &["commit", "-m", "base"]);
+        let base_sha = git(&primary, &["rev-parse", "HEAD"]);
+        let run_id = "cook-19278-attempt-1";
+        component::write_standalone_component_config(&component::Component {
+            id: "fixture".into(),
+            local_path: primary.display().to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        let record = worktree::create(worktree::WorktreeCreateOptions {
+            component_id: "fixture".into(),
+            branch: "fix/8058".into(),
+            from: Some("main".into()),
+            task_url: None,
+            run_id: Some(run_id.into()),
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+            source_path: primary.to_str().map(str::to_owned),
+        })
+        .unwrap()
+        .record;
+        let target = std::path::Path::new(&record.worktree_path);
+        std::fs::write(
+            primary.join("homeboy.json"),
+            r#"{"id":"fixture","remote_path":"from-controller-manifest"}"#,
+        )
+        .unwrap();
+        git(&primary, &["add", "homeboy.json"]);
+        git(&primary, &["commit", "-m", "register component upstream"]);
+
+        let component = deps::resolve_checkout_component(Some("fixture"), target).unwrap();
+        assert_eq!(component.local_path, record.worktree_path);
+        assert_eq!(component.remote_path, "from-controller-manifest");
+
+        let unmanaged = repo.path().join("fixture@unmanaged");
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                unmanaged.to_str().unwrap(),
+                &base_sha,
+            ],
+        );
+        let error = deps::resolve_checkout_component(Some("fixture"), &unmanaged).unwrap_err();
+        assert!(
+            error.to_string().contains("has no portable manifest"),
+            "{error}"
+        );
+
+        std::fs::write(target.join("tracked.txt"), "candidate\n").unwrap();
+        git(target, &["commit", "-am", "candidate"]);
+        let candidate_sha = git(target, &["rev-parse", "HEAD"]);
+        let tree_sha = git(target, &["rev-parse", "HEAD^{tree}"]);
+        let mut options =
+            batch_cook_options("cook-19278", Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.into();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".into());
+        options.gates.gate_environment.admitted_component_id = Some("fixture".into());
+        options.workspace.to_worktree = record.id.clone();
+        options.workspace.source_worktree_path = Some(target.to_path_buf());
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+        seed_review_form_aggregate(run_id, &options.identity.initial_plan);
+
+        let mut proof = serde_json::to_value(promotion_with_existing_path(run_id, target)).unwrap();
+        proof["to_worktree"] = serde_json::json!(record.id);
+        proof["target"]["worktree"] = serde_json::json!(record.id);
+        proof["changed_files"] = serde_json::json!(["tracked.txt"]);
+        proof["verified_base"] = serde_json::json!({"base": "main", "sha": base_sha});
+        proof["candidate"] = serde_json::json!({
+            "base_sha": base_sha, "candidate_sha": candidate_sha, "tree_sha": tree_sha,
+        });
+        let checkout = serde_json::json!({
+            "schema": "homeboy/agent-task-gate-candidate-checkout/v2",
+            "commit": candidate_sha, "tree": tree_sha,
+        });
+        proof["deterministic_gates"][0]["candidate_checkout"] = checkout.clone();
+        proof["provenance"]["candidate_checkout"] = checkout;
+        let promotion: AgentTaskPromotionReport = serde_json::from_value(proof).unwrap();
+        let mut backend = CaptureBackend {
+            synthetic_gate_proof: Some(promotion.clone()),
+            commit_real: true,
+            ..Default::default()
+        };
+        finalize_or_load_cook_pr_with_backend(&options, run_id, &promotion, &mut backend)
+            .expect("publish the verified candidate from its manifest-less base");
+        assert!(backend.created);
+        let published = backend.pushed_sha.as_deref().expect("published commit");
+        assert_eq!(
+            git(target, &["diff", "--name-only", &base_sha, published]),
+            "tracked.txt"
+        );
+        assert!(!target.join("homeboy.json").exists());
+    });
+}
+
 /// #14725: the recovered-candidate branch after a Cook gate failure
 /// (`manual_finalization: true`) must reuse the component identity Cook
 /// recorded at admission with no new required `--recover` argument.
