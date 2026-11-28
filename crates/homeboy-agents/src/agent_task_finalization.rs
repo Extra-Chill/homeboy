@@ -120,16 +120,21 @@ fn update_existing_pr<B: AgentTaskPrFinalizationBackend + ?Sized>(
     ))
 }
 
-/// Whether a Cook publication proved its task (#18931): the repro failed on
-/// base and passed on the candidate, the agent reported no `not_delivered`
-/// item, and the review form's verdict is `complete`. This one predicate
+/// Whether a Cook publication proved its task (#18931): either the repro
+/// proved the issue or the operator verified acceptance on the green candidate,
+/// no item remains undelivered, and completion is `complete`. This predicate
 /// decides both the draft state and `Closes` versus `Refs`, so they cannot
 /// disagree.
 pub fn cook_proved_task(
     dossier: &crate::agent_task_review_dossier::AgentTaskReviewDossier,
 ) -> bool {
-    dossier.repro == Some(crate::agent_task_review_dossier::AgentTaskReviewRepro::Verified)
-        && !dossier.has_undelivered_items()
+    matches!(
+        dossier.repro,
+        Some(
+            crate::agent_task_review_dossier::AgentTaskReviewRepro::Verified
+                | crate::agent_task_review_dossier::AgentTaskReviewRepro::OperatorVerified
+        )
+    ) && !dossier.has_undelivered_items()
         && dossier.completion
             == Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete)
 }

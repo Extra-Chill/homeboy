@@ -262,6 +262,11 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
     let replace_gates = replace_gates_request(&mut args)?;
     let publish = CookPublishRequest {
         partial: args.publish_partial,
+        evidence: args
+            .evidence
+            .as_deref()
+            .map(operator_evidence)
+            .transpose()?,
         review_form: super::review::supplied_review_form(
             args.review_form.as_deref(),
             args.review_form_tool.as_deref(),
@@ -281,6 +286,29 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
         corrected_gates,
         publish,
     })
+}
+
+fn operator_evidence(spec: &str) -> homeboy::core::Result<String> {
+    let evidence = match spec.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "evidence",
+                format!("cannot read {path}: {error}"),
+                None,
+                None,
+            )
+        })?,
+        None => spec.to_string(),
+    };
+    if evidence.trim().is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "evidence",
+            "operator evidence must not be empty",
+            None,
+            None,
+        ));
+    }
+    Ok(evidence)
 }
 
 /// `--regate` replacements. Explicit verify commands replace the declared
@@ -583,6 +611,41 @@ mod tests {
             assert_eq!(replay["result"]["replayed"], true);
             assert_eq!(store.read_records().unwrap().len(), 2, "one relaunch only");
         });
+    }
+
+    #[test]
+    fn operator_publication_requires_evidence_and_snapshots_files() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["homeboy", "agent-task", "recover", "cook-1"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv)
+        };
+        for extra in [
+            vec!["--publish"],
+            vec!["--evidence", "passed"],
+            vec!["--publish", "--evidence", "passed", "--publish-partial"],
+        ] {
+            assert!(parse(&extra).is_err());
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("evidence.txt");
+        std::fs::write(&file, "Live acceptance passed.").unwrap();
+        let spec = format!("@{}", file.display());
+        let Commands::AgentTask(task) = parse(&["--publish", "--evidence", &spec]).unwrap().command
+        else {
+            panic!("agent-task")
+        };
+        let AgentTaskCommand::Recover(args) = task.command else {
+            panic!("recover")
+        };
+        let request = super::recovery_request(args).unwrap();
+        std::fs::remove_file(file).unwrap();
+        assert_eq!(
+            request.publish.evidence.as_deref(),
+            Some("Live acceptance passed.")
+        );
+        assert!(super::operator_evidence("  ").is_err());
+        assert!(super::operator_evidence(&spec).is_err());
     }
 
     /// An explicit budget always applies, even at the CLI default; without

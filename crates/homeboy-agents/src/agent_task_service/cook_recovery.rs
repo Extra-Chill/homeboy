@@ -704,6 +704,8 @@ impl CookRegateInputs {
 pub struct CookPublishRequest {
     /// Publish the agent's incomplete verdict unchanged and track remaining scope.
     pub partial: bool,
+    /// Operator attestation that the incomplete acceptance has been verified.
+    pub evidence: Option<String>,
     /// Complete review form for a candidate whose provider outcome recorded
     /// none (or declared the task incomplete).
     pub review_form: Option<super::AgentTaskSuppliedReviewForm>,
@@ -716,6 +718,7 @@ pub struct CookPublishRequest {
 impl CookPublishRequest {
     pub fn is_empty(&self) -> bool {
         !self.partial
+            && self.evidence.is_none()
             && self.review_form.is_none()
             && self.component.is_none()
             && self.review_overrides.is_empty()
@@ -887,6 +890,11 @@ pub trait CookRecoveryPerformer {
     ) -> Result<(Value, i32)> {
         if request.partial {
             return super::cook_promotion::publish_partial_cook(run_id, request, preflight);
+        }
+        if request.evidence.is_some() {
+            return super::cook_promotion::publish_operator_verified_cook(
+                run_id, request, preflight,
+            );
         }
         let value = super::recover_cook_pr_with_review_form(
             run_id,

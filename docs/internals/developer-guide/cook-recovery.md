@@ -75,6 +75,8 @@ covers transient phase refinements too.
 For a green candidate whose agent declared `completion: incomplete`, run:
 
 ```sh
+homeboy agent-task recover <attempt> --publish --evidence @operator-acceptance.txt
+# Or retain incomplete status and track genuinely remaining work:
 homeboy agent-task recover <attempt> --publish-partial
 ```
 

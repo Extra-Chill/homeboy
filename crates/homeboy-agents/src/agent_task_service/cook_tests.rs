@@ -12233,6 +12233,119 @@ impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecovery
 }
 
 #[test]
+fn operator_verified_incomplete_cook_publishes_complete() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-operator-acceptance";
+        let run_id = "cook-operator-acceptance-attempt-1";
+        let target = tempfile::tempdir().unwrap();
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.into();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".into());
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .unwrap();
+        let mut aggregate = review_form_aggregate(&options.identity.initial_plan);
+        aggregate.outcomes[0].outputs["review_form"]["completion"] =
+            serde_json::json!("incomplete");
+        aggregate.outcomes[0].outputs["review_form"]["incomplete_reason"] =
+            serde_json::json!("Live acceptance unavailable in sandbox.");
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &aggregate)
+            .unwrap();
+        let request = crate::agent_task_service::CookPublishRequest {
+            evidence: Some("Live Lab acceptance passed with the candidate build.".into()),
+            ..Default::default()
+        };
+        let promotion = promotion_with_existing_path(run_id, target.path());
+        let mut backend = CaptureBackend {
+            synthetic_gate_proof: Some(promotion.clone()),
+            ..Default::default()
+        };
+        // No persisted green proof means no attestation and no publication.
+        assert!(
+            super::super::cook_promotion::publish_operator_verified_cook_with(
+                run_id,
+                &request,
+                false,
+                &mut backend
+            )
+            .is_err()
+        );
+        assert!(!backend.created);
+        let mut failed = promotion.clone();
+        failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&failed).unwrap())
+            .unwrap();
+        assert!(
+            super::super::cook_promotion::publish_operator_verified_cook_with(
+                run_id,
+                &request,
+                false,
+                &mut backend
+            )
+            .is_err()
+        );
+        assert!(test_lifecycle_store()
+            .read_record(run_id)
+            .unwrap()
+            .metadata
+            .get("operator_acceptance")
+            .is_none());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&promotion).unwrap())
+            .unwrap();
+        let publish = |preflight, backend: &mut CaptureBackend| {
+            super::super::cook_promotion::publish_operator_verified_cook_with(
+                run_id, &request, preflight, backend,
+            )
+        };
+        assert_eq!(
+            publish(true, &mut backend).unwrap().0["status"],
+            "validated"
+        );
+        assert!(test_lifecycle_store()
+            .read_record(run_id)
+            .unwrap()
+            .metadata
+            .get("operator_acceptance")
+            .is_none());
+        let (result, code) = publish(false, &mut backend).unwrap();
+        assert_eq!(code, 0, "{result}");
+        assert_eq!(backend.create_count, 1);
+        assert!(backend.body.contains("## Evidence"), "{}", backend.body);
+        assert!(
+            backend
+                .body
+                .contains("Operator-verified acceptance: Live Lab acceptance passed"),
+            "{}",
+            backend.body
+        );
+        let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
+        assert_eq!(super::super::cook_summary(&record).status, "review_ready");
+        assert_eq!(
+            record.state(),
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
+        );
+        assert!(record.metadata.get("partial_delivery").is_none());
+        assert_eq!(
+            test_lifecycle_store()
+                .read_aggregate(run_id)
+                .unwrap()
+                .outcomes[0]
+                .outputs["review_form"],
+            aggregate.outcomes[0].outputs["review_form"]
+        );
+        publish(false, &mut backend).unwrap();
+        assert_eq!(backend.create_count, 1, "replay must not create another PR");
+    });
+}
+
+#[test]
 fn green_incomplete_cook_publishes_partial_and_tracks_remaining_scope() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-partial-19171";
