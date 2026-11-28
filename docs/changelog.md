@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.501.3] - 2026-11-28
+
+### Fixed
+- provider evidence shares the gate-input size limit
+- restore declared install outputs for an already-installed lockfile
+
 ## [0.501.2] - 2026-11-28
 
 ### Fixed
