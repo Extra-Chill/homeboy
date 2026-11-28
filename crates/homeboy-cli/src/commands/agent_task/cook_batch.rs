@@ -24,6 +24,7 @@ use std::process::Command;
 
 use homeboy::core::workflow::definition::Join;
 use homeboy::core::workflow::{WorkflowDefinition, WORKFLOW_SCHEMA};
+use homeboy::core::worktree_provider::native_handle_for_branch;
 use homeboy::core::{Error, Result};
 use serde_json::{json, Value};
 
@@ -418,7 +419,8 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
                 issue.number,
                 slugify(&issue.repo, SlugStyle::CookBatch)
             );
-            let worktree = format!("{repository}@{}", slugify(&branch, SlugStyle::CookBatch));
+            // Children receive the resolved component as --repo, not the owning remote.
+            let worktree = native_handle_for_branch(&component, &branch)?;
             let prompt = match &args.prompt_template {
                 _ if issue_prompts.contains_key(&issue.key) => issue_prompts[&issue.key].clone(),
                 Some(template) => template
@@ -429,15 +431,15 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
                     .replace("{worktree}", &worktree),
                 None => default_task_prompt(&issue.url),
             };
-            json!({
+            Ok(json!({
                 "issue_url": issue.url,
                 "issue_ref": issue.key,
                 "branch": branch,
                 "worktree": worktree,
                 "prompt": prompt,
-            })
+            }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let bundle = match &args.bundle_runner {
         Some(runner) => prepare_workspace_bundle(runner, &path, &base_sha),
         None => {
@@ -974,6 +976,61 @@ mod tests {
                 "{error}"
             );
             assert!(error.contains(checkout.to_str().unwrap()), "{error}");
+        });
+    }
+
+    #[test]
+    fn batch_prepare_uses_the_nested_component_for_child_worktree_handles() {
+        use crate::test_support::{run_git_fixture_command, shared_committed_git_repo_fixture};
+        use homeboy::core::worktree_provider::validate_native_handle;
+
+        crate::test_support::with_isolated_home(|home| {
+            let (_fixture, checkout) = shared_committed_git_repo_fixture("checkout");
+            let origin = home.path().join("monorepo.git");
+            run_git_fixture_command(
+                &checkout,
+                &["clone", "--bare", ".", origin.to_str().unwrap()],
+            );
+            run_git_fixture_command(
+                &checkout,
+                &["remote", "add", "-f", "origin", origin.to_str().unwrap()],
+            );
+            let component = "monorepo-plugin";
+            let nested = checkout.join("plugins").join(component);
+            std::fs::create_dir_all(&nested).unwrap();
+            homeboy::core::component::write_standalone_component_config(
+                &homeboy::core::component::Component {
+                    id: component.into(),
+                    local_path: nested.display().to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            let (value, code) = batch_prepare(AgentTaskBatchPrepareArgs {
+                issues: vec![
+                    "https://github.com/example/monorepo/issues/12".into(),
+                    "https://github.com/example/monorepo/issues/13".into(),
+                ],
+                repo: component.into(),
+                base: Some("main".into()),
+                branch_prefix: "fix".into(),
+                prompt_template: Some("Fix {repo} in {worktree}".into()),
+                issue_prompts: vec![],
+                bundle_runner: None,
+            })
+            .expect("prepare the nested component batch");
+            assert_eq!(code, 0);
+            assert_eq!(value["repo"], "monorepo");
+            assert_eq!(value["component"], component);
+            let children = value["children"].as_array().unwrap();
+            assert_eq!(children.len(), 2);
+            for child in children {
+                let handle = child["worktree"].as_str().unwrap();
+                let branch = child["branch"].as_str().unwrap();
+                validate_native_handle(handle, component, branch).expect("child handle admits");
+                assert_eq!(child["prompt"], format!("Fix monorepo in {handle}"));
+            }
         });
     }
 
