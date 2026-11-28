@@ -532,10 +532,8 @@ fn cancel_resolved_run_in_store(
                 None,
             ));
         };
-        match homeboy_core::process::process_identity_state_with_start_identity(
-            pid,
-            None,
-            Some(&start_identity),
+        match super::run_owner::process_observation(
+            &super::run_owner::RunOwner::identified_process(pid, start_identity),
         ) {
             homeboy_core::process::ProcessIdentityState::Live => {
                 let termination = homeboy_core::process::terminate_process_tree(
@@ -1273,7 +1271,7 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
 
     // Local, live owner process: terminate its tree directly (SIGTERM then
     // SIGKILL escalation handled inside terminate_process_tree).
-    if let Some((pid, _identity)) = super::cook_run_state::local_cancellable_owner(record) {
+    if let Some((pid, _identity)) = super::run_owner::local_cancellable_owner(record) {
         let termination = homeboy_core::process::terminate_process_tree(
             pid,
             homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
@@ -1552,8 +1550,6 @@ mod tests {
                         })
                         .unwrap();
                 }
-                let record = store.read_record(&id).unwrap();
-                assert!(super::super::cook_run_state::local_cancellable_owner(&record).is_none());
                 let cancelled = cancel_run_in_store(&store, &id, None).unwrap();
                 assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
             }

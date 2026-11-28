@@ -1,6 +1,6 @@
 //! The one Cook run state and the actions it makes legal (#18436 slices 1-2).
 //!
-//! Owns execution-owner observations and their shared liveness decision.
+//! Projects run-owner observations into phase and action policy.
 //! Discovery, stale annotation and action eligibility project this decision;
 //! provider process candidates never substitute for an execution owner.
 //! [`CookRunState::of`] is the single classifier over the authoritative
@@ -22,10 +22,9 @@ use homeboy_lifecycle_contract::RunExecutionState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::run_owner::{run_owner_liveness, OwnerLiveness, RunOwner, SupervisorJobs};
 use super::AgentTaskRunRecord;
 use crate::agent_task_service::AgentTaskLiveness;
-use homeboy_core::api_jobs::{JobStatus, JobStore};
-use uuid::Uuid;
 
 use crate::agent_task_service::CookContinuationState as Continuation;
 /// Read-only continuation facts shared by settlement and recovery admission.
@@ -78,15 +77,8 @@ pub(crate) fn continuation_child_owner(record: &AgentTaskRunRecord) -> Option<u3
         .flatten()
         .filter(|execution| execution["state"] == "running")
         .find_map(|execution| {
-            execution["owner_pid"]
-                .as_u64()
-                .and_then(|pid| u32::try_from(pid).ok())
-                .filter(|pid| {
-                    homeboy_core::process::process_identity_state(
-                        *pid,
-                        execution["owner_linux_starttime_ticks"].as_u64(),
-                    ) == homeboy_core::process::ProcessIdentityState::Live
-                })
+            let owner = RunOwner::provider(execution)?;
+            owner.live_pid()
         });
     let child_gate_owner_pid = (record.metadata["promotion_progress"]["active"] == true)
         .then(|| {
@@ -95,7 +87,7 @@ pub(crate) fn continuation_child_owner(record: &AgentTaskRunRecord) -> Option<u3
                 .and_then(|pid| u32::try_from(pid).ok())
         })
         .flatten()
-        .filter(|pid| homeboy_core::process::pid_is_running(*pid));
+        .filter(|pid| run_owner_liveness(&RunOwner::process(*pid)) == OwnerLiveness::Live);
     child_provider_owner_pid.or(child_gate_owner_pid)
 }
 
@@ -166,7 +158,7 @@ pub(crate) fn live_gate_owner_at(
     let owner_pid = progress["owner_pid"]
         .as_u64()
         .and_then(|pid| u32::try_from(pid).ok())
-        .filter(|pid| homeboy_core::process::pid_is_running(*pid))?;
+        .filter(|pid| run_owner_liveness(&RunOwner::process(*pid)) == OwnerLiveness::Live)?;
     let heartbeat_at = progress["updated_at"].as_str()?.to_string();
     let heartbeat = chrono::DateTime::parse_from_rfc3339(&heartbeat_at).ok()?;
     if (now - heartbeat.with_timezone(&chrono::Utc)).num_seconds()
@@ -194,114 +186,22 @@ pub(crate) fn live_gate_owner_at(
     })
 }
 
-pub(crate) fn continuation_owner_expired(value: &Value) -> bool {
-    value["owner_pid"].as_u64().is_some_and(|pid| {
-        u32::try_from(pid).map_or(true, |pid| !homeboy_core::process::pid_is_running(pid))
-    })
-}
-
-pub(crate) fn has_live_execution_step_owner(record: &AgentTaskRunRecord) -> bool {
-    let scheduling = &record.metadata["execution_scheduling"];
-    if !scheduling["current_intent_id"].is_string()
-        || record.lifecycle.execution.state == RunExecutionState::Cancelled
-    {
-        return false;
-    }
-    if record.lifecycle.execution.state == RunExecutionState::Queued {
-        return true;
-    }
-    let owner = &record.metadata["execution_step_owner"];
-    if owner["intent_id"] != scheduling["current_intent_id"] || !owner["job_id"].is_string() {
-        return false;
-    }
-    let Some(pid) = owner["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-    else {
-        return true;
-    };
-    let Ok(identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
-        owner["process_start_identity"].clone(),
-    ) else {
-        return true;
-    };
-    matches!(
-        homeboy_core::process::process_identity_state_with_start_identity(
-            pid,
-            None,
-            Some(&identity)
-        ),
-        homeboy_core::process::ProcessIdentityState::Live
-            | homeboy_core::process::ProcessIdentityState::Unverifiable
-    )
-}
-
-/// Resolve a local cancellation target using verified process-start evidence.
-/// A recorded runner takes precedence; never fall back from an invalid runner
-/// identity to a different execution-step owner.
-pub(crate) fn local_cancellable_owner(
-    record: &AgentTaskRunRecord,
-) -> Option<(u32, homeboy_core::process::ProcessStartIdentity)> {
-    let (pid, identity) = if let Some(pid) = record.metadata.get("runner_pid") {
-        (pid, &record.metadata["runner_process_start_identity"])
-    } else {
-        let owner = &record.metadata["execution_step_owner"];
-        let intent = &record.metadata["execution_scheduling"]["current_intent_id"];
-        if !intent.is_string() || owner["intent_id"] != *intent {
-            return None;
-        }
-        (&owner["pid"], &owner["process_start_identity"])
-    };
-    let pid = u32::try_from(pid.as_u64()?).ok()?;
-    if pid == std::process::id() {
-        return None;
-    }
-    let identity = serde_json::from_value(identity.clone()).ok()?;
-    (homeboy_core::process::process_identity_state_with_start_identity(pid, None, Some(&identity))
-        == homeboy_core::process::ProcessIdentityState::Live)
-        .then_some((pid, identity))
-}
-
-pub(crate) fn local_owner_liveness(record: &AgentTaskRunRecord) -> super::LocalOwnerLiveness {
-    use super::LocalOwnerLiveness;
-    let Some(pid) = record
-        .metadata
-        .get("runner_pid")
-        .and_then(Value::as_u64)
-        .and_then(|pid| u32::try_from(pid).ok())
-    else {
-        return LocalOwnerLiveness::Absent;
-    };
-    let start_identity = record
-        .metadata
-        .get("runner_process_start_identity")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok());
-    match homeboy_core::process::process_identity_state_with_start_identity(
-        pid,
-        None,
-        start_identity.as_ref(),
-    ) {
-        homeboy_core::process::ProcessIdentityState::Live => LocalOwnerLiveness::Live,
-        homeboy_core::process::ProcessIdentityState::Dead
-        | homeboy_core::process::ProcessIdentityState::IdentityMismatch => LocalOwnerLiveness::Dead,
-        homeboy_core::process::ProcessIdentityState::Unverifiable => {
-            LocalOwnerLiveness::Unverifiable
-        }
-    }
-}
-
 pub(crate) fn reads_stale(record: &AgentTaskRunRecord) -> bool {
     if record.runner_job_id().is_some() && record.has_fresh_update() {
         return false;
     }
-    classify_liveness(record, chrono::Utc::now(), &BTreeSet::new()).is_reconcilable()
+    classify_liveness(
+        record,
+        chrono::Utc::now(),
+        &SupervisorJobs::for_record(record),
+    )
+    .is_reconcilable()
 }
 
 pub(crate) fn classify_liveness(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
-    live: &BTreeSet<Uuid>,
+    live: &SupervisorJobs,
 ) -> AgentTaskLiveness {
     if record.owner_process_is_running()
         || crate::agent_task_service::live_cook_continuation(record).is_some()
@@ -378,53 +278,13 @@ fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
             .is_some_and(|run_id| !run_id.is_empty())
 }
 
-pub(crate) fn live_supervisor_jobs() -> BTreeSet<Uuid> {
-    live_supervisor_jobs_at(
-        homeboy_core::daemon::read_status(),
-        homeboy_core::paths::observation_db(),
-    )
-}
-
-pub(crate) fn live_supervisor_jobs_at(
-    status: homeboy_core::error::Result<homeboy_core::daemon::DaemonStatus>,
-    path: homeboy_core::error::Result<std::path::PathBuf>,
-) -> BTreeSet<Uuid> {
-    let lease = status
-        .ok()
-        .filter(|daemon| daemon.reachable && daemon.fresh)
-        .and_then(|daemon| daemon.state.map(|state| state.lease_id));
-    let store = path
-        .ok()
-        .and_then(|path| JobStore::open_without_reconciliation(path).ok());
-    let operation = ["controller.", homeboy_core::daemon::step_job::STEP_JOB_TYPE].concat();
-    lease
-        .zip(store)
-        .map_or_else(BTreeSet::new, |(lease, store)| {
-            store
-                .list()
-                .into_iter()
-                .filter(|job| {
-                    job.operation == operation
-                        && job.daemon_lease_id.as_deref() == Some(lease.as_str())
-                        && matches!(job.status, JobStatus::Queued | JobStatus::Running)
-                })
-                .map(|job| job.id)
-                .collect()
-        })
-}
-
-fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord, live: &BTreeSet<Uuid>) -> bool {
+fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord, live: &SupervisorJobs) -> bool {
     let supervisor = &record.metadata["local_cook_supervisor"];
     if supervisor["job_type"].as_str() != Some(homeboy_core::daemon::step_job::STEP_JOB_TYPE) {
         return false;
     }
-    let Some(job_id) = supervisor["job_id"].as_str() else {
-        return false;
-    };
-    let Ok(job_id) = Uuid::parse_str(job_id) else {
-        return false;
-    };
-    live.contains(&job_id)
+    RunOwner::daemon_job(&supervisor["job_id"], live)
+        .is_some_and(|owner| run_owner_liveness(&owner) == OwnerLiveness::Live)
 }
 
 fn live_local_cook_retry_child(record: &AgentTaskRunRecord) -> bool {
@@ -434,25 +294,7 @@ fn live_local_cook_retry_child(record: &AgentTaskRunRecord) -> bool {
     {
         return false;
     }
-    let Some(pid) = supervisor["child_pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-    else {
-        return false;
-    };
-    let Ok(start_identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
-        supervisor["child_start_identity"].clone(),
-    ) else {
-        return false;
-    };
-    matches!(
-        homeboy_core::process::process_identity_state_with_start_identity(
-            pid,
-            None,
-            Some(&start_identity),
-        ),
-        homeboy_core::process::ProcessIdentityState::Live
-    )
+    super::run_owner::detached_process_liveness(RunOwner::detached_child(supervisor)) == Some(true)
 }
 
 /// Where one Cook run is in its lifecycle.
@@ -787,11 +629,20 @@ impl CookRunState {
     /// Classify `record`. This is the only place a Cook run's phase,
     /// terminality and recoverability are decided.
     pub fn of(record: &AgentTaskRunRecord) -> Self {
+        let jobs = SupervisorJobs::for_record(record);
+        Self::of_at(record, chrono::Utc::now(), &jobs)
+    }
+
+    pub(crate) fn of_at(
+        record: &AgentTaskRunRecord,
+        now: chrono::DateTime<chrono::Utc>,
+        jobs: &SupervisorJobs,
+    ) -> Self {
         let execution_state = observed_execution_state(record);
         let execution_phase = CookRunPhase::of_execution(execution_state);
         // Delivery, fences and live owners refine the execution phase; they
         // are observations, not durable phase-transition facts.
-        let liveness = classify_liveness(record, chrono::Utc::now(), &BTreeSet::new());
+        let liveness = classify_liveness(record, now, jobs);
         let terminal = !matches!(
             execution_phase,
             CookRunPhase::Queued | CookRunPhase::Running
@@ -808,7 +659,7 @@ impl CookRunState {
             }
             _ => settled_status(record, phase),
         };
-        let live_gate = live_gate_owner(record);
+        let live_gate = live_gate_owner_at(record, now);
         Self {
             liveness,
             phase,

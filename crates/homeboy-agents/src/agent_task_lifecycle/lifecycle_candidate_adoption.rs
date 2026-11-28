@@ -129,7 +129,10 @@ pub fn start_candidate_adoption_with_policy_in_store(
                 return false;
             }
             if existing.state == "verification_running" {
-                if homeboy_core::process::pid_is_running(existing.owner_pid) {
+                if super::run_owner::run_owner_liveness(&super::run_owner::RunOwner::process(
+                    existing.owner_pid,
+                )) == super::run_owner::OwnerLiveness::Live
+                {
                     conflict = true;
                     return false;
                 }
@@ -469,7 +472,9 @@ pub(crate) fn reconcile_candidate_adoption(record: &mut AgentTaskRunRecord) -> b
         return false;
     };
     if attempt.state != "verification_running"
-        || homeboy_core::process::pid_is_running(attempt.owner_pid)
+        || super::run_owner::run_owner_liveness(&super::run_owner::RunOwner::process(
+            attempt.owner_pid,
+        )) == super::run_owner::OwnerLiveness::Live
     {
         return false;
     }

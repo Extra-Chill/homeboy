@@ -24,8 +24,22 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     roots: Option<&homeboy_core::paths::PathRoots>,
     fenced: bool,
 ) -> ControlPlaneActionEligibilityReport {
-    let state = CookRunState::of(record).with_cook_index_fence(fenced);
-    if record.metadata.get("cook_id").is_some() && super::legal_actions(&state).is_empty() {
+    let jobs = match roots {
+        Some(roots) => super::run_owner::SupervisorJobs::for_record_in_roots(record, roots),
+        None => super::run_owner::SupervisorJobs::for_record(record),
+    };
+    let state =
+        CookRunState::of_at(record, chrono::Utc::now(), &jobs).with_cook_index_fence(fenced);
+    project_action_eligibility(record, plan, roots, &state)
+}
+
+fn project_action_eligibility(
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+    roots: Option<&homeboy_core::paths::PathRoots>,
+    state: &CookRunState,
+) -> ControlPlaneActionEligibilityReport {
+    if record.metadata.get("cook_id").is_some() && super::legal_actions(state).is_empty() {
         return ControlPlaneActionEligibilityReport {
             schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
             run: RunId::new(&record.run_id).expect("validated durable run ID"),
@@ -44,10 +58,10 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
             Err(error) => unavailable(error.message),
         }
     };
-    let resume = resume_availability(record, &state);
-    let placement_update = placement_update_availability(record, &state);
-    let retry = retry_availability(record, &state, plan, roots);
-    let reconcile = reconcile_availability(record, &state, roots);
+    let resume = resume_availability(record, state);
+    let placement_update = placement_update_availability(record, state);
+    let retry = retry_availability(record, state, plan, roots);
+    let reconcile = reconcile_availability(record, state);
 
     ControlPlaneActionEligibilityReport {
         schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
@@ -145,7 +159,6 @@ pub(crate) fn recover_entry(
 fn reconcile_availability(
     record: &AgentTaskRunRecord,
     state: &CookRunState,
-    roots: Option<&homeboy_core::paths::PathRoots>,
 ) -> (ControlPlaneActionAvailability, String) {
     if dead_candidate_adoption_owner(record) {
         return available("candidate adoption owner is gone");
@@ -153,14 +166,7 @@ fn reconcile_availability(
     if state.terminal {
         return unavailable("terminal runs have no ownership to reconcile");
     }
-    let liveness = match roots {
-        Some(roots) => crate::agent_task_service::liveness_for_record_in_roots(
-            record,
-            chrono::Utc::now(),
-            roots,
-        ),
-        None => crate::agent_task_service::liveness_for_record(record, chrono::Utc::now()),
-    };
+    let liveness = state.liveness;
     if liveness.is_reconcilable() {
         available(format!(
             "run liveness is {}; no authoritative owner holds it",
@@ -176,7 +182,9 @@ fn reconcile_availability(
 fn dead_candidate_adoption_owner(record: &AgentTaskRunRecord) -> bool {
     record.candidate_adoption.as_ref().is_some_and(|adoption| {
         (adoption.state == "verification_running"
-            && !homeboy_core::process::pid_is_running(adoption.owner_pid))
+            && super::run_owner::run_owner_liveness(&super::run_owner::RunOwner::process(
+                adoption.owner_pid,
+            )) != super::run_owner::OwnerLiveness::Live)
             || (adoption.state == "interrupted"
                 && matches!(adoption.phase.as_str(), "owner_stale" | "gate_orphaned"))
     })
@@ -442,6 +450,99 @@ mod tests {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Cancel),
                     ControlPlaneActionAvailability::Unavailable
+                );
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn reconcile_cancel_and_recover_share_run_owner_liveness() {
+        use super::super::cook_run_state::classify_liveness;
+        use super::super::run_owner::{
+            run_owner_liveness, OwnerLiveness, RunOwner, SupervisorJobs,
+        };
+        use crate::agent_task_service::AgentTaskLiveness;
+        use serde_json::json;
+        use ControlPlaneActionAvailability::{Available, Indeterminate, Unavailable};
+        use OwnerLiveness::{Dead, Live, Unverifiable};
+
+        let now = chrono::Utc::now();
+        let pid = std::process::id();
+        let identity = homeboy_core::process::process_start_identity(pid)
+            .unwrap()
+            .unwrap();
+        let other_identity = match identity {
+            homeboy_core::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                homeboy_core::process::ProcessStartIdentity::Linux {
+                    starttime_ticks: starttime_ticks + 1,
+                }
+            }
+            homeboy_core::process::ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            } => homeboy_core::process::ProcessStartIdentity::Macos {
+                start_seconds: start_seconds + 1,
+                start_microseconds,
+            },
+        };
+        let job_id = uuid::Uuid::new_v4();
+        for expected in [Live, Dead, Unverifiable] {
+            let jobs = match expected {
+                Live => SupervisorJobs::observed([job_id]),
+                Dead => SupervisorJobs::observed([]),
+                Unverifiable => SupervisorJobs::default(),
+            };
+            for daemon in [false, true] {
+                let mut record = record(RunExecutionState::Running);
+                let owner = if daemon {
+                    record.metadata["local_cook_supervisor"] = json!({
+                        "job_type": homeboy_core::daemon::step_job::STEP_JOB_TYPE,
+                        "job_id": job_id,
+                    });
+                    RunOwner::daemon_job(&record.metadata["local_cook_supervisor"]["job_id"], &jobs)
+                        .unwrap()
+                } else {
+                    record.metadata["runner_pid"] =
+                        json!(if expected == Unverifiable { 0 } else { pid });
+                    record.metadata["runner_process_start_identity"] = json!(if expected == Dead {
+                        &other_identity
+                    } else {
+                        &identity
+                    });
+                    RunOwner::from_process_metadata(
+                        &record.metadata,
+                        "runner_pid",
+                        "runner_process_start_identity",
+                    )
+                    .unwrap()
+                };
+                assert_eq!(run_owner_liveness(&owner), expected, "daemon={daemon}");
+                let state = CookRunState::of_at(&record, now, &jobs);
+                let report = project_action_eligibility(&record, None, None, &state);
+                let liveness = match (expected, daemon) {
+                    (Live, _) => AgentTaskLiveness::Active,
+                    (Unverifiable, false) => AgentTaskLiveness::Unreconciled,
+                    _ => AgentTaskLiveness::Stale,
+                };
+                assert_eq!(classify_liveness(&record, now, &jobs), liveness);
+                assert_eq!(state.liveness, liveness);
+                assert_eq!(decision(&report, ControlPlaneAction::Cancel), Available);
+                assert_eq!(
+                    decision(&report, ControlPlaneAction::Reconcile),
+                    if expected == Live {
+                        Unavailable
+                    } else {
+                        Available
+                    }
+                );
+                assert_eq!(
+                    decision(&report, ControlPlaneAction::Recover),
+                    match (expected, daemon) {
+                        (Live, false) => Unavailable,
+                        (Live, true) => Indeterminate,
+                        _ => Available,
+                    }
                 );
             }
         }

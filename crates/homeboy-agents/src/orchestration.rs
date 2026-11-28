@@ -4400,7 +4400,9 @@ fn project_dead_candidate_adoption(record: &AgentTaskRunRecord) -> AgentTaskRunR
         return projected;
     };
     if adoption.state != "verification_running"
-        || homeboy_core::process::pid_is_running(adoption.owner_pid)
+        || crate::agent_task_lifecycle::run_owner::RunOwner::process(adoption.owner_pid)
+            .live_pid()
+            .is_some()
     {
         return projected;
     }
