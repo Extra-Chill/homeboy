@@ -10,6 +10,8 @@ homeboy upgrade [OPTIONS]
 
 Upgrades Homeboy to the latest version. The command auto-detects the installation method (Homebrew, source build, or downloaded release binary) and runs the appropriate upgrade process.
 
+When a controller upgrade finds multiple distinct executable `homeboy` binaries on `PATH`, it warns on stderr and names the first match and the paths it shadows. The warning does not change which controller is selected for upgrade or the exit status. Use the intended binary's full path or adjust `PATH` order.
+
 By default, after a successful local upgrade, Homeboy also converges configured SSH runners on the installed controller release. This keeps lab runners from drifting behind the local CLI.
 
 ### GitHub authentication
