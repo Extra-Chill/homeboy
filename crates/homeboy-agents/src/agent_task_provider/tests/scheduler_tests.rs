@@ -917,6 +917,102 @@ fn provider_default_timeout_returns_structured_outcome_without_explicit_timeout(
 }
 
 #[test]
+fn shared_cargo_target_contention_refuses_provider_before_spawn() {
+    use homeboy_core::test_support::{with_isolated_home, EnvVarGuard};
+
+    with_isolated_home(|home| {
+        let root = home.path().join("shared-targets");
+        let _root = EnvVarGuard::set("HOMEBOY_CARGO_TARGET_ROOT", &root);
+        let workspace = tempfile::tempdir().expect("workspace");
+        fs::write(
+            workspace.path().join("homeboy.json"),
+            r#"{"id":"cargo-fixture","managed_execution":{"shared_cargo_target":true}}"#,
+        )
+        .unwrap();
+        let holder = homeboy_core::cleanup::admit_managed_cargo_provider(
+            "agent-task-cargo",
+            "competing-cook-run",
+            workspace.path(),
+            &Default::default(),
+        )
+        .expect("first Cook admitted");
+        let marker = home.path().join("provider-started");
+        let fake = FakePi::new(&format!("touch {}", shell_quote(marker.to_str().unwrap())));
+        let mut request = fake.request("cargo-contender");
+        request.workspace.root = Some(workspace.path().display().to_string());
+        let mut plan = AgentTaskPlan::new("cargo-contention", vec![request]);
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                AgentTaskProviderRotationEntry {
+                    model: Some("test/model".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    model: Some("test/fallback".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let run_id = "contending-cook-run";
+        let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+            .expect("lifecycle store");
+        crate::agent_task_lifecycle::submit_plan_in_store(&store, &plan, Some(run_id))
+            .expect("submit contender");
+        let aggregate = AgentTaskScheduler::new(Arc::new(
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![fake.provider()]),
+        ))
+        .with_lifecycle_store(store.clone())
+        .with_run_id(run_id)
+        .run(plan);
+
+        let record = store.read_record(run_id).expect("durable contender");
+        assert_eq!(record.provider_executions_consumed(), 0);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["state"],
+            "admission_refused"
+        );
+        let outcome = &aggregate.outcomes[0];
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::Capacity),
+            "{outcome:?}"
+        );
+        let diagnostic = outcome
+            .diagnostics
+            .iter()
+            .find(|d| d.class == "agent_task.cargo_target_contention")
+            .unwrap();
+        let lease = &diagnostic.data["lease"];
+        let path = lease["target_path"].as_str().unwrap();
+        assert!(std::path::Path::new(path).starts_with(&root));
+        assert!(diagnostic.message.contains(path));
+        assert!(diagnostic
+            .message
+            .contains(lease["lease_identity"].as_str().unwrap()));
+        assert!(diagnostic
+            .message
+            .contains(lease["os_error"].as_str().unwrap()));
+        assert!(diagnostic.message.contains("competing-cook-run"));
+        assert_eq!(outcome.metadata["execution_budget"]["executions_used"], 0);
+        assert!(!outcome
+            .diagnostics
+            .iter()
+            .any(|d| d.class == "agent_task.provider_rotation_exhausted"));
+        assert!(outcome.metadata["provider_rotation"].is_null());
+        assert!(!marker.exists());
+        drop(holder);
+        assert!(homeboy_core::cleanup::admit_managed_cargo_provider(
+            "agent-task-cargo",
+            "next-cook-run",
+            workspace.path(),
+            &Default::default(),
+        )
+        .is_ok());
+    });
+}
+
+#[test]
 fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
     let pid_path = unique_state_path("stalled-child");
     let _ = fs::remove_file(&pid_path);

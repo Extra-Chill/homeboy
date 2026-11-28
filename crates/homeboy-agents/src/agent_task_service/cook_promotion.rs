@@ -5058,14 +5058,16 @@ pub(crate) fn pre_provider_diagnostic_cause<'a>(
     provider_executions_consumed: u64,
     diagnostics: impl IntoIterator<Item = &'a crate::agent_task::AgentTaskDiagnostic>,
 ) -> Option<(String, String, Value)> {
-    if provider_executions_consumed > 0 {
-        return None;
-    }
     let diagnostic = diagnostics.into_iter().find(|item| {
-        item.class.starts_with("agent_task.committed_harvest_")
-            || item.data["pre_provider"] == Value::Bool(true)
+        (crate::agent_task_provider::is_cargo_admission_failure(&item.class)
+            && item.data["pre_provider"] == Value::Bool(true))
+            || (provider_executions_consumed == 0
+                && (item.class.starts_with("agent_task.committed_harvest_")
+                    || item.data["pre_provider"] == Value::Bool(true)))
     })?;
-    let phase = if diagnostic
+    let phase = if crate::agent_task_provider::is_cargo_admission_failure(&diagnostic.class) {
+        "cargo_target_admission"
+    } else if diagnostic
         .class
         .starts_with("agent_task.committed_harvest_")
     {

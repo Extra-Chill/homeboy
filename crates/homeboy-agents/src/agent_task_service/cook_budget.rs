@@ -175,11 +175,21 @@ pub fn validate_effective_cook_budget(
 }
 
 pub(crate) fn execution_budget_usage(aggregate: &AgentTaskAggregate) -> ExecutionBudgetUsage {
+    let refused = aggregate
+        .outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome.diagnostics.iter().any(|diagnostic| {
+                crate::agent_task_provider::is_cargo_admission_failure(&diagnostic.class)
+            })
+        })
+        .count();
     let executions = aggregate
         .events
         .iter()
         .filter(|event| event.state == ControlPlaneState::Running)
         .count()
+        .saturating_sub(refused)
         .try_into()
         .unwrap_or(u32::MAX);
     let same_provider_retries = aggregate

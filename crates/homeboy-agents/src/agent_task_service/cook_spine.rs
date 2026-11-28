@@ -2142,7 +2142,17 @@ pub(super) fn run_cook_spine(
                 == homeboy_lifecycle_contract::RunExecutionState::Failed)
                 .then(|| incomplete_no_candidate_reason(&aggregate))
                 .flatten();
-            let status = if record.metadata["pre_execution_failure"].is_object() {
+            let cargo_admission_failure = aggregate
+                .outcomes
+                .iter()
+                .flat_map(|outcome| &outcome.diagnostics)
+                .find(|diagnostic| {
+                    crate::agent_task_provider::is_cargo_admission_failure(&diagnostic.class)
+                        && diagnostic.data["pre_provider"] == Value::Bool(true)
+                });
+            let status = if record.metadata["pre_execution_failure"].is_object()
+                || cargo_admission_failure.is_some()
+            {
                 CookStatus::PreExecutionFailure
             } else if no_candidate_reason.is_some() {
                 CookStatus::NoCandidate
@@ -2159,7 +2169,9 @@ pub(super) fn run_cook_spine(
                 disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
-                stop_reason: if let Some(reason) = no_candidate_reason {
+                stop_reason: if let Some(diagnostic) = cargo_admission_failure {
+                    Some(redact_diagnostic_text(&diagnostic.message))
+                } else if let Some(reason) = no_candidate_reason {
                     Some(reason)
                 } else if cancelled {
                     Some(format!(
@@ -2177,6 +2189,9 @@ pub(super) fn run_cook_spine(
             if cancelled {
                 report.value.terminal_phase = Some("cancellation".to_string());
                 report.value.terminal_failure_classification = Some("cancelled".to_string());
+            } else if let Some(diagnostic) = cargo_admission_failure {
+                report.value.terminal_phase = Some("cargo_target_admission".to_string());
+                report.value.terminal_failure_classification = Some(diagnostic.class.clone());
             } else if status == CookStatus::NoCandidate {
                 report.value.terminal_phase = Some("candidate_selection".to_string());
                 report.value.terminal_failure_classification = Some("no_candidate".to_string());
