@@ -3303,6 +3303,46 @@ mod tests {
     }
 
     #[test]
+    fn runner_set_replaces_and_clears_secret_env() {
+        crate::test_support::with_isolated_home(|_| {
+            server::create(
+                r#"{"id":"lab-ssh","host":"example.test","user":"runner"}"#,
+                false,
+            )
+            .expect("create server");
+
+            for (id, kind) in [("lab-local", "local"), ("lab-ssh", "ssh")] {
+                let spec = serde_json::json!({
+                    "id": id,
+                    "kind": kind,
+                    "env": {"LOG_LEVEL": "debug"},
+                    "secret_env": {"OLD_TOKEN": {"env": "OLD_TOKEN_SOURCE"}},
+                });
+                create(&spec.to_string(), false).expect("create runner with secret reference");
+
+                let patch = r#"{"secret_env":{"NEW_TOKEN":{"env":"NEW_TOKEN_SOURCE"}}}"#;
+                merge(Some(id), patch, &[]).expect("merge secret references");
+                let runner = load(id).expect("reload merged runner");
+                assert_eq!(runner.secret_env.len(), 2);
+
+                let replace = ["secret_env".to_string()];
+                merge(Some(id), patch, &replace).expect("replace secret references");
+                let runner = load(id).expect("reload updated runner");
+                assert_eq!(runner.secret_env.len(), 1);
+                assert_eq!(
+                    runner.secret_env["NEW_TOKEN"].env.as_deref(),
+                    Some("NEW_TOKEN_SOURCE")
+                );
+
+                merge(Some(id), r#"{"secret_env":{}}"#, &replace).expect("clear secret references");
+                let runner = load(id).expect("reload cleared runner");
+                assert!(runner.secret_env.is_empty());
+                assert_eq!(runner.env["LOG_LEVEL"], "debug");
+            }
+        });
+    }
+
+    #[test]
     fn runner_secret_env_refs_resolve_from_env_and_files() {
         let temp = tempfile::tempdir().expect("tempdir");
         let secret_file = temp.path().join("runner-token");

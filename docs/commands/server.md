@@ -56,7 +56,7 @@ Use `null` in JSON to clear a field (for example, `{"identity_file": null}`).
 Options:
 
 - `--json <JSON>`: JSON object to merge into config (supports `@file` and `-` for stdin)
-- `--replace <field>`: replace array fields instead of union (repeatable)
+- `--replace <field>`: replace the supplied field instead of merging it (repeatable)
 
 ### `delete`
 

@@ -222,7 +222,7 @@ enum ExtensionCommand {
         /// JSON object to merge into manifest (supports @file and - for stdin)
         #[arg(long, value_name = "JSON")]
         json: String,
-        /// Replace these fields instead of merging arrays
+        /// Replace these fields instead of merging them
         #[arg(long, value_name = "FIELD")]
         replace: Vec<String>,
     },

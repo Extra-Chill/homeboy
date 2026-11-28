@@ -39,6 +39,7 @@ pub struct MergeFields {
 }
 
 /// Merge a JSON patch into any serializable config type.
+/// Fields in `replace_fields` are replaced wholesale when present in the patch.
 pub fn merge_config<T: Serialize + DeserializeOwned>(
     existing: &mut T,
     patch: Value,
@@ -231,12 +232,6 @@ pub fn collect_array_fields(value: &Value) -> Vec<String> {
     }
 }
 
-fn should_replace(path: &str, replace_fields: &[String]) -> bool {
-    replace_fields
-        .iter()
-        .any(|field| path == field || path.starts_with(&format!("{}.", field)))
-}
-
 fn deep_merge(base: &mut Value, patch: Value, replace_fields: &[String], path: String) {
     match (base, patch) {
         (Value::Object(base_obj), Value::Object(patch_obj)) => {
@@ -248,19 +243,15 @@ fn deep_merge(base: &mut Value, patch: Value, replace_fields: &[String], path: S
                 };
                 if value.is_null() {
                     base_obj.remove(&key);
+                } else if replace_fields.contains(&field_path) {
+                    base_obj.insert(key, value);
                 } else {
                     let entry = base_obj.entry(key).or_insert(Value::Null);
                     deep_merge(entry, value, replace_fields, field_path);
                 }
             }
         }
-        (Value::Array(base_arr), Value::Array(patch_arr)) => {
-            if should_replace(&path, replace_fields) {
-                *base_arr = patch_arr;
-            } else {
-                array_union(base_arr, patch_arr);
-            }
-        }
+        (Value::Array(base_arr), Value::Array(patch_arr)) => array_union(base_arr, patch_arr),
         (base, patch) => *base = patch,
     }
 }
@@ -323,6 +314,27 @@ mod tests {
         let patch = serde_json::json!({"description": "hello", "tags": []});
         merge_config(&mut config, patch, &[]).expect("known fields merge");
         assert_eq!(config.description, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn merge_config_replaces_only_selected_paths() {
+        let mut config = serde_json::json!({
+            "settings": {"map": {"old": true}, "list": ["old"], "untouched": true},
+            "tags": ["old"],
+        });
+        let patch = serde_json::json!({
+            "settings": {"map": {"new": true}, "list": ["new"]},
+            "tags": ["new"],
+        });
+        merge_config(&mut config, patch, &["settings.map".into(), "tags".into()])
+            .expect("merge with replacements");
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "settings": {"map": {"new": true}, "list": ["old", "new"], "untouched": true},
+                "tags": ["new"],
+            })
+        );
     }
 
     /// Top-level camelCase / PascalCase keys still normalize to snake_case so

@@ -97,7 +97,7 @@ Options:
 
 - `--json <JSON>`: JSON object to merge into config (supports `@file` and `-` for stdin)
 - `--base64 <BASE64_JSON>`: Base64-encoded JSON object for shell-sensitive payloads
-- `--replace <field>`: replace array fields instead of union (repeatable)
+- `--replace <field>`: replace the supplied field instead of merging it (repeatable)
 - Dedicated flags for common fields: `--local-path`, `--remote-path`, `--build-artifact`, `--extract-command`, `--changelog-target`, `--version-target`, and `--extension`
 
 Arbitrary field updates must use `--json` or `--base64`. Positional JSON, positional `key=value`, and trailing arbitrary `--key value` updates are not accepted.
