@@ -392,16 +392,6 @@ pub fn admit_reconstructable_artifact_work_in_root(
     Ok(())
 }
 
-/// Run one bounded artifact-retention pass when no other process owns it.
-/// `None` means another pass is active; callers must remeasure before writing.
-pub fn try_run_automatic_artifact_retention(
-    roots: Vec<PathBuf>,
-) -> Result<Option<ArtifactCleanupOutput>> {
-    let data_root = homeboy_paths::homeboy_data()?;
-    let deadline = automatic_retention_deadline(&crate::defaults::load_config().retention);
-    try_run_automatic_artifact_retention_in_root(&data_root, roots, deadline)
-}
-
 /// Deadline for one standalone automatic pass that is not a phase of a larger
 /// pass: the configured automatic budget, starting now.
 pub fn automatic_retention_deadline(
@@ -412,8 +402,9 @@ pub fn automatic_retention_deadline(
     ))
 }
 
-/// [`try_run_automatic_artifact_retention`] against an explicitly injected data
-/// root.
+/// Run one bounded artifact-retention pass against an explicitly injected
+/// data root when no other process owns it. `None` means another pass is
+/// active; callers must remeasure before writing.
 ///
 /// The cross-process exclusion this pass depends on is an `FsIndexLock` under
 /// the data root, while the roots it reclaims from are supplied by the caller.
