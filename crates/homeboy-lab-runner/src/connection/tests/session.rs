@@ -232,16 +232,31 @@ fn live_lease_adoption_snapshot_accepts_stale_but_exact_daemon() {
 #[test]
 fn live_lease_adoption_snapshot_rejects_continuity_mismatches() {
     let baseline = compact_daemon_status(true, 0, Some("homeboy test+live"));
-    for case in [
-        "unreachable",
-        "endpoint probe error",
-        "lease mismatch",
-        "PID mismatch",
-        "connected lease mismatch",
-        "connected PID mismatch",
-        "build mismatch",
-        "missing build",
-        "missing daemon",
+    for (case, expected_reason) in [
+        ("unreachable", "live daemon is not reachable"),
+        (
+            "endpoint probe error",
+            "live daemon endpoint identity/jobs probe failed: timeout",
+        ),
+        (
+            "lease mismatch",
+            "live lease `lease-other` does not match requested lease `lease-live`",
+        ),
+        ("PID mismatch", "live PID `9999` does not match requested PID `4646`"),
+        (
+            "connected lease mismatch",
+            "live lease `lease-live` does not match connected lease `lease-other`",
+        ),
+        ("connected PID mismatch", "live PID `4646` does not match connected PID `9999`"),
+        (
+            "build mismatch",
+            "live build identity `other build` does not match expected build identity `homeboy test+live`",
+        ),
+        (
+            "missing build",
+            "live build identity `unavailable` does not match expected build identity `homeboy test+live`",
+        ),
+        ("missing daemon", "no live daemon was reported"),
     ] {
         let mut status = baseline.clone();
         let mut connected = baseline.daemon.clone().expect("daemon");
@@ -274,18 +289,11 @@ fn live_lease_adoption_snapshot_rejects_continuity_mismatches() {
             "homeboy test+live",
         )
         .unwrap_or_else(|| panic!("{case} must reject adoption"));
-        if case == "missing daemon" {
-            assert_eq!(
-                message,
-                "live lease changed before adoption could be persisted"
-            );
-        } else {
-            assert!(
-                message.contains("expected lease `lease-live` PID 4646 build `homeboy test+live`")
-            );
-            assert!(message.contains("current lease `"));
-            assert!(message.ends_with("no session state was changed"));
-        }
+        assert_eq!(
+            message,
+            format!("explicit live lease adoption revalidation failed: {expected_reason}; no session state was changed"),
+            "{case}",
+        );
     }
 }
 
