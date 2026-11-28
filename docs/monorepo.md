@@ -24,6 +24,18 @@ homeboy-desktop's are `homeboy-desktop-v*`. Per-extension tags kept their names.
   (`crates/homeboy-core/src/extension/runtime/`) from the same checkout. A
   change there runs the extension checks as well.
 
+## Core release test evidence
+
+Before preparing a new core release, `.github/workflows/release.yml` requires
+both Lint and a passing full Test suite for the candidate commit. Test runs
+at full scope on pushes to `main` and on manual dispatches alike: a release
+ships the whole component, so a previous-push diff must neither narrow the
+test evidence nor make the release depend on changed-scope selection. PR CI
+still uses changed scope for fast feedback. The separate Lint gate is unchanged.
+
+Recovery of an existing release tag resumes publication without rerunning the
+quality gates; it does not prepare a new release.
+
 ## Installing extensions
 
 `homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress`

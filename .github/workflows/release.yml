@@ -467,7 +467,9 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           commands: review test
           expected-commands: review lint,review test
-          args: ${{ github.event.before && format('--skip-lint --changed-since {0}', github.event.before) || '--skip-lint' }}
+          # Fresh releases require the full test suite on both push and dispatch.
+          scope: full
+          args: --skip-lint
           execution-timeout-seconds: '3000'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
