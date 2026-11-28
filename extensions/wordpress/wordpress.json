@@ -640,6 +640,13 @@
       "description": "Component-relative PHP paths or globs removed from both standalone_php_test_paths and wordpress_test_paths, for fixtures and helpers that match a test convention but are not tests."
     },
     {
+      "id": "release_validation_dependency_inputs",
+      "label": "Release validation dependency snapshots",
+      "type": "boolean",
+      "default": true,
+      "description": "This runner consumes Homeboy's authoritative release validation dependency paths."
+    },
+    {
       "id": "validation_dependencies",
       "label": "Validation Dependencies",
       "type": "array",

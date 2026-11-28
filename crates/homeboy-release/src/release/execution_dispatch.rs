@@ -759,7 +759,17 @@ fn run_lint_preflight(step: &PlanStep, context: &ReleaseExecutionContext) -> Rel
     use super::planning_quality::LintQualityOutcome;
 
     match super::planning_quality::validate_lint_quality(context.component, context.component_id) {
-        LintQualityOutcome::Passed { ran } => successful_quality_result(step, ran),
+        LintQualityOutcome::Passed {
+            ran,
+            validation_dependencies,
+        } => {
+            let mut result = successful_quality_result(step, ran);
+            result.data = Some(serde_json::json!({
+                "ran": ran,
+                "validation_dependencies": validation_dependencies,
+            }));
+            result
+        }
         LintQualityOutcome::Failed(err) => failed_result(&step.id, &step.kind, err),
     }
 }

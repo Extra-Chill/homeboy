@@ -26,6 +26,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 python3 - "${SCRIPT_DIR}/../lib" <<'PY'
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -58,7 +59,10 @@ php = homeboy_runtime_php(root)
 
 if php is None:
     php = declared_floor(root)
-    for dependency in local_dependency_paths(root):
+    resolved = os.environ.get('HOMEBOY_RELEASE_VALIDATION_DEPENDENCY_PATHS')
+    dependencies = (map(Path, resolved.splitlines()) if resolved is not None
+                    else local_dependency_paths(root))
+    for dependency in dependencies:
         floor = declared_floor(dependency)
         if floor and (not php or version(floor) > version(php)):
             php = floor

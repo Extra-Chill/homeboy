@@ -204,6 +204,18 @@ if [ "$mapped_resolved" != "$REMOTE_AGENTS_API_DIR" ]; then
     exit 1
 fi
 
+release_paths="${REMOTE_AGENTS_API_DIR}"$'\n'"${EXAMPLE_DEPENDENCY_DIR}"
+release_resolved=$(HOMEBOY_RELEASE_VALIDATION_DEPENDENCY_PATHS="$release_paths" homeboy_resolve_validation_dependency_paths "$COMPONENT_DIR")
+if [ "$release_resolved" != "$release_paths" ]; then
+    echo "FAIL: release lint should consume only the provided paths in order" >&2
+    exit 1
+fi
+release_resolved=$(HOMEBOY_RELEASE_VALIDATION_DEPENDENCY_PATHS='' homeboy_resolve_validation_dependency_paths "$COMPONENT_DIR")
+if [ -n "$release_resolved" ]; then
+    echo "FAIL: an empty release dependency list must not trigger fallback resolution" >&2
+    exit 1
+fi
+
 resolved=$(PATH="${BIN_DIR}:$PATH" homeboy_resolve_validation_dependency_paths "$COMPONENT_DIR")
 
 if ! grep -F -- "$EXAMPLE_DEPENDENCY_DIR" <<< "$resolved" >/dev/null; then

@@ -1329,6 +1329,16 @@ _homeboy_emit_merged_validation_dependency_path() {
 homeboy_resolve_validation_dependency_paths() {
     local plugin_path="${1:-}"
 
+    # Release lint already resolved the full graph against its identity policy.
+    # Presence (including an empty value) disables all ambient lookup and cache
+    # fallbacks; the paths are ordered with prerequisites before consumers.
+    if [ "${HOMEBOY_RELEASE_VALIDATION_DEPENDENCY_PATHS+x}" = x ]; then
+        if [ -n "$HOMEBOY_RELEASE_VALIDATION_DEPENDENCY_PATHS" ]; then
+            printf '%s\n' "$HOMEBOY_RELEASE_VALIDATION_DEPENDENCY_PATHS"
+        fi
+        return 0
+    fi
+
     # Make plugin path available to the resolver for org inference
     _HOMEBOY_DEP_PLUGIN_PATH="$plugin_path"
 

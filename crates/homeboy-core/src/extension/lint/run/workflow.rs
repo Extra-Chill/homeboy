@@ -13,8 +13,10 @@ use super::hints::build_autofix_hint;
 use super::scoping::resolve_scoped_lint_runs;
 use super::types::{LintRunWorkflowArgs, LintRunWorkflowResult, ScopedLintPlan, ScopedLintRun};
 use crate::extension;
+use crate::extension::invoke::STRICT_VALIDATION_DEPENDENCIES_ENV;
 use crate::extension::lint::baseline as lint_baseline;
 use crate::extension::lint::build_lint_runner;
+use crate::extension::lint::validation_inputs::{ValidationInputs, PATHS_ENV};
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::finding::HomeboyFinding;
@@ -38,6 +40,91 @@ struct ScopedLintOutput {
     output: extension::invoke::RunnerOutput,
     evidence: Vec<LintRunEvidence>,
     child_run_dirs: Vec<RunDir>,
+}
+
+/// Resolve and freeze validation inputs once for the entire release lint gate,
+/// independently of whether the release has a prior tag or uses scoped routes.
+pub fn run_release_lint_workflow(
+    component: &Component,
+    source_path: &Path,
+    mut args: LintRunWorkflowArgs,
+    run_dir: &RunDir,
+) -> homeboy_core::Result<(LintRunWorkflowResult, serde_json::Value)> {
+    let context = crate::extension::lint::resolve_lint_command(component)?;
+    let manifest = extension::catalog::load_extension(&context.extension_id)?;
+    let consumes_snapshots = manifest.settings.iter().any(|setting| {
+        setting.id == "release_validation_dependency_inputs"
+            && setting.default == Some(serde_json::Value::Bool(true))
+    });
+    let (strings, json) = crate::extension::lint::split_lint_settings(&args.settings);
+    let settings = extension::invoke::build_settings_json(
+        &manifest
+            .settings
+            .into_iter()
+            // An extension's empty default must not hide the portable list.
+            .filter(|setting| {
+                setting.id != "validation_dependencies"
+                    || !setting
+                        .default
+                        .as_ref()
+                        .is_some_and(|value| value.as_array().is_some_and(Vec::is_empty))
+            })
+            .collect::<Vec<_>>(),
+        &context.settings,
+        &strings,
+        &json,
+    )?;
+    let settings = serde_json::from_str(&settings).map_err(|err| {
+        homeboy_core::Error::internal_json(
+            err.to_string(),
+            Some("read release lint settings".into()),
+        )
+    })?;
+    let wordpress = context.extension_id == "wordpress";
+    let inputs = ValidationInputs::resolve(source_path, &settings, wordpress)?;
+    if !inputs.is_empty() && !consumes_snapshots {
+        let mut error = homeboy_core::Error::validation_invalid_argument(
+            "extension",
+            format!("Update extension '{}': its lint runner does not support release validation dependency snapshots", context.extension_id),
+            None,
+            None,
+        );
+        error.details["validation_dependencies"] = inputs.evidence();
+        return Err(error);
+    }
+    args.ci_env.extend([
+        (STRICT_VALIDATION_DEPENDENCIES_ENV.into(), "1".into()),
+        (PATHS_ENV.into(), inputs.paths_env()),
+    ]);
+    let evidence = inputs.evidence();
+    let workflow =
+        run_main_lint_workflow(component, source_path, args, run_dir).map_err(|mut err| {
+            err.details["validation_dependencies"] = evidence.clone();
+            err
+        })?;
+    Ok((workflow, evidence))
+}
+
+/// Run a component-owned release lint script with frozen dependency inputs.
+pub fn run_release_self_check_lint(
+    component: &Component,
+    source_path: &Path,
+) -> homeboy_core::Result<(i32, serde_json::Value)> {
+    let inputs = ValidationInputs::resolve(source_path, &serde_json::Value::Null, false)?;
+    let policy = extension::self_check::SelfCheckExecutionPolicy::with_env(vec![
+        (STRICT_VALIDATION_DEPENDENCIES_ENV.into(), "1".into()),
+        (PATHS_ENV.into(), inputs.paths_env()),
+    ]);
+    let output = extension::self_check::run_self_checks_with_passthrough_and_progress(
+        component,
+        ExtensionCapability::Lint,
+        source_path,
+        true,
+        Some(&policy),
+        None,
+        None,
+    )?;
+    Ok((output.exit_code, inputs.evidence()))
 }
 
 /// Run the main lint workflow.
@@ -155,7 +242,7 @@ pub fn run_main_lint_workflow(
         let output = runner
             .env_if(
                 args.changed_since.is_some(),
-                "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+                STRICT_VALIDATION_DEPENDENCIES_ENV,
                 "1",
             )
             .run()?;
@@ -505,7 +592,7 @@ fn run_scoped_lint_runs(
         let output = runner
             .env_if(
                 args.changed_since.is_some(),
-                "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES",
+                STRICT_VALIDATION_DEPENDENCIES_ENV,
                 "1",
             )
             .run()?;
