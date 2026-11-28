@@ -161,7 +161,10 @@ captured_argv="$(ls "${CAPTURE_DIR}"/argv-*.json | head -1)"
 assert_contains "$captured_recipe" "wordpress.run-php"
 assert_contains "$captured_recipe" "/wordpress/wp-content/plugins/component"
 assert_contains "$captured_recipe" "workspace-recipe/v1"
-assert_contains "${CAPTURE_DIR}/wrapper.php" "\$homeboy_smoke_stderr = defined(\"STDERR\") ? STDERR : fopen(\"php://stderr\", \"w\");"
+assert_contains "${CAPTURE_DIR}/wrapper.php" 'if (!defined("STDOUT")) { define("STDOUT", fopen("php://stdout", "w")); }'
+assert_contains "${CAPTURE_DIR}/wrapper.php" 'if (!defined("STDERR")) { define("STDERR", fopen("php://stderr", "w")); }'
+assert_contains "${CAPTURE_DIR}/wrapper.php" 'if (!defined("STDIN")) { define("STDIN", fopen("php://stdin", "r")); }'
+assert_contains "${CAPTURE_DIR}/wrapper.php" '$homeboy_smoke_stderr = STDERR;'
 assert_contains "${CAPTURE_DIR}/wrapper.php" "fwrite(\$homeboy_smoke_stderr"
 assert_not_contains "${CAPTURE_DIR}/wrapper.php" "fwrite(STDERR"
 assert_contains "$captured_argv" "$FAKE_CODEBOX"
