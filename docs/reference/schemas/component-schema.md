@@ -111,6 +111,7 @@ Component configuration defines buildable and deployable units stored in `compon
     - **`source_roots`** (array): One or more non-overlapping repository-relative source directories
     - **`archive_root`** (string): Archive-relative directory where each selected source root's contents are packaged
     - Unmapped ZIP artifacts use the identity-layout completeness check. Mapped archive paths are checked exactly.
+    - Both checks omit tracked files excluded by the component-root `.buildignore`. For example, `src/` can exclude Vite inputs while tracked compiled CSS under `assets/` still has to ship. `.buildignore` does not affect which commits trigger a release.
   - **`gates`** (array): Declared release gates run against the packaged artifact after packaging and before tagging. Gates run in declaration order, fail-fast; a non-zero exit blocks the release before any tag or publication, the way a failing test does. `--dry-run` lists the gates without running them.
     - **`id`** (string, required): Unique gate identifier
     - **`run`** (string, required): Command run from the component root after packaging; `{artifact}` is replaced with the shell-quoted path of the selected built artifact
