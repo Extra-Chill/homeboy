@@ -41,6 +41,7 @@
       "bash tests/installed-build-helper-resolution-smoke.sh",
       "bash tests/installed-test-helper-resolution-smoke.sh",
       "bash tests/extension-composer-vendor-integrity-smoke.sh",
+      "bash tests/wp-codebox-composer-prepare-smoke.sh",
       "node tests/wp-codebox-phpunit-multisite-smoke.mjs",
       "node tests/wp-codebox-phpunit-aggregate-smoke.mjs",
       "node tests/wp-codebox-phpunit-evidence-smoke.mjs",
