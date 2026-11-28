@@ -108,6 +108,21 @@ needs to migrate to this command or core API.
 homeboy rig up studio
 ```
 
+To run the package in a specific worktree without installing it or changing the
+host-wide registration, pass its package root:
+
+```sh
+homeboy rig up studio --source ./worktrees/studio-feature
+```
+
+The directory must contain `rig.json` or `rigs/studio/rig.json` for the
+requested ID. Templates and `${package.root}` resolve from that package, and a
+missing or invalid local rig is an error, not a fallback to the installed rig.
+Without `--source`, `up` still uses the installed rig. `--source` is local-only
+and cannot be combined with `--runner`, `--placement lab`, or `--dry-run`.
+It selects the spec for this invocation; rig state and resource leases are not
+isolated per worktree.
+
 Run a component at a PR head, branch, or SHA without changing its registered checkout:
 
 ```sh

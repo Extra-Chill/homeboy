@@ -33,6 +33,9 @@ pub struct RigArgs {
     command: RigCommand,
 }
 
+const RIG_UP_SOURCE_LOCAL_REASON: &str =
+    "`rig up --source` runs a local package and cannot be used with --runner or --placement lab.";
+
 impl RigArgs {
     pub(crate) fn is_hot_resource_command(&self) -> bool {
         matches!(
@@ -57,11 +60,35 @@ impl RigArgs {
         }
     }
 
+    pub(crate) fn validate_source_placement(
+        &self,
+        runner: Option<&str>,
+        placement: homeboy::cli_surface::Placement,
+    ) -> homeboy::core::Result<()> {
+        if matches!(
+            self.command,
+            RigCommand::Up {
+                source: Some(_),
+                ..
+            }
+        ) && (runner.is_some() || placement == homeboy::cli_surface::Placement::Lab)
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "source",
+                RIG_UP_SOURCE_LOCAL_REASON,
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn up_dry_run_rig_id(&self) -> Option<&str> {
         match &self.command {
             RigCommand::Up {
                 rig_id,
                 dry_run: true,
+                source: None,
                 refs,
                 ..
             } if refs.is_empty() => Some(rig_id),
@@ -72,9 +99,19 @@ impl RigArgs {
     pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
         let portable_target = match &self.command {
             RigCommand::Check { target, .. } => Some((target.as_str(), RIG_CHECK_LAB_LABEL)),
-            RigCommand::Up { rig_id, .. } if disposable_rig(rig_id) => {
-                Some((rig_id.as_str(), "rig up"))
+            RigCommand::Up {
+                source: Some(_), ..
+            } => {
+                return CommandPortabilityContract::lab(LabCommandContract::local_only(
+                    "rig up",
+                    RIG_UP_SOURCE_LOCAL_REASON,
+                ));
             }
+            RigCommand::Up {
+                rig_id,
+                source: None,
+                ..
+            } if disposable_rig(rig_id) => Some((rig_id.as_str(), "rig up")),
             _ => None,
         };
         if let Some((target, label)) = portable_target {
@@ -143,6 +180,9 @@ enum RigCommand {
     Up {
         /// Rig ID
         rig_id: String,
+        /// Load this rig from a local package directory without installing it.
+        #[arg(long, value_name = "PACKAGE", conflicts_with = "dry_run")]
+        source: Option<String>,
         /// Materialize a component at a PR URL/number, branch, or SHA (repeatable).
         #[arg(long = "ref", value_name = "COMPONENT=REF")]
         refs: Vec<String>,
@@ -385,10 +425,18 @@ pub fn run(args: RigArgs) -> CmdResult<RigCommandOutput> {
         } => materialize(&rig_path, source_root.as_deref()),
         RigCommand::Up {
             rig_id,
+            source,
             dry_run,
             refs,
             setting_args,
-        } => up(config_root, &rig_id, dry_run, &refs, &setting_args),
+        } => up(
+            config_root,
+            &rig_id,
+            source.as_deref(),
+            dry_run,
+            &refs,
+            &setting_args,
+        ),
         RigCommand::Check { target, id, path } => {
             check(config_root, &target, id.as_deref(), path.as_deref())
         }
@@ -627,11 +675,25 @@ fn show(config_root: &Path, rig_id: &str) -> CmdResult<RigCommandOutput> {
 fn up(
     config_root: &Path,
     rig_id: &str,
+    source: Option<&str>,
     dry_run: bool,
     refs: &[String],
     setting_args: &SettingArgs,
 ) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(config_root, rig_id)?;
+    let rig = match source {
+        Some(package) if Path::new(package).is_dir() => {
+            rig::load_local_source(package, Some(rig_id))?
+        }
+        Some(package) => {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "source",
+                "rig up --source requires a local package directory",
+                Some(package.to_string()),
+                None,
+            ));
+        }
+        None => rig::load(config_root, rig_id)?,
+    };
     if dry_run {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "dry_run",
@@ -1184,8 +1246,15 @@ mod tests {
             let RigCommand::Up { setting_args, .. } = cli.rig.command else {
                 panic!()
             };
-            let (_, code) =
-                up(&test_config_root(), "disposable", false, &[], &setting_args).unwrap();
+            let (_, code) = up(
+                &test_config_root(),
+                "disposable",
+                None,
+                false,
+                &[],
+                &setting_args,
+            )
+            .unwrap();
             assert_eq!(code, 0);
             let json: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
