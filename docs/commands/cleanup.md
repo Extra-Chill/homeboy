@@ -4,7 +4,7 @@ Remove or inspect reconstructable artifacts that Homeboy can safely recreate.
 
 This is the canonical artifact cleanup path. Worktree lifecycle cleanup is handled by `homeboy worktree cleanup`; artifact removal stays dry-run here until `--apply` is passed.
 
-Aggregate `--apply` submits a durable asynchronous controller job by default. For a bounded, controller-owned cleanup when the daemon is unavailable, explicitly select the existing local execution contract: `homeboy --placement local cleanup --include shared-cargo-targets --apply --full`. This executes synchronously through the same category safety checks, locks, and apply-time revalidation, and reports `execution.placement: "local"` with `durable: false`. Remote cleanup categories retain their normal remote runner behavior.
+Aggregate `--apply` submits a durable asynchronous controller job by default. For a bounded, controller-owned cleanup when the daemon is unavailable, explicitly select the existing local execution contract: `homeboy --placement local cleanup --include shared-cargo-targets --apply`. This executes synchronously through the same category safety checks, locks, and apply-time revalidation, and reports `execution.placement: "local"` with `durable: false`. Remote cleanup categories retain their normal remote runner behavior.
 
 ## `homeboy cleanup artifacts`
 
@@ -24,7 +24,7 @@ homeboy cleanup artifacts --apply
 
 Use `--sort size` to rank the inspected artifacts by size and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream. With `--all-worktrees`, `--limit N` bounds declaration inspections for either sort order and returns a filter-bound cursor when more inventory remains; resume it with `--cursor` and the same eligibility filters. A deadline interrupted while measuring one large directory records an opaque, checksummed reference to its repository-bound durable frontier, so the next pass continues measuring the declaration without putting every pending path in the command line. A continuation pass whose budget is already spent still advances that frontier by at least one entry before yielding, and applies a candidate as soon as its measurement completes, so repeatedly following the cursor converges even when no single pass can measure the whole subtree (#16293). Size order is therefore largest-first within that bounded page, not a claim about uninspected worktrees. A dry-run continuation remains a dry run; add `--apply` explicitly when ready to remove candidates.
 
-The JSON output includes worktree identity, candidate paths, estimated bytes, skipped reasons, applied rows, a per-worktree `worktrees` roll-up, and a `summary` object. The terminal summary shows bounded candidate rows and points to the JSON output for full large reviews. `summary.invocation_reclaimed_bytes` reports bytes reclaimed by the current command, `summary.remaining_candidate_bytes` reports cleanup candidates still present after the command, and `summary.cumulative_session_reclaimed_bytes` carries the local cumulative total for repeated `--apply` runs against the same repository. Cleanup refuses unsafe path declarations and skips artifact paths that contain tracked or staged source changes, files Git tracks at all (a repository that commits its generated output keeps it), or untracked work that Git does not ignore.
+The JSON output includes worktree identity, candidate paths, estimated bytes, skipped reasons, applied rows, a per-worktree `worktrees` roll-up, and a `summary` object. JSON detail arrays are sampled by default. Use `--verbose --output ./cleanup.json` to save all rows from the inspected page; `--verbose` also expands stdout. `summary.invocation_reclaimed_bytes` reports bytes reclaimed by the current command, `summary.remaining_candidate_bytes` reports cleanup candidates still present after the command, and `summary.cumulative_session_reclaimed_bytes` carries the local cumulative total for repeated `--apply` runs against the same repository. Cleanup refuses unsafe path declarations and skips artifact paths that contain tracked or staged source changes, files Git tracks at all (a repository that commits its generated output keeps it), or untracked work that Git does not ignore.
 
 Every candidate reports both `size_bytes` (apparent content size) and `allocated_bytes` (disk actually charged to the tree). Large trees of small files diverge sharply between the two; `allocated_bytes` is what free space reflects after `--apply`.
 
@@ -46,6 +46,8 @@ A synchronous invocation (no daemon-owned job or `homeboy.retention` cadence beh
 
 `homeboy cleanup retained-storage` uses the same 30-second process-group boundary around its read-only source inventories and filesystem reconciliation. Its progress identifies the active source; a deadline returns typed partial evidence and `homeboy cleanup retained-storage --limit <N>` as the safe continuation instead of blocking on a recursive walk.
 
+`retained-storage --limit N` caps each detail array, including filesystem stores and their child examples. Totals still cover every inspected resource. Aggregate keys rank by bytes, then count, then key; when keys do not fit, the last slot is an `other` row with their combined bytes and count. Follow `continuation` for more lifecycle examples or use `retained-storage --verbose --output ./retained.json` to capture all inspected rows in one report. `--verbose` expands stdout as well; it does not remove source scan budgets.
+
 Regular `homeboy cleanup` includes `repo-artifacts` inventory. After an agent-task provider exits, Homeboy also cleans declared rebuildable artifacts from that exact detached attempt worktree before applying its existing source-state and commit safety guard. Active sibling worktrees are not scanned by this lifecycle step.
 
 ## Controller Scratch
@@ -55,12 +57,18 @@ homeboy cleanup --include controller-scratch --limit 5
 # Run the returned next_command to inspect the next page.
 ```
 
-`--limit` bounds registered resource inspections before lifecycle, Git, or
-filesystem-size probes. The result reports `inspected_count` and
-`uninspected_resource_count`; candidate counts, byte estimates, and retention
-summaries describe the inspected page. `--full` expands detail for that page,
-without expanding the scan. A partial page carries `next_cursor` and an exact
-`next_command`, and the aggregate reports partial inventory coverage.
+`--limit` caps admitted reclaim candidates and the default detail samples.
+The sweep can walk past retained leases until the deadline, so `skipped_count`,
+retained byte estimates, and reason counts can exceed the sample size. These
+summaries cover the inspected page, not the uninspected remainder. A partial
+page carries `next_cursor` and an exact `next_command`.
+
+Use `--full` (alias `--verbose`) on the original invocation to capture all
+rows for that page without expanding the scan. For a synchronous apply, pair
+it with `--output ./cleanup.json` to keep the evidence from that pass. For a
+durable apply, request `--full` when submitting, then retrieve the saved rows
+with `cleanup status <job-id> --full`. Replaying an apply observes a new pass,
+not the original results.
 
 The cursor orders stable resource-path identities, so retained rows do not
 starve later resources and deleting earlier candidates does not shift the next

@@ -256,7 +256,10 @@ Records carry a `liveness`, and `reclaimable` is reported separately from the
 retained totals. "Cleanup cannot free this" and "cleanup has not freed this yet"
 are different answers, so `retained_bytes` and `reclaimable_bytes` are never
 summed together. `safe_next_commands` names a reclaim command for every category
-the report can produce a record for.
+the report can produce a record for. `--limit` caps displayed detail, not these
+totals: owner and other dimensional roll-ups fold lower-ranked keys into an
+`other` row. Use the lifecycle example cursor or `--verbose` to see individual
+rows that did not fit.
 
 The SQLite row is explicitly scoped to the index, not the artifact bytes it
 indexes; the artifact payloads are accounted for by the artifact-root categories
@@ -274,12 +277,13 @@ roots outside the data root as `managed/external`. `apparent_bytes` is the sum
 of file lengths; `physical_bytes` is allocated filesystem blocks. Sparse files,
 hard links shared across top-level stores, directory metadata, and allocation
 granularity can make the top-level sum differ from root physical usage; the
-report states the direction and byte difference rather than hiding it. Existing
-`retained_bytes` and lifecycle aggregates remain unchanged for consumers.
+report states the direction and byte difference rather than hiding it. The
+reconciliation sums all inspected stores, even when `top_level` only displays
+the largest ones.
 
 Since #11126 the **config root** (`~/.config/homeboy`) is probed as a fourth
-root, exposed as `filesystem.config_root` and as a `config_root` entry in
-`top_level`. It is usually a different volume from the data root and holds
+root, exposed as `filesystem.config_root` and eligible for a `config_root`
+entry in `top_level`. It is usually a different volume from the data root and holds
 `rigs/{id}.state/logs/` (unbounded append), `rig-packages/`, `backups/`,
 `agent-runtimes/`, `runner-sessions/`, `runner-lease-evidence/`,
 `runner-job-execution-context/`, and `preview-ingress/routes/`. It was never

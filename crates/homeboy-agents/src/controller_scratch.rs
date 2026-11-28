@@ -652,6 +652,9 @@ pub struct ControllerScratchRetentionReason {
     pub resource_count: usize,
     pub owners: Vec<ControllerScratchRetentionOwner>,
     pub additional_owner_count: usize,
+    pub additional_owner_resource_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_reason_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -1371,21 +1374,23 @@ fn cleanup_unlocked(
             )?
         };
         if let Some(reason) = reason {
-            if let Some(bytes) = resource.size_bytes {
-                *retained_bytes_by_reason.entry(reason.clone()).or_default() += bytes;
-            } else {
-                *retained_unknown_bytes_count_by_reason
-                    .entry(reason.clone())
-                    .or_default() += 1;
-            }
+            record_retained_size(
+                &mut retained_bytes_by_reason,
+                &mut retained_unknown_bytes_count_by_reason,
+                &reason,
+                resource.size_bytes,
+            );
             // Keep every row for an explicit `--full` inspection. The default
             // response admits rows directly to its item/byte budget so a large
             // retained index is not materialized before it is truncated.
-            all_skips.push((reason.clone(), Some(resource.run_id.clone())));
+            all_skips.push((
+                retention_reason_key(&reason).to_string(),
+                Some(resource.run_id.clone()),
+            ));
             append_skipped_detail(
                 &mut skipped,
                 &mut skipped_bytes,
-                options.full,
+                options,
                 ControllerScratchSkipped {
                     path: resource.path.clone(),
                     run_id: Some(resource.run_id.clone()),
@@ -1529,11 +1534,20 @@ fn cleanup_unlocked(
                     }
                 }
                 ScratchRemoval::Skipped(reason) => {
-                    all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
+                    record_retained_size(
+                        &mut retained_bytes_by_reason,
+                        &mut retained_unknown_bytes_count_by_reason,
+                        &reason,
+                        Some(candidate.size_bytes),
+                    );
+                    all_skips.push((
+                        retention_reason_key(&reason).to_string(),
+                        Some(candidate.run_id.clone()),
+                    ));
                     append_skipped_detail(
                         &mut skipped,
                         &mut skipped_bytes,
-                        options.full,
+                        options,
                         ControllerScratchSkipped {
                             path: candidate.path.clone(),
                             run_id: Some(candidate.run_id.clone()),
@@ -1601,7 +1615,7 @@ fn cleanup_unlocked(
     let recovery_candidate_count = recovery_candidates.len();
     let (recovery_candidates, recovery_candidate_detail) = present_detail(
         recovery_candidates,
-        options.full,
+        options,
         recovery_candidate_count,
         format!("{} --full", cleanup_page_command(options, cursor)),
     )?;
@@ -1610,7 +1624,7 @@ fn cleanup_unlocked(
     default_policy_eligible_bytes += recovery_bytes;
     let (candidates, candidate_detail) = present_detail(
         mutation_candidates,
-        options.full,
+        options,
         mutation_candidate_count,
         format!("{} --full", cleanup_page_command(options, cursor)),
     )?;
@@ -1645,7 +1659,7 @@ fn cleanup_unlocked(
         preserved_workspace_bytes,
         partially_preserved_workspace_count,
         preserved_workspaces,
-        retention_reasons: summarize_retention(&all_skips),
+        retention_reasons: summarize_retention(&all_skips, options),
         skipped,
         skipped_detail,
         has_more,
@@ -1667,7 +1681,7 @@ fn cleanup_unlocked(
 fn append_skipped_detail(
     skipped: &mut Vec<ControllerScratchSkipped>,
     skipped_bytes: &mut usize,
-    full: bool,
+    options: ControllerScratchCleanupOptions,
     detail: ControllerScratchSkipped,
 ) -> Result<()> {
     let detail_bytes = serde_json::to_vec(&detail)
@@ -1678,8 +1692,8 @@ fn append_skipped_detail(
             )
         })?
         .len();
-    if full
-        || (skipped.len() < OutputBudget::COLLECTION.max_items
+    if options.full
+        || (skipped.len() < options.limit.min(OutputBudget::COLLECTION.max_items)
             && skipped_bytes.saturating_add(detail_bytes) <= OutputBudget::COLLECTION.max_bytes)
     {
         *skipped_bytes = skipped_bytes.saturating_add(detail_bytes);
@@ -1733,7 +1747,7 @@ fn skipped_detail_metadata(
 /// mutation. `--full` is the explicit lossless inspection mode.
 fn present_detail<T>(
     items: Vec<T>,
-    full: bool,
+    options: ControllerScratchCleanupOptions,
     total_items: usize,
     export_command: String,
 ) -> Result<(Vec<T>, OutputTruncation)>
@@ -1750,7 +1764,7 @@ where
                 )
             })
     })?;
-    if full {
+    if options.full {
         return Ok((
             items,
             OutputTruncation {
@@ -1780,7 +1794,7 @@ where
                 )
             })?
             .len();
-        if returned.len() >= OutputBudget::COLLECTION.max_items
+        if returned.len() >= options.limit.min(OutputBudget::COLLECTION.max_items)
             || returned_bytes.saturating_add(item_bytes) > OutputBudget::COLLECTION.max_bytes
         {
             break;
@@ -1808,12 +1822,44 @@ where
     ))
 }
 
+// Keep resource-specific paths and recovery evidence in detail rows, not in
+// summary keys: otherwise each retained resource can create its own bucket.
+fn retention_reason_key(reason: &str) -> &str {
+    if reason.starts_with("workspace preservation required:") {
+        "workspace preservation required"
+    } else if reason.starts_with("linked Git worktree `") {
+        "linked Git worktree could not be unregistered"
+    } else {
+        reason
+    }
+}
+
+fn record_retained_size(
+    bytes_by_reason: &mut BTreeMap<String, u64>,
+    unknown_count_by_reason: &mut BTreeMap<String, usize>,
+    reason: &str,
+    bytes: Option<u64>,
+) {
+    let key = retention_reason_key(reason).to_string();
+    if let Some(bytes) = bytes {
+        *bytes_by_reason.entry(key).or_default() += bytes;
+    } else {
+        *unknown_count_by_reason.entry(key).or_default() += 1;
+    }
+}
+
 /// Summarize every skipped resource by reason and owning run. Takes the complete
 /// lightweight `(reason, run_id)` record so aggregates stay exact when the
 /// default response bounds detailed rows.
 fn summarize_retention(
     all_skips: &[(String, Option<String>)],
+    options: ControllerScratchCleanupOptions,
 ) -> Vec<ControllerScratchRetentionReason> {
+    let owner_limit = if options.full {
+        usize::MAX
+    } else {
+        options.limit.min(RETENTION_OWNER_SUMMARY_LIMIT)
+    };
     let mut reasons = BTreeMap::<String, BTreeMap<String, usize>>::new();
     for (reason, run_id) in all_skips {
         let Some(run_id) = run_id.as_deref() else {
@@ -1825,7 +1871,7 @@ fn summarize_retention(
             .entry(run_id.to_string())
             .or_default() += 1;
     }
-    reasons
+    let mut rows: Vec<_> = reasons
         .into_iter()
         .map(|(reason, owners)| {
             let resource_count = owners.values().sum();
@@ -1842,16 +1888,41 @@ fn summarize_retention(
                     .cmp(&left.resource_count)
                     .then_with(|| left.run_id.cmp(&right.run_id))
             });
-            let additional_owner_count = owners.len().saturating_sub(RETENTION_OWNER_SUMMARY_LIMIT);
-            owners.truncate(RETENTION_OWNER_SUMMARY_LIMIT);
+            let additional_owner_count = owners.len().saturating_sub(owner_limit);
+            let additional_owner_resource_count = owners
+                .iter()
+                .skip(owner_limit)
+                .map(|owner| owner.resource_count)
+                .sum();
+            owners.truncate(owner_limit);
             ControllerScratchRetentionReason {
                 reason,
                 resource_count,
                 owners,
                 additional_owner_count,
+                additional_owner_resource_count,
+                additional_reason_count: None,
             }
         })
-        .collect()
+        .collect();
+    rows.sort_unstable_by(|left, right| {
+        right
+            .resource_count
+            .cmp(&left.resource_count)
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    if rows.len() > owner_limit && owner_limit > 0 {
+        let omitted = rows.split_off(owner_limit - 1);
+        rows.push(ControllerScratchRetentionReason {
+            reason: "other".to_string(),
+            resource_count: omitted.iter().map(|row| row.resource_count).sum(),
+            owners: Vec::new(),
+            additional_owner_count: 0,
+            additional_owner_resource_count: 0,
+            additional_reason_count: Some(omitted.len()),
+        });
+    }
+    rows
 }
 
 /// The lifecycle a lease is effectively in at inspection time, derived from
@@ -3619,7 +3690,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let summary = summarize_retention(&skipped);
+        let summary = summarize_retention(
+            &skipped,
+            ControllerScratchCleanupOptions {
+                apply: false,
+                limit: usize::MAX,
+                full: false,
+                retention_override_seconds: None,
+            },
+        );
 
         assert_eq!(summary.len(), 1);
         assert_eq!(summary[0].resource_count, RETENTION_OWNER_SUMMARY_LIMIT + 1);
@@ -5068,7 +5147,8 @@ mod tests {
         // Large retained inventories keep exact aggregates while the default
         // response stays inside the shared item and byte presentation budget.
         let root = tempfile::tempdir().expect("root");
-        let total = 125;
+        let total = 3_000;
+        let limit = 7;
         let mut resources = Vec::with_capacity(total);
         for index in 0..total {
             let scratch = root.path().join(format!("scratch-{index}"));
@@ -5078,6 +5158,7 @@ mod tests {
             resource.lease_id = format!("lease-{index}");
             // Within interrupted retention, so every resource is skipped.
             resource.lifecycle_state = "interrupted".to_string();
+            resource.size_bytes = Some(42);
             resources.push(resource);
         }
         write_index_at(
@@ -5093,17 +5174,28 @@ mod tests {
             data_root.path(),
             &observation,
             ControllerScratchCleanupOptions {
-                apply: false,
-                limit: total,
+                apply: true,
+                limit,
                 full: false,
                 retention_override_seconds: None,
             },
         );
 
         assert_eq!(output.candidate_count, 0);
-        // True total is preserved even though rendered rows are bounded.
+        assert_eq!(output.applied_count, 0);
         assert_eq!(output.skipped_count, total);
-        assert!(output.skipped.len() <= OutputBudget::COLLECTION.max_items);
+        assert_eq!(output.skipped.len(), limit);
+        assert_eq!(output.retention_reasons[0].owners.len(), limit);
+        assert_eq!(
+            output.retained_bytes_by_reason.values().sum::<u64>(),
+            total as u64 * 42
+        );
+        let stdout = serde_json::to_vec_pretty(&output).expect("serialize apply evidence");
+        assert!(stdout.len() < 16 * 1024);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&stdout).unwrap()["skipped_count"],
+            total
+        );
         assert!(output.skipped_detail.returned_bytes <= OutputBudget::COLLECTION.max_bytes);
         assert_eq!(output.skipped_detail.total_items, total);
         assert_eq!(
@@ -5124,13 +5216,14 @@ mod tests {
             data_root.path(),
             &observation,
             ControllerScratchCleanupOptions {
-                apply: false,
-                limit: total,
+                apply: true,
+                limit,
                 full: true,
                 retention_override_seconds: None,
             },
         );
         assert_eq!(full.skipped.len(), total);
+        assert_eq!(full.retention_reasons[0].owners.len(), total);
         assert!(!full.skipped_detail.truncated);
     }
 

@@ -191,12 +191,13 @@ const AUTOMATIC_RETENTION_OUT_OF_SCOPE: [(CleanupCategoryArg, &str); 4] = [
 pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> CmdResult<Value> {
     match args.command {
         Some(CleanupCommand::Artifacts(args)) => {
-            cleanup::cleanup_artifacts(ArtifactCleanupOptions {
+            let options = ArtifactCleanupOptions {
                 path: args.path,
-                scope: args
-                    .all_worktrees
-                    .then_some(ArtifactCleanupScope::RepositoryWorktrees)
-                    .unwrap_or_default(),
+                scope: if args.all_worktrees {
+                    ArtifactCleanupScope::RepositoryWorktrees
+                } else {
+                    ArtifactCleanupScope::ExactCheckout
+                },
                 apply: args.apply,
                 self_artifacts: args.self_artifacts,
                 temp_roots: args.temp_root,
@@ -214,16 +215,33 @@ pub fn run(args: CleanupArgs, placement: homeboy::cli_surface::Placement) -> Cmd
                 min_age_days: args.min_age_days,
                 include_active_worktrees: args.include_active_worktrees,
                 max_scan_duration: None,
-            })
-            .and_then(|output| {
-                serde_json::to_value(output).map_err(|err| {
-                    homeboy::core::Error::internal_json(
-                        err.to_string(),
-                        Some("serialize cleanup artifacts output".to_string()),
-                    )
-                })
-            })
-            .map(|output| (output, 0))
+            };
+            let output = cleanup::cleanup_artifacts(options.clone())?;
+            let mut result = serde_json::to_value(&output).map_err(|err| {
+                homeboy::core::Error::internal_json(
+                    err.to_string(),
+                    Some("serialize cleanup artifacts output".to_string()),
+                )
+            })?;
+            if !args.verbose {
+                let replay =
+                    cleanup::artifact_cleanup_apply_command(&options, options.cursor.as_ref());
+                let export = format!("{replay} --verbose");
+                let mut budget = OutputBudget::COLLECTION;
+                if let Some(limit) = args.limit {
+                    budget.max_items = budget.max_items.min(limit);
+                }
+                // Compute reason counts before projecting the skipped sample.
+                result["skipped_counts_by_reason"] =
+                    serde_json::json!(skipped_counts_by_reason(&result));
+                bound_category_evidence(
+                    &mut result,
+                    budget,
+                    output.next_command.as_deref().unwrap_or(&replay),
+                    &export,
+                );
+            }
+            Ok((result, 0))
         }
         Some(CleanupCommand::RetainedStorage(args)) => bounded_retained_storage_report(args),
         Some(CleanupCommand::AutomaticRetention) => automatic_retention(),
@@ -453,14 +471,13 @@ fn apply_cleanup(
         return Ok((result.output, result.exit_code));
     }
 
-    // Captured before `args` is consumed. The subcommand is `None` on this
-    // path, so these are the only fields the degraded sweep needs.
+    // The degraded sweep only needs the overrides for store-free cleanup.
     let overrides = CleanupPolicyOverrides {
         runtime_tmp_managed_days: args.runtime_tmp_managed_older_than_days,
         limit: args.limit,
         ..CleanupPolicyOverrides::default()
     };
-    let error = match submit_cleanup(args) {
+    let error = match submit_cleanup(&args) {
         Ok(output) => return Ok((output, 0)),
         Err(error) => error,
     };
@@ -480,8 +497,19 @@ fn apply_cleanup(
             error.message
         ),
     );
-    serde_json::to_value(outcome)
-        .map(|output| (output, 0))
+    serde_json::to_value(&outcome)
+        .map(|mut output| {
+            if !args.full {
+                let budget = cleanup_detail_budget(args.limit);
+                let export = cleanup_replay_command(&args, true, true);
+                if let Some(categories) = output["categories"].as_array_mut() {
+                    for category in categories {
+                        bound_category_evidence(category, budget, outcome.next_command, &export);
+                    }
+                }
+            }
+            (output, 0)
+        })
         .map_err(|error| {
             homeboy::core::Error::internal_json(
                 error.to_string(),
@@ -490,8 +518,8 @@ fn apply_cleanup(
         })
 }
 
-fn submit_cleanup(args: CleanupArgs) -> homeboy::core::Result<Value> {
-    let request = serde_json::to_value(&args).map_err(|error| {
+fn submit_cleanup(args: &CleanupArgs) -> homeboy::core::Result<Value> {
+    let request = serde_json::to_value(args).map_err(|error| {
         homeboy::core::Error::internal_json(
             error.to_string(),
             Some("serialize cleanup job request".to_string()),
@@ -573,6 +601,9 @@ struct RetainedStorageAggregate {
     key: String,
     count: usize,
     size_bytes: u64,
+    /// Number of distinct keys folded into this synthetic `other` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omitted_keys: Option<usize>,
 }
 
 /// Liveness assigned to storage a cleanup category would reclaim on its next
@@ -632,6 +663,8 @@ struct RetainedStorageFilesystem {
     /// while the volume holding it was full.
     config_root: RetainedStorageFilesystemUsage,
     top_level: Vec<RetainedStorageFilesystemEntry>,
+    #[serde(skip_serializing_if = "is_zero")]
+    omitted_top_level_count: usize,
     reconciliation: RetainedStorageReconciliation,
     accounting_notes: Vec<&'static str>,
 }
@@ -653,6 +686,8 @@ struct RetainedStorageFilesystemEntry {
     physical_bytes: u64,
     cleanup_or_status_command: &'static str,
     largest_examples: Vec<RetainedStorageFilesystemUsage>,
+    #[serde(skip_serializing_if = "is_zero")]
+    omitted_example_count: usize,
     inventory_completeness: &'static str,
 }
 
@@ -721,6 +756,15 @@ fn retained_storage_child_report(args: CleanupRetainedStorageArgs) -> CmdResult<
     if let Some(cursor) = &args.cursor {
         process.args(["--cursor", cursor]);
     }
+    if args.verbose {
+        process.arg("--verbose");
+    }
+    let evidence = spool_full_cleanup_evidence(&mut process, args.verbose).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("spool retained-storage evidence".to_string()),
+        )
+    })?;
     homeboy::core::engine::command::isolate_process_tree(&mut process);
     let mut last_progress = None;
     let mut child = process.spawn().map_err(|error| {
@@ -779,12 +823,13 @@ fn retained_storage_child_report(args: CleanupRetainedStorageArgs) -> CmdResult<
             1,
         ));
     }
-    let envelope: Value = serde_json::from_slice(&supervised.output.stdout).map_err(|error| {
-        homeboy::core::Error::internal_json(
-            error.to_string(),
-            Some("parse retained-storage child evidence".to_string()),
-        )
-    })?;
+    let envelope =
+        parse_cleanup_child_evidence(evidence, &supervised.output.stdout).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("parse retained-storage child evidence".to_string()),
+            )
+        })?;
     let output = envelope.get("data").cloned().ok_or_else(|| {
         homeboy::core::Error::internal_unexpected(
             "retained-storage child returned no structured data",
@@ -796,15 +841,6 @@ fn retained_storage_child_report(args: CleanupRetainedStorageArgs) -> CmdResult<
 fn retained_storage_report(
     args: CleanupRetainedStorageArgs,
 ) -> homeboy::core::Result<RetainedStorageReport> {
-    if args.limit == 0 {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "limit",
-            "--limit must be positive",
-            None,
-            None,
-        ));
-    }
-
     let mut records = Vec::new();
     // The report reads the same resolved policy the delete paths use, so an
     // operator cannot be shown a window cleanup would not actually apply.
@@ -947,7 +983,7 @@ fn retained_storage_report(
     let filesystem = retained_storage_filesystem_inventory()?;
     let mut report = build_retained_storage_report(
         records,
-        args.limit,
+        if args.verbose { usize::MAX } else { args.limit },
         args.cursor.as_deref(),
         sqlite,
         filesystem,
@@ -1096,7 +1132,12 @@ fn retained_storage_filesystem_inventory_for(
             &mut budget,
         )?);
     }
-    top_level.sort_by_key(|entry| std::cmp::Reverse(entry.physical_bytes));
+    top_level.sort_unstable_by(|left, right| {
+        right
+            .physical_bytes
+            .cmp(&left.physical_bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
 
     let apparent_total = top_level
         .iter()
@@ -1130,6 +1171,7 @@ fn retained_storage_filesystem_inventory_for(
             physical_bytes: config_root_usage.physical_bytes,
         },
         top_level,
+        omitted_top_level_count: 0,
         reconciliation: RetainedStorageReconciliation {
             top_level_apparent_bytes: apparent_total,
             top_level_physical_bytes: physical_total,
@@ -1145,7 +1187,7 @@ fn retained_storage_filesystem_inventory_for(
             "The root directory's own metadata and filesystem allocation granularity can leave a small reconciliation difference.",
             "Symlinks are measured as links and are not followed.",
             "`reconciliation` balances the data root only. `managed/external` entries — including the config root — are measured and listed but are deliberately excluded from those totals, because they are not part of the data-root walk they would be reconciled against.",
-            "The config root is probed as a separate volume. It is omitted from `top_level` only when it contains, or is contained by, the data root; roots that merely share a filesystem occupy disjoint inodes and are not double-counted.",
+            "The config root is eligible for `top_level` when neither root contains the other; roots that merely share a filesystem occupy disjoint inodes and are not double-counted.",
         ],
     })
 }
@@ -1234,6 +1276,7 @@ fn filesystem_entry_with_category(
         physical_bytes: usage.physical_bytes,
         cleanup_or_status_command: command,
         largest_examples: largest_children_with_budget(&path, budget)?,
+        omitted_example_count: 0,
         inventory_completeness: if usage.truncated {
             "partial"
         } else {
@@ -1325,8 +1368,12 @@ fn largest_children_with_budget(
             physical_bytes: usage.physical_bytes,
         });
     }
-    children.sort_by_key(|entry| std::cmp::Reverse(entry.physical_bytes));
-    children.truncate(10);
+    children.sort_unstable_by(|left, right| {
+        right
+            .physical_bytes
+            .cmp(&left.physical_bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
     Ok(children)
 }
 
@@ -1486,8 +1533,30 @@ fn build_retained_storage_report(
     limit: usize,
     cursor: Option<&str>,
     sqlite: RetainedStorageSqlite,
-    filesystem: RetainedStorageFilesystem,
+    mut filesystem: RetainedStorageFilesystem,
 ) -> RetainedStorageReport {
+    filesystem.omitted_top_level_count = filesystem.top_level.len().saturating_sub(limit);
+    filesystem.top_level.truncate(limit);
+    // Share the child-example budget across stores so nested detail grows
+    // linearly with the requested limit, not with its square.
+    let mut stores_with_examples = filesystem
+        .top_level
+        .iter()
+        .filter(|entry| !entry.largest_examples.is_empty())
+        .count();
+    let mut remaining_examples = limit;
+    for entry in &mut filesystem.top_level {
+        if entry.largest_examples.is_empty() {
+            continue;
+        }
+        let shown = remaining_examples
+            .div_ceil(stores_with_examples)
+            .min(entry.largest_examples.len());
+        entry.omitted_example_count = entry.largest_examples.len() - shown;
+        entry.largest_examples.truncate(shown);
+        remaining_examples -= shown;
+        stores_with_examples -= 1;
+    }
     records.sort_by(|left, right| {
         right
             .size_bytes
@@ -1522,14 +1591,14 @@ fn build_retained_storage_report(
         retained_bytes,
         reclaimable_count,
         reclaimable_bytes,
-        by_category: aggregate_retained(&records, |record| record.category.clone()),
-        by_reason: aggregate_retained(&records, |record| record.reason.clone()),
-        by_owner: aggregate_retained(&records, |record| match &record.run_id {
+        by_category: aggregate_retained(&records, limit, |record| record.category.clone()),
+        by_reason: aggregate_retained(&records, limit, |record| record.reason.clone()),
+        by_owner: aggregate_retained(&records, limit, |record| match &record.run_id {
             Some(run_id) => format!("{} (run {run_id})", record.owner),
             None => record.owner.clone(),
         }),
-        by_liveness: aggregate_retained(&records, |record| record.liveness.clone()),
-        by_age: aggregate_retained(&records, |record| record.age.clone()),
+        by_liveness: aggregate_retained(&records, limit, |record| record.liveness.clone()),
+        by_age: aggregate_retained(&records, limit, |record| record.age.clone()),
         largest_examples: examples,
         continuation,
         totals_complete: true,
@@ -1552,6 +1621,7 @@ fn build_retained_storage_report(
 
 fn aggregate_retained(
     records: &[RetainedStorageRecord],
+    limit: usize,
     key: impl Fn(&RetainedStorageRecord) -> String,
 ) -> Vec<RetainedStorageAggregate> {
     let mut totals: BTreeMap<String, (usize, u64)> = BTreeMap::new();
@@ -1560,14 +1630,36 @@ fn aggregate_retained(
         entry.0 += 1;
         entry.1 += record.size_bytes;
     }
-    totals
+    let mut rows: Vec<_> = totals
         .into_iter()
         .map(|(key, (count, size_bytes))| RetainedStorageAggregate {
             key,
             count,
             size_bytes,
+            omitted_keys: None,
         })
-        .collect()
+        .collect();
+    rows.sort_unstable_by(|left, right| {
+        right
+            .size_bytes
+            .cmp(&left.size_bytes)
+            .then_with(|| right.count.cmp(&left.count))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    if rows.len() > limit {
+        let omitted = rows.split_off(limit - 1);
+        rows.push(RetainedStorageAggregate {
+            key: "other".to_string(),
+            omitted_keys: Some(omitted.len()),
+            count: omitted.iter().map(|row| row.count).sum(),
+            size_bytes: omitted.iter().map(|row| row.size_bytes).sum(),
+        });
+    }
+    rows
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 fn age_bucket(age_seconds: u64) -> String {
@@ -3004,11 +3096,14 @@ fn run_cleanup_category(
             );
         }
     }
-    if !args.full {
-        let export = cleanup_replay_command(&args, true, false);
+    // An isolated child has already projected its detail before returning.
+    if !args.full && cleanup_category_runs_in_process(metadata) {
+        let export = cleanup_replay_command(args, true, true);
+        let budget = cleanup_detail_budget(args.limit);
         for category in &mut categories[first_category..] {
             bound_category_evidence(
                 &mut category.output,
+                budget,
                 &category.continuation_command,
                 &export,
             );
@@ -3317,6 +3412,15 @@ fn run_cleanup_category_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     append_cleanup_child_args(&mut process, args);
+    let evidence = spool_full_cleanup_evidence(&mut process, args.full).map_err(|error| {
+        Box::new(cleanup_category_process_failure(
+            metadata,
+            args.apply,
+            timeout,
+            None,
+            format!("spool cleanup category evidence: {error}"),
+        ))
+    })?;
     homeboy::core::engine::command::isolate_process_tree(&mut process);
     let mut last_progress = None;
     let mut child = match process.spawn() {
@@ -3391,8 +3495,7 @@ fn run_cleanup_category_process(
             ),
         )));
     }
-    let stdout = String::from_utf8_lossy(&supervised.output.stdout);
-    let envelope: Value = match serde_json::from_str(&stdout) {
+    let envelope = match parse_cleanup_child_evidence(evidence, &supervised.output.stdout) {
         Ok(value) => value,
         Err(error) => {
             return Err(Box::new(cleanup_category_process_failure(
@@ -3441,6 +3544,32 @@ fn run_cleanup_category_process(
         categories.push(category);
     }
     Ok(categories)
+}
+
+// Explicit evidence exports can exceed the supervisor's bounded pipe capture.
+// Keep deadline supervision and stderr progress, but spool stdout privately.
+fn spool_full_cleanup_evidence(
+    process: &mut Command,
+    full: bool,
+) -> std::io::Result<Option<std::fs::File>> {
+    if !full {
+        return Ok(None);
+    }
+    let evidence = tempfile::tempfile()?;
+    process.stdout(Stdio::from(evidence.try_clone()?));
+    Ok(Some(evidence))
+}
+
+fn parse_cleanup_child_evidence(
+    evidence: Option<std::fs::File>,
+    stdout: &[u8],
+) -> serde_json::Result<Value> {
+    if let Some(mut evidence) = evidence {
+        std::io::Seek::rewind(&mut evidence).map_err(serde_json::Error::io)?;
+        serde_json::from_reader(std::io::BufReader::new(evidence))
+    } else {
+        serde_json::from_slice(stdout)
+    }
 }
 
 fn append_cleanup_child_args(process: &mut Command, args: &CleanupArgs) {
@@ -4387,13 +4516,26 @@ fn category_outcome(apply: bool, metrics: &CleanupCategoryMetrics) -> String {
     }
 }
 
+fn cleanup_detail_budget(limit: Option<i64>) -> OutputBudget {
+    let mut budget = OutputBudget::COLLECTION;
+    if let Some(limit) = limit.and_then(|limit| usize::try_from(limit).ok()) {
+        budget.max_items = budget.max_items.min(limit);
+    }
+    budget
+}
+
 /// Without `--full`, every evidence list in a category's output is a bounded
 /// collection, so the default output stays finite however many runs or
 /// artifacts a pass touched. Each bounded list gains a `<field>_truncation`
 /// disclosure; counts and totals are already in the category metrics. An
 /// unbounded list made the hourly `homeboy.retention` workflow step exceed its
 /// output limit and fail every pass.
-fn bound_category_evidence(value: &mut Value, continue_command: &str, export_command: &str) {
+fn bound_category_evidence(
+    value: &mut Value,
+    budget: OutputBudget,
+    continue_command: &str,
+    export_command: &str,
+) {
     let Value::Object(object) = value else {
         return;
     };
@@ -4403,9 +4545,17 @@ fn bound_category_evidence(value: &mut Value, continue_command: &str, export_com
             Value::Array(items) => {
                 let total = items.len();
                 let (returned, truncation) = homeboy::core::output::budget_json_values(
-                    std::mem::take(items),
+                    std::mem::take(items).into_iter().map(|mut item| {
+                        bound_category_evidence(
+                            &mut item,
+                            budget,
+                            continue_command,
+                            export_command,
+                        );
+                        item
+                    }),
                     total,
-                    OutputBudget::COLLECTION,
+                    budget,
                     continue_command,
                     export_command,
                 );
@@ -4414,7 +4564,9 @@ fn bound_category_evidence(value: &mut Value, continue_command: &str, export_com
                     disclosures.push((format!("{key}_truncation"), truncation));
                 }
             }
-            Value::Object(_) => bound_category_evidence(child, continue_command, export_command),
+            Value::Object(_) => {
+                bound_category_evidence(child, budget, continue_command, export_command)
+            }
             _ => {}
         }
     }
@@ -5025,7 +5177,7 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         lines.extend(candidate_lines);
         if candidate_count > candidate_display_limit as u64 {
             lines.push(format!(
-                "Full candidate list is available in JSON output; use --sort size --limit {candidate_display_limit} for a bounded largest-first review."
+                "Use --verbose for the full candidate list from the inspected page, or --sort size --limit {candidate_display_limit} for a bounded largest-first review."
             ));
         }
     }
@@ -5103,6 +5255,11 @@ fn rehydrate_command_lines(payload: &Value) -> Vec<String> {
 }
 
 fn skipped_counts_by_reason(payload: &Value) -> Vec<(String, u64)> {
+    if let Some(counts) = payload.get("skipped_counts_by_reason") {
+        if let Ok(counts) = serde_json::from_value(counts.clone()) {
+            return counts;
+        }
+    }
     let mut counts = std::collections::BTreeMap::new();
     if let Some(skipped) = payload.get("skipped").and_then(Value::as_array) {
         for row in skipped {
@@ -5659,18 +5816,15 @@ mod tests {
             .any(|row| row.key == "shared_cargo_targets"
                 && row.count == 2
                 && row.size_bytes == 70));
-        assert!(report
-            .by_owner
-            .iter()
-            .any(|row| row.key == "runtime-a (run run-1)"));
+        assert_eq!(report.by_owner[0].key, "cook-1");
+        assert_eq!(report.by_owner[1].count, 2);
+        assert_eq!(report.by_owner[1].size_bytes, 50);
         assert!(report
             .by_liveness
             .iter()
             .any(|row| row.key == "active" && row.size_bytes == 50));
-        assert!(report
-            .by_age
-            .iter()
-            .any(|row| row.key == "under_1d" && row.size_bytes == 30));
+        assert_eq!(report.by_age[1].key, "other");
+        assert_eq!(report.by_age[1].size_bytes, 50);
         let continuation = build_retained_storage_report(
             report.largest_examples.clone(),
             1,
@@ -5689,6 +5843,119 @@ mod tests {
         // an artifact-root producer contributes.
         assert_eq!(report.reclaimable_count, 0);
         assert_eq!(report.reclaimable_bytes, 0);
+    }
+
+    #[test]
+    fn retained_storage_bounds_high_cardinality_json_without_losing_totals() {
+        const TOTAL: usize = 5_030;
+        let records: Vec<_> = (0..TOTAL)
+            .map(|index| {
+                let mut record = retained_record("scratch", "active", index as u64 + 1);
+                record.reference = format!("resource-{index}");
+                record.run_id = Some(format!("run-{index}"));
+                record.reason = format!("reason-{index}");
+                record
+            })
+            .collect();
+        let bytes = records.iter().map(|row| row.size_bytes).sum::<u64>();
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..12 {
+            let path = root.path().join(format!("store-{index}"));
+            std::fs::create_dir(&path).unwrap();
+            for child in 0..12 {
+                std::fs::write(path.join(format!("file-{child}")), b"bytes").unwrap();
+            }
+        }
+        let filesystem = || {
+            retained_storage_filesystem_inventory_for(
+                root.path().to_path_buf(),
+                root.path().to_path_buf(),
+                root.path().join("artifacts"),
+                root.path().join("cargo-targets"),
+            )
+            .unwrap()
+        };
+        let report =
+            build_retained_storage_report(records.clone(), 10, None, test_sqlite(), filesystem());
+        let json = serde_json::to_vec_pretty(&report).unwrap();
+        assert!(json.len() < 32 * 1024);
+        let parsed: Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed["inspected_count"], TOTAL);
+        assert_eq!(parsed["retained_bytes"], bytes);
+        for rows in [
+            &report.by_owner,
+            &report.by_reason,
+            &report.by_category,
+            &report.by_liveness,
+            &report.by_age,
+        ] {
+            assert!(rows.len() <= 10);
+            assert_eq!(rows.iter().map(|row| row.count).sum::<usize>(), TOTAL);
+            assert_eq!(rows.iter().map(|row| row.size_bytes).sum::<u64>(), bytes);
+        }
+        assert_eq!(report.by_owner[0].size_bytes, TOTAL as u64);
+        let other = report.by_owner.last().unwrap();
+        assert_eq!(other.key, "other");
+        assert_eq!(other.omitted_keys, Some(TOTAL - 9));
+        assert_eq!(report.largest_examples.len(), 10);
+        assert_eq!(report.filesystem.top_level.len(), 10);
+        assert_eq!(report.filesystem.omitted_top_level_count, 2);
+        assert!(report
+            .filesystem
+            .top_level
+            .iter()
+            .all(|entry| entry.largest_examples.len() == 1 && entry.omitted_example_count == 11));
+        let next = build_retained_storage_report(
+            records.clone(),
+            1,
+            Some(&report.largest_examples[9].reference),
+            test_sqlite(),
+            filesystem(),
+        );
+        assert_eq!(next.largest_examples[0].size_bytes, TOTAL as u64 - 10);
+        assert_eq!(next.by_owner[0].omitted_keys, Some(TOTAL));
+        let full =
+            build_retained_storage_report(records, usize::MAX, None, test_sqlite(), filesystem());
+        assert_eq!(full.largest_examples.len(), TOTAL);
+        assert_eq!(full.by_owner.len(), TOTAL);
+        assert_eq!(full.filesystem.top_level.len(), 12);
+        assert_eq!(
+            full.filesystem.reconciliation.top_level_apparent_bytes,
+            report.filesystem.reconciliation.top_level_apparent_bytes
+        );
+    }
+
+    #[test]
+    fn explicit_cleanup_evidence_is_not_limited_by_child_pipe_capture() {
+        let payload = serde_json::json!({"data": "x".repeat(CLEANUP_CATEGORY_OUTPUT_LIMIT + 1)});
+        let mut process = Command::new("unused");
+        let spool = spool_full_cleanup_evidence(&mut process, true)
+            .unwrap()
+            .unwrap();
+        serde_json::to_writer(&spool, &payload).unwrap();
+        assert_eq!(
+            parse_cleanup_child_evidence(Some(spool), b"").unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn cleanup_detail_budget_limits_nested_rows() {
+        let mut output =
+            serde_json::json!({"owners": [{"resources": [1,2,3]}, {"resources": [4,5,6]}, {}]});
+        bound_category_evidence(
+            &mut output,
+            cleanup_detail_budget(Some(2)),
+            "continue",
+            "export",
+        );
+        assert_eq!(output["owners"].as_array().unwrap().len(), 2);
+        assert_eq!(output["owners_truncation"]["omitted_items"], 1);
+        assert_eq!(output["owners"][0]["resources"], serde_json::json!([1, 2]));
+        assert_eq!(
+            output["owners"][0]["resources_truncation"]["total_items"],
+            3
+        );
     }
 
     fn retained_record(category: &str, liveness: &str, size_bytes: u64) -> RetainedStorageRecord {
@@ -5731,6 +5998,7 @@ mod tests {
                 physical_bytes: 0,
             },
             top_level: Vec::new(),
+            omitted_top_level_count: 0,
             reconciliation: RetainedStorageReconciliation {
                 top_level_apparent_bytes: 0,
                 top_level_physical_bytes: 0,
@@ -7660,7 +7928,7 @@ mod tests {
 
         let truncated = summary_for(&[1024; 12]);
         assert!(truncated.contains("Rebuildable artifacts (showing 10 of 12):"));
-        assert!(truncated.contains("Full candidate list is available in JSON output"));
+        assert!(truncated.contains("Use --verbose for the full candidate list"));
         assert!(truncated.contains("--sort size --limit 10"));
         assert!(!truncated.contains("/tmp/repo/target-10"));
     }
