@@ -3518,10 +3518,10 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
             runtime.metadata["executor"]["model"],
             "openai/gpt-5.6-terra"
         );
-        assert_eq!(
-            record.metadata["automatic_artifact_retention"]["command"],
-            "cleanup.artifacts"
-        );
+        assert!(record
+            .metadata
+            .get("automatic_artifact_retention")
+            .is_none());
     });
 }
 

@@ -1444,46 +1444,10 @@ pub(crate) fn record_aggregate_in_store(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let mut retained_roots = Vec::new();
-    let roots: Vec<PathBuf> = plan
-        .tasks
-        .iter()
-        .filter_map(|task| task.workspace.root.as_ref())
-        .filter_map(|root| {
-            let path = PathBuf::from(root);
-            if path.is_dir() {
-                Some(path)
-            } else {
-                retained_roots.push(serde_json::json!({
-                    "path": root,
-                    "reason": "workspace root is inaccessible from this controller",
-                }));
-                None
-            }
-        })
-        .collect();
-    record.ensure_metadata_object();
-    if !roots.is_empty() {
-        record.metadata["automatic_artifact_retention"] =
-            match homeboy_core::cleanup::try_run_automatic_artifact_retention_in_root(
-                &lifecycle_store.data_root(),
-                roots,
-                homeboy_core::cleanup::automatic_retention_deadline(&homeboy_core::defaults::load_config().retention),
-            ) {
-                Ok(Some(output)) => serde_json::to_value(output).unwrap_or_else(|error| {
-                    serde_json::json!({ "status": "retained", "reason": error.to_string() })
-                }),
-                Ok(None) => serde_json::json!({
-                    "status": "busy",
-                    "reason": "automatic artifact retention is already running",
-                }),
-                Err(error) => serde_json::json!({ "status": "retained", "reason": error.message }),
-            };
-    }
-    if !retained_roots.is_empty() {
-        record.metadata["automatic_artifact_retention_inaccessible_roots"] =
-            serde_json::Value::Array(retained_roots);
-    }
+    // Reclaiming idle repository artifacts belongs to the daemon's hourly
+    // `homeboy.retention` pass over registered roots. Running it here scanned
+    // every worktree of the repository on each attempt, inside the publish
+    // span, and stored that unrelated inventory on the run.
     crate::controller_scratch::register_outcome_resources_at(
         &lifecycle_store.data_root(),
         &record.run_id,

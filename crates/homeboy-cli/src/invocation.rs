@@ -15,7 +15,7 @@ pub(crate) fn identify(matches: &ArgMatches) {
         let mut cursor = matches;
         let mut path = Vec::new();
         loop {
-            for key in ["run_id", "cook_id", "run", "cook"] {
+            for key in ["run_id", "cook_id", "run", "cook", "id"] {
                 if let Ok(Some(id)) = cursor.try_get_one::<String>(key) {
                     row.run_id = opaque(id);
                 }
@@ -27,6 +27,27 @@ pub(crate) fn identify(matches: &ArgMatches) {
             cursor = child;
         }
         row.command_path = path.join(" ").chars().take(256).collect();
+        row.read_only = declared_read_only(&path);
+    });
+}
+
+/// A path the command registry explicitly declares read-only. Silence is not
+/// a declaration, so an undeclared path still counts as a possible mutation.
+fn declared_read_only(path: &[&str]) -> bool {
+    let Some((command, subcommand)) = path.split_first() else {
+        return false;
+    };
+    crate::command_contract::registered_command(command)
+        .and_then(|spec| spec.path_safety(subcommand))
+        .is_some_and(|entry| !entry.safety.mutates)
+}
+
+/// Record that the parsed command only reads Cook or workflow state.
+pub(crate) fn mark_read_only(read_only: bool) {
+    CURRENT.with_borrow_mut(|current| {
+        if let Some(row) = current {
+            row.read_only |= read_only;
+        }
     });
 }
 
