@@ -1,5 +1,8 @@
 # CI-deferred Cook verification (first slice)
 
+For local gate overlap warnings and queue-versus-execution timing, see
+[Cook gate overlap and timing](cook-gate-overlap.md).
+
 Use `homeboy agent-task cook ... --verify 'cargo fmt --all --check' --verify-ci`.
 The explicit local gates still have to pass; no full-suite gate needs to be
 supplied. CI mode requires PR publication (not `--no-finalize`).

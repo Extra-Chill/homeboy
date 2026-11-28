@@ -635,6 +635,14 @@ pub(super) fn run_cook_spine(
         }
     }
     record_active_cook_worktree_warning(lifecycle_store, &options)?;
+    if let Some(warning) = options.gates.lint_overlap_warning() {
+        lifecycle_store.record_metadata_value(
+            &options.identity.initial_run_id,
+            "cook_gate_overlap_warning",
+            serde_json::json!({"policy": "warn", "message": warning}),
+        )?;
+        eprintln!("Cook gate admission warning: {warning}");
+    }
     // Admission through the first dispatch observes each runner identity once.
     let mut admission_identities = crate::agent_task_gate::placement::runner_identity_scope();
     if options.gates.has_npm_run_declaration() {

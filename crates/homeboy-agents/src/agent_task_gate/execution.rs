@@ -207,7 +207,7 @@ pub(super) fn run_gate_argv_with_supervision(
     let run = || {
         homeboy_engine_primitives::phase_timing::PhaseTimer::current()
             .time_with_outcome::<_, homeboy_core::Error>(
-                &gate_phase_name(None, command, index),
+                &format!("roundtrip.{}", gate_phase_name(None, command, index)),
                 || {
                     run_gate_argv(
                         cwd,
@@ -437,11 +437,16 @@ pub(super) fn run_gate_argv(
     // Local placement queues through the host-wide gate admission the Lab
     // daemon on this host also charges (#18555). Runner-admitted Lab gates
     // call `run_gate_argv_local` directly and are never queued twice.
-    let (permit, wait) = match admission::acquire(cwd, index, || {
-        execution
-            .supervision
-            .is_some_and(|policy| (policy.is_cancelled)())
-    })? {
+    let (permit, wait) = match homeboy_engine_primitives::phase_timing::PhaseTimer::current().time(
+        "stage.local_gate_admission",
+        || {
+            admission::acquire(cwd, index, || {
+                execution
+                    .supervision
+                    .is_some_and(|policy| (policy.is_cancelled)())
+            })
+        },
+    )? {
         admission::Admission::Admitted(permit, wait) => (permit, wait),
         admission::Admission::Cancelled => {
             let error = Error::new(
@@ -473,18 +478,32 @@ pub(super) fn run_gate_argv(
             .and_then(|deadline| deadline.checked_add(wait)),
         ..execution
     };
-    let mut report = run_gate_argv_local(
-        cwd,
-        index,
-        command_vec,
-        command,
-        visibility,
-        reveal_policy,
-        execution,
-        gate_environment,
-        package_artifacts,
-        declared_plan,
-    )?;
+    let mut report = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time_with_outcome(
+            &gate_phase_name(None, command, index),
+            || {
+                run_gate_argv_local(
+                    cwd,
+                    index,
+                    command_vec,
+                    command,
+                    visibility,
+                    reveal_policy,
+                    execution,
+                    gate_environment,
+                    package_artifacts,
+                    declared_plan,
+                )
+            },
+            |report| {
+                matches!(
+                    report.status,
+                    AgentTaskGateStatus::Failed
+                        | AgentTaskGateStatus::Unavailable
+                        | AgentTaskGateStatus::Deferred
+                )
+            },
+        )?;
     if !wait.is_zero() {
         report.environment.admission_wait_ms = Some(wait.as_millis());
     }

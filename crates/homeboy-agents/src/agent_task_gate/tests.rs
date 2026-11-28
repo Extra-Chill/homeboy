@@ -11,4 +11,7 @@ mod failure_and_invocation;
 #[path = "tests/preflight_and_isolation.rs"]
 mod preflight_and_isolation;
 
+#[path = "tests/lint_overlap.rs"]
+mod lint_overlap;
+
 use failure_and_invocation::*;
