@@ -14,6 +14,9 @@ pub struct Invocation {
     pub duration_ms: u64,
     pub caller_session: Option<String>,
     pub run_id: Option<String>,
+    /// The command only read durable state, so it never steered a run.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 impl ObservationStore {

@@ -32,6 +32,12 @@ pub use crate::core::resource_policy_context::{
     ResourcePolicyRunnerSelection,
 };
 
+/// Whether the command is a bounded read of Cook or workflow state, such as
+/// `agent-task status|diagnose|review` or `runs logs|evidence` for a Cook.
+pub(crate) fn is_cook_state_read(command: &Commands) -> bool {
+    is_bounded_agent_task_metadata_read(command)
+}
+
 /// Translate the static parsed command tree into the parser-independent
 /// preflight contract. This is intentionally an adapter: command-family
 /// predicates remain above core, while capability-provided parsers can produce
