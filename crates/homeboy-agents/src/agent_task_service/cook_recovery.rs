@@ -709,8 +709,6 @@ pub struct CookPublishRequest {
     /// Complete review form for a candidate whose provider outcome recorded
     /// none (or declared the task incomplete).
     pub review_form: Option<super::AgentTaskSuppliedReviewForm>,
-    /// Fallback component identity for a durable record that recorded none.
-    pub component: Option<String>,
     /// Explicit reviewer overrides applied to the hydrated dossier.
     pub review_overrides: Vec<crate::agent_task_review_dossier::AgentTaskReviewOverride>,
 }
@@ -720,7 +718,6 @@ impl CookPublishRequest {
         !self.partial
             && self.evidence.is_none()
             && self.review_form.is_none()
-            && self.component.is_none()
             && self.review_overrides.is_empty()
     }
 }
@@ -899,7 +896,6 @@ pub trait CookRecoveryPerformer {
         let value = super::recover_cook_pr_with_review_form(
             run_id,
             request.review_form.clone(),
-            request.component.as_deref(),
             request.review_overrides.clone(),
             preflight,
         )?;

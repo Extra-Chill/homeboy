@@ -1264,12 +1264,7 @@ pub(super) fn dependency_tool_preflight_error(options: &CookRequest) -> Result<O
     if !gate_workspace.is_dir() {
         return Ok(None);
     }
-    let component_id = options
-        .gates
-        .gate_environment
-        .admitted_component_id
-        .clone()
-        .or_else(|| cook_repository_identity_component_id(&options.identity.initial_plan));
+    let component_id = admitted_registration_id(options);
     let missing =
         homeboy_core::deps::missing_dependency_tools(&gate_workspace, component_id.as_deref());
     if missing.is_empty() {
@@ -1307,6 +1302,16 @@ pub(super) fn dependency_tool_preflight_error(options: &CookRequest) -> Result<O
     error.details["missing_dependency_tools"] = serde_json::to_value(&missing)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     Ok(Some(error))
+}
+
+/// The component recorded at admission, with the gate environment taking precedence.
+pub(super) fn admitted_registration_id(options: &CookRequest) -> Option<String> {
+    options
+        .gates
+        .gate_environment
+        .component_id()
+        .map(str::to_owned)
+        .or_else(|| cook_repository_identity_component_id(&options.identity.initial_plan))
 }
 
 pub fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<String> {
