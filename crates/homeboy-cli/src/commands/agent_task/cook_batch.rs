@@ -708,8 +708,9 @@ fn child_phase(child: &Value) -> &str {
         }
         "running" => "running",
         "candidate_recoverable" => "candidate_recoverable",
+        "succeeded" if child["publication"] == "succeeded_partial" => "partial",
         "succeeded" => "succeeded",
-        "partial_failure" | "partial" => "partial",
+        "succeeded_partial" | "partial_failure" | "partial" => "partial",
         _ => "failed",
     }
 }
@@ -1293,6 +1294,12 @@ mod tests {
 
     #[test]
     fn batch_child_phase_counts_cover_execution_and_recovery() {
+        assert_eq!(
+            child_phase(&json!({
+                "state": "succeeded", "publication": "succeeded_partial"
+            })),
+            "partial"
+        );
         for (state, execution_phase, expected) in [
             ("queued", "admission", "queued"),
             ("running", "provider", "running"),

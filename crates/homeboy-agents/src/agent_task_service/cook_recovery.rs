@@ -88,6 +88,10 @@ impl CookRecoveryStep {
                 format!("recovery made no progress: {blocker}; cancel this Cook"),
                 command(&["cancel", run_id]),
             ),
+            Self::None { reason } if reason.contains("--publish-partial") => (
+                reason.clone(),
+                command(&["recover", run_id, "--publish-partial"]),
+            ),
             Self::None { reason } => (reason.clone(), command(&["status", run_id])),
             Self::Adopt { candidate_ref } => (
                 "adopt the preserved candidate".to_string(),
@@ -2395,6 +2399,10 @@ mod tests {
             inputs.run_id = "cook-attempt-1";
             inputs.agent_incomplete_reason = Some(reason);
         });
+        assert_eq!(
+            decided.next_action("homeboy", "cook-attempt-1").command,
+            incomplete_review_recovery_command("cook-attempt-1")
+        );
         let (report, exit) = finish_without_step(CookRecoveryReport {
             schema: COOK_RECOVERY_SCHEMA,
             cook_id: "cook".into(),
