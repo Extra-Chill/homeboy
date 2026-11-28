@@ -2287,7 +2287,11 @@ pub(crate) fn replacement_gate_execution_owner_live(metadata: &Value) -> Option<
         fence["owner_pid"]
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok())
-            .is_some_and(homeboy_core::process::pid_is_running),
+            .is_some_and(|pid| {
+                agent_task_lifecycle::run_owner::run_owner_liveness(
+                    &agent_task_lifecycle::run_owner::RunOwner::process(pid),
+                ) == agent_task_lifecycle::run_owner::OwnerLiveness::Live
+            }),
     )
 }
 
@@ -2437,7 +2441,11 @@ fn dead_owner_admitted_gate_jobs(metadata: &Value) -> Option<Vec<AdmittedGateJob
     let owner_live = owner_pid
         .as_u64()
         .and_then(|pid| u32::try_from(pid).ok())
-        .is_some_and(homeboy_core::process::pid_is_running);
+        .is_some_and(|pid| {
+            agent_task_lifecycle::run_owner::run_owner_liveness(
+                &agent_task_lifecycle::run_owner::RunOwner::process(pid),
+            ) == agent_task_lifecycle::run_owner::OwnerLiveness::Live
+        });
     if owner_live {
         return None;
     }

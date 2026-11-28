@@ -889,13 +889,13 @@ impl AgentTaskRunRecord {
 
     /// Durable step custody replaces the caller's expiring retry lease.
     pub(crate) fn has_live_execution_step_owner(&self) -> bool {
-        super::cook_run_state::has_live_execution_step_owner(self)
+        super::run_owner::has_live_execution_step_owner(self)
     }
 
     /// Probe the current controller process, not its provider children.
     /// Provider completion does not release the controller's ownership.
     pub(crate) fn local_owner_liveness(&self) -> LocalOwnerLiveness {
-        super::cook_run_state::local_owner_liveness(self)
+        super::run_owner::local_owner_liveness(self)
     }
 
     pub(crate) fn owner_pid(&self) -> Option<u32> {

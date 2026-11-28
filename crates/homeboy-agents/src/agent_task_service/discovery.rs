@@ -2,16 +2,14 @@
 //! reporting. Pure move out of the former `agent_task_service.rs` god-file.
 
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
-use crate::agent_task_lifecycle::cook_run_state::{
-    classify_liveness, live_supervisor_jobs, live_supervisor_jobs_at,
-};
+use crate::agent_task_lifecycle::cook_run_state::classify_liveness;
+use crate::agent_task_lifecycle::run_owner::SupervisorJobs;
 use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
 use base64::Engine;
 use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_core::observation::RunCursor;
 use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, BTreeSet};
-use uuid::Uuid;
 // `runs list --kind agent-task --active` treats a `Running` record that has gone this long without
 // an `updated_at` heartbeat as suspect even when its owner process/runner-job
 // liveness cannot be disproven (#5682).
@@ -406,7 +404,7 @@ pub fn discover_runs_page(
         |record, submitted_after| matches_discovery_options(record, &filters, submitted_after),
     )?;
     let now = chrono::Utc::now();
-    let live = (filter == AgentTaskDiscoveryFilter::Active).then(live_supervisor_jobs);
+    let live = (filter == AgentTaskDiscoveryFilter::Active).then(SupervisorJobs::read);
     let runs = page
         .records
         .into_iter()
@@ -616,7 +614,7 @@ pub(crate) fn discover_runs_in_store(
 /// observation status: an observer may have marked that projection stale while
 /// the embedded lifecycle record still needs explicit cancellation.
 pub(super) fn discover_reconcile_run(record: AgentTaskRunRecord) -> AgentTaskDiscoveryRun {
-    discovery_run(record, Some(&live_supervisor_jobs()), chrono::Utc::now())
+    discovery_run(record, Some(&SupervisorJobs::read()), chrono::Utc::now())
 }
 
 fn discovery_report(
@@ -651,7 +649,7 @@ fn discovery_report(
     let total = records.len();
 
     let now = chrono::Utc::now();
-    let live = is_active.then(live_supervisor_jobs);
+    let live = is_active.then(SupervisorJobs::read);
     let liveness_summary = live
         .as_ref()
         .map(|l| liveness_summary_for_records(&records, now, l));
@@ -827,7 +825,7 @@ fn parse_submitted_after(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
 fn liveness_summary_for_records(
     records: &[AgentTaskRunRecord],
     now: chrono::DateTime<chrono::Utc>,
-    live: &BTreeSet<Uuid>,
+    live: &SupervisorJobs,
 ) -> AgentTaskLivenessSummary {
     let mut summary = AgentTaskLivenessSummary {
         reconcile_command: "homeboy agent-task reconcile --all",
@@ -854,20 +852,7 @@ pub fn liveness_for_record(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskLiveness {
-    classify_liveness(record, now, &live_supervisor_jobs())
-}
-
-pub(crate) fn liveness_for_record_in_roots(
-    record: &AgentTaskRunRecord,
-    now: chrono::DateTime<chrono::Utc>,
-    roots: &homeboy_core::paths::PathRoots,
-) -> AgentTaskLiveness {
-    let jobs_path = homeboy_core::paths::observation_db_in_root(roots.data());
-    let status = homeboy_core::daemon::read_status_at_paths(
-        homeboy_core::paths::daemon_state_file_in_root(roots.config()),
-        jobs_path.clone(),
-    );
-    classify_liveness(record, now, &live_supervisor_jobs_at(status, Ok(jobs_path)))
+    classify_liveness(record, now, &SupervisorJobs::read())
 }
 
 /// Read-only controller-upgrade admission derived from the same liveness model
@@ -885,7 +870,7 @@ pub(crate) fn controller_upgrade_admission_for_records(
         .filter(|record| !is_fixture_runner_record(record))
         .cloned()
         .collect::<Vec<_>>();
-    let live = live_supervisor_jobs();
+    let live = SupervisorJobs::read();
     let summary = liveness_summary_for_records(&records, now, &live);
     let mut parent_by_attempt = BTreeMap::new();
     let mut invalid_handoff_parents = BTreeSet::new();
@@ -1190,7 +1175,7 @@ fn discovery_outcome(record: &AgentTaskRunRecord) -> AgentTaskRunRecord {
 
 fn discovery_run(
     record: AgentTaskRunRecord,
-    live: Option<&BTreeSet<Uuid>>,
+    live: Option<&SupervisorJobs>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> AgentTaskDiscoveryRun {
     // Physical discovery rows already have canonical IDs, not operator aliases.
@@ -1434,7 +1419,7 @@ mod tests {
             ("no owner", &unowned, now, AgentTaskLiveness::Stale),
         ] {
             assert_eq!(
-                classify_liveness(record, at, &BTreeSet::new()),
+                classify_liveness(record, at, &SupervisorJobs::default()),
                 expected,
                 "{label}"
             );
@@ -1548,13 +1533,13 @@ mod tests {
             .expect("supervisor record")
         };
         let records = (0..64).map(record).collect::<Vec<_>>();
-        let live = BTreeSet::from([job_id]);
+        let live = SupervisorJobs::observed([job_id]);
         let summary = liveness_summary_for_records(&records, now, &live);
         assert_eq!(
             summary.active, 64,
             "every record shares the one observed supervisor"
         );
-        let summary = liveness_summary_for_records(&records, now, &BTreeSet::new());
+        let summary = liveness_summary_for_records(&records, now, &SupervisorJobs::default());
         assert_eq!(
             summary.active, 0,
             "an empty observation confirms no supervisor"

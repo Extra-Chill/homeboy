@@ -12,6 +12,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::agent_task_lifecycle;
+use crate::agent_task_lifecycle::run_owner::continuation_owner_expired;
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::agent_task_service::cook::{
     AgentTaskCookAttemptDispatcher, CookDisposition, CookFinalization, CookIdentity,
@@ -2216,10 +2217,6 @@ pub(crate) fn abandoned_cook_continuation(
 /// A claim is abandoned only when its owner process is gone. Age alone is not
 /// evidence: gates and recovery legitimately hold a claim for longer than any
 /// fixed window, and taking over a live claim would admit two drivers.
-fn continuation_owner_expired(value: &Value) -> bool {
-    agent_task_lifecycle::cook_run_state::continuation_owner_expired(value)
-}
-
 fn lifecycle_continuation(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<&Value> {
     record.metadata.get(LIFECYCLE_CONTINUATION_KEY)
 }

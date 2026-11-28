@@ -273,7 +273,12 @@ fn detached_cook_launcher_is_live(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    detached_cook_process_is_live(record, "launcher").unwrap_or_else(|| {
+    super::run_owner::detached_process_liveness(super::run_owner::RunOwner::from_process_metadata(
+        &record.metadata["detached_cook_handoff"],
+        "launcher_pid",
+        "launcher_start_identity",
+    ))
+    .unwrap_or_else(|| {
         detached_cook_deadline(record, "admission_deadline_at")
             .is_some_and(|deadline| deadline > now)
     })
@@ -1260,12 +1265,13 @@ pub fn detached_cook_admission_is_live(
                         )
                     })
         }
-        Some("child_attached") => {
-            detached_cook_process_is_live(record, "child").unwrap_or_else(|| {
-                detached_cook_deadline(record, "child_supervisor_deadline_at")
-                    .is_some_and(|deadline| deadline > now)
-            })
-        }
+        Some("child_attached") => super::run_owner::detached_process_liveness(
+            super::run_owner::RunOwner::detached_child(&record.metadata["detached_cook_handoff"]),
+        )
+        .unwrap_or_else(|| {
+            detached_cook_deadline(record, "child_supervisor_deadline_at")
+                .is_some_and(|deadline| deadline > now)
+        }),
         // Runtime sealing can outlast the initial lease. Use the same observed
         // launcher custody as reclaim, falling back to the deadline only when
         // process identity cannot be established.
@@ -1384,27 +1390,6 @@ pub fn expire_detached_cook_admission_in_store(
     let terminal = apply_cook_handoff_event(lifecycle_store, &sanitize_run_id(cook_id), event)?;
     Ok(terminal.state() == RunExecutionState::Failed
         && terminal.metadata["detached_cook_handoff"]["admission_state"] == "failed")
-}
-
-/// The observed liveness of the handoff's `{role}_pid`, or `None` when its
-/// process identity cannot be established.
-fn detached_cook_process_is_live(record: &AgentTaskRunRecord, role: &str) -> Option<bool> {
-    let handoff = &record.metadata["detached_cook_handoff"];
-    let pid = handoff[format!("{role}_pid")]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())?;
-    let identity =
-        serde_json::from_value(handoff[format!("{role}_start_identity")].clone()).ok()?;
-    match homeboy_core::process::process_identity_state_with_start_identity(
-        pid,
-        None,
-        Some(&identity),
-    ) {
-        homeboy_core::process::ProcessIdentityState::Live => Some(true),
-        homeboy_core::process::ProcessIdentityState::Dead
-        | homeboy_core::process::ProcessIdentityState::IdentityMismatch => Some(false),
-        homeboy_core::process::ProcessIdentityState::Unverifiable => None,
-    }
 }
 
 fn detached_cook_deadline(
@@ -3979,18 +3964,8 @@ pub(crate) fn annotate_local_provider_ownership(
                 has_failed |= execution["state"] == json!("failed");
                 has_cancelled |= execution["state"] == json!("cancelled");
                 recovery_identity.push(execution["owner_identity"].clone());
-                let identity_state = execution
-                    .get("owner_pid")
-                    .and_then(Value::as_u64)
-                    .and_then(|pid| u32::try_from(pid).ok())
-                    .map(|pid| {
-                        homeboy_core::process::process_identity_state(
-                            pid,
-                            execution
-                                .get("owner_linux_starttime_ticks")
-                                .and_then(Value::as_u64),
-                        )
-                    });
+                let identity_state = super::run_owner::RunOwner::provider(execution)
+                    .map(|owner| super::run_owner::process_observation(&owner));
                 let live = matches!(
                     identity_state,
                     Some(homeboy_core::process::ProcessIdentityState::Live)

@@ -16,7 +16,8 @@ use homeboy_control_plane_contract::{
 use homeboy_core::{Error, Result};
 use homeboy_lifecycle_contract::RunExecutionState;
 
-use crate::agent_task_lifecycle::cook_run_state::{classify_liveness, live_supervisor_jobs};
+use crate::agent_task_lifecycle::cook_run_state::classify_liveness;
+use crate::agent_task_lifecycle::run_owner::SupervisorJobs;
 
 use super::discovery::{
     discover_runs, discover_runs_in_store, liveness_stale_reason, run_source,
@@ -231,7 +232,7 @@ impl ReconcileEvidence {
     pub(crate) fn gather(
         store: &LifecycleStore,
         record: &AgentTaskRunRecord,
-        live_supervisors: &std::collections::BTreeSet<uuid::Uuid>,
+        live_supervisors: &SupervisorJobs,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         let liveness = pre_spawn_driver_liveness(
@@ -741,7 +742,7 @@ fn reconcile_exact_run(
     run_id: &str,
     dry_run: bool,
 ) -> Result<AgentTaskReconcileRun> {
-    let live_supervisors = live_supervisor_jobs();
+    let live_supervisors = SupervisorJobs::read();
     let before = agent_task_lifecycle::exact_record_in_store(store, run_id)?;
     let before_liveness = pre_spawn_driver_liveness(
         store,
@@ -931,7 +932,7 @@ mod tests {
         let evidence = ReconcileEvidence::gather(
             &test_lifecycle_store(),
             record,
-            &live_supervisor_jobs(),
+            &SupervisorJobs::read(),
             now,
         );
         reconcile_verdict(record, &evidence, now)
