@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Node.js lint runner for `homeboy lint`.
+# Node.js lint runner for `homeboy review lint`.
 #
 # Detection order:
 #   1. HOMEBOY_NODE_LINT_COMMAND env var (full override)

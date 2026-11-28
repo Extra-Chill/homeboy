@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Rust lint runner for homeboy lint.
+# Rust lint runner for homeboy review lint.
 #
 # Runs cargo fmt --check and cargo clippy as lint steps.
 # Supports the standard homeboy extension env vars:
@@ -274,7 +274,7 @@ if should_run_step "fmt"; then
                 echo "FMT SUMMARY: ${FILE_COUNT} files need formatting"
                 echo "============================================"
                 echo ""
-                echo "Fix: homeboy lint <component> --fix"
+                echo "Fix: homeboy review lint <component> --fix"
             else
                 echo ""
                 echo "$FMT_OUTPUT"
@@ -298,7 +298,7 @@ if should_run_step "fmt"; then
                         sub(comp_path, "", file)
                         gsub(/"/, "\\\"", file)
                         annotations = annotations (annotations ? ",\n" : "") \
-                            "  {\"file\": \"" file "\", \"line\": " line ", \"message\": \"File needs formatting (run homeboy lint --fix)\", \"source\": \"rustfmt\", \"severity\": \"warning\", \"code\": \"formatting\"}"
+                            "  {\"file\": \"" file "\", \"line\": " line ", \"message\": \"File needs formatting (run homeboy review lint --fix)\", \"source\": \"rustfmt\", \"severity\": \"warning\", \"code\": \"formatting\"}"
                     }
                     END {
                         if (annotations) {

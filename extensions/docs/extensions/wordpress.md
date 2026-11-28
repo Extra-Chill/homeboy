@@ -1267,8 +1267,8 @@ offload so controller machines do not execute benchmark workloads.
 Reviewer rerun sequence:
 
 ```bash
-homeboy build <component>
-homeboy test <component> --ci-job wp-codebox-phpunit
+homeboy review build <component>
+homeboy review test <component> --ci-job wp-codebox-phpunit
 homeboy config set /bench/local_execution '"denied"'
 homeboy bench <component> --ci-profile wp-codebox-validation-bench --runner <runner-id>
 ```

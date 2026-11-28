@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Node.js test runner for `homeboy test`.
+# Node.js test runner for `homeboy review test`.
 #
 # Runs `npm test` (or pnpm/yarn equivalent) and parses the result count
 # into the canonical TestResults JSON envelope homeboy core expects.

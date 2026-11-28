@@ -31,16 +31,16 @@ command that scans for `wp-config.php` to find sites.
 
 ```bash
 # Run PHPUnit + lint for a single component
-homeboy test <component-id>
+homeboy review test <component-id>
 
 # Lint only (PHPCS + PHPStan + ESLint where applicable)
-homeboy lint <component-id>
+homeboy review lint <component-id>
 
 # Apply lint auto-fixes (PHPCBF + custom fixers)
 homeboy review lint <component-id> --fix
 
 # Production ZIP at <component>/build/<component-id>.zip
-homeboy build <component-id>
+homeboy review build <component-id>
 
 # Benchmark configured workloads
 homeboy bench <component-id>
@@ -194,7 +194,7 @@ it. See [docs/TESTING.md](docs/TESTING.md#real-wordpress-host-smokes).
 To rerun one existing smoke on demand before pushing:
 
 ```bash
-homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
+homeboy review test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
 Use `--file` for a standalone PHP smoke. The focused command does not change
@@ -210,7 +210,7 @@ for PHPUnit and core-dev test runs. The current backend implementation is
 `wp-codebox`, and it remains the default:
 
 ```bash
-HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND=wp-codebox homeboy test <component-id>
+HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND=wp-codebox homeboy review test <component-id>
 ```
 
 The `test-runner-wp-codebox.sh` script name and existing WP Codebox settings are
@@ -236,7 +236,7 @@ minute instead of the full budget.
 
 ```bash
 # default 60s; 0 disables early termination
-HOMEBOY_WP_CODEBOX_RUNTIME_CRASH_GRACE_SECONDS=60 homeboy test <component-id>
+HOMEBOY_WP_CODEBOX_RUNTIME_CRASH_GRACE_SECONDS=60 homeboy review test <component-id>
 ```
 
 The same value can be set as `wp_codebox_runtime_crash_grace_seconds` in
@@ -309,7 +309,7 @@ works — it is not a parallel, drifting copy.
 
 A component with no PHPCS config of its own (no `phpcs.xml`, `.phpcs.xml`,
 `phpcs.xml.dist`, or `.phpcs.xml.dist`) gets this shared ruleset automatically
-from the Lint capability — `homeboy lint`, `homeboy review`, and the
+from the Lint capability — `homeboy review lint`, `homeboy review`, and the
 `preflight.lint` release gate all resolve to it, with no `scripts.lint` or
 composer wiring required. The fallback is this file specifically, not
 `phpcs.xml.dist` above: `phpcs.xml.dist` references the shared ruleset via a
@@ -418,7 +418,7 @@ delete the baseline to ratchet toward full cleanup.
 
 Knobs:
 
-- `HOMEBOY_PHPSTAN_LEVEL=8 homeboy test <component>` — bump one-off.
+- `HOMEBOY_PHPSTAN_LEVEL=8 homeboy review test <component>` — bump one-off.
 - `HOMEBOY_SKIP_PHPSTAN=1` — critical-only check that still blocks
   `function.notFound` / `class.notFound` (guaranteed runtime fatals).
 
@@ -455,7 +455,7 @@ minimum-PHP runtime guards).
 ## Build runner
 
 ```text
-homeboy build <component>
+homeboy review build <component>
     │
     ├─ Detect plugin/theme from headers (Plugin Name | Theme Name)
     ├─ Extract version
@@ -672,7 +672,7 @@ lint-style"`, ...) no longer has to vendor `@wordpress/scripts` itself.
 The pinned copy lives in its own isolated npm project at
 `wordpress/toolchains/wp-scripts/`, **not** in `wordpress/node_modules`
 alongside the extension's own lint tooling. `wordpress/package.json` pins
-`eslint` 9.x + `@wordpress/eslint-plugin` for `homeboy lint`'s flat-config
+`eslint` 9.x + `@wordpress/eslint-plugin` for `homeboy review lint`'s flat-config
 ESLint runner; `@wordpress/scripts` pins its own `eslint` 8.x for classic
 `.eslintrc`-config `wp-scripts lint-js`. A single shared `node_modules` tree
 hoists one `eslint` to the top level, and `wp-scripts lint-js` resolves

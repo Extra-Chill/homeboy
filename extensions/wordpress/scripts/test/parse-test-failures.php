@@ -1,6 +1,6 @@
 <?php
 /**
- * Parse PHPUnit output into structured failure data for homeboy test --analyze.
+ * Parse PHPUnit output into structured failure data for homeboy review test --analyze.
  *
  * Orchestrator that delegates to format-specific parsers (standard, testdox)
  * and uses shared error classification. Each parser returns raw blocks with

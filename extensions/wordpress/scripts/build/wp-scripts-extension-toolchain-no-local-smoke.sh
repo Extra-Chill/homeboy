@@ -6,7 +6,7 @@ set -euo pipefail
 # tests through the extension's own pinned copy. Uses the extension's REAL
 # installed toolchain (not a stub) so this is a genuine end-to-end proof, not
 # just a contract check against a fake binary -- `npm install` in
-# wordpress/toolchains/wp-scripts/ must have run first (CI and `homeboy test`
+# wordpress/toolchains/wp-scripts/ must have run first (CI and `homeboy review test`
 # both do this before invoking package.json scripts).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

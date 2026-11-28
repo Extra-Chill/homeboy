@@ -540,8 +540,8 @@
         "jobs": ["wp-codebox-build-smoke", "wp-codebox-phpunit", "wp-codebox-bench-offloaded"],
         "summary": "Run safe local build/PHPUnit smoke coverage first, then route WP Codebox benchmark work through Homeboy Lab/runner offload with durable run artifacts.",
         "rerun_commands": [
-          "homeboy build <component>",
-          "homeboy test <component> --ci-job wp-codebox-phpunit",
+          "homeboy review build <component>",
+          "homeboy review test <component> --ci-job wp-codebox-phpunit",
           "homeboy config set /bench/local_execution '\"denied\"'",
           "homeboy bench <component> --ci-profile wp-codebox-validation-bench --runner <runner-id>"
         ],

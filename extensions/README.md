@@ -1,6 +1,6 @@
 # Homeboy Extensions
 
-Official extension directory for [Homeboy](https://github.com/Extra-Chill/homeboy). Each extension is a project-type primitive — it teaches Homeboy how to discover, audit, lint, test, and release a particular kind of codebase.
+Official extension directory for [Homeboy](https://github.com/Extra-Chill/homeboy). Each extension is a project-type primitive — it teaches Homeboy how to discover, lint, test, build, and release a particular kind of codebase.
 
 This is a **monorepo** — each subdirectory is a standalone extension. Install individual extensions, not the whole repo.
 
@@ -114,13 +114,16 @@ Once installed, declare the extension in your repo's `homeboy.json` and Homeboy 
 }
 ```
 
-Then run Homeboy commands as usual:
+Run quality gates under `homeboy review`, then release when ready:
 
 ```bash
 homeboy review lint --fix
 homeboy review test
 homeboy release
 ```
+
+Use `homeboy review build` for a local build gate and `homeboy review ci --help`
+for CI reproduction commands.
 
 ### WordPress runtime integration
 

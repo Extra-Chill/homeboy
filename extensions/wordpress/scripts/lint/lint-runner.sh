@@ -719,7 +719,7 @@ if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
     # validates separately via the diagnose phase. Saves ~35s on large
     # codebases by avoiding a redundant PHPCS scan.
     echo ""
-    echo "Fix-only mode: skipping validation (run 'homeboy lint' separately to validate)"
+    echo "Fix-only mode: skipping validation (run 'homeboy review lint' separately to validate)"
     exit 0
 fi
 

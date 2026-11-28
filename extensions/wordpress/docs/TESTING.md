@@ -12,16 +12,16 @@ Components only need a `tests/` directory with PHPUnit test files.
 
 ```bash
 # Test a single component (lint + PHPUnit)
-homeboy test <component-id>
+homeboy review test <component-id>
 
 # Test an entire project (all components)
-homeboy test <project-id>
+homeboy review test <project-id>
 
 # Verbose diagnostics
-HOMEBOY_DEBUG=1 homeboy test <component-id>
+HOMEBOY_DEBUG=1 homeboy review test <component-id>
 
 # Rerun one real-WordPress host smoke through the CI-equivalent runtime path
-homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
+homeboy review test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
 Tests run through `scripts/test/test-runner.sh`, which dispatches to the WP
@@ -34,7 +34,7 @@ Select the runtime backend with `HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND` when a
 runner needs to be explicit. Supported values: `wp-codebox` (default).
 
 ```bash
-HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND=wp-codebox homeboy test <component-id>
+HOMEBOY_WORDPRESS_TEST_RUNTIME_BACKEND=wp-codebox homeboy review test <component-id>
 ```
 
 ## WP Codebox command diagnostics
@@ -145,7 +145,7 @@ The reason prefers the structured `error.code: error.message` that
 to the last stderr line for older WP Codebox builds.
 
 ```bash
-homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
+homeboy review test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
 
 Use `--file tests/contract-smoke.php` to run one standalone PHP smoke.
@@ -412,7 +412,7 @@ the useful lint signal everywhere except the single intentional boundary.
 
 ### Level override
 
-`HOMEBOY_PHPSTAN_LEVEL=8 homeboy test <component>` bumps one-off without
+`HOMEBOY_PHPSTAN_LEVEL=8 homeboy review test <component>` bumps one-off without
 changing the default. `HOMEBOY_SKIP_PHPSTAN=1` runs a critical-only
 check that still blocks `function.notFound` / `class.notFound` (guaranteed
 runtime fatals) regardless of the skip.

@@ -153,7 +153,7 @@
       "label": "Targeted Test Script",
       "type": "string",
       "default": "",
-      "description": "npm script to run when homeboy test receives passthrough test args, for example 'test:unit'"
+      "description": "npm script to run when homeboy review test receives passthrough test args, for example 'test:unit'"
     },
     {
       "id": "bench_env",

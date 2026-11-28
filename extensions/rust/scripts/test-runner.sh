@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Rust test runner for homeboy test.
+# Rust test runner for homeboy review test.
 #
 # Runs cargo test with standard homeboy extension env vars:
 #   HOMEBOY_EXTENSION_PATH  — path to this extension

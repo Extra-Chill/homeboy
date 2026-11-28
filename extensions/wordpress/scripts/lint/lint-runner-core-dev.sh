@@ -55,7 +55,7 @@ else
         echo "Running WordPress core PHPCS on ${#CHANGED_PHP_FILES[@]} changed PHP file(s)..."
         "$PHPCS_BIN" --standard="$PHPCS_CONFIG" "${CHANGED_PHP_FILES[@]}" || lint_status=1
     else
-        echo "Error: WordPress core PHPCS config or binary missing; run composer install before Homeboy lint." >&2
+        echo "Error: WordPress core PHPCS config or binary missing; run composer install before 'homeboy review lint'." >&2
         lint_status=1
     fi
 
@@ -68,7 +68,7 @@ else
         echo "Running WordPress core PHPStan on ${#CHANGED_PHP_FILES[@]} changed PHP file(s)..."
         "$PHPSTAN_BIN" "${phpstan_args[@]}" || lint_status=1
     else
-        echo "Error: WordPress core PHPStan config or binary missing; run composer install before Homeboy lint." >&2
+        echo "Error: WordPress core PHPStan config or binary missing; run composer install before 'homeboy review lint'." >&2
         lint_status=1
     fi
 fi

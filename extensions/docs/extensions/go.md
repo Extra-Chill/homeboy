@@ -20,7 +20,7 @@ Adds first-class Go support to Homeboy for services, bridges, and command-line t
 
 ```bash
 homeboy extension install https://github.com/Extra-Chill/homeboy --id go
-homeboy build <project-or-component>
-homeboy test <project-or-component>
-homeboy lint <project-or-component>
+homeboy review build <project-or-component>
+homeboy review test <project-or-component>
+homeboy review lint <project-or-component>
 ```
