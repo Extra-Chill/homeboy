@@ -203,7 +203,7 @@ if should_run_step "fmt"; then
         FMT_BEFORE="$(mktemp)"
         homeboy_fix_results_capture "$FMT_BEFORE" "$PROJECT_PATH" '*.rs'
         set +e
-        FMT_OUTPUT=$(cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" 2>&1)
+        FMT_OUTPUT=$(cargo fmt --all --manifest-path "${PROJECT_PATH}/Cargo.toml" 2>&1)
         FMT_EXIT=$?
         set -e
 
@@ -251,7 +251,7 @@ if should_run_step "fmt"; then
             echo ""
             echo "Running cargo fmt --check..."
             set +e
-            FMT_OUTPUT=$(cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" --check 2>&1)
+            FMT_OUTPUT=$(cargo fmt --all --manifest-path "${PROJECT_PATH}/Cargo.toml" --check 2>&1)
             FMT_EXIT=$?
             set -e
         fi

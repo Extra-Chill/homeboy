@@ -15,4 +15,4 @@ if [ ! -f "${PROJECT_PATH}/Cargo.toml" ]; then
     exit 0
 fi
 
-cargo fmt --manifest-path "${PROJECT_PATH}/Cargo.toml" 2>&1
+cargo fmt --all --manifest-path "${PROJECT_PATH}/Cargo.toml" 2>&1
