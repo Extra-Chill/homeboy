@@ -13,9 +13,15 @@ cleanup_seconds="${HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS:-15}"
 log_file="$(mktemp)"
 trap 'rm -f "${log_file}"' EXIT
 results_dir="${HOMEBOY_CI_RESULTS_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/homeboy-ci-results}"
-if [ -d "${results_dir}" ] && [ ! -L "${results_dir}" ]; then
-  rm -f "${results_dir}/setup.json"
+if [ -L "${results_dir}" ] || { [ -e "${results_dir}" ] && [ ! -d "${results_dir}" ]; }; then
+  printf '::error::Setup result path is not a real directory: %s\n' "${results_dir}"
+  exit 1
 fi
+mkdir -p "${results_dir}"
+native_result_dir="$(mktemp -d "${results_dir}/.setup-XXXXXX")"
+trap 'rm -f "${log_file}"; rm -rf "${native_result_dir}"' EXIT
+export HOMEBOY_EXTENSION_SETUP_RESULT_FILE="${native_result_dir}/result.json"
+rm -f "${results_dir}/setup.json"
 
 setup_owner() {
   case "${label}" in
@@ -64,6 +70,21 @@ write_setup_failure() {
     --argjson exit_code "${status}" \
     '{schema:$schema,phase:"dependency_build_setup",status:$status,owner:$owner,step:$step,exit_code:$exit_code,replay_command:$replay_command,diagnostic:$diagnostic}' \
     > "${result_file}"
+
+  if [ -f "${HOMEBOY_EXTENSION_SETUP_RESULT_FILE}" ] && jq -e '
+    .schema == "homeboy/extension-setup-result/v1" and (.status == "timeout" or .status == "failed")
+  ' "${HOMEBOY_EXTENSION_SETUP_RESULT_FILE}" >/dev/null; then
+    jq --slurpfile setup "${HOMEBOY_EXTENSION_SETUP_RESULT_FILE}" '
+      $setup[0] as $native | . + {
+        status: $native.status,
+        owner: $native.invocation.extension_id,
+        diagnostic: ($native.error + " (run " + $native.run_id + ")"),
+        replay_command: $native.invocation.retry_command,
+        extension_setup: $native
+      }
+    ' "${result_file}" > "${native_result_dir}/action.json"
+    mv -f "${native_result_dir}/action.json" "${result_file}"
+  fi
 
   if [ -n "${GITHUB_ENV:-}" ]; then
     printf 'HOMEBOY_CI_RESULTS_DIR=%s\nHOMEBOY_SETUP_RESULT_FILE=%s\n' "${output_dir}" "${result_file}" >> "${GITHUB_ENV}"

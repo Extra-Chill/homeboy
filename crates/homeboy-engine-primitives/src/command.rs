@@ -47,6 +47,10 @@ const EXECUTION_PROTOCOL_COMPLETE: u8 = 0;
 const EXECUTION_PROTOCOL_INCOMPLETE: u8 = 1;
 #[cfg(target_os = "linux")]
 const EXECUTION_PROTOCOL_INCOMPLETE_NO_ROOT: u8 = 2;
+#[cfg(target_os = "linux")]
+const PROTOCOL_TERM_DELIVERED: u8 = 1 << 6;
+#[cfg(target_os = "linux")]
+const PROTOCOL_KILL_DELIVERED: u8 = 1 << 7;
 
 /// Waitable identity of one isolated execution.
 ///
@@ -94,13 +98,24 @@ pub enum ExecutionCleanup {
 pub struct ExecutionOutcome {
     pub root_status: ExitStatus,
     pub cleanup: ExecutionCleanup,
+    pub signals: ExecutionSignals,
+}
+
+/// Signal delivery observed by the execution owner; absent when the platform
+/// does not report individual signals (for example Windows job termination).
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ExecutionSignals {
+    pub term_delivered: Option<bool>,
+    pub kill_delivered: Option<bool>,
 }
 
 impl ExecutionOutcome {
+    #[cfg(not(target_os = "linux"))]
     fn complete(root_status: ExitStatus) -> Self {
         Self {
             root_status,
             cleanup: ExecutionCleanup::Complete,
+            signals: ExecutionSignals::default(),
         }
     }
 
@@ -815,9 +830,24 @@ impl ControllerChildGuard {
         #[cfg(all(unix, not(target_os = "linux")))]
         {
             let status = self.terminate_and_reap(child, deadline)?;
+            let mut outcome = self.outcome_after_wait(status, identity)?;
+            outcome.signals = ExecutionSignals {
+                term_delivered: Some(false),
+                kill_delivered: Some(true),
+            };
+            return Ok(outcome);
+        }
+        #[cfg(windows)]
+        {
+            let status = self.terminate_and_reap(child, deadline)?;
             return self.outcome_after_wait(status, identity);
         }
-        #[cfg(any(target_os = "linux", not(unix)))]
+        #[cfg(not(any(unix, windows)))]
+        {
+            let status = self.terminate_and_reap(child, deadline)?;
+            self.outcome_after_wait(status, identity)
+        }
+        #[cfg(target_os = "linux")]
         {
             self.request_drain(identity.wait_pid)?;
             match reap_child_until(child, deadline) {
@@ -2636,6 +2666,7 @@ fn execution_supervisor_loop(
     let mut root_reaped = false;
     let mut tearing_down = false;
     let mut kill_phase = false;
+    let mut delivered = 0;
     let mut controller_loss = false;
     let mut phase_deadline = supervisor_now();
 
@@ -2663,7 +2694,7 @@ fn execution_supervisor_loop(
                 if errno == Some(libc::ECHILD) && root_reaped {
                     supervisor_finish(
                         protocol_write_fd,
-                        EXECUTION_PROTOCOL_COMPLETE,
+                        EXECUTION_PROTOCOL_COMPLETE | delivered,
                         root_wait_status,
                     );
                 }
@@ -2698,19 +2729,19 @@ fn execution_supervisor_loop(
                 } else {
                     EXECUTION_PROTOCOL_INCOMPLETE_NO_ROOT
                 };
-                supervisor_finish(protocol_write_fd, tag, root_wait_status);
+                supervisor_finish(protocol_write_fd, tag | delivered, root_wait_status);
             }
         }
 
         if tearing_down {
-            supervisor_signal_remaining(
-                root_pid,
-                if kill_phase {
-                    libc::SIGKILL
-                } else {
-                    libc::SIGTERM
-                },
-            );
+            let (signal, flag) = if kill_phase {
+                (libc::SIGKILL, PROTOCOL_KILL_DELIVERED)
+            } else {
+                (libc::SIGTERM, PROTOCOL_TERM_DELIVERED)
+            };
+            if supervisor_signal_remaining(root_pid, signal) {
+                delivered |= flag;
+            }
         }
 
         supervisor_idle(&mut liveness_fd);
@@ -2889,11 +2920,10 @@ fn supervisor_idle(fd: &mut RawFd) {
 }
 
 #[cfg(target_os = "linux")]
-fn supervisor_signal_remaining(root_pid: u32, signal: libc::c_int) {
-    unsafe {
-        libc::kill(-(root_pid as libc::pid_t), signal);
-    }
-    supervisor_signal_children(signal);
+fn supervisor_signal_remaining(root_pid: u32, signal: libc::c_int) -> bool {
+    let group = unsafe { libc::kill(-(root_pid as libc::pid_t), signal) == 0 };
+    let children = supervisor_signal_children(signal);
+    group || children
 }
 
 #[cfg(target_os = "linux")]
@@ -2966,12 +2996,22 @@ fn read_execution_protocol_outcome(fd: RawFd) -> io::Result<ExecutionOutcome> {
     read_exact_fd(fd, &mut payload)?;
     let wait_status = i32::from_ne_bytes(payload[1..].try_into().expect("wait status"));
     let root_status = ExitStatus::from_raw(wait_status);
-    match payload[0] {
-        EXECUTION_PROTOCOL_COMPLETE => Ok(ExecutionOutcome::complete(root_status)),
-        EXECUTION_PROTOCOL_INCOMPLETE => Ok(ExecutionOutcome {
-            root_status,
-            cleanup: ExecutionCleanup::Incomplete,
-        }),
+    let signals = ExecutionSignals {
+        term_delivered: Some(payload[0] & PROTOCOL_TERM_DELIVERED != 0),
+        kill_delivered: Some(payload[0] & PROTOCOL_KILL_DELIVERED != 0),
+    };
+    match payload[0] & !(PROTOCOL_TERM_DELIVERED | PROTOCOL_KILL_DELIVERED) {
+        tag @ (EXECUTION_PROTOCOL_COMPLETE | EXECUTION_PROTOCOL_INCOMPLETE) => {
+            Ok(ExecutionOutcome {
+                root_status,
+                cleanup: if tag == EXECUTION_PROTOCOL_COMPLETE {
+                    ExecutionCleanup::Complete
+                } else {
+                    ExecutionCleanup::Incomplete
+                },
+                signals,
+            })
+        }
         EXECUTION_PROTOCOL_INCOMPLETE_NO_ROOT => Err(io::Error::other(
             "execution owner cleanup did not complete before root status was observed",
         )),

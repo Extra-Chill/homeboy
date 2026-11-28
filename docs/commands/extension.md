@@ -102,6 +102,17 @@ Notes:
 homeboy extension setup <extension_id>
 ```
 
+Runtime setup defaults to a 300-second budget. The extension can set
+`runtime.setup_timeout_seconds`, and `HOMEBOY_EXTENSION_SETUP_TIMEOUT_SECONDS`
+overrides it for the current invocation (1–3600 seconds).
+
+Homeboy records an `extension.setup` run before launching the command. A timeout
+returns `extension.setup_timeout` with the extension ID, redacted shell
+invocation, timing, bounded stdout/stderr tails, process cleanup result, and
+artifact IDs for the full redacted logs. Use the run ID to find those artifacts.
+Homeboy marks the timeout retryable only when it confirms cleanup. The retry
+command repeats installation if the failed setup caused an install rollback.
+
 ### `install`
 
 ```sh

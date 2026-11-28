@@ -31,6 +31,7 @@ mod runtime_helper;
 mod scenario_runner;
 mod scope;
 mod settings;
+mod setup;
 mod shared_lib;
 mod tool;
 
@@ -131,6 +132,21 @@ fn resolve_setup_timeout(
 
 /// Run a extension's setup command (if defined).
 pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
+    run_setup_with_retry(
+        extension_id,
+        &[
+            "homeboy".into(),
+            "extension".into(),
+            "setup".into(),
+            extension_id.into(),
+        ],
+    )
+}
+
+pub(super) fn run_setup_with_retry(
+    extension_id: &str,
+    retry_args: &[String],
+) -> Result<ExtensionSetupResult> {
     let extension = load_extension(extension_id)?;
 
     let runtime = match extension.runtime() {
@@ -162,24 +178,14 @@ pub fn run_setup(extension_id: &str) -> Result<ExtensionSetupResult> {
     let command = template::render(setup_command, &vars);
     let timeout_override = std::env::var(EXTENSION_SETUP_TIMEOUT_ENV).ok();
     let setup_timeout = resolve_setup_timeout(runtime, timeout_override.as_deref())?;
-    let output = execute_local_command_passthrough_with_timeout(
+    let exit_code = setup::execute(
+        extension_id,
         &command,
-        Some(extension_path),
-        None,
+        Path::new(extension_path),
         setup_timeout,
-    );
-    let exit_code = output.exit_code;
-
-    if exit_code != 0 {
-        return Err(Error::internal_io(
-            if output.timed_out {
-                format!("Setup command timed out after {}s", setup_timeout.as_secs())
-            } else {
-                format!("Setup command failed with exit code {}", exit_code)
-            },
-            Some("extension setup".to_string()),
-        ));
-    }
+        retry_args,
+        timeout_override.as_deref(),
+    )?;
 
     // Persist the runtime env the extension's provider discovers now that setup
     // has run. On a Lab runner, setup configures runner-local state (e.g. a

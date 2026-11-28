@@ -553,7 +553,7 @@ Set `import-observations: true` on jobs that should consume observation bundles 
 
 Artifact boundaries:
 
-- `homeboy-ci-results-<component>-<commands>-<job>-<os>-<runtime>`: immediate structured command outputs used for pass/fail decisions and PR rendering, such as `bench.json`.
+- `homeboy-ci-results-<component>-<commands>-<job>-<os>-<runtime>`: immediate structured command outputs used for pass/fail decisions and PR rendering, such as `bench.json`. When extension runtime setup times out before review commands run, `setup.json` identifies the blocked extension and command, records cleanup and retry details, and links to the full redacted stdout and stderr in the observation bundle.
 - `homeboy-observations-<component>-<commands>-<job>-<os>-<runtime>`: persisted Homeboy run history exported for later import/query by agents and other tooling. The suffix prevents collisions when a workflow splits lint/test across jobs, matrix dimensions, or multiple action invocations.
 
 #### Continuous release outputs

@@ -15,7 +15,7 @@ use homeboy_core::git;
 use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;
 
-use super::super::invoke::run_setup;
+use super::super::invoke::run_setup_with_retry;
 use super::{
     derive_id_from_url, manifest_path_for_extension, slugify_id, write_source_metadata,
     InstallResult,
@@ -169,7 +169,7 @@ pub(super) fn install_from_url(
 
     // A successful install is ready for use. Do not report a successful install
     // if the declared setup command failed.
-    if let Err(err) = run_setup(&extension_id) {
+    if let Err(err) = run_install_setup(&extension_id, url, revision, false) {
         let _ = std::fs::remove_dir_all(&extension_dir);
         return Err(err);
     }
@@ -795,7 +795,7 @@ pub(super) fn install_from_path(
         source_revision.clone(),
     );
     super::write_requested_source_ref(&extension_dir, revision);
-    if let Err(err) = run_setup(&extension_id) {
+    if let Err(err) = run_install_setup(&extension_id, &source.to_string_lossy(), revision, false) {
         let _ = std::fs::remove_file(&extension_dir);
         return Err(err);
     }
@@ -808,6 +808,32 @@ pub(super) fn install_from_path(
         manifest_path,
         source_revision,
     })
+}
+
+pub(super) fn run_install_setup(
+    extension_id: &str,
+    source: &str,
+    revision: Option<&str>,
+    replace: bool,
+) -> Result<()> {
+    let mut retry = [
+        "homeboy",
+        "extension",
+        "install",
+        "--id",
+        extension_id,
+        "--",
+        source,
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    if replace {
+        retry.insert(3, "--replace".to_string());
+    }
+    if let Some(revision) = revision {
+        retry.splice(3..3, ["--ref".to_string(), revision.to_string()]);
+    }
+    run_setup_with_retry(extension_id, &retry).map(|_| ())
 }
 
 #[cfg(test)]
