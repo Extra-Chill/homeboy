@@ -25,8 +25,10 @@ pub(crate) fn local_client() -> SshClient {
 /// Checkout-less components resolve release tags through the GitHub API, so a
 /// test that plans one would otherwise reach the network. This guard prepends
 /// fake binaries to `PATH`: `gh` reports no token, and `curl` either answers
-/// HTTP 404 for every request or fails like an unreachable host. Production
-/// behavior is unchanged. Callers must hold
+/// HTTP 404 for every request or fails like an unreachable host. With no token,
+/// metadata lookup does not pipe a curl config, so the stub must not read the
+/// inherited stdin (which may be open for the lifetime of the test runner).
+/// Callers must hold
 /// [`homeboy_core::test_support::env_lock`] (or be inside `with_isolated_home`)
 /// while the guard lives.
 #[cfg(unix)]
@@ -39,14 +41,12 @@ pub(crate) struct OfflineGithub {
 impl OfflineGithub {
     /// Every GitHub request answers HTTP 404, i.e. no such release exists.
     pub(crate) fn not_found() -> Self {
-        Self::with_curl("#!/bin/sh\ncat > /dev/null 2>&1\nprintf '\\n404'\n")
+        Self::with_curl("#!/bin/sh\nprintf '\\n404'\n")
     }
 
     /// Every GitHub request fails the way curl does when the host is unreachable.
     pub(crate) fn unreachable() -> Self {
-        Self::with_curl(
-            "#!/bin/sh\ncat > /dev/null 2>&1\necho 'curl: (7) Failed to connect' >&2\nexit 7\n",
-        )
+        Self::with_curl("#!/bin/sh\necho 'curl: (7) Failed to connect' >&2\nexit 7\n")
     }
 
     fn with_curl(curl_script: &str) -> Self {
