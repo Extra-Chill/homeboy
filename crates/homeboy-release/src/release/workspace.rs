@@ -38,6 +38,7 @@ impl ReleaseWorkspace {
         component: &Component,
         head_release: bool,
         prepared_release_pr_resume: bool,
+        expected_sha: Option<&str>,
     ) -> Result<Self> {
         let store = OperationRecordStore::in_roots(roots);
         if in_place_eligible(component, head_release, prepared_release_pr_resume) {
@@ -51,6 +52,12 @@ impl ReleaseWorkspace {
         }
 
         let source_sha = verified_remote_default_sha(component)?;
+        if let Some(expected) = expected_sha.filter(|expected| *expected != source_sha) {
+            return Err(Error::invalid_argument(
+                "release.source",
+                format!("Release source drift: the checkout is at {expected} but staging would use {source_sha}. Check out the intended default-branch source and rerun `homeboy release --dry-run`."),
+            ));
+        }
         let owner_id = Uuid::new_v4();
         let owner_run_ref = format!("release/{owner_id}");
         let branch = format!(
@@ -794,7 +801,7 @@ mod tests {
                 "dirty\n",
             )
             .expect("dirty source");
-            let workspace = ReleaseWorkspace::select(&test_roots(), &component, false, false)
+            let workspace = ReleaseWorkspace::select(&test_roots(), &component, false, false, None)
                 .expect("native staging");
             let owner = workspace
                 .output
@@ -852,7 +859,7 @@ mod tests {
             std::fs::write(source_root.join("README.md"), "dirty\n").expect("dirty source");
             component.local_path = package.display().to_string();
 
-            let workspace = ReleaseWorkspace::select(&test_roots(), &component, false, false)
+            let workspace = ReleaseWorkspace::select(&test_roots(), &component, false, false, None)
                 .expect("native staging");
             let worktree_root = Path::new(&workspace.output.path);
             let staged = Path::new(&workspace.component.local_path);

@@ -298,6 +298,7 @@ pub(super) fn execute_release_plan_step(
                     context.component_id,
                     release_tag.as_deref(),
                     push_branch,
+                    !context.options.pipeline.head,
                 )
                 .map(Some)
             }
@@ -548,13 +549,7 @@ pub(super) fn run_remote_sync_preflight(
     context: &ReleaseExecutionContext,
     staging_source_sha: Option<&str>,
 ) -> ReleaseStepResult {
-    let result = staging_source_sha
-        .map_or_else(
-            || super::planning_git::validate_remote_sync(context.component),
-            |source_sha| {
-                super::planning_git::validate_remote_sync_at(context.component, source_sha)
-            },
-        )
+    let result = super::planning_git::validate_remote_sync(context.component, staging_source_sha)
         .and_then(|()| {
             let requirement = if context.options.pipeline.head {
                 super::planning_git::DefaultBranchRequirement::ReachableFromDefault
@@ -2015,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_remote_sync_fast_forwards_and_returns_success_step() {
+    fn preflight_remote_sync_refuses_to_fast_forward_the_selected_checkout() {
         let temp = tempfile::tempdir().expect("tempdir");
         let remote = temp.path().join("remote.git");
         let seed = temp.path().join("seed");
@@ -2068,9 +2063,9 @@ mod tests {
             .expect("dispatch")
             .expect("result");
 
-        assert_eq!(result.status, ReleaseStepStatus::Success);
-        assert!(!release_step_is_show_stopper(&result));
-        assert_eq!(
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert!(release_step_is_show_stopper(&result));
+        assert_ne!(
             run_output(&checkout, &["git", "rev-parse", "HEAD"]),
             run_output(&checkout, &["git", "rev-parse", "origin/main"])
         );

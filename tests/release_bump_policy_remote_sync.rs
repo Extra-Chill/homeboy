@@ -1,20 +1,5 @@
-//! Regression coverage for #14974.
-//!
-//! `preflight.remote_sync` can fast-forward the release checkout's HEAD past
-//! the commit range that produced the auto-detected bump type, because that
-//! bump type is resolved BEFORE remote_sync runs. When a `feat:` commit lands
-//! on the remote after auto-detection saw only `fix:` commits, the rebuilt
-//! plan's `preflight.bump_policy` step recomputes "recommended" as `minor`
-//! from the now-advanced HEAD while "requested" still reflects the older,
-//! `fix:`-only range — an underbump false positive that fails the release
-//! outright (`Requested patch bump is lower than detected minor impact`).
-//!
-//! This reproduces the exact shape of the production failure: a checkout
-//! whose local HEAD sits one `fix:` commit ahead of the last release tag,
-//! while `origin/main` has already advanced past it with a `feat:` commit
-//! pushed by someone else. A release run with no explicit `--bump` must
-//! auto-detect `minor` end to end — not fail asking for a lower bump than it
-//! itself detects.
+//! A default-branch checkout with unreleased work must not plan or apply
+//! from stale tracking refs. After refresh, preview and apply use the same SHA.
 
 use homeboy_core::test_support::{HermeticTestContext, TestBinary};
 use std::path::{Path, PathBuf};
@@ -25,11 +10,55 @@ const RELEASED_VERSION: &str = "1.1.0";
 const TAG: &str = "v1.1.0";
 
 #[test]
-fn auto_detected_bump_survives_a_remote_sync_fast_forward_past_a_feat_commit() {
+fn stale_release_requires_refresh_and_a_reviewed_source() {
     let context = HermeticTestContext::new();
     let fixture = BumpPolicyFixture::new(&context);
+    let upstream = git(&fixture.remote, &["rev-parse", "main"]);
+    assert_ne!(upstream, fixture.original_head);
+    assert_eq!(
+        git(&fixture.repo, &["rev-parse", "origin/main"]),
+        fixture.original_head
+    );
 
-    let output = fixture.release(&context);
+    for args in [["--dry-run"], ["--apply"]] {
+        let blocked = fixture.release(&context, &args);
+        assert!(!blocked.status.success());
+        let text = output_text(&blocked);
+        assert!(text.contains("0 ahead, 1 behind"), "{text}");
+        assert!(text.contains(&upstream), "{text}");
+        assert!(text.contains(&fixture.original_head), "{text}");
+        assert!(text.contains("fetched at"), "{text}");
+        assert_eq!(
+            git(&fixture.repo, &["rev-parse", "HEAD"]),
+            fixture.original_head
+        );
+        assert!(!ref_exists(&fixture.remote, &format!("refs/tags/{TAG}")));
+    }
+
+    run(&fixture.repo, &["git", "merge", "--ff-only", "origin/main"]);
+    let rejected = fixture.release(
+        &context,
+        &["--apply", "--expect-source", &fixture.original_head],
+    );
+    assert!(!rejected.status.success());
+    assert!(output_text(&rejected).contains("Release source drift"));
+
+    let preview = fixture.release(&context, &["--dry-run"]);
+    assert!(preview.status.success(), "{}", output_text(&preview));
+    let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).expect("preview JSON");
+    let planned = &preview["data"]["result"];
+    assert_eq!(planned["status"], "planned");
+    assert_eq!(planned["releasable_commits"], 2);
+    assert_eq!(planned["new_version"], RELEASED_VERSION);
+    assert_eq!(planned["plan"]["policy"]["source_sha"], upstream);
+    let freshness = &planned["plan"]["policy"]["source_freshness"];
+    assert_eq!(freshness["local_head"], upstream);
+    assert_eq!(freshness["upstream_head"], upstream);
+    assert_eq!(freshness["ahead"], 0);
+    assert_eq!(freshness["behind"], 0);
+    assert!(freshness["fetched_at"].as_str().is_some());
+
+    let output = fixture.release(&context, &["--apply", "--expect-source", &upstream]);
 
     assert!(
         output.status.success(),
@@ -37,24 +66,22 @@ fn auto_detected_bump_survives_a_remote_sync_fast_forward_past_a_feat_commit() {
         output_text(&output)
     );
 
-    // Assert directly on the release command's own reported bump type, not
-    // just its side effects. This is the exact field CI reads for
-    // `release-bump-type`: it must reflect the fresh, post-remote-sync
-    // detection ("minor"), not the stale pre-fetch guess ("patch") that
-    // caused #14974's false-positive underbump failure.
+    // CI reads this field, so it must reflect the reviewed feature commit.
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
         .expect("release command must emit its JSON envelope");
     assert_eq!(
         envelope["data"]["result"]["bump_type"], "minor",
-        "reported bump_type must track the post-remote-sync detection: {envelope:#}"
+        "reported bump_type must track the reviewed source: {envelope:#}"
     );
     assert_eq!(envelope["data"]["result"]["status"], "released");
     assert_eq!(envelope["data"]["result"]["new_version"], RELEASED_VERSION);
     assert_eq!(envelope["data"]["result"]["tag"], TAG);
 
-    // The release commit must be the MINOR version the feat commit demands,
-    // proving "requested" tracked "recommended" after remote_sync moved HEAD
-    // — not the stale patch bump auto-detection saw before the fast-forward.
+    assert_eq!(
+        envelope["data"]["result"]["plan"]["policy"]["source_sha"],
+        upstream
+    );
+    assert_eq!(git(&fixture.repo, &["rev-parse", "HEAD^"]), upstream);
     assert_eq!(
         git(&fixture.repo, &["log", "-1", "--format=%s"]),
         format!("release: {TAG}")
@@ -69,25 +96,6 @@ fn auto_detected_bump_survives_a_remote_sync_fast_forward_past_a_feat_commit() {
         "{released}"
     );
     assert!(!released.contains(ORIGINAL_VERSION), "{released}");
-
-    // remote_sync must have actually fast-forwarded past the feat commit that
-    // landed on origin after the checkout's HEAD was pinned — otherwise this
-    // test would not be exercising the bug at all.
-    assert_eq!(
-        git(
-            &fixture.repo,
-            &[
-                "log",
-                "--format=%s",
-                &format!("{}..HEAD", fixture.original_head)
-            ]
-        )
-        .lines()
-        .filter(|line| !line.is_empty())
-        .any(|line| line == "feat: add remote capability"),
-        true,
-        "release history must include the feat commit pushed to origin after checkout"
-    );
 }
 
 struct BumpPolicyFixture {
@@ -182,13 +190,12 @@ impl BumpPolicyFixture {
         run(&repo, &["git", "commit", "-qm", "fix: patch something"]);
         run(&repo, &["git", "push", "-q", "origin", "main"]);
         let original_head = git(&repo, &["rev-parse", "HEAD"]);
+        run(&repo, &["git", "branch", "--unset-upstream"]);
 
         // A second contributor clones the SAME origin and pushes a `feat:`
         // commit on top — exactly the "someone else pushed a feat commit
         // after this checkout's HEAD was pinned" shape from #14974. The
-        // release checkout (`repo`) never pulls this directly; only
-        // `preflight.remote_sync`, during the release run, may fast-forward
-        // it to include this commit.
+        // release checkout (`repo`) does not fetch it before the test starts.
         run(
             root.path(),
             &[
@@ -227,7 +234,7 @@ impl BumpPolicyFixture {
         }
     }
 
-    fn release(&self, context: &HermeticTestContext) -> Output {
+    fn release(&self, context: &HermeticTestContext, args: &[&str]) -> Output {
         context
             .command(TestBinary::HomeboyFixture)
             .args([
@@ -236,9 +243,9 @@ impl BumpPolicyFixture {
                 "--path",
                 self.repo.to_str().expect("repo path"),
                 "--skip-checks",
-                "--apply",
                 "--full",
             ])
+            .args(args)
             .output()
             .expect("run release fixture")
     }

@@ -152,14 +152,6 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
                 .flatten()
         });
 
-        // A stale checkout whose HEAD still sits at the latest tag while its
-        // upstream is ahead would report `release-already-at-head` and silently
-        // skip genuinely-releasable work. Fail closed with an actionable refresh
-        // hint instead of skipping. (#7945 / #7435)
-        if let Some(ref tag) = release_already_at_head {
-            guard_stale_primary_at_head(component_id, &release_scope.git_root, tag)?;
-        }
-
         if let Some(skip_plan) = release_skip_plan(
             component_id,
             options,
@@ -362,41 +354,6 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
     ))
 }
 
-/// Fail closed when a checkout reports `release-already-at-head` only because it
-/// is stale — HEAD sits at the latest tag while its upstream is ahead.
-///
-/// Without this guard, `homeboy release` plans against a registered primary that
-/// is behind `origin/<branch>` and silently skips (or reports `bump: none`),
-/// hiding genuinely-releasable merged work. The check uses **local** tracking
-/// refs (no network fetch), so it never slows planning or breaks offline and
-/// materialized-checkout flows; it only fires when git already knows the
-/// checkout is behind. (#7945 / #7435)
-fn guard_stale_primary_at_head(component_id: &str, git_root: &str, tag: &str) -> Result<()> {
-    let Ok(snapshot) = homeboy_core::git::get_repo_snapshot(git_root) else {
-        return Ok(());
-    };
-
-    let behind = snapshot.behind.unwrap_or(0);
-    if behind == 0 {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "release-stale-checkout",
-        format!(
-            "Refusing to skip `{component_id}` as release-already-at-head: the checkout HEAD is at tag {tag} but its upstream ({branch}) is {behind} commit(s) ahead. Planning against this stale checkout would hide releasable merged work.",
-            branch = snapshot.branch,
-        ),
-        None,
-        Some(vec![
-            format!(
-                "Refresh the checkout to its upstream, then rerun: git -C {git_root} pull --ff-only && homeboy release {component_id}"
-            ),
-            "If you intend to release exactly this commit, check out the ref you want to release before planning.".to_string(),
-        ]),
-    ))
-}
-
 fn apply_oversized_patch_release_policy(
     semver_recommendation: &mut Option<ReleaseSemverRecommendation>,
     changelog_plan: &ReleaseChangelogPlan,
@@ -476,7 +433,6 @@ fn is_explicit_patch_bump(requested_bump: &str, current_version: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::guard_stale_primary_at_head;
     use super::{apply_oversized_patch_release_policy, oversized_patch_release_bump, plan};
     use crate::release::types::{
         ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions, ReleaseSemverCommit,
@@ -700,44 +656,7 @@ mod tests {
         }
     }
 
-    use std::path::Path;
-
     use homeboy_core::test_support::run_git_command as git;
-
-    /// Build a local clone whose HEAD is at `v1.0.0` and an "origin" that is
-    /// `extra_upstream_commits` ahead, then update tracking refs without
-    /// checking out. Returns the local clone path.
-    fn stale_checkout_fixture(root: &Path, extra_upstream_commits: usize) -> std::path::PathBuf {
-        let origin = root.join("origin");
-        let local = root.join("local");
-        std::fs::create_dir_all(&origin).expect("origin dir");
-
-        git(&origin, &["init", "-b", "master"]);
-        git(&origin, &["config", "user.email", "t@example.com"]);
-        git(&origin, &["config", "user.name", "T"]);
-        std::fs::write(origin.join("f.txt"), "0\n").expect("seed file");
-        git(&origin, &["add", "."]);
-        git(&origin, &["commit", "-m", "release: v1.0.0"]);
-        git(&origin, &["tag", "v1.0.0"]);
-
-        git(
-            &origin,
-            &["clone", ".", local.to_str().expect("local path")],
-        );
-        git(&local, &["config", "user.email", "t@example.com"]);
-        git(&local, &["config", "user.name", "T"]);
-
-        for index in 0..extra_upstream_commits {
-            std::fs::write(origin.join("f.txt"), format!("{}\n", index + 1)).expect("write");
-            git(&origin, &["add", "."]);
-            git(&origin, &["commit", "-m", &format!("feat: change {index}")]);
-        }
-
-        // Update tracking refs locally (no working-tree move): the local clone
-        // now knows origin/master is ahead while HEAD stays at v1.0.0.
-        git(&local, &["fetch", "origin"]);
-        local
-    }
 
     #[test]
     fn stale_descendant_release_plans_a_neutral_superseded_skip() {
@@ -798,25 +717,6 @@ mod tests {
                 .expect("unmutated stale version")
                 .trim(),
             "0.1.0"
-        );
-    }
-
-    #[test]
-    fn stale_primary_guard_fails_closed_only_when_checkout_is_behind_upstream() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let behind = stale_checkout_fixture(&dir.path().join("behind"), 2);
-        let error = guard_stale_primary_at_head("demo", behind.to_str().expect("path"), "v1.0.0")
-            .expect_err("behind checkout must fail closed");
-        assert!(
-            error.message.contains("stale") || error.message.contains("ahead"),
-            "error should explain the stale checkout, got: {}",
-            error.message
-        );
-
-        let current = stale_checkout_fixture(&dir.path().join("current"), 0);
-        assert!(
-            guard_stale_primary_at_head("demo", current.to_str().expect("path"), "v1.0.0").is_ok(),
-            "an up-to-date checkout at the tag must still skip cleanly"
         );
     }
 

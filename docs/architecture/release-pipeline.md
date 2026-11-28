@@ -125,11 +125,16 @@ such as version targets and changelog targets.
 ## Release Workspace Ownership
 
 A clean checkout already on its default branch remains the authoritative
-in-place release workspace. When that checkout is dirty, detached, or on a
+in-place release workspace, provided it is not behind the freshly fetched
+upstream default branch. Freshness is checked before bump detection, and the
+selected commit is checked again before mutation. The release preflight does
+not fast-forward the checkout. When the checkout is dirty, detached, or on a
 different branch, release provisions an isolated provider-owned staging
-workspace instead. The staging request is bound to the verified remote default
-branch SHA and carries generic `release_staging` purpose, an owner run
-reference, and `remove_on_success` cleanup policy.
+workspace instead. Staging uses the verified remote default-branch SHA and
+refuses to proceed if that differs from the release source. Replan from a
+checkout of the intended source in that case. The staging request carries the
+`release_staging` purpose, an owner run reference, and a `remove_on_success`
+cleanup policy.
 
 Provider finalization receives the terminal disposition exactly once. A
 successful staging run requests immediate cleanup; a failed or interrupted run

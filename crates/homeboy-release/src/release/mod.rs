@@ -35,6 +35,7 @@ mod planning_quality;
 mod planning_semver;
 mod planning_worktree;
 mod preflight_identity;
+mod source_freshness;
 // `homeboy-core` reaches release/deploy behavior only through the
 // `release_provider` hook; the CLI registers this implementation at startup.
 pub use homeboy_deploy::provider_impl;
@@ -82,6 +83,7 @@ pub use executor::release_notes_path;
 pub use executor::{publish_candidate, CandidatePublication};
 pub use package_recovery::{package_existing_tag, ReleasePackageResult};
 pub use pipeline::run;
+pub use source_freshness::check_portable_release_source;
 pub use types::readiness_is_valid;
 pub use types::{
     BatchReleaseResult, CiReleaseOwnership, ReleaseCommandInput, ReleaseCommandResult,

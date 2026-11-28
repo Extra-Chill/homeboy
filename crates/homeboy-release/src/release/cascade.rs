@@ -199,6 +199,7 @@ pub fn run_cascade(
         let mut input = base_input.clone();
         input.component_id = target.downstream.clone();
         input.path_override = None;
+        input.expected_source = None;
         // A dependency-only release has no new commits; the patch override both
         // selects the bump and permits the otherwise-empty release.
         input.bump_override = Some(DEPENDENCY_BUMP.to_string());
