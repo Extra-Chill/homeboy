@@ -72,6 +72,9 @@ pub(crate) struct DependencyProviderHydrationPlan {
     pub install_success_exit_codes: Vec<i32>,
     pub reusable: Option<DependencyProviderReusableState>,
     pub outputs: Vec<DependencyInstallOutput>,
+    /// Files whose contents fully determine the install (lockfiles and
+    /// manifests). Empty means the outputs cannot be cached by content.
+    pub cache_key_files: Vec<PathBuf>,
     pub download_cache: Option<DependencyDownloadCache>,
     pub download_auth: Option<DependencyDownloadAuth>,
 }
@@ -608,6 +611,7 @@ impl AdapterDependencyProvider {
             install_success_exit_codes: install.success_codes(),
             reusable,
             outputs: self.install_outputs()?,
+            cache_key_files: self.adapter.cache_key_files(),
         }))
     }
 
@@ -786,6 +790,22 @@ impl InstalledDependencyAdapter {
     /// Whether one of the adapter's declared lockfiles exists in the install
     /// root. Lockfile-gated commands (for example `npm ci`) are only runnable
     /// and only plannable when this holds.
+    /// The declared lockfiles and project manifests present in the install
+    /// root. None without a lockfile (an unlocked install is not determined by
+    /// file contents) or for a multi-package workspace, whose members get
+    /// install outputs the adapter does not declare.
+    fn cache_key_files(&self) -> Vec<PathBuf> {
+        if !self.has_declared_lockfile() || declares_workspace_members(&self.install_path) {
+            return Vec::new();
+        }
+        self.lockfile_priority
+            .iter()
+            .chain(&self.project_signals.root_files)
+            .map(|name| self.install_path.join(name))
+            .filter(|path| path.is_file())
+            .collect()
+    }
+
     fn has_declared_lockfile(&self) -> bool {
         self.lockfile_priority
             .iter()
@@ -984,6 +1004,18 @@ enum DependencyAdapterOutputKind {
     Path,
     File,
     Directory,
+}
+
+/// Whether `root` is an npm/yarn (`package.json` `workspaces`) or pnpm
+/// (`pnpm-workspace.yaml` `packages`) workspace with member packages.
+fn declares_workspace_members(root: &Path) -> bool {
+    let npm = fs::read_to_string(root.join("package.json"))
+        .ok()
+        .and_then(|manifest| serde_json::from_str::<serde_json::Value>(&manifest).ok())
+        .is_some_and(|manifest| manifest.get("workspaces").is_some());
+    let pnpm = fs::read_to_string(root.join("pnpm-workspace.yaml"))
+        .is_ok_and(|manifest| manifest.lines().any(|line| line.starts_with("packages:")));
+    npm || pnpm
 }
 
 /// Find the nearest npm workspace that owns this member and has a lockfile.
@@ -1268,6 +1300,7 @@ impl ManifestDependencyProvider {
             install_success_exit_codes: install.success_codes(),
             reusable,
             outputs: self.install_outputs()?,
+            cache_key_files: Vec::new(),
         }))
     }
 
@@ -1948,6 +1981,7 @@ fn hydration_plan_from_extension_output(
         install_success_exit_codes: success_codes(plan.success_exit_codes),
         reusable,
         outputs: dependency_install_outputs(&plan.outputs)?,
+        cache_key_files: Vec::new(),
     }))
 }
 

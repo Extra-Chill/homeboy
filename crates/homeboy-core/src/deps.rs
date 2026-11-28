@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod dependency_graph;
+mod output_cache;
 mod stack_refresh;
 mod stack_source;
 #[cfg(test)]
@@ -492,6 +493,35 @@ fn hydrate_declared_dependencies_unlocked(
             }
         }
 
+        let probe_environment = policy
+            .environment
+            .set
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .chain(environment.iter().cloned())
+            .collect::<Vec<_>>();
+        let output_cache = output_cache::OutputCache::for_plan(&plan, &probe_environment);
+        if output_cache
+            .as_ref()
+            .is_some_and(|cache| cache.restore(&plan.install.cwd))
+            && declared_outputs_ready(&plan.install.cwd, &plan.outputs)
+        {
+            outcomes.push(hydration_outcome(
+                workspace,
+                package_root,
+                provider_id,
+                install_command,
+                plan.install.cwd.display().to_string(),
+                "lockfile_output_cache_hit".to_string(),
+                DependencyHydrationTermination::NotStarted,
+                DependencyHydrationStatus::Reused,
+                None,
+                String::new(),
+                String::new(),
+            ));
+            continue;
+        }
+
         (policy.on_progress)(&DependencyHydrationProgress {
             provider_id: provider_id.clone(),
             phase: "installing".to_string(),
@@ -609,6 +639,9 @@ fn hydrate_declared_dependencies_unlocked(
             .last_mut()
             .expect("install outcome")
             .install_attempts = install_attempts;
+        if let Some(cache) = &output_cache {
+            cache.publish(&plan.install.cwd);
+        }
     }
 
     for outcome in &mut outcomes {
@@ -1858,6 +1891,7 @@ mod tests {
                 "version":1,
                 "ecosystem":"nodejs",
                 "project_signals":{"root_files":["package.json"]},
+                "lockfile_priority":["pnpm-lock.yaml","yarn.lock","npm-shrinkwrap.json","package-lock.json"],
                 "package_managers":[
                     {"id":"pnpm","selection":{"priority":1,"files":["pnpm-lock.yaml"]},"commands":{"install":{"command":"pnpm install --frozen-lockfile"}},"package_identity":{"manifest":"package.json","name":"name","dependencies":["dependencies","devDependencies","peerDependencies","optionalDependencies"]},"outputs":[{"path":"node_modules","kind":"directory"}]},
                     {"id":"yarn","selection":{"priority":2,"files":["yarn.lock"]},"commands":{"install":{"command":"yarn install --frozen-lockfile"}},"package_identity":{"manifest":"package.json","name":"name","dependencies":["dependencies","devDependencies","peerDependencies","optionalDependencies"]},"outputs":[{"path":"node_modules","kind":"directory"}]},
@@ -2137,6 +2171,78 @@ esac
                 .iter()
                 .any(|part| part.contains("pnpm install")));
             assert!(available.is_empty(), "{available:?}");
+        });
+    }
+
+    /// A fresh workspace with an already-installed lockfile restores the saved
+    /// outputs instead of reinstalling; a different lockfile installs again.
+    #[test]
+    fn fresh_workspace_with_installed_lockfile_restores_outputs_without_reinstalling() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+            let bin = tempfile::tempdir().expect("bin dir");
+            let installs = bin.path().join("installs");
+            homeboy_test_support::write_executable(
+                bin.path().join("npm"),
+                &format!(
+                    "#!/bin/sh\nif test \"$1\" = --version; then echo 10.0.0; exit 0; fi\nmkdir -p node_modules/.bin && echo dep > node_modules/dep && ln -s ../dep node_modules/.bin/dep && echo install >> {}\n",
+                    installs.display()
+                ),
+                0o755,
+            )
+            .expect("fake npm");
+            let mut policy = hydration_policy(
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(Mutex::new(Vec::new())),
+            );
+            policy.environment.set.insert(
+                "PATH".to_string(),
+                format!(
+                    "{}:{}",
+                    bin.path().display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            );
+            let hydrate_with = |lockfile: &str, package: &str| {
+                let workspace = tempfile::tempdir().expect("workspace");
+                std::fs::write(workspace.path().join("package.json"), package).unwrap();
+                std::fs::write(workspace.path().join("package-lock.json"), lockfile).unwrap();
+                let outcome =
+                    hydrate_declared_dependencies(workspace.path(), "fixture", ".", &policy)
+                        .expect("hydration")
+                        .remove(0);
+                let link = std::fs::read_link(workspace.path().join("node_modules/.bin/dep"));
+                (outcome.status, outcome.reason, link.ok(), workspace)
+            };
+            let hydrate = |lockfile: &str| {
+                hydrate_with(
+                    lockfile,
+                    r#"{"name":"fixture","dependencies":{"dep":"1.0.0"}}"#,
+                )
+            };
+            let install_count = || std::fs::read_to_string(&installs).unwrap().lines().count();
+
+            let (status, ..) = hydrate("lock-v1");
+            assert_eq!(status, DependencyHydrationStatus::Succeeded);
+            let (status, reason, link, _workspace) = hydrate("lock-v1");
+            assert_eq!(status, DependencyHydrationStatus::Reused);
+            assert_eq!(reason, "lockfile_output_cache_hit");
+            assert_eq!(
+                link,
+                Some(PathBuf::from("../dep")),
+                "symlinks survive restore"
+            );
+            assert_eq!(install_count(), 1);
+            let (status, ..) = hydrate("lock-v2");
+            assert_eq!(status, DependencyHydrationStatus::Succeeded);
+            assert_eq!(install_count(), 2);
+            // A workspace's members get outputs the adapter does not declare.
+            let package =
+                r#"{"name":"fixture","workspaces":["packages/*"],"dependencies":{"dep":"1.0.0"}}"#;
+            hydrate_with("lock-v3", package);
+            let (status, ..) = hydrate_with("lock-v3", package);
+            assert_eq!(status, DependencyHydrationStatus::Succeeded);
+            assert_eq!(install_count(), 4);
         });
     }
 
