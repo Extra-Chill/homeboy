@@ -695,7 +695,6 @@ pub(crate) use super::run_disclosure::detached_cook_route_less_warning;
 pub(crate) use super::run_disclosure::durable_cook_identity_lines;
 #[cfg(test)]
 pub(super) use super::run_disclosure::format_resolved_execution_placement_line;
-pub(super) use super::run_disclosure::run_cook_explicit;
 pub(crate) use super::run_execution::compile_cook_plan;
 pub(super) use super::run_execution::default_cook_prompt_from_task_url;
 #[allow(unused_imports)] // Preserve the existing run module path.

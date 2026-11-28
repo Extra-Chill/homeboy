@@ -704,22 +704,13 @@ pub fn adopt_cook_candidate(
         return match dispatch {
             CookFollowUpDispatch::Dispatched { run_id } => {
                 lifecycle_store.finish_candidate_adoption(&record.run_id, None, false)?;
-                options.identity.initial_plan = recipe_store.load_recipe(cook_id)?
-                    .attempts
-                    .into_iter()
-                    .find(|attempt| attempt.run_id == run_id)
-                    .map(|attempt| attempt.plan)
-                    .ok_or_else(|| {
-                        Error::validation_invalid_argument(
-                            "cook_recipe.attempts",
-                            "dispatched candidate remediation is missing from the durable cook recipe",
-                            Some(run_id.clone()),
-                            None,
-                        )
-                    })?;
-                options.identity.initial_run_id = run_id;
-                let mut result = super::cook::CookService::run(
-                    options,
+                // The remediation advances on the dispatcher adoption already
+                // rebuilt from this recipe's recorded transport.
+                let attempt_dispatcher = options.provider_transport.attempt_dispatcher.clone();
+                let mut result = super::cook::CookService::advance(
+                    cook_id,
+                    &run_id,
+                    &move |_: &Value| Ok(attempt_dispatcher.clone()),
                     super::cook::CookRuntime::with_finalizer(
                         executor,
                         recipe_store,

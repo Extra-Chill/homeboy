@@ -2,20 +2,6 @@
 
 use super::run::*;
 
-pub(super) fn run_cook_explicit(
-    request: agent_task_service::CookRequest,
-    executor: SharedAgentTaskExecutor,
-) -> homeboy::core::Result<
-    agent_task_service::AgentTaskRunResult<agent_task_service::AgentTaskCookReport>,
-> {
-    let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    agent_task_service::CookService::run(
-        request,
-        agent_task_service::CookRuntime::production(executor, &recipe_store, &lifecycle_store),
-    )
-}
-
 /// Operator-facing durable identity block for a Cook that has just become
 /// addressable.
 ///

@@ -14,6 +14,7 @@ pub struct CookRuntime<'a> {
     durable_observer: &'a CookProgressObserver<'a>,
     replay_keeps_recorded_transport: bool,
     workflow_instance: Option<String>,
+    operator_continue_route: bool,
 }
 
 /// How often a workflow-step Cook re-drives a non-terminal Cook.
@@ -35,6 +36,7 @@ impl<'a> CookRuntime<'a> {
             durable_observer,
             replay_keeps_recorded_transport: false,
             workflow_instance: None,
+            operator_continue_route: false,
         }
     }
 
@@ -51,6 +53,14 @@ impl<'a> CookRuntime<'a> {
     /// and terminal continuation drive a detached attempt and set this.
     pub fn replay_keeping_recorded_transport(mut self) -> Self {
         self.replay_keeps_recorded_transport = true;
+        self
+    }
+
+    /// The operator continuation route (`agent-task recover`): an advanced
+    /// attempt honors this process's explicit `--placement local` and records
+    /// the continue-route authority on the selected attempt.
+    pub fn operator_continue_route(mut self) -> Self {
+        self.operator_continue_route = true;
         self
     }
 
@@ -190,6 +200,7 @@ pub(crate) fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentT
 pub struct CookService;
 
 impl CookService {
+    /// Start a fresh Cook from a caller-built request.
     pub fn run(
         request: CookRequest,
         runtime: CookRuntime<'_>,
@@ -202,6 +213,7 @@ impl CookService {
             durable_observer,
             replay_keeps_recorded_transport,
             workflow_instance,
+            operator_continue_route: _,
         } = runtime;
         drive_until_terminal(
             workflow_instance.is_some(),
@@ -223,6 +235,153 @@ impl CookService {
             || std::thread::sleep(WORKFLOW_STEP_COOK_POLL_INTERVAL),
         )
     }
+
+    /// Advance an existing Cook attempt by identity. The request is rebuilt
+    /// from the durable recipe here, once, with the dispatcher/local-placement
+    /// rule applied by [`cook_attempt_transport`]; callers never rebuild it.
+    pub fn advance(
+        cook_id: &str,
+        run_id: &str,
+        resolve_dispatcher: &CookDispatcherResolver<'_>,
+        runtime: CookRuntime<'_>,
+    ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+        let recipe = runtime.store.load_recipe(cook_id)?;
+        let transport = cook_attempt_transport(
+            &recipe,
+            run_id,
+            runtime.operator_continue_route,
+            resolve_dispatcher,
+        )?;
+        let request = cook_attempt_request(&recipe, run_id, &transport)?;
+        if let CookAttemptTransport::OperatorLocal(decision) = transport {
+            agent_task_lifecycle::transition_execution_placement_for_continuation_in_store(
+                runtime.lifecycle_store,
+                run_id,
+                decision,
+            )?;
+        }
+        if runtime.operator_continue_route {
+            authorize_cook_continue_route(runtime.lifecycle_store, cook_id, run_id)?;
+        }
+        Self::run(request, runtime)
+    }
+}
+
+/// Rebuilds the attempt dispatcher recorded in a recipe's `attempt_dispatch`.
+pub type CookDispatcherResolver<'a> =
+    dyn Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>> + 'a;
+
+/// Where an advanced attempt runs.
+pub enum CookAttemptTransport {
+    /// The recipe's recorded attempt dispatcher.
+    Recorded(Option<Arc<dyn AgentTaskCookAttemptDispatcher>>),
+    /// The operator's explicit `--placement local` replacing a recorded
+    /// placement after a pre-provider failure.
+    OperatorLocal(homeboy_lab_contract::ExecutionPlacementDecision),
+}
+
+/// The dispatcher/local-placement rule for advancing one recorded attempt.
+/// Only the operator continuation route honors `--placement local`; every
+/// other path binds the recipe's recorded dispatcher.
+pub fn cook_attempt_transport(
+    recipe: &super::AgentTaskCookRecipe,
+    run_id: &str,
+    operator_continue_route: bool,
+    resolve_dispatcher: &CookDispatcherResolver<'_>,
+) -> Result<CookAttemptTransport> {
+    if operator_continue_route {
+        if let Some(decision) =
+            explicit_local_continuation_decision(&recipe_attempt(recipe, run_id)?.plan)?
+        {
+            return Ok(CookAttemptTransport::OperatorLocal(decision));
+        }
+    }
+    resolve_dispatcher(&recipe.promotion_transport["attempt_dispatch"])
+        .map(CookAttemptTransport::Recorded)
+}
+
+/// The one loader of an existing attempt's request: the durable recipe bound
+/// to `transport`, with the exact recorded attempt as its identity.
+pub fn cook_attempt_request(
+    recipe: &super::AgentTaskCookRecipe,
+    run_id: &str,
+    transport: &CookAttemptTransport,
+) -> Result<CookRequest> {
+    let attempt = recipe_attempt(recipe, run_id)?;
+    let mut request = match transport {
+        CookAttemptTransport::Recorded(dispatcher) => {
+            super::reconstruct_options_with_dispatcher(recipe, dispatcher.clone())?
+        }
+        CookAttemptTransport::OperatorLocal(_) => {
+            super::reconstruct_options_without_dispatcher(recipe)?
+        }
+    };
+    request.identity.initial_run_id = attempt.run_id.clone();
+    request.identity.initial_plan = attempt.plan.clone();
+    if let CookAttemptTransport::OperatorLocal(decision) = transport {
+        request.identity.initial_plan.metadata["execution_placement_decision"] =
+            serde_json::to_value(decision)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    }
+    Ok(request)
+}
+
+fn recipe_attempt<'a>(
+    recipe: &'a super::AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<&'a super::AgentTaskCookRecipeAttempt> {
+    recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "selected attempt is absent from its durable Cook recipe",
+                Some(run_id.to_string()),
+                None,
+            )
+        })
+}
+
+/// The replacement placement an operator's explicit `--placement local`
+/// requests for a recorded attempt, if this process carries one.
+fn explicit_local_continuation_decision(
+    plan: &crate::agent_task_scheduler::AgentTaskPlan,
+) -> Result<Option<homeboy_lab_contract::ExecutionPlacementDecision>> {
+    if !homeboy_core::resource_policy_context::captured_context()
+        .is_some_and(|context| context.local_override)
+    {
+        return Ok(None);
+    }
+    let prior: homeboy_lab_contract::ExecutionPlacementDecision = serde_json::from_value(
+        plan.metadata["execution_placement_decision"].clone(),
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "execution_placement_decision",
+            format!("durable Cook attempt has no valid placement decision: {error}"),
+            None,
+            None,
+        )
+    })?;
+    Ok(Some(homeboy_lab_contract::ExecutionPlacementDecision::new(
+        prior.policy_id,
+        prior.policy_revision,
+        prior.identity,
+        homeboy_lab_contract::Placement::Local,
+        homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+        homeboy_lab_contract::EffectiveExecutionPlacement::Local,
+        None,
+        homeboy_lab_contract::ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
+            authorized: true,
+            authority: Some("operator --placement local".to_string()),
+        },
+    )))
 }
 
 /// Re-drive only the already-admitted Cook. Non-workflow callers keep their

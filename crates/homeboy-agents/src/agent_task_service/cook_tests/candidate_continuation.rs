@@ -424,7 +424,8 @@ fn with_own_green_gates(test: impl FnOnce(CookRequest, std::path::PathBuf)) {
 }
 
 fn continue_terminal(
-    options: &CookRequest,
+    cook_id: &str,
+    run_id: &str,
     backend: &mut CaptureBackend,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
@@ -445,7 +446,18 @@ fn continue_terminal(
         },
         &noop_cook_progress_observer,
     );
-    CookService::run(options.clone(), runtime.replay_keeping_recorded_transport())
+    CookService::advance(
+        cook_id,
+        run_id,
+        &accepted_detached_dispatcher,
+        runtime.replay_keeping_recorded_transport(),
+    )
+}
+
+fn accepted_detached_dispatcher(
+    _: &Value,
+) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>> {
+    Ok(Some(Arc::new(AcceptedDetachedAttemptDispatcher)))
 }
 
 #[test]
@@ -497,11 +509,11 @@ fn lab_gate_terminal_continuation_records_runner_only_path_failure() {
         recipes.enqueue_terminal_continuation(cook, run).unwrap();
         let claim = recipes.claim_continuation_for(cook, run).unwrap().unwrap();
         let mut backend = CaptureBackend::default();
-        let result = crate::agent_task_service::consume_claimed_terminal_with_dispatcher(
+        let result = recipes.consume_claimed_with_dispatcher(
             claim,
-            |_| Ok(Some(Arc::new(AcceptedDetachedAttemptDispatcher))),
-            |options| {
-                continue_terminal(&options, &mut backend)
+            &accepted_detached_dispatcher,
+            |cook_id, run_id| {
+                continue_terminal(cook_id, run_id, &mut backend)
                     .map(|result| (result.exit_code, result.value.disposition))
             },
         );
@@ -589,15 +601,16 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
             hydrate_run_id: Some(run_id.clone()),
             ..Default::default()
         };
-        let exit = crate::agent_task_service::consume_claimed_terminal_with_dispatcher(
-            claim,
-            |_| Ok(Some(Arc::new(AcceptedDetachedAttemptDispatcher))),
-            |options| {
-                continue_terminal(&options, &mut backend)
-                    .map(|result| (result.exit_code, result.value.disposition))
-            },
-        )
-        .unwrap();
+        let exit = recipes
+            .consume_claimed_with_dispatcher(
+                claim,
+                &accepted_detached_dispatcher,
+                |cook_id, run_id| {
+                    continue_terminal(cook_id, run_id, &mut backend)
+                        .map(|result| (result.exit_code, result.value.disposition))
+                },
+            )
+            .unwrap();
 
         assert_eq!(exit, 1);
         assert_eq!(backend.create_count, 0);

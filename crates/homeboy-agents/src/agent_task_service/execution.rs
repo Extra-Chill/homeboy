@@ -882,26 +882,11 @@ fn execute_claimed_queue_record(
         let cook_id = record.metadata["cook_id"]
             .as_str()
             .expect("checked Cook id metadata");
-        let recipe = store.load_recipe(cook_id)?;
-        let attempt = recipe
-            .attempts
-            .iter()
-            .find(|attempt| attempt.run_id == record.run_id)
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "cook_recipe.attempts",
-                    "queued Cook retry is absent from its durable recipe",
-                    Some(record.run_id.clone()),
-                    None,
-                )
-            })?;
-        let attempt_dispatcher = dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
-        let mut options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
-        options.identity.initial_run_id = attempt.run_id.clone();
-        options.identity.initial_plan = attempt.plan.clone();
         let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-        let cook = super::CookService::run(
-            options,
+        let cook = super::CookService::advance(
+            cook_id,
+            &record.run_id,
+            &dispatcher,
             super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
         )?;
         let aggregate = agent_task_lifecycle::read_aggregate(&record.run_id).ok();
@@ -1175,10 +1160,8 @@ fn consume_claimed_continuation(
         .and_then(Value::as_str)
         .and_then(agent_task_lifecycle::trusted_dispatcher_kind);
     let unsupported_dispatcher_kind = dispatcher_value.is_some() && dispatcher_kind.is_none();
-    if let Err(error) =
-        dispatcher(&recipe.promotion_transport["attempt_dispatch"]).and_then(|attempt_dispatcher| {
-            super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher).map(|_| ())
-        })
+    if let Err(error) = super::cook_attempt_transport(&recipe, &run_id, false, dispatcher)
+        .and_then(|transport| super::cook_attempt_request(&recipe, &run_id, &transport))
     {
         claim.fail(&redacted_continuation_failure(&error))?;
         skipped.push(continuation_skip(
@@ -1189,19 +1172,18 @@ fn consume_claimed_continuation(
         ));
         return Ok(unclaimed_continuation_result(skipped));
     }
-    let exit_code = store.consume_claimed_with_dispatcher(
-        claim,
-        |recipe| dispatcher(recipe),
-        |options| {
+    let exit_code =
+        store.consume_claimed_with_dispatcher(claim, dispatcher, |cook_id, run_id| {
             let lifecycle_store =
                 crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-            super::CookService::run(
-                options,
+            super::CookService::advance(
+                cook_id,
+                run_id,
+                dispatcher,
                 super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
             )
             .map(|result| (result.exit_code, result.value.disposition))
-        },
-    )?;
+        })?;
     let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
         .map(|index| index.latest_run_id)
         .unwrap_or(run_id);

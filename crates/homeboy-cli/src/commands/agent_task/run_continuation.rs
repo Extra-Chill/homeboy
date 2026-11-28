@@ -46,71 +46,24 @@ where
     run_cook_continuation_execution(args, executor, reconstruct_dispatcher)
 }
 
-pub(super) fn explicit_local_continuation_decision(
-    plan: &homeboy::agents::agent_task_scheduler::AgentTaskPlan,
-) -> homeboy::core::Result<Option<homeboy_lab_contract::ExecutionPlacementDecision>> {
-    if !homeboy::core::resource_policy_context::captured_context()
-        .is_some_and(|context| context.local_override)
-    {
-        return Ok(None);
-    }
-    let prior: homeboy_lab_contract::ExecutionPlacementDecision = serde_json::from_value(
-        plan.metadata["execution_placement_decision"].clone(),
-    )
-    .map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "execution_placement_decision",
-            format!("durable Cook attempt has no valid placement decision: {error}"),
-            None,
-            None,
-        )
-    })?;
-    Ok(Some(homeboy_lab_contract::ExecutionPlacementDecision::new(
-        prior.policy_id,
-        prior.policy_revision,
-        prior.identity,
-        homeboy_lab_contract::Placement::Local,
-        homeboy_lab_contract::ExecutionPlacementRequirement::Either,
-        homeboy_lab_contract::EffectiveExecutionPlacement::Local,
-        None,
-        homeboy_lab_contract::ExecutionPlacementFallback {
-            local_allowed: false,
-            reason: None,
-        },
-        homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
-            authorized: true,
-            authority: Some("operator --placement local".to_string()),
-        },
-    )))
-}
-
-pub(super) fn apply_explicit_local_continuation(
+/// The operator continuation route advances one recorded attempt by identity.
+fn advance_cook_continuation(
+    cook_id: &str,
     run_id: &str,
-    options: &mut homeboy::agents::agent_task_service::CookRequest,
-) -> homeboy::core::Result<()> {
-    let Some(decision) = explicit_local_continuation_decision(&options.identity.initial_plan)?
-    else {
-        return Ok(());
-    };
-    let lifecycle_store =
-        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    homeboy::agents::agent_task_lifecycle::transition_execution_placement_for_continuation_in_store(
-        &lifecycle_store,
+    reconstruct_dispatcher: &agent_task_service::CookDispatcherResolver<'_>,
+    executor: SharedAgentTaskExecutor,
+) -> homeboy::core::Result<
+    agent_task_service::AgentTaskRunResult<agent_task_service::AgentTaskCookReport>,
+> {
+    let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    agent_task_service::CookService::advance(
+        cook_id,
         run_id,
-        decision.clone(),
-    )?;
-    apply_local_continuation_decision(options, decision)
-}
-
-pub(super) fn apply_local_continuation_decision(
-    options: &mut homeboy::agents::agent_task_service::CookRequest,
-    decision: homeboy_lab_contract::ExecutionPlacementDecision,
-) -> homeboy::core::Result<()> {
-    options.identity.initial_plan.metadata["execution_placement_decision"] =
-        serde_json::to_value(decision)
-            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-    options.provider_transport.attempt_dispatcher = None;
-    Ok(())
+        reconstruct_dispatcher,
+        agent_task_service::CookRuntime::production(executor, &recipe_store, &lifecycle_store)
+            .operator_continue_route(),
+    )
 }
 
 pub(super) fn cook_provider_route_override(
@@ -288,19 +241,21 @@ where
             ));
         };
         let mut result = None;
-        let dispatcher = reconstruct_dispatcher;
-        let executor = executor.clone();
-        let execute = |options| {
-            let mut options = options;
-            apply_explicit_local_continuation(&run_id, &mut options)?;
-            agent_task_service::authorize_cook_continue_route(&options)?;
-            let cook = run_cook_explicit(options, executor.clone())?;
-            let outcome = (cook.exit_code, cook.value.disposition);
-            result = Some(cook.value);
-            Ok(outcome)
-        };
-        let exit_code =
-            agent_task_service::consume_claimed_with_dispatcher(claim, dispatcher, execute)?;
+        let exit_code = agent_task_service::consume_claimed_with_dispatcher(
+            claim,
+            &reconstruct_dispatcher,
+            |cook_id, run_id| {
+                let cook = advance_cook_continuation(
+                    cook_id,
+                    run_id,
+                    &reconstruct_dispatcher,
+                    executor.clone(),
+                )?;
+                let outcome = (cook.exit_code, cook.value.disposition);
+                result = Some(cook.value);
+                Ok(outcome)
+            },
+        )?;
         let value = cook_report_with_continuation(
             serde_json::to_value(result.ok_or_else(|| {
                 homeboy::core::Error::internal_unexpected(
@@ -315,45 +270,8 @@ where
         ));
     }
 
-    let local_override = explicit_local_continuation_decision(
-        &recipe
-            .attempts
-            .iter()
-            .find(|attempt| attempt.run_id == run_id)
-            .ok_or_else(|| {
-                homeboy::core::Error::internal_unexpected("selected Cook attempt is absent")
-            })?
-            .plan,
-    )?;
-    let dispatcher = if local_override.is_some() {
-        None
-    } else {
-        reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
-    };
-    let attempt = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == run_id)
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "cook_or_attempt_id",
-                "selected attempt is absent from its durable Cook recipe",
-                Some(run_id.clone()),
-                None,
-            )
-        })?;
-    let mut options = if local_override.is_some() {
-        agent_task_service::reconstruct_options_without_dispatcher(&recipe)?
-    } else {
-        agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)?
-    };
-    options.identity.initial_run_id = attempt.run_id.clone();
-    options.identity.initial_plan = attempt.plan.clone();
-    if local_override.is_some() {
-        apply_explicit_local_continuation(&run_id, &mut options)?;
-    }
-    agent_task_service::authorize_cook_continue_route(&options)?;
-    let result = run_cook_explicit(options, executor)?;
+    let result =
+        advance_cook_continuation(&recipe.cook_id, &run_id, &reconstruct_dispatcher, executor)?;
     let value =
         cook_report_with_continuation(serde_json::to_value(result.value).unwrap_or(Value::Null));
     Ok((
@@ -559,14 +477,17 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             "state": format!("{continuation_state:?}"),
             "rearm": args.rearm,
         }));
-        let dispatcher = match crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
-            &recipe.promotion_transport["attempt_dispatch"],
+        let transport = match agent_task_service::cook_attempt_transport(
+            &recipe,
+            &run_id,
+            false,
+            &crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
         ) {
-            Ok(dispatcher) => {
+            Ok(transport) => {
                 phases.push(
                     serde_json::json!({ "phase": "transport", "status": "passed", "reason": "ok" }),
                 );
-                dispatcher
+                transport
             }
             Err(error) => {
                 return Ok((
@@ -582,9 +503,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 ));
             }
         };
-        if let Err(error) =
-            agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
-        {
+        if let Err(error) = agent_task_service::cook_attempt_request(&recipe, &run_id, &transport) {
             return Ok((
                 cook_continuation_preflight_report(
                     selected_run_id,
@@ -659,39 +578,17 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             }
         }
     }
-    let attempt = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == run_id)
-        .expect("continuation selection is recipe-bound");
-    let local_override = match explicit_local_continuation_decision(&attempt.plan) {
-        Ok(decision) => decision,
-        Err(error) => {
-            return Ok((
-                cook_continuation_preflight_report(
-                    selected_run_id,
-                    Some(continuation_command()),
-                    candidate_fingerprint,
-                    phases,
-                    "transport",
-                    &error,
-                ),
-                1,
-            ))
-        }
-    };
-    let dispatcher = match if local_override.is_some() {
-        Ok(None)
-    } else {
-        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
-            &recipe.promotion_transport["attempt_dispatch"],
-        )
-    } {
-        Ok(dispatcher) => {
+    let transport = match agent_task_service::cook_attempt_transport(
+        &recipe,
+        &run_id,
+        true,
+        &crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+    ) {
+        Ok(transport) => {
             phases.push(
                 serde_json::json!({ "phase": "transport", "status": "passed", "reason": "ok" }),
             );
-            dispatcher
+            transport
         }
         Err(error) => {
             return Ok((
@@ -707,16 +604,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ))
         }
     };
-    let attempt = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == run_id)
-        .expect("continuation selection is recipe-bound");
-    let mut options = match if local_override.is_some() {
-        agent_task_service::reconstruct_options_without_dispatcher(&recipe)
-    } else {
-        agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
-    } {
+    let options = match agent_task_service::cook_attempt_request(&recipe, &run_id, &transport) {
         Ok(options) => options,
         Err(error) => {
             return Ok((
@@ -732,23 +620,6 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ))
         }
     };
-    options.identity.initial_run_id = attempt.run_id.clone();
-    options.identity.initial_plan = attempt.plan.clone();
-    if let Some(decision) = local_override {
-        if let Err(error) = apply_local_continuation_decision(&mut options, decision) {
-            return Ok((
-                cook_continuation_preflight_report(
-                    selected_run_id,
-                    Some(continuation_command()),
-                    candidate_fingerprint,
-                    phases,
-                    "transport",
-                    &error,
-                ),
-                1,
-            ));
-        }
-    }
     if let Some(finalization) = agent_task_service::recorded_finalization_receipt(&record.metadata)
         .filter(|finalization| !finalization.is_null())
     {
