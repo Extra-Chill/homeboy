@@ -555,21 +555,12 @@ pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
     }
 
     let mut rigs = if id.is_some() {
-        discover_rigs_for_install(&path, id, false)?
+        let discovered = discover_rigs_for_install(&path, id, false)?;
+        discovery::select_rigs(discovered, id, false, source)?
     } else {
         discover_rigs(&path)?
     };
-    if let Some(id) = id {
-        let id = homeboy_core::extension::lifecycle::slugify_id(id)?;
-        if rigs.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "id",
-                format!("Rig '{}' not found in package", id),
-                Some(id),
-                None,
-            ));
-        }
-    } else if rigs.len() != 1 {
+    if id.is_none() && rigs.len() != 1 {
         let available = rigs.iter().map(|rig| rig.id.clone()).collect::<Vec<_>>();
         return Err(Error::validation_invalid_argument(
             "id",
@@ -668,7 +659,8 @@ fn enclosing_local_package_for_rig(id: &str) -> Result<Option<PathBuf>> {
         }
         if candidate.join("rig.json").is_file() {
             let rigs = discover_rigs_for_install(candidate, Some(id), false)?;
-            if !rigs.is_empty() {
+            let slug = homeboy_core::extension::lifecycle::slugify_id(id)?;
+            if rigs.iter().any(|rig| rig.id == slug) {
                 return Ok(Some(candidate.to_path_buf()));
             }
         }

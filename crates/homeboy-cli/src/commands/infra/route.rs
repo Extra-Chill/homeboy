@@ -39,6 +39,9 @@ pub(crate) fn route_after_parse_with_provenance(
     // letting one through means cook executes a request it already knows it
     // cannot honor (#10917).
     reject_contradictory_cook_arguments(cli)?;
+    if let Commands::Rig(args) = &cli.command {
+        args.validate_source_placement(cli.runner.as_deref(), cli.placement)?;
+    }
 
     if let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Retry(retry),
