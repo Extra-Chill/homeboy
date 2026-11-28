@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.14] - 2026-11-28
+
+### Fixed
+- check rustfmt across all workspace members, not just the root package
+
 ## [1.37.13] - 2026-11-22
 
 ### Fixed
