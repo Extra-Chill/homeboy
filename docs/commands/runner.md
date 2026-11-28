@@ -908,10 +908,18 @@ homeboy runner set <id> --json <JSON>
 homeboy runner set <id> --base64 <BASE64_JSON>
 homeboy runner set <id> --json '{"workspace_root":"/srv/homeboy","concurrency_limit":4}'
 homeboy runner set <id> --json '{"runner_exec_wait_timeout_secs":2400,"cancel_on_wait_timeout":true}'
+homeboy runner set <id> --json '{"env":{"OLD_MODE":null}}'
+homeboy runner set <id> --replace env --json '{"env":{"APP_MODE":"production"}}'
+homeboy runner set <id> --replace env --json '{"env":{}}'
 ```
 
 Updates a runner by merging a JSON object into the runner config. SSH runner settings live under `servers/<id>.json` as the server's `runner` capability; local runners live under `runners/<id>.json`.
 Arbitrary runner updates must use `--json` or `--base64`; positional `key=value` and trailing arbitrary `--key value` updates are not accepted.
+
+Objects merge by key, including `env`. Set an environment key to JSON `null` to delete it without changing other keys. With `--replace env`, the supplied `env` object replaces the entire configured map: omitted keys are removed, and `{}` clears the map. This does not change `secret_env`.
+
+Arrays supplied at the top level of a single patch replace by default. Use `--replace <field>` for nested arrays (for example, `--replace policy.allowed_projects`). Other objects still merge by key.
+
 `runner_exec_wait_timeout_secs` controls how long the controller waits after a
 runner accepts a job (`0` returns an in-flight handoff immediately).
 `cancel_on_wait_timeout` controls whether an expired controller wait requests

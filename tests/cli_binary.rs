@@ -54,5 +54,7 @@ mod runner_doctor_playwright;
 mod runner_job_list;
 #[path = "cli_binary/runner_refresh_progress.rs"]
 mod runner_refresh_progress;
+#[path = "cli_binary/runner_set.rs"]
+mod runner_set;
 #[path = "cli_binary/unknown_command.rs"]
 mod unknown_command;

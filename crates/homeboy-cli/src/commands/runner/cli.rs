@@ -123,6 +123,18 @@ pub(super) enum RunnerCommand {
         id: String,
     },
     /// Modify runner settings
+    #[command(
+        after_help = r#"Objects merge by key; arrays supplied at the top level of a single patch
+replace by default. Use --replace <FIELD> for nested arrays. For env only,
+--replace env replaces the configured map with the supplied env object.
+
+Delete an environment key by setting its value to null:
+  homeboy runner set <id> --json '{"env":{"OLD_MODE":null}}'
+
+Replace or clear the whole environment map:
+  homeboy runner set <id> --replace env --json '{"env":{"APP_MODE":"production"}}'
+  homeboy runner set <id> --replace env --json '{"env":{}}'"#
+    )]
     Set {
         #[command(flatten)]
         args: DynamicSetArgs,
