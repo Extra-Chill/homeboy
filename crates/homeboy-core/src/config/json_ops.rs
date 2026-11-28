@@ -44,6 +44,17 @@ pub fn merge_config<T: Serialize + DeserializeOwned>(
     patch: Value,
     replace_fields: &[String],
 ) -> Result<MergeFields> {
+    merge_config_with_map_replacement(existing, patch, replace_fields, &[])
+}
+
+/// Merge with selected top-level map fields eligible for whole-map replacement.
+/// Other object fields still merge recursively, even when listed in `replace_fields`.
+pub fn merge_config_with_map_replacement<T: Serialize + DeserializeOwned>(
+    existing: &mut T,
+    patch: Value,
+    replace_fields: &[String],
+    replaceable_maps: &[&str],
+) -> Result<MergeFields> {
     // Normalize top-level keys to snake_case (accepts camelCase, PascalCase,
     // etc. for struct-field keys on the patch root). Nested keys are left
     // verbatim so HashMap lookup keys - component IDs, hook names, etc. -
@@ -80,10 +91,31 @@ pub fn merge_config<T: Serialize + DeserializeOwned>(
     let mut base = serde_json::to_value(&*existing)
         .map_err(|e| Error::internal_json(e.to_string(), Some("serialize config".to_string())))?;
 
-    // Snapshot patch values before merge (for zero-value detection)
-    let patch_values: Map<String, Value> = patch.as_object().cloned().unwrap_or_default();
+    // Start a replaced map from empty. Also materialize omitted empty maps so
+    // that null entries are treated as deletions even when adding the first key.
+    if let Some(base_obj) = base.as_object_mut() {
+        for &field in replaceable_maps {
+            if patch_obj.get(field).is_some_and(Value::is_object) {
+                if should_replace(field, replace_fields) {
+                    base_obj.insert(field.to_string(), Value::Object(Map::new()));
+                } else {
+                    base_obj
+                        .entry(field.to_string())
+                        .or_insert_with(|| Value::Object(Map::new()));
+                }
+            }
+        }
+    }
 
+    // Use the effective merged value for zero-value detection on opted-in maps
+    // (deleting the last entry can make a known map vanish on serialization).
+    let mut patch_values = patch_obj.clone();
     deep_merge(&mut base, patch, replace_fields, String::new());
+    for &field in replaceable_maps {
+        if let (Some(value), Some(merged)) = (patch_values.get_mut(field), base.get(field)) {
+            *value = merged.clone();
+        }
+    }
 
     *existing = serde_json::from_value(base)
         .map_err(|e| Error::validation_invalid_json(e, Some("merge config".to_string()), None))?;

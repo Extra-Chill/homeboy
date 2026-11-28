@@ -23,8 +23,8 @@ pub use json_io::{
 };
 pub use json_io::{serialize_with_id, to_json_string};
 pub use json_ops::collect_array_fields;
-pub use json_ops::merge_config;
 pub(crate) use json_ops::remove_config;
+pub use json_ops::{merge_config, merge_config_with_map_replacement};
 pub use json_pointer::value_type_name;
 pub use json_pointer::{config_pointer, get_json_pointer, remove_json_pointer, set_json_pointer};
 
@@ -571,6 +571,9 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
 
     /// The directory name within the config root (e.g., "projects", "servers").
     const DIR_NAME: &'static str;
+
+    /// Top-level map fields that can be replaced instead of merged.
+    const REPLACEABLE_MAPS: &'static [&'static str] = &[];
 
     // Required methods - only these need implementation
     fn id(&self) -> &str;
@@ -1164,10 +1167,14 @@ pub fn merge<T: ConfigEntity>(
     let raw = read_json_spec_to_string(json_spec)?;
 
     if is_json_array(&raw) {
-        return Ok(MergeOutput::Bulk(merge_batch_from_json_in_root::<T>(
-            config_root,
-            &raw,
-        )?));
+        let replace_maps = replace_fields
+            .iter()
+            .filter(|field| T::REPLACEABLE_MAPS.contains(&field.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        return Ok(MergeOutput::Bulk(
+            merge_batch_with_map_replacement_in_root::<T>(config_root, &raw, &replace_maps)?,
+        ));
     }
 
     Ok(MergeOutput::Single(merge_from_json_in_root::<T>(
@@ -1291,7 +1298,12 @@ pub fn merge_from_json_in_root<T: ConfigEntity>(
 
     let mut entity = load_in_root::<T>(config_root, &effective_id)?;
     let previous_json = to_json_string(&entity)?;
-    let result = merge_config(&mut entity, parsed, replace_fields)?;
+    let result = merge_config_with_map_replacement(
+        &mut entity,
+        parsed,
+        replace_fields,
+        T::REPLACEABLE_MAPS,
+    )?;
     entity.set_id(effective_id.clone());
     entity.post_merge(&previous_json);
     save_in_root(config_root, &entity)?;
@@ -1314,6 +1326,15 @@ pub fn merge_from_json<T: ConfigEntity>(
 pub fn merge_batch_from_json_in_root<T: ConfigEntity>(
     config_root: &Path,
     raw_json: &str,
+) -> Result<BatchResult> {
+    merge_batch_with_map_replacement_in_root::<T>(config_root, raw_json, &[])
+}
+
+/// Merge a batch, honoring replacement flags for opted-in top-level maps only.
+fn merge_batch_with_map_replacement_in_root<T: ConfigEntity>(
+    config_root: &Path,
+    raw_json: &str,
+    replace_maps: &[String],
 ) -> Result<BatchResult> {
     let value: serde_json::Value = from_str(raw_json)?;
 
@@ -1356,7 +1377,12 @@ pub fn merge_batch_from_json_in_root<T: ConfigEntity>(
                         continue;
                     }
                 };
-                match merge_config(&mut entity, patch, &[]) {
+                match merge_config_with_map_replacement(
+                    &mut entity,
+                    patch,
+                    replace_maps,
+                    T::REPLACEABLE_MAPS,
+                ) {
                     Ok(_) => {
                         entity.set_id(id.clone());
                         entity.post_merge(&previous_json);

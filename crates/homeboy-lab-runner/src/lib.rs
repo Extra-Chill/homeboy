@@ -771,6 +771,7 @@ fn missing_remote_homeboy_path_error(runner: &Runner, context: &str) -> Error {
 impl ConfigEntity for Runner {
     const ENTITY_TYPE: &'static str = "runner";
     const DIR_NAME: &'static str = "runners";
+    const REPLACEABLE_MAPS: &'static [&'static str] = &["env"];
 
     fn id(&self) -> &str {
         &self.id
@@ -1789,9 +1790,7 @@ pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Re
     let parsed: Value = config::from_str(&raw)?;
 
     if parsed.is_array() {
-        return Ok(MergeOutput::Bulk(config::merge_batch_from_json::<Runner>(
-            &raw,
-        )?));
+        return config::merge::<Runner>(id, &raw, replace_fields);
     }
 
     let effective_id = id
@@ -1850,7 +1849,12 @@ pub fn enable_server_runner(server_id: &str, patch: Value) -> Result<Runner> {
     let mut runner = server.runner.unwrap_or_default();
     let patch = strip_runner_identity_fields(patch);
     if !matches!(patch.as_object(), Some(obj) if obj.is_empty()) {
-        config::merge_config(&mut runner, patch, &[])?;
+        config::merge_config_with_map_replacement(
+            &mut runner,
+            patch,
+            &[],
+            Runner::REPLACEABLE_MAPS,
+        )?;
     }
     validate_server_runner(server_id, &runner)?;
     let spec = RunnerSpec::from(runner);
@@ -2047,7 +2051,12 @@ fn merge_server_runner(
         obj.remove("kind");
         obj.remove("server_id");
     }
-    let result = config::merge_config(&mut runner, patch, replace_fields)?;
+    let result = config::merge_config_with_map_replacement(
+        &mut runner,
+        patch,
+        replace_fields,
+        Runner::REPLACEABLE_MAPS,
+    )?;
     validate_server_runner(id, &runner)?;
     server.runner = Some(runner);
     server::save(&server)?;
