@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Execute the host-smoke contract through the installed WP Codebox runtime. The
-# smoke reads the injected roots and requires a file from the mounted dependency.
+# smokes check the CLI stream constants and read the injected dependency roots.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -24,6 +24,18 @@ fi
 component="${WORKDIR}/component"
 dependency="${WORKDIR}/dependency roots/runtime-dependency"
 mkdir -p "${component}/tests" "$dependency"
+cat > "${component}/tests/streams-smoke.php" <<'PHP'
+<?php
+
+if ( 'stream' !== get_resource_type( STDIN ) ) {
+	exit( 1 );
+}
+if ( false === fwrite( STDERR, "standard error is writable\n" ) ) {
+	exit( 1 );
+}
+fwrite( STDOUT, "standard streams smoke passed\n" );
+PHP
+php "${component}/tests/streams-smoke.php" > "${WORKDIR}/cli.out"
 cat > "${component}/tests/runtime-contract-smoke.php" <<'PHP'
 <?php
 
@@ -64,14 +76,23 @@ cat > "${dependency}/runtime-dependency.php" <<'PHP'
 define( 'HOMEBOY_RUNTIME_DEPENDENCY_LOADED', true );
 PHP
 
-HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+if ! HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 HOMEBOY_WP_CODEBOX_BIN="$WP_CODEBOX_BIN" \
-HOMEBOY_WORDPRESS_HOST_SMOKE_FILE="tests/runtime-contract-smoke.php" \
+HOMEBOY_WORDPRESS_HOST_SMOKE_FILES=$'tests/streams-smoke.php\ntests/runtime-contract-smoke.php' \
 HOMEBOY_SETTINGS_JSON="$(jq -nc --arg path "$dependency" '{validation_dependencies: [{path: $path, plugin_slug: "runtime-dependency"}]}')" \
-    bash "${SCRIPT_DIR}/test-runner-host-smoke-wp.sh" > "${WORKDIR}/run.out"
+    bash "${SCRIPT_DIR}/test-runner-host-smoke-wp.sh" > "${WORKDIR}/run.out"; then
+    sed 's/^/  /' "${WORKDIR}/run.out" >&2
+    exit 1
+fi
+
+if ! grep -Fxqf "${WORKDIR}/cli.out" "${WORKDIR}/run.out"; then
+    echo "Expected the same standard stream smoke output under CLI and Playground." >&2
+    sed 's/^/  /' "${WORKDIR}/run.out" >&2
+    exit 1
+fi
 
 if ! grep -Fq "runtime host smoke passed" "${WORKDIR}/run.out"; then
     echo "Expected the WordPress host smoke to read and use runtime mappings." >&2

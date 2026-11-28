@@ -134,7 +134,11 @@ homeboy_wordpress_smoke_wrapper() {
         echo "\$smoke = " . var_export($smoke, true) . ";\n";
         echo "\$homeboy_smoke_environment = " . var_export($environment, true) . ";\n";
         echo "foreach (\$homeboy_smoke_environment as \$name => \$value) { putenv(\$name . \"=\" . \$value); \$_ENV[\$name] = \$value; }\n";
-        echo "\$homeboy_smoke_stderr = defined(\"STDERR\") ? STDERR : fopen(\"php://stderr\", \"w\");\n";
+        // Playground runs under a web SAPI without the CLI stream constants.
+        echo "if (!defined(\"STDOUT\")) { define(\"STDOUT\", fopen(\"php://stdout\", \"w\")); }\n";
+        echo "if (!defined(\"STDERR\")) { define(\"STDERR\", fopen(\"php://stderr\", \"w\")); }\n";
+        echo "if (!defined(\"STDIN\")) { define(\"STDIN\", fopen(\"php://stdin\", \"r\")); }\n";
+        echo "\$homeboy_smoke_stderr = STDERR;\n";
         echo "if (!is_resource(\$homeboy_smoke_stderr)) { \$homeboy_smoke_stderr = fopen(\"php://output\", \"w\"); }\n";
         echo "if (!file_exists(\$smoke)) { fwrite(\$homeboy_smoke_stderr, \"smoke file missing in sandbox: \" . \$smoke . \"\\n\"); exit(3); }\n";
         echo "register_shutdown_function(function () { \$e = error_get_last(); if (\$e && in_array(\$e[\"type\"], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true)) { exit(1); } });\n";
