@@ -78,6 +78,21 @@ fn release_envelope_flags_compose_on_both_sides_of_inspection_subcommands() {
 }
 
 #[test]
+fn ordinary_release_targets_remain_positional() {
+    for components in [
+        ["fixture"].as_slice(),
+        ["fixture", "version-tools"].as_slice(),
+    ] {
+        let mut argv = vec!["homeboy", "release", "--dry-run"];
+        argv.extend_from_slice(components);
+        let args = release(&argv);
+        assert!(args.command.is_none());
+        assert_eq!(args.execute.components, components);
+        super::validate_helper_position(&args).expect("valid release targets");
+    }
+}
+
+#[test]
 fn release_inspection_targets_use_component_first_grammar() {
     let changes = release(&["homeboy", "release", "changes", "homeboy"]);
     assert!(matches!(

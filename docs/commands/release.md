@@ -14,6 +14,8 @@ homeboy release artifact-source-authority <component_id> --dir <DIR> --tag <TAG>
 homeboy release resolve <repository> --prefix <tag-prefix>
 ```
 
+Put release helpers before component IDs (for example, `homeboy release version show php-transformer`). A helper name after a positional component ID is rejected before release planning.
+
 By default Homeboy auto-detects the bump from commit history. Use `--bump <major|minor|patch|VERSION>` to force a bump type or explicit version.
 
 ### Commit types
