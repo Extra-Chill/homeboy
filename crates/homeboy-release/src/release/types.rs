@@ -403,7 +403,7 @@ pub struct ReleasePipelineOptions {
     /// Use when CI handles publishing after the tag is pushed.
     #[serde(default)]
     pub skip_publish: bool,
-    /// Finish a release whose version commit and tag already exist at HEAD.
+    /// Finish a release at its tagged HEAD or verified release PR merge commit.
     #[serde(default)]
     pub head: bool,
     /// Existing release artifacts to inventory instead of running release.package.
@@ -413,7 +413,7 @@ pub struct ReleasePipelineOptions {
     #[serde(default)]
     pub deploy: bool,
     /// Prepare through a release pull request rather than updating the default
-    /// branch directly. With `head`, finalize the normally merged commit.
+    /// branch directly. With `head`, require verification of the release PR merge.
     #[serde(default)]
     pub protected_branch: bool,
     /// A validated prepared release branch whose PR creation is being retried.

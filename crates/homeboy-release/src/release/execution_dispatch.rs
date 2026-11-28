@@ -550,7 +550,15 @@ pub(super) fn run_remote_sync_preflight(
 ) -> ReleaseStepResult {
     let result = staging_source_sha
         .map_or_else(
-            || super::planning_git::validate_remote_sync(context.component),
+            || {
+                if context.options.pipeline.head {
+                    // Finalize the verified merge or tagged commit, not a
+                    // newer default-branch tip. Refresh refs without moving HEAD.
+                    git::fetch_origin(&context.component.local_path)
+                } else {
+                    super::planning_git::validate_remote_sync(context.component)
+                }
+            },
             |source_sha| {
                 super::planning_git::validate_remote_sync_at(context.component, source_sha)
             },
