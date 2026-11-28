@@ -166,11 +166,14 @@ pub(crate) fn friction(store: &ObservationStore, args: RunsFrictionArgs) -> CmdR
             .and_then(|id| cook_aliases.get(id))
             .and_then(|id| cooks.get_mut(id))
         {
-            if run.started_at
-                >= cook["submitted_at"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string()
+            // Reads (status, diagnose, logs, show) inspect a Cook; only a
+            // command that could change it is an intervention.
+            if !row.read_only
+                && run.started_at
+                    >= cook["submitted_at"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
             {
                 let n = cook["manual_intervention_count"].as_u64().unwrap_or(0);
                 cook["manual_intervention_count"] = json!(n + 1);
@@ -201,4 +204,64 @@ pub(crate) fn friction(store: &ObservationStore, args: RunsFrictionArgs) -> CmdR
         ),
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, FromArgMatches};
+
+    /// Each argv runs through the real invocation boundary into the store;
+    /// only the commands that could change the Cook count as interventions.
+    #[test]
+    fn only_commands_that_could_change_a_cook_count_as_interventions() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let cook = "wf-loop-0123456789ab-cook-i1-n1-a1";
+            let store = ObservationStore::open_initialized().unwrap();
+            store
+                .start_run_with_id(
+                    homeboy::core::observation::NewRunRecord::builder("agent-task").build(),
+                    cook.to_string(),
+                )
+                .unwrap();
+            let commands: [&[&str]; 6] = [
+                &["agent-task", "status", cook],
+                &["agent-task", "diagnose", cook],
+                &["runs", "show", cook],
+                &["runs", "logs", cook],
+                &["agent-task", "cancel", cook],
+                &["agent-task", "recover", cook],
+            ];
+            for args in commands {
+                let argv = std::iter::once("homeboy").chain(args.iter().copied());
+                let matches = crate::cli_surface::Cli::command()
+                    .try_get_matches_from(argv)
+                    .unwrap();
+                let cli = crate::cli_surface::Cli::from_arg_matches(&matches).unwrap();
+                crate::invocation::run(|| {
+                    crate::invocation::identify(&matches);
+                    crate::invocation::mark_read_only(
+                        crate::commands::utils::resource_policy::is_cook_state_read(&cli.command),
+                    );
+                    std::process::ExitCode::SUCCESS
+                });
+            }
+
+            let (RunsOutput::Friction(report), _) = friction(
+                &store,
+                RunsFrictionArgs {
+                    last: "1d".into(),
+                    component: None,
+                },
+            )
+            .unwrap() else {
+                panic!("friction report");
+            };
+            assert_eq!(report["invocation_count"], 6, "{report:#}");
+            assert_eq!(
+                report["highest_intervention_cooks"][0]["manual_intervention_count"], 2,
+                "{report:#}"
+            );
+        });
+    }
 }

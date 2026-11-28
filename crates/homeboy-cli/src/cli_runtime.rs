@@ -1469,6 +1469,9 @@ impl CliRuntime {
         // Restore command-scoped runner intent before admission and placement
         // routing inspect the typed command. Provider readiness is runner-scoped.
         normalize_agent_task_runner_option(&mut cli, &normalized);
+        crate::invocation::mark_read_only(
+            crate::commands::utils::resource_policy::is_cook_state_read(&cli.command),
+        );
         if let Commands::AgentTask(agent_task) = &mut cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) =
                 &mut agent_task.command
