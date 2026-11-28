@@ -3083,7 +3083,7 @@ fn parsed_command_runner_evidence(
     refresh: impl FnOnce(
         Option<&str>,
     ) -> crate::core::Result<crate::runner::runners::LabRunnerReadiness>,
-    persisted_target: impl FnOnce() -> crate::core::Result<Option<String>>,
+    lab_wait_target: impl FnOnce() -> crate::core::Result<Option<String>>,
 ) -> (
     Option<crate::runner::runners::LabRunnerReadiness>,
     Option<String>,
@@ -3100,7 +3100,7 @@ fn parsed_command_runner_evidence(
         // answered from the controller mirror without consulting any runner.
         let selected = cli.runner.clone().or_else(|| {
             matches!(input.placement, PlacementIntent::Lab)
-                .then(|| persisted_target().ok().flatten())
+                .then(|| lab_wait_target().ok().flatten())
                 .flatten()
         });
         return (None, selected);
@@ -3126,6 +3126,21 @@ fn parsed_command_runner_evidence(
             }
         }
     }
+    // On a co-located controller the only Lab runner is this host's own
+    // daemon, so Auto runs the Cook here. That holds whatever the daemon's
+    // admission state: under pressure it selects no runner, and queueing for
+    // it would wait on the same machine that has free local slots.
+    if split_cook
+        && matches!(input.placement, PlacementIntent::Auto)
+        && cli.runner.is_none()
+        && lab_wait_target()
+            .ok()
+            .flatten()
+            .as_deref()
+            .is_some_and(crate::runner::runners::is_host_daemon_runner)
+    {
+        return (None, None);
+    }
     let readiness = match refresh(cli.runner.as_deref()) {
         Ok(readiness) => Some(readiness),
         // A split-placement Cook must never read a failed Lab observation as
@@ -3143,18 +3158,6 @@ fn parsed_command_runner_evidence(
         }
         Err(_) => None,
     };
-    if split_cook
-        && matches!(input.placement, PlacementIntent::Auto)
-        && cli.runner.is_none()
-        && readiness.as_ref().is_some_and(|value| {
-            value
-                .selected_runner_id
-                .as_deref()
-                .is_some_and(crate::runner::runners::is_host_daemon_runner)
-        })
-    {
-        return (None, None);
-    }
     let selected = cli.runner.clone().or_else(|| {
         readiness
             .as_ref()
@@ -4057,25 +4060,27 @@ mod tests {
                     ready.reasons = reasons.clone();
                     Ok(ready)
                 },
-                || panic!("cook requires live evidence"),
+                || Ok(Some("lab-a".to_string())),
             );
             let result = resolve(readiness, selected).expect("a ready Lab admits the Cook");
             assert_eq!(result.placement.selected, EffectiveExecutionPlacement::Lab);
             assert_eq!(result.selected_runner_id.as_deref(), Some("lab-a"));
         }
 
-        // A co-located host daemon is not a remote offload destination.
+        // A co-located host daemon is not a remote offload destination, even
+        // while pressure leaves it selecting no runner: Auto runs locally.
         let (readiness, selected) = parsed_command_runner_evidence(
             &cli,
             &input,
             |_| {
-                let mut ready =
-                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::ConnectedReady);
-                ready.selected_runner_id = Some("host-daemon".to_string());
-                ready.available_runner_ids = vec!["host-daemon".to_string()];
-                Ok(ready)
+                let mut blocked =
+                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::CapacityBlocked);
+                blocked.selected_runner_id = None;
+                blocked.available_runner_ids = Vec::new();
+                blocked.reasons = vec!["capacity_unknown".to_string(), "pressure".to_string()];
+                Ok(blocked)
             },
-            || panic!("cook requires live evidence"),
+            || Ok(Some("host-daemon".to_string())),
         );
         let local = resolve(readiness, selected).expect("Cook on the Lab resolves locally");
         assert_eq!(local.placement.selected, EffectiveExecutionPlacement::Local);
@@ -4117,7 +4122,7 @@ mod tests {
                 error.retryable = Some(true);
                 Err(error)
             },
-            || panic!("cook requires live evidence"),
+            || Ok(Some("homeboy-lab".to_string())),
         );
         let readiness = readiness.expect("a failed refresh stays typed Lab evidence");
         assert_ne!(
@@ -4178,7 +4183,7 @@ mod tests {
                         crate::runner::runners::LabRunnerReadinessState::ConnectedReady,
                     ))
                 },
-                || panic!("placing commands require live evidence"),
+                || Ok(Some("lab-a".to_string())),
             );
             assert!(refreshed);
             assert!(readiness.is_some());
