@@ -335,6 +335,7 @@ fn matrix_template_request(
             "scenarios": run_args.scenario_ids,
             "profile": run_args.profile,
             "ci_profile": run_args.ci_profile,
+            "ci_job": run_args.ci_job,
             "iterations": run_args.iterations,
             "report": run_args.report,
         }),
@@ -435,6 +436,7 @@ mod tests {
             scenario_ids: Vec::new(),
             profile: None,
             ci_profile: None,
+            ci_job: None,
             ignore_default_baseline: false,
         }
     }

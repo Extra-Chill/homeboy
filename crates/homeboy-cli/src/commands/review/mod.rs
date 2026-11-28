@@ -270,12 +270,12 @@ impl ReviewArgs {
                     || self.baseline_args.baseline
                     || self.baseline_args.ignore_baseline
                     || self.baseline_args.ratchet
-                    || !self.extension_override.extensions.is_empty()
                 {
                     return Err(unsupported_nested_option(
-                        "--changed-only, --summary, baseline options, or --extension",
+                        "--changed-only, --summary, or baseline options",
                     ));
                 }
+                merge_extension_ids(&mut self.extension_override, &mut args.extension_override);
                 args.target_id = merge_option(
                     "component",
                     self.comp.component.take(),
@@ -320,6 +320,7 @@ impl ReviewArgs {
             Some(ReviewCommand::Ai(args)) => &args.extension_override.extensions,
             Some(ReviewCommand::Lint(args)) => &args.extension_override.extensions,
             Some(ReviewCommand::Test(args)) => &args.extension_override.extensions,
+            Some(ReviewCommand::Build(args)) => &args.extension_override.extensions,
             _ => &self.extension_override.extensions,
         }
     }
@@ -988,8 +989,8 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
             })
             .unwrap_or_default();
         let extension_id = ci_profile::select_extension_id(&extension_ids)?;
-        let output = ci_profile::run_for_extension(
-            &ctx.source_path,
+        let output = ci::run_local_selection(
+            &ctx,
             &extension_id,
             CiRunSelection::Profile(profile.clone()),
         )?;
