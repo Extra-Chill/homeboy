@@ -6,7 +6,8 @@ use homeboy::core::scope::{self, Scope};
 use homeboy_core::extension::build;
 use homeboy_extension_contract::ExtensionCapability;
 
-use crate::commands::utils::args::{ChangedSinceArgs, ScopeArgs};
+use crate::commands::source_command::resolve_ci_job_for_command;
+use crate::commands::utils::args::{ChangedSinceArgs, ExtensionOverrideArgs, ScopeArgs};
 use crate::commands::utils::resolve::resolve_project_components;
 use crate::commands::CmdResult;
 
@@ -34,6 +35,13 @@ pub struct BuildArgs {
     #[command(flatten)]
     pub scope: ScopeArgs,
 
+    #[command(flatten)]
+    pub extension_override: ExtensionOverrideArgs,
+
+    /// Apply environment from an extension-declared CI build job
+    #[arg(long, conflicts_with_all = ["json", "all", "component_ids"])]
+    pub ci_job: Option<String>,
+
     // Ask the build provider to resolve the build scope from files changed
     // since a git ref. Declared once in the shared changed-scope group so
     // `build --changed-since` cannot drift from the other five commands
@@ -43,6 +51,37 @@ pub struct BuildArgs {
 }
 
 pub fn run(args: BuildArgs) -> CmdResult<build::BuildResult> {
+    if args.ci_job.is_some() || !args.extension_override.extensions.is_empty() {
+        if args.json.is_some()
+            || args.all
+            || !args.component_ids.is_empty()
+            || args
+                .scope
+                .selection()
+                .is_some_and(|scope| !matches!(scope, Scope::Path { .. }))
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "build",
+                "--ci-job and --extension require a single positional or path target",
+                None,
+                None,
+            ));
+        }
+        let mut ctx = execution_context::resolve(&ResolveOptions {
+            component_id: args.target_id,
+            path_override: args.scope.path,
+            extension_overrides: args.extension_override.extensions,
+            ..ResolveOptions::default()
+        })?;
+        let job = resolve_ci_job_for_command(args.ci_job.as_deref(), &ctx.component, "build")?;
+        ctx.component
+            .env
+            .extend(homeboy::core::ci_profile::ci_job_env(job.as_ref()));
+        return build::run_component_with_changed_since(
+            &ctx.component,
+            args.changed.changed_since(),
+        );
+    }
     // Priority: --json > --all with project > positional args
 
     // Shared tail: every multi-component build path dispatches the resolved

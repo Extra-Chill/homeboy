@@ -18,9 +18,11 @@ use std::path::PathBuf;
 use failure_log_triage::{CiFailureTriageOutput, CiFailureTriageRequest};
 use gate::{DifferentialGateDecision, DifferentialGateInput, DifferentialGateSide};
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
-use homeboy::core::engine::execution_context::{self, ResolveOptions};
+use homeboy::core::engine::execution_context::{self, ExecutionContext, ResolveOptions};
+use homeboy_extension_contract::CiJobSpec;
 use plan::{CiEventContext, CiPlan};
 use scope::{GithubActionsContext, MergeBaseResolver, ResolvedScope, ScopeRequest};
+use std::process::Command;
 
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs};
 use super::{CmdResult, CommandReport};
@@ -495,7 +497,7 @@ fn run_ci(args: CiRunArgs) -> CmdResult<CiOutput> {
         .unwrap_or_default();
     let extension_id = ci_profile::select_extension_id(&extension_ids)?;
     let selection = ci_run_selection(&args)?;
-    let run = ci_profile::run_for_extension(&ctx.source_path, &extension_id, selection)?;
+    let run = run_local_selection(&ctx, &extension_id, selection)?;
     let exit_code = run.exit_code;
 
     Ok((
@@ -507,6 +509,51 @@ fn run_ci(args: CiRunArgs) -> CmdResult<CiOutput> {
         }),
         exit_code,
     ))
+}
+
+pub(super) fn run_local_selection(
+    ctx: &ExecutionContext,
+    extension_id: &str,
+    selection: CiRunSelection,
+) -> homeboy::core::Result<CiRunOutput> {
+    ci_profile::run_for_extension(&ctx.source_path, extension_id, selection, |id, job| {
+        native_job_command(ctx, extension_id, id, job)
+    })
+}
+
+fn native_job_command(
+    ctx: &ExecutionContext,
+    extension_id: &str,
+    job_id: &str,
+    job: &CiJobSpec,
+) -> homeboy::core::Result<Option<Command>> {
+    let action = match job.command.as_str() {
+        "lint" => &["review", "lint"][..],
+        "build" => &["review", "build"],
+        "test" => &["review", "test"],
+        "bench" => &["bench"],
+        _ => return Ok(None),
+    };
+    let executable = std::env::current_exe().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            format!("Failed to resolve the Homeboy executable for CI job '{job_id}': {error}"),
+            Some("ci.run".to_string()),
+        )
+    })?;
+    let mut command = Command::new(executable);
+    command
+        .args(["--placement", "local"])
+        .args(action)
+        .arg(&ctx.component_id)
+        .arg("--path")
+        .arg(&ctx.source_path)
+        .args(["--extension", extension_id, "--ci-job", job_id]);
+    // Test and bench already consume the job args as runner passthrough.
+    // Lint and build take job args as flags to their command surface.
+    if matches!(job.command.as_str(), "lint" | "build") {
+        command.args(&job.args);
+    }
+    Ok(Some(command))
 }
 
 fn ci_run_selection(args: &CiRunArgs) -> homeboy::core::Result<CiRunSelection> {

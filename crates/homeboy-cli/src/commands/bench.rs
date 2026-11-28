@@ -365,6 +365,10 @@ pub struct BenchRunArgs {
     #[arg(long, value_name = "ID", conflicts_with = "profile")]
     ci_profile: Option<String>,
 
+    /// Run using env and passthrough args from one extension-declared CI bench job.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["profile", "ci_profile"])]
+    ci_job: Option<String>,
+
     /// Skip auto-upgrading single-rig runs into a comparison even when
     /// the rig spec declares `bench.default_baseline_rig`. Use with
     /// `--baseline` / `--ratchet` against a rig that normally
@@ -482,6 +486,7 @@ impl RigRunBenchOptions {
                 scenario_ids: Vec::new(),
                 profile: Some(self.profile),
                 ci_profile: None,
+                ci_job: None,
                 ignore_default_baseline: false,
             },
         }

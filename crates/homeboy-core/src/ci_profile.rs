@@ -134,9 +134,16 @@ pub fn run_for_extension(
     source_path: &Path,
     extension_id: &str,
     selection: CiRunSelection,
+    resolve_command: impl Fn(&str, &CiJobSpec) -> Result<Option<Command>>,
 ) -> Result<CiRunOutput> {
     let extension = crate::extension::catalog::load_extension(extension_id)?;
-    run_from_manifest(source_path, extension_id, &extension, selection)
+    run_from_manifest(
+        source_path,
+        extension_id,
+        &extension,
+        selection,
+        resolve_command,
+    )
 }
 
 pub fn resolve_job_for_extension(extension_id: &str, job_id: &str) -> Result<CiResolvedJob> {
@@ -259,11 +266,12 @@ pub fn ci_context_for_job(job: Option<&CiResolvedJob>, profile: Option<&str>) ->
     job.map(|job| ci_context(&job.id, &job.spec, profile))
 }
 
-pub fn run_from_manifest(
+fn run_from_manifest(
     source_path: &Path,
     extension_id: &str,
     extension: &ExtensionManifest,
     selection: CiRunSelection,
+    resolve_command: impl Fn(&str, &CiJobSpec) -> Result<Option<Command>>,
 ) -> Result<CiRunOutput> {
     let ci = extension.ci.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -309,7 +317,7 @@ pub fn run_from_manifest(
         ));
     }
 
-    let mut jobs = Vec::new();
+    let mut commands = Vec::new();
     for job_id in job_ids {
         let job = ci.jobs.get(&job_id).ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -319,9 +327,23 @@ pub fn run_from_manifest(
                 Some(ci.jobs.keys().cloned().collect()),
             )
         })?;
-        jobs.push(run_job(source_path, &job_id, job, profile_id.as_deref())?);
+        if job.local_context.fidelity == CiJobFidelity::RemoteOnly {
+            return Err(Error::validation_invalid_argument(
+                "job",
+                format!("CI job '{job_id}' is remote-only and cannot run locally"),
+                Some(job_id),
+                job.mapping.workflow.clone().map(|workflow| vec![workflow]),
+            ));
+        }
+        let command = resolve_command(&job_id, job)?
+            .unwrap_or_else(|| external_job_command(source_path, job));
+        commands.push((job_id, job, command));
     }
 
+    let jobs: Vec<_> = commands
+        .into_iter()
+        .map(|(id, job, command)| run_job(source_path, &id, job, profile_id.as_deref(), command))
+        .collect::<Result<_>>()?;
     let success = jobs.iter().all(|job| job.success);
     Ok(CiRunOutput {
         extension_id: extension_id.to_string(),
@@ -332,23 +354,34 @@ pub fn run_from_manifest(
     })
 }
 
+fn external_job_command(source_path: &Path, job: &CiJobSpec) -> Command {
+    let executable = Path::new(&job.command);
+    // With path separators, resolve against the checkout instead of relying on
+    // platform-specific handling of relative programs with Command::current_dir.
+    let mut command = if executable.components().count() > 1 {
+        Command::new(source_path.join(executable))
+    } else {
+        Command::new(executable)
+    };
+    command.args(&job.args).envs(&job.env);
+    command
+}
+
 fn run_job(
     source_path: &Path,
     job_id: &str,
     job: &CiJobSpec,
     profile: Option<&str>,
+    mut command: Command,
 ) -> Result<CiJobRunOutput> {
-    let output = Command::new(&job.command)
-        .args(&job.args)
-        .envs(&job.env)
-        .current_dir(source_path)
-        .output()
-        .map_err(|error| {
-            Error::internal_io(
-                format!("Failed to run CI job '{job_id}': {error}"),
-                Some("ci.run".to_string()),
-            )
-        })?;
+    let output = command.current_dir(source_path).output().map_err(|error| {
+        let executable = command.get_program().to_string_lossy();
+        let cwd = source_path.display();
+        Error::internal_io(
+            format!("Failed to run CI job '{job_id}' (executable '{executable}', working directory '{cwd}'): {error}"),
+            Some("ci.run".to_string()),
+        )
+    })?;
 
     Ok(CiJobRunOutput {
         id: job_id.to_string(),
@@ -556,6 +589,7 @@ mod tests {
             "test",
             &manifest,
             CiRunSelection::Job("smoke".to_string()),
+            |_, _| Ok(None),
         )
         .expect("run job");
 
@@ -676,6 +710,7 @@ mod tests {
             "test",
             &manifest,
             CiRunSelection::Profile("pr".to_string()),
+            |_, _| Ok(None),
         )
         .expect("run profile");
 
@@ -685,6 +720,33 @@ mod tests {
         assert_eq!(output.jobs[0].ci_context.job_id, "first");
         assert_eq!(output.jobs[0].stdout, "first");
         assert_eq!(output.jobs[1].stdout, "second");
+    }
+
+    #[test]
+    fn run_from_manifest_names_missing_executable_and_working_directory() {
+        let tmp = TempDir::new().expect("temp dir");
+        let mut manifest = manifest_with_ci();
+        let executable = "./missing-ci-executable";
+        manifest
+            .ci
+            .as_mut()
+            .unwrap()
+            .jobs
+            .get_mut("lint")
+            .unwrap()
+            .command = executable.into();
+        let error = run_from_manifest(
+            tmp.path(),
+            "fixture-ci",
+            &manifest,
+            CiRunSelection::Job("lint".to_string()),
+            |_, _| Ok(None),
+        )
+        .unwrap_err();
+        let message = error.details["error"].as_str().unwrap();
+        assert!(message.contains("CI job 'lint'"), "{message}");
+        assert!(message.contains(executable), "{message}");
+        assert!(message.contains(tmp.path().to_str().unwrap()), "{message}");
     }
 
     #[test]
@@ -706,6 +768,7 @@ mod tests {
             "test",
             &manifest,
             CiRunSelection::Job("fail".to_string()),
+            |_, _| Ok(None),
         )
         .expect("run job");
 

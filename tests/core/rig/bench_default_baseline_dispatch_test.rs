@@ -70,6 +70,7 @@ fn make_args(
             scenario_ids: Vec::new(),
             profile: None,
             ci_profile: None,
+            ci_job: None,
             ignore_default_baseline,
         },
     }

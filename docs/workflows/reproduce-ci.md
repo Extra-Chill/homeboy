@@ -27,11 +27,21 @@ homeboy review ci run --path /path/to/repo --extension <extension-id> --job <job
 homeboy review ci run --path /path/to/repo --extension <extension-id> --profile <profile-id>
 ```
 
+The command IDs `lint`, `test`, and `build` invoke their `homeboy review`
+subcommands; `bench` invokes `homeboy bench`. They run locally in the selected
+checkout with the selected extension and declared job environment. Job `args`
+are command flags for lint and build, and runner arguments for test and bench.
+Other command values name external executables (use `./` for a checkout-relative
+script). `remote-only` jobs cannot run via `review ci run`; use the runner
+workflow named in the job declaration instead.
+
 For jobs that map directly to native Homeboy commands, you can also run the command itself:
 
 ```bash
 homeboy review lint <component-id> --ci-job <job-id>
 homeboy review test <component-id> --ci-job <job-id>
+homeboy review build <component-id> --ci-job <job-id>
+homeboy bench <component-id> --ci-job <job-id>
 homeboy bench <component-id> --ci-profile <profile-id>
 ```
 

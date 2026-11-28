@@ -690,8 +690,15 @@ fn run_component_with_rig_context(
         &ctx.settings,
         homeboy::core::hygiene::DependencyHygieneOptions { allow_stale: false },
     )?;
-    let ci_profile_job =
-        resolve_ci_profile_job(args.ci_profile.as_deref(), ctx.extension_id.as_deref())?;
+    let ci_profile_job = if args.ci_job.is_some() {
+        crate::commands::source_command::resolve_ci_job_for_command(
+            args.ci_job.as_deref(),
+            &ctx.component,
+            "bench",
+        )?
+    } else {
+        resolve_ci_profile_job(args.ci_profile.as_deref(), ctx.extension_id.as_deref())?
+    };
 
     if let Some(snapshot) = rig_snapshot.as_mut() {
         let effective_path = ctx.source_path.to_string_lossy().into_owned();
@@ -971,6 +978,7 @@ mod tests {
             scenario_ids: Vec::new(),
             profile: None,
             ci_profile: None,
+            ci_job: None,
             ignore_default_baseline: false,
         }
     }

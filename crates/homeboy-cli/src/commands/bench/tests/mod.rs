@@ -517,6 +517,7 @@ pub(super) fn run_args(
             scenario_ids,
             profile: None,
             ci_profile: None,
+            ci_job: None,
             ignore_default_baseline: false,
         },
     }
