@@ -68,7 +68,7 @@ extension HomeboyCLI {
 
     func runsArtifactGet(runId: String, artifactId: String, outputPath: String) async throws {
         let response = try await cli.execute(
-            HomeboyCommandRegistry.arguments("runs artifact get", appending: [runId, artifactId, "--output", outputPath]),
+            HomeboyCommandRegistry.arguments("runs artifact get", appending: [runId, artifactId, "--to", outputPath]),
             timeout: 120
         )
         guard response.success else {
