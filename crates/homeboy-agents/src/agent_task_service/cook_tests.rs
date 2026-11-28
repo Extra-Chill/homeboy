@@ -11950,14 +11950,6 @@ fn cook_promotion_finalization_resolves_review_profile_via_recorded_component_id
     });
 }
 
-/// #14725: the recovered-candidate branch after a Cook gate failure
-/// (`manual_finalization: true`) must reuse the component identity Cook
-/// recorded at admission with no new required `--recover` argument.
-
-/// #14725: when the durable record predates the recorded-identity fix (or is a
-/// standalone manual finalization with no Cook lineage), `--component` may be
-/// supplied alongside `--recover` instead of the combination being rejected.
-
 #[test]
 fn interrupted_attempt_does_not_change_the_only_substantive_disclosure() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -12218,7 +12210,6 @@ impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecovery
         let value = recover_cook_pr_with_backend_and_review_form(
             run_id,
             request.review_form.clone(),
-            request.component.as_deref(),
             request.review_overrides.clone(),
             preflight,
             &mut backend,

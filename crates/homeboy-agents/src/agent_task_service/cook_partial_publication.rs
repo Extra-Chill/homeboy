@@ -79,14 +79,7 @@ pub(crate) fn publish_operator_verified_cook_with<B: AgentTaskPrFinalizationBack
             "promotion": promotion,
         }),
     )?;
-    let value = recover_cook_pr_with_backend_and_review_form(
-        &id,
-        None,
-        request.component.as_deref(),
-        Vec::new(),
-        false,
-        backend,
-    )?;
+    let value = recover_cook_pr_with_backend(&id, Vec::new(), false, backend)?;
     let code = i32::from(!matches!(
         value["status"].as_str(),
         Some("review_ready" | "draft_published")
@@ -244,14 +237,7 @@ pub(crate) fn publish_partial_cook_with<B: AgentTaskPrFinalizationBackend>(
         )?;
         url
     };
-    let value = recover_cook_pr_with_backend_and_review_form(
-        id,
-        None,
-        request.component.as_deref(),
-        Vec::new(),
-        false,
-        backend,
-    )?;
+    let value = recover_cook_pr_with_backend(id, Vec::new(), false, backend)?;
     let pr_url = value["pr_url"].as_str().ok_or_else(|| {
         Error::validation_invalid_argument(
             "publish-partial",

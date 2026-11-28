@@ -320,6 +320,12 @@ pub struct AgentTaskGateEnvironmentPolicy {
     pub requirements: AgentTaskGateRequirements,
 }
 
+impl AgentTaskGateEnvironmentPolicy {
+    pub(crate) fn component_id(&self) -> Option<&str> {
+        self.admitted_component_id.as_deref()
+    }
+}
+
 /// Where the controller installed a declared extension from, and at which
 /// revision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

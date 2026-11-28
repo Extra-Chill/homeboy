@@ -535,6 +535,27 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
+    fn recover_help_omits_component() {
+        let mut cli = crate::cli_surface::Cli::command();
+        let agent_task = cli
+            .find_subcommand_mut("agent-task")
+            .expect("agent-task command");
+        let recover = agent_task
+            .find_subcommand_mut("recover")
+            .expect("recover command")
+            .render_long_help()
+            .to_string();
+        assert!(!recover.contains("--component"), "{recover}");
+
+        let finalize = agent_task
+            .find_subcommand_mut("finalize-pr")
+            .expect("finalize-pr command")
+            .render_long_help()
+            .to_string();
+        assert!(finalize.contains("--component"), "{finalize}");
+    }
+
+    #[test]
     fn cook_help_recommends_review_test() {
         let help = crate::cli_surface::Cli::command()
             .find_subcommand("agent-task")

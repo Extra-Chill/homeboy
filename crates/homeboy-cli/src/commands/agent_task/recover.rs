@@ -273,7 +273,6 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
             args.review_form_model.as_deref(),
             args.review_form_author.as_deref(),
         )?,
-        component: args.component.take(),
         review_overrides: super::review::parse_review_overrides(&args.review_overrides)?,
     };
     Ok(CookRecoveryRequest {

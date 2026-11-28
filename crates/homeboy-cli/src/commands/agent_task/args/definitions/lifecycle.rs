@@ -300,10 +300,6 @@ pub struct RecoverArgs {
     /// form. Overrides require a recorded or supplied review form.
     #[arg(long = "review-override", value_name = "TARGET=VALUE@PROVENANCE")]
     pub review_overrides: Vec<String>,
-    /// Publish step: registered component identity, consulted only when the
-    /// durable record carries no recorded component identity.
-    #[arg(long, value_name = "COMPONENT_ID")]
-    pub component: Option<String>,
 }
 
 impl RecoverArgs {
@@ -384,7 +380,6 @@ pub struct FinalizePrArgs {
     #[arg(long, value_name = "PATH")]
     pub path: String,
     /// Registered component identity for disambiguating a shared-repository worktree.
-    /// A stopped Cook publishes through `agent-task recover`, which takes the same fallback.
     #[arg(long, value_name = "COMPONENT_ID")]
     pub component: Option<String>,
     /// Base branch for the manual finalization candidate.

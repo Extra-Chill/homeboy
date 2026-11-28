@@ -108,7 +108,7 @@ pub(crate) fn component_workspace_path(options: &CookRequest) -> Result<Option<P
     Ok(Some(component))
 }
 
-fn replacement_component_workspace(
+fn resolve_replacement_gate_workspace(
     original: &AgentTaskPromotionReport,
     target: &std::path::Path,
 ) -> Result<Option<PathBuf>> {
@@ -1829,7 +1829,7 @@ fn verify_replacement_gates_owned(
         );
     }
     let gate_timeout = gates.gate_timeout();
-    let admitted_component_id = gates.gate_environment.admitted_component_id.clone();
+    let component_id = gates.gate_environment.component_id().map(str::to_owned);
     let original = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion",
@@ -1943,7 +1943,7 @@ fn verify_replacement_gates_owned(
     // replay. A later retry may have an empty aggregate (or a different task).
     let source = persisted_promotion_source_in_store(lifecycle_store, &original, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
-    let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
+    let replacement_gate_workspace = resolve_replacement_gate_workspace(&original, &target_path)?;
     let original_value = serde_json::to_value(&original)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     // Replacement gates run under the same declared supervision as Cook
@@ -2030,7 +2030,7 @@ fn verify_replacement_gates_owned(
                 .unwrap_or(&target_path),
             &verified_base.sha,
             gate_timeout,
-            admitted_component_id.as_deref(),
+            component_id.as_deref(),
             |_, _| Ok(()),
         )?;
         Ok(replacement)
@@ -2941,15 +2941,8 @@ pub(crate) fn cook_finalization_options_with_stores(
     // admitted the run against, so finalization must reuse that identity
     // rather than re-deriving it ambiguously from the bare worktree path
     // (#14725).
-    let recorded_component_id =
-        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan);
-    let selected_component_id = options
-        .gates
-        .gate_environment
-        .admitted_component_id
-        .as_deref()
-        .or(recorded_component_id.as_deref());
-    let review_profile = resolve_review_profile(selected_component_id, &path)?;
+    let component_id = super::cook_workspace::admitted_registration_id(options);
+    let review_profile = resolve_review_profile(component_id.as_deref(), &path)?;
     let title_policy =
         crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&options.identity.initial_plan);
     let gap = draft_publication_gap(
@@ -3005,11 +2998,11 @@ pub(crate) fn cook_finalization_options_with_stores(
     let commit_message = cook_commit_message(
         &options.finalization.commit_message,
         &pr_title,
-        selected_component_id,
+        component_id.as_deref(),
     );
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
-        component_id: selected_component_id.map(str::to_string),
+        component_id,
         run_id: successful_run_id.to_string(),
         base: options.finalization.base.clone(),
         verified_base_sha: Some(verified_base.sha.clone()),
@@ -3136,7 +3129,7 @@ pub fn recover_cook_pr(
     overrides: Vec<AgentTaskReviewOverride>,
     preflight: bool,
 ) -> Result<Value> {
-    recover_cook_pr_with_review_form(run_or_cook_id, None, None, overrides, preflight)
+    recover_cook_pr_with_review_form(run_or_cook_id, None, overrides, preflight)
 }
 
 /// Auditable authorship for a review form supplied outside provider execution.
@@ -3185,22 +3178,15 @@ impl AgentTaskSuppliedReviewForm {
 
 /// Recover publication using an operator-supplied form only when the immutable
 /// candidate's historical provider outcome did not retain one.
-///
-/// `component` disambiguates a shared-repository worktree only when the
-/// durable Cook recipe recorded no usable component identity at admission
-/// (e.g. a pre-existing durable record predating #14725); a recovered Cook
-/// with a recorded identity reuses it and ignores this fallback.
 pub fn recover_cook_pr_with_review_form(
     run_or_cook_id: &str,
     review_form: Option<AgentTaskSuppliedReviewForm>,
-    component: Option<&str>,
     overrides: Vec<AgentTaskReviewOverride>,
     preflight: bool,
 ) -> Result<Value> {
     recover_cook_pr_with_backend_and_review_form(
         run_or_cook_id,
         review_form,
-        component,
         overrides,
         preflight,
         &mut RealAgentTaskPrFinalizationBackend,
@@ -3216,7 +3202,6 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     recover_cook_pr_with_backend_and_review_form(
         run_or_cook_id,
         None,
-        None,
         overrides,
         preflight,
         backend,
@@ -3226,7 +3211,6 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinalizationBackend>(
     run_or_cook_id: &str,
     review_form: Option<AgentTaskSuppliedReviewForm>,
-    _component: Option<&str>,
     overrides: Vec<AgentTaskReviewOverride>,
     preflight: bool,
     backend: &mut B,
