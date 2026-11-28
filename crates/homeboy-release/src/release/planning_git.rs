@@ -3,41 +3,13 @@ use homeboy_core::engine::command;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 
-/// Fetch from remote and fast-forward if behind.
-///
-/// Ensures the release commit is created on top of the actual remote HEAD,
-/// preventing detached release tags when PRs merge during a CI quality gate.
-/// Returns Err if the branch has diverged and can't be fast-forwarded.
-pub(super) fn validate_remote_sync(component: &Component) -> Result<()> {
-    let synced = git::fetch_and_fast_forward(&component.local_path)?;
-
-    if let Some(n) = synced {
-        homeboy_core::log_status!(
-            "release",
-            "Fast-forwarded {} commit(s) from remote before release",
-            n
-        );
-    }
-
-    Ok(())
-}
-
-/// Refresh remote refs without changing a provider-selected staging checkout.
-/// The selected SHA remains the authority from provisioning through mutation.
-pub(super) fn validate_remote_sync_at(component: &Component, source_sha: &str) -> Result<()> {
+/// Refresh remote refs without changing the selected checkout.
+pub(super) fn validate_remote_sync(component: &Component, source_sha: Option<&str>) -> Result<()> {
     git::fetch_origin(&component.local_path)?;
-    let head = git::get_head_commit(&component.local_path)?;
-    if head == source_sha {
-        return Ok(());
+    if let Some(sha) = source_sha {
+        super::source_freshness::require_head(component, sha)?;
     }
-    Err(Error::validation_invalid_argument(
-        "release.workspace",
-        format!(
-            "staging checkout moved from immutable source SHA {source_sha} to {head} before release mutation"
-        ),
-        Some(component.local_path.clone()),
-        Some(vec!["Re-provision the release workspace from the verified source SHA.".to_string()]),
-    ))
+    Ok(())
 }
 
 /// How strictly a release pins HEAD to the repo's default branch.
@@ -279,7 +251,7 @@ fn source_remote(component: &Component) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_default_branch, validate_remote_sync, DefaultBranchRequirement};
+    use super::{check_default_branch, DefaultBranchRequirement};
     use homeboy_core::component::Component;
     use std::path::{Path, PathBuf};
 
@@ -473,21 +445,6 @@ mod tests {
             .details
             .to_string()
             .contains("creating a GitHub Release"));
-    }
-
-    #[test]
-    fn remote_sync_fast_forwards_behind_checkout() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (seed, checkout) = remote_with_checkout(temp.path());
-        commit_readme(&seed, "fixture\nsecond\n", "Second commit");
-        run_git(&seed, &["push", "-q", "origin", "main"]);
-
-        validate_remote_sync(&git_component(&checkout)).expect("checkout should fast-forward");
-
-        assert_eq!(
-            git_revision(&checkout, "HEAD"),
-            git_revision(&checkout, "origin/main")
-        );
     }
 
     /// The release plan detaches by construction when a caller nominates a

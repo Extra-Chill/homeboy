@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use super::execution_plan::{build_initial_preflight_plan, initial_executable_preflight_ids};
 use super::pipeline_summary::{build_summary, derive_overall_status};
 use super::planner::plan;
+use super::source_freshness::{record_source, require_head, ReleaseSourceFreshness};
 use super::types::{
     ReleaseOptions, ReleasePlan, ReleaseRollbackEvidence, ReleaseRun, ReleaseRunResult,
     ReleaseStepResult, ReleaseStepStatus, ReleaseWorkspaceOutput,
@@ -23,7 +24,7 @@ pub fn run(component_id: &str, options: &ReleaseOptions) -> Result<ReleaseRun> {
     // The public convenience entry: callers without roots of their own get one
     // resolution here, which `run_with_plan` then threads through the release.
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
-    run_with_plan(&roots, component_id, options).map(|(_plan, run, _workspace)| run)
+    run_with_plan(&roots, component_id, options, None, None).map(|(_plan, run, _workspace)| run)
 }
 
 /// Execute a release and return the plan that drove it alongside the run.
@@ -31,6 +32,8 @@ pub(crate) fn run_with_plan(
     roots: &homeboy_core::paths::PathRoots,
     component_id: &str,
     options: &ReleaseOptions,
+    expected_sha: Option<&str>,
+    freshness: Option<&ReleaseSourceFreshness>,
 ) -> Result<(ReleasePlan, ReleaseRun, Option<ReleaseWorkspaceOutput>)> {
     // Roots arrive from the caller and cover the entire release: workspace
     // provisioning and its finalization record, both plan phases, packaging,
@@ -38,6 +41,22 @@ pub(crate) fn run_with_plan(
     // into one home and then record its state against another (#7505).
     let mut workspace_options = options.clone();
     let component = super::context::load_component(component_id, options)?;
+    let fetched = if expected_sha.is_none()
+        && !options.pipeline.head
+        && !options.pipeline.protected_branch_resume
+    {
+        ReleaseSourceFreshness::fetch_default_checkout(&component)?
+    } else {
+        None
+    };
+    let freshness = freshness.or(fetched.as_ref());
+    if let Some(source) = freshness {
+        source.require_current(component_id)?;
+    }
+    let expected_sha = expected_sha.or(freshness.map(|source| source.local_head.as_str()));
+    if let Some(sha) = expected_sha {
+        require_head(&component, sha)?;
+    }
     let mut control_plane = (!options.dry_run)
         .then(|| super::control_plane::ReleaseControlPlaneObservation::start(roots, component_id))
         .transpose()?;
@@ -47,18 +66,24 @@ pub(crate) fn run_with_plan(
         &component,
         options.pipeline.head,
         options.pipeline.protected_branch_resume,
+        expected_sha,
     )?;
     workspace_options.path_override = Some(workspace.component.local_path.clone());
     let checkout_guard =
         super::checkout_guard::ReleaseCheckoutGuard::capture(&workspace.component)?;
 
     let staging_source_sha = workspace.source_sha();
+    let in_place_sha =
+        homeboy_core::git::head_sha(std::path::Path::new(&workspace.component.local_path));
     match run_with_plan_inner(
         roots,
         component_id,
         &workspace_options,
         checkout_guard.as_ref(),
-        staging_source_sha.as_deref(),
+        expected_sha
+            .or(staging_source_sha.as_deref())
+            .or(in_place_sha.as_deref()),
+        freshness.map(|source| (&component, source)),
     ) {
         Ok((plan, mut run)) => {
             let disposition = if matches!(run.result.status, ReleaseStepStatus::Success) {
@@ -117,12 +142,22 @@ fn run_with_plan_inner(
     component_id: &str,
     options: &ReleaseOptions,
     checkout_guard: Option<&super::checkout_guard::ReleaseCheckoutGuard>,
-    staging_source_sha: Option<&str>,
+    selected_sha: Option<&str>,
+    source: Option<(&homeboy_core::component::Component, &ReleaseSourceFreshness)>,
 ) -> Result<(ReleasePlan, ReleaseRun)> {
     let mut results: Vec<ReleaseStepResult> = Vec::new();
     ensure_readiness_passed(options)?;
+    let component = super::context::load_component(component_id, options)?;
+    if let Some(sha) = selected_sha {
+        require_head(&component, sha)?;
+    }
 
-    let initial_plan = build_initial_preflight_plan(component_id, options);
+    let mut initial_plan = build_initial_preflight_plan(component_id, options);
+    record_source(
+        &mut initial_plan,
+        selected_sha,
+        source.map(|(_, freshness)| freshness),
+    );
     let time_phase = |phase: &str, operation: &mut dyn FnMut() -> Result<bool>| {
         if let Some(context) = &options.control_plane {
             homeboy_core::observation::ObservationStore::open_initialized_in_roots(roots)?
@@ -140,7 +175,7 @@ fn run_with_plan_inner(
             options,
             &mut results,
             &HashSet::new(),
-            staging_source_sha,
+            selected_sha,
         )
     })?;
 
@@ -160,21 +195,12 @@ fn run_with_plan_inner(
         .map(|readiness| readiness.source.clone())
         .unwrap_or(super::preflight_identity::capture(&preflight_component)?);
 
-    // Rebuild the full plan after executable preflights. `preflight.remote_sync`
-    // may fast-forward HEAD and `preflight.changelog_bootstrap` may create the
-    // first changelog file; changelog/version planning must observe those
-    // changes instead of stale checkout state.
-    //
-    // An auto-detected bump type was resolved against the checkout BEFORE
-    // `preflight.remote_sync` ran. If remote_sync fast-forwarded HEAD, that
-    // stale bump type is a "requested" observation of an older commit range
-    // than the one `preflight.bump_policy`'s "recommended" side is about to
-    // (re)compute from the now-advanced HEAD — a false-positive underbump
-    // (#14974: a `feat:` commit that landed on the remote after auto-detection
-    // ran made the release step ask for a lower bump than it itself detected).
-    // Refresh the auto-detected bump type from the same post-remote-sync scope
-    // so both sides of that comparison observe one commit range. An explicit
-    // `--bump` is a real user request and is never refreshed away.
+    if let Some(sha) = selected_sha {
+        require_head(&preflight_component, sha)?;
+    }
+
+    // Changelog bootstrap may create the first changelog file. Rebuild the
+    // full plan without substituting a different source commit.
     let effective_options: ReleaseOptions =
         if options.pipeline.head || options.bump_policy.bump_type_explicit {
             options.clone()
@@ -189,10 +215,18 @@ fn run_with_plan_inner(
         };
     let options = &effective_options;
 
-    let release_plan = plan(component_id, options)?;
+    let mut release_plan = plan(component_id, options)?;
+    record_source(
+        &mut release_plan,
+        selected_sha,
+        source.map(|(_, freshness)| freshness),
+    );
     let completed_preflights: HashSet<&'static str> =
         initial_executable_preflight_ids().iter().copied().collect();
 
+    if let Some((checkout, freshness)) = source {
+        freshness.revalidate(checkout)?;
+    }
     super::preflight_identity::revalidate(&preflight_component, &preflight_source)?;
     time_phase("package", &mut || {
         super::execution_plan::execute_plan_steps_at_source(
@@ -202,7 +236,7 @@ fn run_with_plan_inner(
             options,
             &mut results,
             &completed_preflights,
-            staging_source_sha,
+            selected_sha,
         )
     })?;
 

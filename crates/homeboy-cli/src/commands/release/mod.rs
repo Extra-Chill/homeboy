@@ -175,6 +175,10 @@ pub struct ReleaseExecuteArgs {
     #[arg(long, global = true)]
     pub full: bool,
 
+    /// Require the full source SHA from a reviewed dry-run plan (single component).
+    #[arg(long, value_name = "SHA", conflicts_with_all = ["recover", "package_only"])]
+    expect_source: Option<String>,
+
     /// Confirm risky release execution modes.
     #[arg(long)]
     apply: bool,
@@ -958,6 +962,21 @@ fn run_portable_preflight_with(
     }
     let component = component::resolve_effective(Some(component_id), args.path.as_deref(), None)?;
     let commit = homeboy::core::git::get_head_commit(&component.local_path)?;
+    release::check_portable_release_source(
+        &component,
+        &commit,
+        !args.recover && !args.package_only && !args.head,
+    )?;
+    if let Some(expected) = &args.expect_source {
+        if expected != &commit {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "expect-source",
+                format!("Release source drift: expected HEAD {expected}, found {commit}. Replan with `homeboy release --dry-run`."),
+                None,
+                None,
+            ));
+        }
+    }
     let mut gate_results = Vec::new();
     let mut evidence_refs = Vec::new();
     let mut resolved_runner_id = None;
@@ -1097,6 +1116,14 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
     }
     let component_ids = resolve_component_ids(&args, &args.components)?;
     validate_positional_component_ids(&args, &component_ids)?;
+    if args.expect_source.is_some() && component_ids.len() != 1 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "expect-source",
+            "--expect-source requires a single component",
+            None,
+            None,
+        ));
+    }
     if args.package_only {
         validate_package_only_intent(&args, &component_ids)?;
     }
@@ -1178,6 +1205,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         let input = ReleaseCommandInput {
             component_id: component_id.clone(),
             path_override: args.path.clone(),
+            expected_source: args.expect_source.clone(),
             // Changelog-history recovery is detection-only unless the operator
             // explicitly applies it. An explicit dry run remains authoritative.
             dry_run: args.dry_run_args.dry_run
@@ -1268,6 +1296,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
 
     let input_template = ReleaseCommandInput {
         component_id: String::new(), // overridden per component
+        expected_source: None,
         path_override: None,
         dry_run: args.dry_run_args.dry_run,
         recover: false,
@@ -1850,6 +1879,7 @@ mod tests {
             dry_run_args: DryRunArgs { dry_run: true },
             full: false,
             apply: false,
+            expect_source: None,
             deploy: false,
             recover: false,
             repair_changelog_history: Vec::new(),

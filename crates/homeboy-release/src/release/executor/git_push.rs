@@ -18,6 +18,7 @@ pub(crate) fn run_git_push(
     component_id: &str,
     release_tag: Option<&str>,
     target_branch: Option<&str>,
+    require_reviewed_source: bool,
 ) -> Result<ReleaseStepResult> {
     let current_branch = homeboy_core::git::current_branch(std::path::Path::new(
         &component.local_path,
@@ -48,6 +49,16 @@ pub(crate) fn run_git_push(
 
     if output.success {
         return Ok(step_success("git.push", "git.push", Some(data), Vec::new()));
+    }
+
+    if require_reviewed_source && is_non_fast_forward_rejection(&output.stderr) {
+        return Ok(step_failed(
+            "git.push",
+            "git.push",
+            Some(data),
+            Some(format!("Release source drift: {}. Refresh the checkout and replan with `homeboy release {component_id} --dry-run`.", push_error_message(&output))),
+            Vec::new(),
+        ));
     }
 
     // The branch push was rejected. When the remote branch advanced after the
@@ -356,14 +367,21 @@ fn non_fast_forward_recovery_hints(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_non_fast_forward_rejection, run_git_branch_push, run_git_push, run_git_tag_push,
-    };
+    use super::{is_non_fast_forward_rejection, run_git_branch_push, run_git_tag_push};
     use crate::release::types::ReleaseStepStatus;
     use homeboy_core::component::Component;
     use std::process::Command;
 
     use homeboy_core::test_support::run_git_command as git;
+
+    fn run_git_push(
+        component: &Component,
+        component_id: &str,
+        release_tag: Option<&str>,
+        target_branch: Option<&str>,
+    ) -> homeboy_core::error::Result<crate::release::types::ReleaseStepResult> {
+        super::run_git_push(component, component_id, release_tag, target_branch, false)
+    }
 
     #[test]
     fn test_run_git_push_without_upstream() {
@@ -745,6 +763,17 @@ mod tests {
             local_path: local.path().to_string_lossy().to_string(),
             ..Component::default()
         };
+
+        let original = rev(local.path(), "HEAD");
+        let blocked = super::run_git_push(&component, "fixture", Some("v1.0.0"), None, true)
+            .expect("push step returns a result");
+        assert_eq!(blocked.status, ReleaseStepStatus::Failed);
+        assert_eq!(rev(local.path(), "HEAD"), original);
+        assert!(blocked
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("replan"));
 
         let result = run_git_push(&component, "fixture", Some("v1.0.0"), None)
             .expect("push step returns a result");

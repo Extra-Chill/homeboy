@@ -256,6 +256,33 @@ fn run_command_with_workspace_inner(
         },
     )?;
 
+    let path = std::path::Path::new(&component.local_path);
+    let source = if input.pipeline.head || !git::is_git_repo(&component.local_path) {
+        None
+    } else {
+        super::source_freshness::ReleaseSourceFreshness::fetch_default_checkout(&component)?
+    };
+    if let Some(source) = &source {
+        homeboy_core::log_status!("release", "{}", source.summary());
+        source.require_current(&input.component_id).map_err(|error| {
+            if let Some(owner) = ci_release_owner(&component) {
+                error.with_hint(format!("Automatic release publication is owned by {owner}; wait for that workflow rather than publishing manually."))
+            } else {
+                error
+            }
+        })?;
+    }
+    let source_sha = source
+        .as_ref()
+        .map(|s| s.local_head.clone())
+        .or_else(|| git::head_sha(path));
+    if let Some(expected) = input.expected_source.as_deref() {
+        super::source_freshness::require_head(&component, expected)?;
+    }
+    if let Some(readiness) = &input.readiness {
+        super::preflight_identity::revalidate(&component, &readiness.source)?;
+    }
+
     let release_scope = ReleaseScope::resolve(&component, &input.component_id)?;
     input.pipeline.protected_branch_resume = prepared_release_pr_resume_intent(
         &component,
@@ -363,13 +390,23 @@ fn run_command_with_workspace_inner(
     };
 
     if options.dry_run {
-        if let Some(result) = prepared_tag_publish_recovery_result(
+        if let Some(mut result) = prepared_tag_publish_recovery_result(
             &input,
             &component,
             &release_scope,
             &execution,
             &bump_type,
         )? {
+            if let Some(sha) = source_sha.as_deref() {
+                super::source_freshness::require_head(&component, sha)?;
+            }
+            if let Some(plan) = &mut result.plan {
+                super::source_freshness::record_source(
+                    plan,
+                    source_sha.as_deref(),
+                    source.as_ref(),
+                );
+            }
             return Ok((
                 ReleaseWorkspaceCommandResult {
                     result,
@@ -379,23 +416,24 @@ fn run_command_with_workspace_inner(
             ));
         }
 
-        // Keep planner failures visible in a preview. Converting an error to
-        // `None` would produce an unclassified `skipped` result (without a
-        // version or a reason), notably when a primary checkout is behind its
-        // already-fetched upstream.
-        let early_plan_result = super::plan(&input.component_id, &options);
+        // Keep planner failures visible rather than returning an unclassified skip.
+        let early_plan_result = super::plan(&input.component_id, &options).map(|mut plan| {
+            super::source_freshness::record_source(
+                &mut plan,
+                source_sha.as_deref(),
+                source.as_ref(),
+            );
+            plan
+        });
+        if let Some(sha) = source_sha.as_deref() {
+            super::source_freshness::require_head(&component, sha)?;
+        }
         let early_plan = early_plan_result.as_ref().ok().cloned();
         let skipped_reason = early_plan.as_ref().and_then(skipped_reason_from_plan);
 
         if let Err(error) = early_plan_result {
             let current_version = current_component_version(&component).ok().flatten();
-            let remote_freshness = release_remote_freshness(&component);
             let mut summary = vec![error.to_string()];
-            if let Some((local, remote, behind)) = remote_freshness {
-                summary.push(format!(
-                    "Local HEAD {local} is {behind} commit(s) behind remote default {remote}. Fast-forward the checkout and rerun the preview."
-                ));
-            }
             if let Some(owner) = ci_release_owner(&component) {
                 summary.push(format!("Automatic release publication is owned by {owner}; wait for that workflow to finish rather than publishing manually."));
             }
@@ -463,6 +501,9 @@ fn run_command_with_workspace_inner(
         }
 
         let dry_run_preflight = run_dry_run_preflights(roots, &input.component_id, &options)?;
+        if let Some(sha) = source_sha.as_deref() {
+            super::source_freshness::require_head(&component, sha)?;
+        }
         if let Some(run) = dry_run_preflight {
             let status = release_command_status(true, skipped_reason.as_deref(), Some(&run));
             let release_summary = release_summary_from_run(&run);
@@ -534,8 +575,13 @@ fn run_command_with_workspace_inner(
         ));
     }
 
-    let (plan, run_result, workspace) =
-        super::pipeline::run_with_plan(roots, &input.component_id, &options)?;
+    let (plan, run_result, workspace) = super::pipeline::run_with_plan(
+        roots,
+        &input.component_id,
+        &options,
+        source_sha.as_deref(),
+        source.as_ref(),
+    )?;
     display_release_summary(&run_result);
     let skipped_reason = skipped_reason_from_plan(&plan);
 
@@ -608,14 +654,7 @@ fn run_command_with_workspace_inner(
         post_release_exit,
     );
 
-    // The bump type resolved above ran BEFORE `preflight.remote_sync` — which
-    // `run_with_plan` just executed and which may have fast-forwarded HEAD
-    // past the commit range that produced it (#14974). The rebuilt plan's
-    // semver recommendation reflects whatever bump type actually drove this
-    // release (refreshed post-remote-sync when auto-detected, unchanged when
-    // explicit), so prefer it for the reported result over the pre-remote-sync
-    // value. Recovery/head releases carry no recommendation; keep the
-    // originally resolved bump type for those.
+    // Prefer the effective bump in the executed plan (policy may adjust it).
     let bump_type = plan
         .semver_recommendation()
         .map(|recommendation| recommendation.requested_bump)
@@ -794,21 +833,6 @@ fn current_component_version(
     component: &homeboy_core::component::Component,
 ) -> Result<Option<String>> {
     super::version::read_component_version(component).map(|info| Some(info.version))
-}
-
-fn release_remote_freshness(
-    component: &homeboy_core::component::Component,
-) -> Option<(String, String, usize)> {
-    let snapshot = git::get_repo_snapshot(&component.local_path).ok()?;
-    let behind = snapshot.behind?;
-    if behind == 0 {
-        return None;
-    }
-    let head = git::get_head_commit(&component.local_path).ok()?;
-    let branch = snapshot.branch;
-    let remote =
-        homeboy_core::git::resolve_default_remote(std::path::Path::new(&component.local_path));
-    Some((head, format!("{remote}/{branch}"), behind as usize))
 }
 
 fn ci_release_owner(component: &homeboy_core::component::Component) -> Option<String> {
@@ -990,18 +1014,8 @@ fn downgrade_major_pre_1_0(
 /// applying the same pre-1.0 major→minor downgrade as the initial auto
 /// resolution at the top of `run_release`.
 ///
-/// `preflight.remote_sync` may fast-forward HEAD past the commit range that
-/// produced the bump type originally baked into `ReleaseOptions` (issue
-/// #14974): the release was auto-detected as "patch" against a checkout that
-/// was later fast-forwarded to include a `feat:` commit, so the rebuilt
-/// plan's `preflight.bump_policy` step recomputed "recommended" as "minor"
-/// against a "requested" that had gone stale — an underbump false positive.
-///
-/// The fix is to keep "requested" and "recommended" observations of the same
-/// commit range: when the bump was auto-detected (not an explicit `--bump`),
-/// callers that rebuild the plan after `preflight.remote_sync` may have run
-/// must refresh the requested bump type from the same (possibly advanced)
-/// HEAD that `preflight.bump_policy`'s "recommended" side will observe.
+/// Resolve the auto-detected bump from the checkout used to build the plan.
+/// A provider-owned staging workspace can have a different release scope.
 pub(super) fn refresh_auto_bump_type(
     component: &homeboy_core::component::Component,
     release_scope: &ReleaseScope,
@@ -1337,6 +1351,7 @@ pub fn run_batch(
         let input = ReleaseCommandInput {
             component_id: component_id.clone(),
             path_override: None,
+            expected_source: input_template.expected_source.clone(),
             dry_run: input_template.dry_run,
             recover: input_template.recover,
             repair_changelog_history: input_template.repair_changelog_history.clone(),
@@ -2475,28 +2490,65 @@ mod tests {
             &["git", "branch", "--set-upstream-to=origin/main", "main"],
         );
 
-        let (result, exit_code) = run_command(ReleaseCommandInput {
+        let error = run_command(ReleaseCommandInput {
             component_id: "fixture".to_string(),
             path_override: Some(dir.to_string_lossy().to_string()),
             dry_run: true,
             ..Default::default()
         })
-        .expect("stale preview should return a classified result");
+        .expect_err("stale preview must fail even at an existing tag");
 
-        assert_eq!(exit_code, 1);
-        assert_eq!(result.status, "blocked");
-        assert_eq!(
-            result.skipped_reason.as_deref(),
-            Some("release-plan-invalid")
+        assert!(error.message.contains("remote default origin/main"));
+        assert!(error.message.contains("0 ahead, 1 behind"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains(".github/workflows/release.yml")));
+    }
+
+    #[test]
+    fn release_source_revalidation_rejects_upstream_movement_without_moving_head() {
+        let remote = tempfile::tempdir().expect("remote");
+        let local = tempfile::tempdir().expect("local");
+        setup_release_owner_fixture(remote.path(), local.path(), "{}");
+        let component = homeboy_core::component::Component {
+            id: "fixture".to_string(),
+            local_path: local.path().display().to_string(),
+            ..Default::default()
+        };
+        let source =
+            super::super::source_freshness::ReleaseSourceFreshness::fetch_default_checkout(
+                &component,
+            )
+            .expect("fetch source")
+            .expect("default checkout");
+        source.require_current("fixture").expect("fresh source");
+
+        run_in(
+            local.path(),
+            &[
+                "git",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fix: concurrent update",
+            ],
         );
-        assert!(result
-            .release_summary
-            .iter()
-            .any(|line| line.contains("behind remote default origin/main")));
-        assert!(result
-            .release_summary
-            .iter()
-            .any(|line| line.contains(".github/workflows/release.yml")));
+        run_in(local.path(), &["git", "push", "-q", "origin", "main"]);
+        run_in(
+            local.path(),
+            &["git", "reset", "--hard", &source.local_head],
+        );
+
+        let error = source
+            .revalidate(&component)
+            .expect_err("require a new plan");
+        assert!(error.message.contains("Release source drift"));
+        assert!(error.message.contains("0 ahead, 1 behind"));
+        assert_eq!(
+            git_stdout(local.path(), &["git", "rev-parse", "HEAD"]),
+            source.local_head
+        );
     }
 
     #[test]

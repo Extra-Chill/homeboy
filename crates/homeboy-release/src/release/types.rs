@@ -615,11 +615,8 @@ pub struct ReleaseBumpPolicyOptions {
     /// The effective bump type came from an explicit `--bump` override rather
     /// than conventional-commit auto-detection.
     ///
-    /// Auto-detected bump types must stay reconcilable with whatever
-    /// `preflight.bump_policy` later observes as "recommended" — including
-    /// after `preflight.remote_sync` fast-forwards HEAD past the commit range
-    /// that produced them (#14974). An explicit override is a real user
-    /// request and must never be silently refreshed away.
+    /// An explicit override is a real user request and must never be
+    /// silently replaced by auto-detection.
     #[serde(default)]
     pub(crate) bump_type_explicit: bool,
 }
@@ -633,6 +630,9 @@ impl ReleaseBumpPolicyOptions {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ReleaseCommandInput {
     pub component_id: String,
+    /// Full source commit recorded by a reviewed release preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path_override: Option<String>,
     #[serde(default)]

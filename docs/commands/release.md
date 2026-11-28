@@ -126,11 +126,28 @@ When `--bump` requests a lower keyword bump than Homeboy detects from releasable
 homeboy release changes <component_id>
 
 # 2. Preview the release (validates configuration, shows plan)
-homeboy release <component_id> --dry-run
+homeboy release <component_id> --dry-run --full
 
-# 3. Execute the release
-homeboy release <component_id>
+# 3. Execute against the source SHA recorded in plan.policy.source_sha
+homeboy release <component_id> --apply --expect-source <sha>
 ```
+
+For a default-branch checkout with a remote, both preview and apply fetch the
+upstream branch before detecting a bump or building a changelog. The full plan
+records the local and upstream SHAs, ahead/behind counts, and fetch time in
+`plan.policy.source_freshness`. A checkout that is behind (including a diverged
+checkout) or whose freshness cannot be verified is blocked. A preview updates
+Git refs but does not move the checkout.
+
+For a managed primary, use your workspace provider's permitted refresh operation
+before retrying. For example, DMC uses
+`wp datamachine-code workspace git pull <component_id> --allow-primary-refresh`.
+For an unmanaged checkout, fast-forward the selected default branch or resolve
+divergence, then run the preview again. `--expect-source` rejects a checkout that
+no longer matches the reviewed SHA. Apply also checks for source drift before
+release mutation rather than automatically fast-forwarding during preflight. If
+upstream advances late enough to reject the branch push, the release stops and
+asks for a fresh plan instead of rebasing the release onto unreviewed commits.
 
 ## Lifecycle Helpers
 
