@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.501.4] - 2026-11-28
+
+### Fixed
+- skip dependency refreshes with unsafe ranges
+- auto runs a Cook locally on a co-located Lab whatever its admission state
+
 ## [0.501.3] - 2026-11-28
 
 ### Fixed
