@@ -115,6 +115,48 @@ External CI artifacts must also provide `manifest.json`; bare directories are re
 
 `release artifact-source-authority` writes this inventory for a completed artifact directory. It recursively records every publication file (except `manifest.json`) in stable path order and binds its SHA-256 bytes to the supplied release identity. Use it after all platform artifacts have been assembled and before `--from-artifacts` finalization.
 
+### Release lint dependency inputs
+
+Release lint resolves validation dependencies before launching the linter, even
+on a first release. Declare component IDs, source-relative checkout paths, or
+Git identities in `validation_dependencies` in `homeboy.json`. The selected
+lint extension's explicit settings take precedence over the top-level list.
+For example:
+
+```json
+{
+  "validation_dependencies": [
+    {"id": "shared-runtime", "path": "../shared-runtime", "revision": "0123456789abcdef0123456789abcdef01234567"},
+    "other-component"
+  ],
+  "validation_dependency_policy": {"unpinned": "configured_checkout"}
+}
+```
+
+A pin can name a commit or ref; use a full commit SHA to replay a run even if a
+branch or tag moves. Use `repository` instead of `path` to name a Git remote
+explicitly, and `package_path` for a member within that repository.
+
+- `configured_checkout` (default) uses the configured checkout's committed
+  HEAD, but requires a clean checkout and verifies its SHA against the live
+  tracked branch (or origin's default branch if no branch is tracked). A clean
+  Git repository without a remote is supported.
+- `upstream_default` resolves the remote's default branch once per lint gate.
+- `fail_closed` requires pins for dependencies outside the release repository.
+  Same-repository dependencies already inherit the release checkout's SHA.
+
+Set `validation_dependency_policy.allow_stale` to `true` to explicitly permit
+an out-of-date configured HEAD. This does not permit dirty or unverifiable
+checkouts. The `preflight.lint` result records component ID, repository,
+requested identity, resolved SHA, source mode, freshness, and whether the stale
+override was used. Pin those recorded SHAs to reproduce the same inputs.
+
+WordPress also resolves `Requires Plugins` dependencies using this policy and
+requires a WordPress extension that supports release snapshots. Release lint
+runners and component scripts can consume the authoritative newline-delimited
+`HOMEBOY_RELEASE_VALIDATION_DEPENDENCY_PATHS` list; an empty list means no
+dependencies. Review lint and test dependency resolution are unchanged.
+
 Risky real release modes require explicit `--apply`: `--deploy`, `--recover`, `--retag`, `--head`, and bare `--skip-checks`. Dry-run previews never require `--apply`, and granular skips such as `--skip-checks=lint` keep the normal release flow because other quality gates remain active.
 
 When `--bump` requests a lower keyword bump than Homeboy detects from releasable commits, release execution requires confirmation in an interactive terminal. Non-interactive runs must pass `--force-lower-bump`; otherwise Homeboy refuses before creating release artifacts, commits, tags, or pushes. Dry-run still returns the plan and semver recommendation for review.

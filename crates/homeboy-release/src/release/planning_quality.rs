@@ -59,7 +59,10 @@ fn command_evidence(
 #[derive(Debug)]
 pub(super) enum LintQualityOutcome {
     /// Lint ran and passed, or no lint runner is configured (`ran == false`).
-    Passed { ran: bool },
+    Passed {
+        ran: bool,
+        validation_dependencies: serde_json::Value,
+    },
     /// Lint findings or a lint harness/tool/evidence failure blocked release.
     Failed(Error),
 }
@@ -87,25 +90,26 @@ pub(super) fn validate_lint_quality(
     if component.has_script(ExtensionCapability::Lint) {
         homeboy_core::log_status!("release", "Running lint (scripts.lint)...");
 
-        let workflow = match extension::lint::run_self_check_lint_workflow(
-            component,
-            Path::new(&component.local_path),
-            component.id.clone(),
-            false,
-        ) {
-            Ok(workflow) => workflow,
-            Err(error) => return runner_error(error, None, None),
-        };
+        let (exit_code, validation_dependencies) =
+            match extension::lint::run_release_self_check_lint(
+                component,
+                Path::new(&component.local_path),
+            ) {
+                Ok(result) => result,
+                Err(error) => return runner_error(error, None, None),
+            };
 
-        if workflow.status == "passed" {
+        if exit_code == 0 {
             homeboy_core::log_status!("release", "Lint passed");
-            return LintQualityOutcome::Passed { ran: true };
+            return LintQualityOutcome::Passed {
+                ran: true,
+                validation_dependencies,
+            };
         }
 
-        return LintQualityOutcome::Failed(quality_error(
-            "lint",
-            format!("Lint failed (exit code {})", workflow.exit_code),
-        ));
+        let mut error = quality_error("lint", format!("Lint failed (exit code {exit_code})"));
+        error.details["validation_dependencies"] = validation_dependencies;
+        return LintQualityOutcome::Failed(error);
     }
 
     let lint_context =
@@ -114,7 +118,12 @@ pub(super) fn validate_lint_quality(
             ExtensionCapability::Lint,
         ) {
             Ok(Some(context)) => context,
-            Ok(None) => return LintQualityOutcome::Passed { ran: false },
+            Ok(None) => {
+                return LintQualityOutcome::Passed {
+                    ran: false,
+                    validation_dependencies: serde_json::json!([]),
+                }
+            }
             Err(error) => return runner_error(error, None, None),
         };
 
@@ -132,7 +141,7 @@ pub(super) fn validate_lint_quality(
                 return runner_error(e, Some(&lint_context.extension_id), None);
             }
         };
-    let workflow = extension::lint::run_main_lint_workflow(
+    let workflow = extension::lint::run_release_lint_workflow(
         component,
         Path::new(&component.local_path),
         extension::lint::LintRunWorkflowArgs {
@@ -154,8 +163,8 @@ pub(super) fn validate_lint_quality(
         },
         &release_run_dir,
     );
-    let workflow = match workflow {
-        Ok(workflow) => workflow,
+    let (workflow, validation_dependencies) = match workflow {
+        Ok(result) => result,
         Err(error) => {
             release_run_dir.finish(false);
             return runner_error(
@@ -169,10 +178,15 @@ pub(super) fn validate_lint_quality(
     if workflow.status == "passed" && workflow.exit_code == 0 {
         homeboy_core::log_status!("release", "Lint passed");
         release_run_dir.finish(true);
-        LintQualityOutcome::Passed { ran: true }
+        LintQualityOutcome::Passed {
+            ran: true,
+            validation_dependencies,
+        }
     } else {
         release_run_dir.finish(false);
-        LintQualityOutcome::Failed(lint_workflow_failure(&workflow, &release_run_dir))
+        let mut error = lint_workflow_failure(&workflow, &release_run_dir);
+        error.details["validation_dependencies"] = validation_dependencies;
+        LintQualityOutcome::Failed(error)
     }
 }
 
@@ -548,7 +562,7 @@ mod tests {
     impl LintQualityOutcome {
         fn expect_passed_with_value(self, expected_ran: bool) -> bool {
             match self {
-                LintQualityOutcome::Passed { ran } => {
+                LintQualityOutcome::Passed { ran, .. } => {
                     assert_eq!(ran, expected_ran, "Passed.ran mismatch");
                     ran
                 }
@@ -612,7 +626,7 @@ mod tests {
         fs::create_dir_all(&extension_dir).expect("extension dir");
         fs::write(
             extension_dir.join("release-lint-fixture.json"),
-            r#"{"name":"Release lint fixture","version":"1.0.0","structured_sidecars":{"lint.findings":true},"lint":{"extension_script":"lint.sh"}}"#,
+            r#"{"name":"Release lint fixture","version":"1.0.0","settings":[{"id":"release_validation_dependency_inputs","label":"Release inputs","type":"boolean","default":true}],"structured_sidecars":{"lint.findings":true},"lint":{"extension_script":"lint.sh"}}"#,
         )
         .expect("extension manifest");
         homeboy_test_support::write_executable(extension_dir.join("lint.sh"), script, 0o755)
@@ -1316,6 +1330,152 @@ exit 1
             );
 
             assert!(validate_lint_quality(&component, "fixture").expect_passed_with_value(true));
+        });
+    }
+
+    #[test]
+    fn first_release_enforces_validation_dependency_identities_before_lint() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let workspaces = tempfile::tempdir().expect("workspaces");
+            let source = workspaces.path().join("consumer");
+            let upstream = workspaces.path().join("upstream");
+            let dependency = workspaces.path().join("runtime");
+            for path in [&source, &upstream] {
+                fs::create_dir(path).expect("workspace");
+            }
+            let component = extension_lint_component(
+                home.path(),
+                &source,
+                r#"#!/bin/sh
+set -eu
+test "$HOMEBOY_STRICT_VALIDATION_DEPENDENCIES" = 1
+test "$(git -C "$HOMEBOY_RELEASE_VALIDATION_DEPENDENCY_PATHS" show HEAD:./api)" = "$(head -n 1 "$HOMEBOY_COMPONENT_PATH/expected-api")"
+printf '[]\n' > "$HOMEBOY_LINT_FINDINGS_FILE"
+touch "$HOMEBOY_COMPONENT_PATH/lint-ran"
+"#,
+                false,
+            );
+            homeboy_test_support::git::init(&upstream);
+            fs::write(upstream.join("api"), "original").unwrap();
+            run_git(&upstream, &["add", "api"]);
+            run_git(&upstream, &["commit", "-qm", "Original API"]);
+            let sha =
+                homeboy_core::git::output_allow_empty(&upstream, &["rev-parse", "HEAD"]).unwrap();
+            run_git(workspaces.path(), &["clone", "-q", "upstream", "runtime"]);
+            fs::write(upstream.join("api"), "changed").unwrap();
+            run_git(&upstream, &["commit", "-qam", "Changed API"]);
+            let declare = |manifest: serde_json::Value| {
+                fs::write(source.join("homeboy.json"), manifest.to_string()).unwrap();
+            };
+            fs::write(source.join("expected-api"), "original\n").unwrap();
+            declare(serde_json::json!({"validation_dependencies": ["../runtime"]}));
+            let error = validate_lint_quality(&component, "fixture").expect_failed();
+            assert!(
+                error.message.contains("stale validation dependency"),
+                "{error:?}"
+            );
+            assert_eq!(
+                error.details["dependency_error"]["identity"]["resolved_sha"],
+                sha
+            );
+            assert!(!source.join("lint-ran").exists());
+
+            declare(serde_json::json!({
+                "validation_dependencies": ["../runtime"],
+                "validation_dependency_policy": {"allow_stale": true}
+            }));
+            let LintQualityOutcome::Passed {
+                validation_dependencies,
+                ..
+            } = validate_lint_quality(&component, "fixture")
+            else {
+                panic!("explicit stale override should pass")
+            };
+            assert_eq!(validation_dependencies[0]["freshness"], "stale");
+            assert_eq!(validation_dependencies[0]["stale_override"], true);
+
+            declare(serde_json::json!({
+                "validation_dependencies": ["../runtime"],
+                "validation_dependency_policy": {"unpinned": "fail_closed"}
+            }));
+            assert!(validate_lint_quality(&component, "fixture")
+                .expect_failed()
+                .message
+                .contains("Unpinned dependency"));
+
+            run_git(&dependency, &["pull", "-q", "--ff-only"]);
+            declare(
+                serde_json::json!({"validation_dependencies": [{"path": "../runtime", "revision": sha}]}),
+            );
+            for _ in 0..2 {
+                let LintQualityOutcome::Passed {
+                    validation_dependencies,
+                    ..
+                } = validate_lint_quality(&component, "fixture")
+                else {
+                    panic!("pinned release should pass")
+                };
+                assert_eq!(validation_dependencies[0]["resolved_sha"], sha);
+                assert_eq!(validation_dependencies[0]["requested_identity"], sha);
+                assert_eq!(validation_dependencies[0]["source_mode"], "pinned");
+                assert_eq!(validation_dependencies[0]["component_id"], "runtime");
+            }
+            assert!(source.join("lint-ran").exists());
+            let tip =
+                homeboy_core::git::output_allow_empty(&dependency, &["rev-parse", "HEAD"]).unwrap();
+            assert_ne!(tip, sha);
+
+            fs::write(source.join("expected-api"), "changed\n").unwrap();
+            declare(serde_json::json!({
+                "validation_dependencies": [{"id": "runtime", "repository": upstream}],
+                "validation_dependency_policy": {"unpinned": "upstream_default"}
+            }));
+            let LintQualityOutcome::Passed {
+                validation_dependencies,
+                ..
+            } = validate_lint_quality(&component, "fixture")
+            else {
+                panic!("upstream default should pass")
+            };
+            assert_eq!(validation_dependencies[0]["resolved_sha"], tip);
+            assert_eq!(
+                validation_dependencies[0]["repository"],
+                upstream.to_str().unwrap()
+            );
+            assert_eq!(
+                validation_dependencies[0]["source_mode"],
+                "upstream_default"
+            );
+
+            run_git(&dependency, &["remote", "remove", "origin"]);
+            declare(serde_json::json!({"validation_dependencies": ["../runtime"]}));
+            let LintQualityOutcome::Passed {
+                validation_dependencies,
+                ..
+            } = validate_lint_quality(&component, "fixture")
+            else {
+                panic!("local-only repository should pass")
+            };
+            assert_eq!(validation_dependencies[0]["freshness"], "local_only");
+
+            let member = source.join("packages/runtime");
+            fs::create_dir_all(&member).unwrap();
+            fs::write(member.join("api"), "member\n").unwrap();
+            run_git(&source, &["add", "packages/runtime/api"]);
+            run_git(&source, &["commit", "-qm", "Add monorepo member"]);
+            fs::write(source.join("expected-api"), "member\n").unwrap();
+            declare(serde_json::json!({
+                "validation_dependencies": ["./packages/runtime"],
+                "validation_dependency_policy": {"unpinned": "fail_closed"}
+            }));
+            let LintQualityOutcome::Passed {
+                validation_dependencies,
+                ..
+            } = validate_lint_quality(&component, "fixture")
+            else {
+                panic!("same-repository dependency inherits the release SHA")
+            };
+            assert_eq!(validation_dependencies[0]["source_mode"], "release_source");
         });
     }
 

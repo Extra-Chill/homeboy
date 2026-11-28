@@ -3,6 +3,7 @@ pub mod fix;
 mod fix_scope;
 pub mod report;
 pub mod run;
+mod validation_inputs;
 
 use crate::extension::invoke::ExtensionRunner;
 use crate::extension::resolve::ExtensionExecutionContext;
@@ -13,7 +14,8 @@ pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata};
 pub use fix::{run_lint_fix, LintFixRequest, LintFixRun};
 pub use report::LintCommandOutput;
 pub use run::{
-    resolve_lint_fix_routes, run_main_lint_workflow, run_self_check_lint_workflow,
+    resolve_lint_fix_routes, run_main_lint_workflow, run_release_lint_workflow,
+    run_release_self_check_lint, run_self_check_lint_workflow,
     run_self_check_lint_workflow_with_progress, LintFixRoute, LintRunWorkflowArgs,
     LintRunWorkflowResult, LintSniffFilters,
 };

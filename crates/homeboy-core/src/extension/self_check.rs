@@ -30,7 +30,7 @@ pub struct SelfCheckOutput {
 /// unbounded behavior.
 pub(crate) struct SelfCheckExecutionPolicy {
     started: Instant,
-    timeout: Duration,
+    timeout: Option<Duration>,
     env: Vec<(String, String)>,
 }
 
@@ -39,16 +39,24 @@ impl SelfCheckExecutionPolicy {
         Self::bounded_at(timeout, env, Instant::now())
     }
 
+    pub(crate) fn with_env(env: Vec<(String, String)>) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout: None,
+            env,
+        }
+    }
+
     fn bounded_at(timeout: Duration, env: Vec<(String, String)>, started: Instant) -> Self {
         Self {
             started,
-            timeout,
+            timeout: Some(timeout),
             env,
         }
     }
 
     fn remaining_timeout_at(&self, now: Instant) -> Option<Duration> {
-        self.timeout
+        self.timeout?
             .checked_sub(now.saturating_duration_since(self.started))
             .filter(|remaining| !remaining.is_zero())
     }
@@ -147,26 +155,28 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
         if let Some(progress) = progress.as_mut() {
             progress.start(index)?;
         }
-        let output =
-            match execution_policy.map(|policy| policy.remaining_timeout_at(Instant::now())) {
-                Some(Some(remaining_timeout)) => execute_self_check_command(
-                    command,
-                    &working_dir,
-                    passthrough,
-                    cargo_target.as_ref(),
-                    execution_policy,
-                    Some(remaining_timeout),
-                ),
-                Some(None) => self_check_suite_timeout_before_spawn(),
-                None => execute_self_check_command(
-                    command,
-                    &working_dir,
-                    passthrough,
-                    cargo_target.as_ref(),
-                    None,
-                    None,
-                ),
-            };
+        let output = match execution_policy
+            .filter(|policy| policy.timeout.is_some())
+            .map(|policy| policy.remaining_timeout_at(Instant::now()))
+        {
+            Some(Some(remaining_timeout)) => execute_self_check_command(
+                command,
+                &working_dir,
+                passthrough,
+                cargo_target.as_ref(),
+                execution_policy,
+                Some(remaining_timeout),
+            ),
+            Some(None) => self_check_suite_timeout_before_spawn(),
+            None => execute_self_check_command(
+                command,
+                &working_dir,
+                passthrough,
+                cargo_target.as_ref(),
+                execution_policy,
+                None,
+            ),
+        };
         let stdout_artifact = if let Some(run_dir) = run_dir {
             write_command_artifact(run_dir, index, "stdout", &output.stdout.to_string_lossy())?
         } else {

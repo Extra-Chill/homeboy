@@ -21,6 +21,6 @@ pub use types::{
     LintSummaryOutput,
 };
 pub use workflow::{
-    run_main_lint_workflow, run_self_check_lint_workflow,
-    run_self_check_lint_workflow_with_progress,
+    run_main_lint_workflow, run_release_lint_workflow, run_release_self_check_lint,
+    run_self_check_lint_workflow, run_self_check_lint_workflow_with_progress,
 };
