@@ -142,6 +142,11 @@ where
     format!("{:x}", hasher.finalize())
 }
 
+/// Size limit for immutable caller data a Cook carries: gate inputs and
+/// provider evidence. Both are sealed, content-addressed, streamed copies, so
+/// one bound covers every placement.
+pub const MAX_CALLER_DATA_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// Transport name for a projected provider-evidence directory.
 pub const PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT: &str = "content-addressed-directory/v1";
 

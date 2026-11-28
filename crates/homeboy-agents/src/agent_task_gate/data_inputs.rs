@@ -7,7 +7,7 @@ use homeboy_engine_primitives::content_hash::{
 #[cfg(test)]
 mod tests;
 
-const MAX_BYTES: u64 = 1024 * 1024 * 1024;
+use homeboy_engine_primitives::content_hash::MAX_CALLER_DATA_BYTES as MAX_BYTES;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
